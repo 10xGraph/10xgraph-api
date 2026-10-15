@@ -6,6 +6,11 @@ from fastapi.security import HTTPAuthorizationCredentials
 
 
 class BaseAuth(ABC):
+    # Set True when ``authenticate`` is a pure function of the credential (no response side
+    # effects), so a result verified earlier in the same request (by the rate limiter) can be
+    # reused instead of verifying the token twice. See ``core/auth/identity_cache.py``.
+    reusable_within_request: bool = False
+
     @abstractmethod
     def authenticate(
         self,

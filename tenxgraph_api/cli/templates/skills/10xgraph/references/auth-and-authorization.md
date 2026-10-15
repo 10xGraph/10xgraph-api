@@ -123,7 +123,7 @@ and scopes rows to the caller (`owner`) or not (`none`). Set server-side only â€
 ## TypeScript Client
 
 ```typescript
-const client = new AgentFlowClient({
+const client = new TenxGraphClient({
   baseUrl: "http://127.0.0.1:8000",
   headers: { Authorization: `Bearer ${token}` },
 });

@@ -57,7 +57,7 @@ def test_api_command_minimal_success(monkeypatch, tmp_path, silent_output):
 
     called = {}
 
-    def fake_run(app_path, host, port, reload, workers):
+    def fake_run(app_path, host, port, reload, workers, ws_max_size=None):
         called.update(
             {
                 "app_path": app_path,
@@ -65,15 +65,19 @@ def test_api_command_minimal_success(monkeypatch, tmp_path, silent_output):
                 "port": port,
                 "reload": reload,
                 "workers": workers,
+                "ws_max_size": ws_max_size,
             }
         )
 
     monkeypatch.setattr("tenxgraph_api.cli.commands.api.uvicorn.run", fake_run)
+    monkeypatch.delenv("MAX_REQUEST_SIZE", raising=False)
 
     cmd = APICommand(output=silent_output)
     code = cmd.execute(config="test_config.json", host="127.0.0.1", port=TEST_PORT, reload=False)
     assert code == 0
     assert called["app_path"].endswith(":app")
+    # WebSocket frames are capped like HTTP bodies.
+    assert called["ws_max_size"] == 10 * 1024 * 1024
     assert called["port"] == TEST_PORT
     assert os.environ.get("GRAPH_PATH", "").endswith("test_config.json")
 
@@ -312,3 +316,17 @@ def test_build_command_compose_force_overwrite(tmp_path, monkeypatch, silent_out
     code = cmd.execute(output_file="Dockerfile", force=True, docker_compose=True)
     assert code == 0
     assert (tmp_path / "docker-compose.yml").read_text(encoding="utf-8").startswith("services:")
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(None, 10 * 1024 * 1024), ("2048", 2048), ("junk", 10 * 1024 * 1024), ("0", 10 * 1024 * 1024)],
+)
+def test_ws_max_size_follows_max_request_size(monkeypatch, raw, expected):
+    from tenxgraph_api.cli.commands.api import _max_request_size
+
+    if raw is None:
+        monkeypatch.delenv("MAX_REQUEST_SIZE", raising=False)
+    else:
+        monkeypatch.setenv("MAX_REQUEST_SIZE", raw)
+    assert _max_request_size() == expected

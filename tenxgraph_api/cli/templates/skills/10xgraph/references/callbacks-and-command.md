@@ -280,4 +280,4 @@ def router_node(state, config):
 - Lifecycle hook fire points — stream path: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/core/graph/utils/stream_handler.py
 - Lifecycle hook fire points — interrupt/resume: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/core/graph/utils/heandler_utils.py
 - Lifecycle hook fire points — checkpoint: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/core/graph/utils/utils.py
-- Legacy docs: https://github.com/10xHub/Agentflow/blob/main/agentflow-docs/docs-mkdocs-legacy/reference/library/Command.md
+- Docs: https://10xgraph.com/docs/concepts/callbacks-and-command

@@ -1,17 +1,17 @@
 # Client Auth and Errors
 
-Use this when changing `@10xscale/agentflow-client` authentication, request headers, credentials, timeouts, debug behavior, or structured error handling.
+Use this when changing `10xgraph-client` authentication, request headers, credentials, timeouts, debug behavior, or structured error handling.
 
 ## Auth Helpers
 
-Public auth types and helpers live in https://github.com/10xHub/agentflow-client/blob/main/src/request.ts.
+Public auth types and helpers live in https://github.com/10xGraph/10xgraph-client/blob/master/src/request.ts.
 
 Auth union:
 
-- `AgentFlowBearerAuth`: `{ type: "bearer", token }`
-- `AgentFlowBasicAuth`: `{ type: "basic", username, password }`
-- `AgentFlowHeaderAuth`: `{ type: "header", name, value, prefix? }`
-- `AgentFlowAuth`: union of the above
+- `TenxGraphBearerAuth`: `{ type: "bearer", token }`
+- `TenxGraphBasicAuth`: `{ type: "basic", username, password }`
+- `TenxGraphHeaderAuth`: `{ type: "header", name, value, prefix? }`
+- `TenxGraphAuth`: union of the above
 
 Helpers:
 
@@ -21,9 +21,9 @@ Helpers:
 - `buildHeaders(context, defaults?)`
 - `getRequestCredentials(context)`
 
-## AgentFlowClient Config
+## TenxGraphClient Config
 
-`AgentFlowConfig` fields:
+`TenxGraphConfig` fields:
 
 - `baseUrl`: required API base URL.
 - `authToken`: bearer-token shorthand.
@@ -48,7 +48,7 @@ All endpoint helpers call `createErrorFromResponse` for non-OK HTTP responses wh
 
 Core error types:
 
-- `AgentFlowError`
+- `TenxGraphError`
 - `BadRequestError`
 - `AuthenticationError`
 - `PermissionError`
@@ -88,7 +88,7 @@ Error instances expose:
 
 ## Source Map
 
-- Auth/request helpers: https://github.com/10xHub/agentflow-client/blob/main/src/request.ts
-- Error classes: https://github.com/10xHub/agentflow-client/blob/main/src/errors.ts
-- Client facade: https://github.com/10xHub/agentflow-client/blob/main/src/client.ts
+- Auth/request helpers: https://github.com/10xGraph/10xgraph-client/blob/master/src/request.ts
+- Error classes: https://github.com/10xGraph/10xgraph-client/blob/master/src/errors.ts
+- Client facade: https://github.com/10xGraph/10xgraph-client/blob/master/src/client.ts
 - Docs: https://10xgraph.com/

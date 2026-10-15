@@ -73,8 +73,11 @@ KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
         "env",
         "auth",
         "authorization",
+        "token_revocation",
+        "graph_introspection",
         "rate_limit",
         "websocket",
+        "runs",
         "ag_ui",
         "observability",
         "injectq",
@@ -132,16 +135,49 @@ _SECTIONS: list[dict[str, Any]] = [
         "id": "authorization",
         "title": "Authorization",
         "description": (
-            "What an authenticated user may do. When off, production uses ownership "
-            "and development allows everything."
+            "What an authenticated user may do. When off, ownership is enforced whenever "
+            "auth is on (and always in production)."
         ),
         "key": "authorization",
         "optional": True,
-        "off_summary": "Production enforces ownership checks; development allows everything.",
+        "off_summary": (
+            "Ownership checks are enforced when auth is on or in production; with auth off in "
+            "development there is no identity to check."
+        ),
         "default": "ownership",
         "widget": "authorization",
         "fields": [],
         "scopes": list(AUTHORIZATION_SCOPES),
+    },
+    {
+        "id": "token_revocation",
+        "title": "Access extras",
+        "description": "Who may read graph internals, and rejecting revoked tokens early.",
+        "key": None,
+        "optional": False,
+        "fields": [
+            {
+                "path": ["graph_introspection"],
+                "label": "Graph introspection",
+                "type": "select",
+                "options": ["open", "scoped"],
+                "help": (
+                    "Who may read the graph structure, tool schemas and state schema. scoped "
+                    "requires the graph:read scope. Defaults to scoped in production, open in "
+                    "development."
+                ),
+            },
+            {
+                "path": ["token_revocation"],
+                "label": "Revocation list",
+                "type": "text",
+                "placeholder": "redis",
+                "help": (
+                    "redis (shared, uses the redis key or REDIS_URL), memory (one process), "
+                    "or module:attr for your own TokenRevocationBackend. Empty means off."
+                ),
+            },
+        ],
     },
     {
         "id": "rate_limit",
@@ -257,7 +293,8 @@ _SECTIONS: list[dict[str, Any]] = [
                 "placeholder": "10.0.0.0/8",
                 "help": (
                     "IPs or CIDR ranges your proxy connects from. X-Forwarded-For is ignored "
-                    "for anyone else, so clients that reach the app directly cannot spoof it."
+                    "for anyone else, so clients that reach the app directly cannot spoof it. "
+                    "Empty means loopback and private networks only."
                 ),
                 "show_if": {"path": ["rate_limit", "trusted_proxy_headers"], "equals": True},
             },
@@ -306,6 +343,79 @@ _SECTIONS: list[dict[str, Any]] = [
                     "Models a /v1/graph/live client may request. Any other request uses the "
                     "agent's own model. Empty means clients cannot choose."
                 ),
+            },
+            {
+                "path": ["websocket", "realtime_client_overrides"],
+                "label": "Realtime options clients may set",
+                "type": "list",
+                "placeholder": "voice",
+                "default": ["voice", "modalities", "vad"],
+                "help": (
+                    "Init-frame options a /v1/graph/live client may set: voice, modalities, vad, "
+                    "system_prompt. Defaults to voice, modalities and vad. Add system_prompt "
+                    "only if every caller may rewrite the agent's instructions."
+                ),
+            },
+        ],
+    },
+    {
+        "id": "runs",
+        "title": "Runs",
+        "description": "Who names threads, which client input reaches the graph, and run limits.",
+        "key": "runs",
+        "optional": True,
+        "off_summary": (
+            "Clients may name new threads, any non-reserved input key reaches the graph, "
+            "each user may hold 10 HTTP runs at once, and runs have no time limit."
+        ),
+        "default": {"thread_ids": "client", "max_concurrent_per_user": 10},
+        "fields": [
+            {
+                "path": ["runs", "thread_ids"],
+                "label": "New thread ids",
+                "type": "select",
+                "options": ["client", "server"],
+                "default": "client",
+                "help": (
+                    "server: a request may only name a thread that exists, so nobody can claim "
+                    "an id before its owner. New threads are started without an id. Clients "
+                    "that pick their own ids (realtime, AG-UI) need client."
+                ),
+            },
+            {
+                "path": ["runs", "config_keys"],
+                "label": "Allowed config keys",
+                "type": "list",
+                "placeholder": "locale",
+                "help": (
+                    "When set, a request config with any other key is rejected. thread_id is "
+                    "always allowed. Empty means any non-reserved key."
+                ),
+            },
+            {
+                "path": ["runs", "state_keys"],
+                "label": "Allowed initial_state keys",
+                "type": "list",
+                "placeholder": "preferences",
+                "help": "When set, initial_state with any other key is rejected.",
+            },
+            {
+                "path": ["runs", "max_concurrent_per_user"],
+                "label": "Max concurrent runs per user",
+                "type": "number",
+                "min": 0,
+                "step": 1,
+                "placeholder": "10",
+                "default": 10,
+                "help": "HTTP runs in flight per user, per process. 0 means unlimited.",
+            },
+            {
+                "path": ["runs", "timeout"],
+                "label": "Run timeout (seconds)",
+                "type": "number",
+                "min": 0,
+                "step": 1,
+                "help": "A run that takes longer is cancelled. Empty means no limit.",
             },
         ],
     },

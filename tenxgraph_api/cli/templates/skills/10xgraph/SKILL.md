@@ -23,7 +23,7 @@ Treat https://10xgraph.com/ as the first source of truth for public package name
 1. Identify the published package or docs surface involved:
    - PyPI core Python SDK: `10xgraph` (`pip install 10xgraph`), source at https://github.com/10xGraph/10xGraph/tree/main/tenxgraph
    - PyPI API/CLI SDK: `10xgraph-api` (`pip install 10xgraph-api`), source at https://github.com/10xGraph/10xgraph-api/tree/main/tenxgraph_api
-   - npm TypeScript SDK: `@10xscale/agentflow-client` (`npm install @10xscale/agentflow-client`), source at https://github.com/10xHub/Agentflow/tree/main/agentflow-client/src
+   - npm TypeScript SDK: `10xgraph-client` (`npm install 10xgraph-client`), source at https://github.com/10xGraph/10xgraph-client/tree/master/src
    - Main docs: https://10xgraph.com/
    - Playground/UI: `10xgraph play` command after installed cli
 
@@ -77,12 +77,12 @@ Treat https://10xgraph.com/ as the first source of truth for public package name
    - Put business services in `InjectQ` instead of global variables.
    - Keep API/CLI graph modules storage-agnostic and wire dependencies through `10xgraph.json`.
 
-4. Verify against source when implementation details matter. Public names and expected behavior should match https://10xgraph.com/; source under https://github.com/10xGraph/10xGraph (core), https://github.com/10xGraph/10xgraph-api (API/CLI), and https://github.com/10xHub/agentflow-client (TypeScript) explains how that behavior is implemented.
+4. Verify against source when implementation details matter. Public names and expected behavior should match https://10xgraph.com/; source under https://github.com/10xGraph/10xGraph (core), https://github.com/10xGraph/10xgraph-api (API/CLI), and https://github.com/10xGraph/10xgraph-client (TypeScript) explains how that behavior is implemented.
 
 ## Local Conventions
 
 - A compiled graph is normally loaded once by the API server and reused per request.
-- Public package naming matters: use `10xgraph`, `10xgraph-api`, and `@10xscale/agentflow-client` in user-facing docs and examples, not repository folder names.
+- Public package naming matters: use `10xgraph`, `10xgraph-api`, and `10xgraph-client` in user-facing docs and examples, not repository folder names.
 - Every persisted interaction should include `config.thread_id`.
 - Tools need docstrings and type annotations so model-facing schemas are useful.
 - Injectable tool and node parameters (`state`, `config`, `tool_call_id`) are hidden from the model schema.

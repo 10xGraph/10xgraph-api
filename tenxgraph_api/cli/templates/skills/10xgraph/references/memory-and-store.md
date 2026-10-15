@@ -67,4 +67,4 @@ TypeScript client methods include `storeMemory`, `searchMemory`, `getMemory`, `u
 - Store interfaces/backends: https://github.com/10xGraph/10xGraph/tree/main/tenxgraph/storage/store
 - Memory tool: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/prebuilt/tools/memory.py
 - API store router: https://github.com/10xGraph/10xgraph-api/tree/main/tenxgraph_api/src/app/routers/store
-- TS memory endpoints: https://github.com/10xHub/agentflow-client/tree/main/src/endpoints
+- TS memory endpoints: https://github.com/10xGraph/10xgraph-client/tree/master/src/endpoints

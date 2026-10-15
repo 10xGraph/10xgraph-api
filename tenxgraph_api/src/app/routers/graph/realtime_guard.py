@@ -1,7 +1,7 @@
 """Connection guard for the WebSocket endpoints.
 
-Rate-limit and request-size middleware are ``BaseHTTPMiddleware`` and Starlette runs them
-only for HTTP scopes, so WebSocket handshakes bypass them entirely. This module re-applies
+The rate-limit and request-size middleware only act on HTTP scopes, so WebSocket handshakes
+bypass them entirely. This module re-applies
 two protections at the handshake, as a FastAPI dependency:
 
 1. The same global rate limit as REST (shared backend + bucket), so opening a socket counts
@@ -21,12 +21,18 @@ teardown of the (yield) dependency, i.e. when the handler returns or the client 
 """
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import WebSocket, WebSocketException
 from injectq.integrations import InjectAPI
 
 from tenxgraph_api.src.app.core import logger
+from tenxgraph_api.src.app.core.concurrency import (
+    ConcurrencyLimiter,
+    Lease,
+    shared_concurrency_limiter,
+)
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.core.middleware.rate_limit import keying
 from tenxgraph_api.src.app.core.middleware.rate_limit.keying import client_key_for
@@ -100,8 +106,15 @@ async def realtime_connection_guard(
             logger.warning("WebSocket rate limit exceeded for %s", key)
             raise WebSocketException(code=WS_TRY_AGAIN_LATER, reason="Rate limit exceeded")
 
-    # 2) Per-process concurrent-connection cap, then the per-user share of it.
+    # 2) Concurrent-connection cap, then the per-user share of it. Shared across workers when a
+    # ConcurrencyLimiter is bound (Redis configured); otherwise counted in this process.
     ws_config = config.websocket
+    shared = shared_concurrency_limiter()
+    if shared is not None:
+        async with _shared_connection_slots(shared, websocket, ws_config):
+            yield
+        return
+
     max_conn = ws_config.max_connections
     if not _registry.try_acquire(max_conn):
         logger.warning(
@@ -129,6 +142,40 @@ async def realtime_connection_guard(
         _registry.release()
         if user_key:
             _registry.release_user(user_key)
+
+
+@asynccontextmanager
+async def _shared_connection_slots(
+    limiter: ConcurrencyLimiter, websocket: WebSocket, ws_config: Any
+) -> AsyncIterator[None]:
+    """Hold the global and per-user connection slots from a shared limiter for the socket."""
+    leases: list[Lease] = []
+    try:
+        if ws_config.max_connections is not None:
+            lease = await limiter.acquire("ws:all", ws_config.max_connections)
+            if lease is None:
+                logger.warning(
+                    "WebSocket connection limit reached (max=%s)", ws_config.max_connections
+                )
+                raise WebSocketException(code=WS_TRY_AGAIN_LATER, reason="Too many connections")
+            leases.append(lease)
+        user_key = keying.verified_user_id(websocket)
+        if user_key and ws_config.max_connections_per_user is not None:
+            lease = await limiter.acquire(f"ws:user:{user_key}", ws_config.max_connections_per_user)
+            if lease is None:
+                logger.warning(
+                    "WebSocket per-user connection limit reached for %s (max=%s)",
+                    user_key,
+                    ws_config.max_connections_per_user,
+                )
+                raise WebSocketException(
+                    code=WS_TRY_AGAIN_LATER, reason="Too many connections for this user"
+                )
+            leases.append(lease)
+        yield
+    finally:
+        for lease in leases:
+            lease.release()
 
 
 async def ws_run_allowed(websocket: WebSocket) -> int | None:

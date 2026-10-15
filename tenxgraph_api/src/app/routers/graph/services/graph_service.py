@@ -1,4 +1,6 @@
-from collections.abc import AsyncIterable
+import asyncio
+import contextlib
+from collections.abc import AsyncIterable, AsyncIterator
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
@@ -10,16 +12,20 @@ from tenxgraph.core.exceptions.media_exceptions import UnsupportedMediaInputErro
 from tenxgraph.core.graph import CompiledGraph
 from tenxgraph.core.state import AgentState, Message, StreamChunk, StreamEvent
 from tenxgraph.storage.checkpointer import BaseCheckpointer
-from tenxgraph.utils.thread_info import ThreadInfo
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.auth.request_config import (
+    ALWAYS_ALLOWED_CONFIG_KEYS,
+    ClientInputError,
     client_config,
+    client_error_detail,
     normalize_thread_id,
+    owned_thread_info,
+    reject_unlisted_keys,
     tool_result_ids,
     unanswered_tool_calls,
 )
-from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
+from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RunsConfig
 from tenxgraph_api.src.app.core.utils.log_sanitizer import sanitize_for_logging
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     GraphInputSchema,
@@ -90,6 +96,100 @@ def _reraise_framework_errors(exc: Exception) -> None:
     if isinstance(exc, typed):
         raise exc
 
+
+class RunTimeoutError(TimeoutError):
+    """A graph run passed ``runs.timeout`` and was cancelled."""
+
+    def __init__(self, timeout: float) -> None:
+        super().__init__(f"Graph run timed out after {timeout:g}s")
+        self.timeout = timeout
+
+
+_STREAM_DONE = object()
+
+
+def _stream_error_reason(exc: Exception) -> str:
+    """The client-facing reason for a failed stream.
+
+    The global error handlers never see a stream failure (it is caught inside the generator),
+    so sanitize here too. Otherwise a driver/DB exception embedding a connection string or
+    internal path would stream verbatim in production, bypassing MODE=production redaction.
+    """
+    if isinstance(exc, RunTimeoutError):
+        return str(exc)  # our own message, nothing internal to hide
+    # Imported lazily: a top-level import of handle_errors creates a circular import through
+    # the shared utils/exceptions modules.
+    from tenxgraph_api.src.app.core.config.settings import get_settings
+    from tenxgraph_api.src.app.core.exceptions.handle_errors import _sanitize_error_message
+
+    is_production = get_settings().MODE == "production"
+    return _sanitize_error_message(str(exc), "GRAPH_STREAM_ERROR", is_production)
+
+
+async def _bounded_stream(stream: AsyncIterator[Any], timeout: float) -> AsyncIterator[Any]:
+    """Yield from ``stream``, cancelling it once ``timeout`` seconds have passed.
+
+    The stream runs in its own task under ``asyncio.timeout``. Cancelling the consumer's task
+    instead would land wherever that task happens to be waiting, often outside this generator
+    (sending a chunk to the client), where it cannot be told apart from a disconnect. One task
+    also keeps the graph's context variables intact across steps. Chunks are handed over one
+    at a time because the graph reuses chunk objects: it must not produce the next chunk until
+    the consumer is done with the current one.
+    """
+    handoff: asyncio.Queue[Any] = asyncio.Queue()
+    consumed = asyncio.Event()
+
+    async def produce() -> None:
+        deadline = asyncio.timeout(timeout)
+        try:
+            async with deadline:
+                async for item in stream:
+                    consumed.clear()
+                    handoff.put_nowait(item)
+                    await consumed.wait()
+        except TimeoutError as exc:
+            # Only our deadline is a run timeout; a TimeoutError from inside the graph (a
+            # provider call, say) is reported as itself.
+            handoff.put_nowait(RunTimeoutError(timeout) if deadline.expired() else exc)
+        except Exception as exc:
+            handoff.put_nowait(exc)
+        else:
+            handoff.put_nowait(_STREAM_DONE)
+        finally:
+            aclose = getattr(stream, "aclose", None)
+            if callable(aclose):
+                with contextlib.suppress(Exception):
+                    await aclose()
+
+    producer = asyncio.create_task(produce())
+    try:
+        while True:
+            item = await handoff.get()
+            if item is _STREAM_DONE:
+                return
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+            consumed.set()
+    finally:
+        if not producer.done():
+            producer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await producer
+
+
+# Realtime init-frame key -> RealtimeConfig field name.
+REALTIME_INIT_FIELDS = {
+    "model": "model",
+    "voice": "voice",
+    "modalities": "response_modalities",
+    "vad": "vad",
+    "system_prompt": "system_instruction",
+    "tools_tags": "tools_tags",
+}
+
+# Longest a background thread-naming call may run (it is a model call).
+THREAD_NAME_TIMEOUT_SECONDS = 60.0
 
 # A taken generated id is retried with a fresh one; each retry is another prediction the
 # claimer would have had to get right.
@@ -181,21 +281,52 @@ class GraphService:
 
         res = await self.checkpointer.aput_thread(
             config,
-            ThreadInfo(thread_id=thread_id, thread_name=thread_name),
+            owned_thread_info(config, thread_id, thread_name=thread_name),
         )
         if res:
             logger.info(f"Generated thread name: {thread_name} for thread_id: {thread_id}")
 
         return thread_name
 
+    def _name_thread_in_background(
+        self, config: dict[str, Any], thread_id: Any, messages: list[str]
+    ) -> None:
+        """Generate and save a new thread's name without holding up the response.
+
+        Runs on the core ``BackgroundTaskManager`` when one is bound, so shutdown drains it;
+        otherwise on a task this service keeps a reference to. A failure is logged, never
+        raised: the run itself already succeeded.
+        """
+
+        async def name_thread() -> None:
+            try:
+                await self._save_thread_name(config, thread_id, messages)
+            except Exception as exc:
+                logger.warning("Thread naming failed for thread %s: %s", thread_id, exc)
+
+        from tenxgraph.utils.background_task_manager import BackgroundTaskManager
+
+        # Only a bound manager (the graph binds its own): try_get on an unbound concrete class
+        # would build a fresh, untracked one that shutdown never drains.
+        container = InjectQ.get_instance()
+        manager = (
+            container.try_get(BackgroundTaskManager) if BackgroundTaskManager in container else None
+        )
+        if isinstance(manager, BackgroundTaskManager):
+            manager.create_task(
+                name_thread(), name="thread_name", timeout=THREAD_NAME_TIMEOUT_SECONDS
+            )
+            return
+        task = asyncio.create_task(name_thread())
+        tasks: set[asyncio.Task[None]] = self.__dict__.setdefault("_naming_tasks", set())
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
     async def _save_thread(self, config: dict[str, Any], thread_id: str):
         """
         Save the generated thread name to the database.
         """
-        return await self.checkpointer.aput_thread(
-            config,
-            ThreadInfo(thread_id=thread_id),
-        )
+        return await self.checkpointer.aput_thread(config, owned_thread_info(config, thread_id))
 
     def _extract_context_info(
         self, raw_state, result: dict[str, Any]
@@ -334,7 +465,7 @@ class GraphService:
 
         except ValueError as e:
             logger.warning(f"Graph stop input validation failed for thread {thread_id}: {e}")
-            raise HTTPException(status_code=422, detail=str(e))
+            raise HTTPException(status_code=422, detail=client_error_detail(e))
         except Exception as e:
             _reraise_framework_errors(e)
             logger.error(f"Graph stop failed for thread {thread_id}: {e}")
@@ -358,7 +489,9 @@ class GraphService:
         nodes = getattr(state_graph, "nodes", {}) if state_graph else {}
         node = nodes.get(node_name)
         if node is not None and isinstance(getattr(node, "func", None), ToolNode):
-            raise ValueError(f"current_node '{node_name}' is a tool node; runs cannot start there")
+            raise ClientInputError(
+                f"current_node '{node_name}' is a tool node; runs cannot start there"
+            )
 
     def _remote_tool_names(self) -> set[str]:
         """Names of the tools the client runs (remote tools), across every ToolNode."""
@@ -398,7 +531,7 @@ class GraphService:
         if not result_ids:
             return
         if len(set(result_ids)) != len(result_ids):
-            raise ValueError("Each tool call can be answered only once")
+            raise ClientInputError("Each tool call can be answered only once")
 
         state = await self.checkpointer.aget_state(config) if self.checkpointer else None
         pending = unanswered_tool_calls(getattr(state, "context", None))
@@ -407,7 +540,12 @@ class GraphService:
         remote = self._remote_tool_names() | (_run_tool_names(config) - self._server_tool_names())
         for call_id in result_ids:
             if call_id not in pending or pending[call_id] not in remote:
-                raise ValueError(f"No remote tool call '{call_id}' is waiting for a result")
+                raise ClientInputError(f"No remote tool call '{call_id}' is waiting for a result")
+
+    def runs_policy(self) -> RunsConfig:
+        """The ``runs`` policy from 10xgraph.json (defaults when the config has none)."""
+        runs = getattr(self.config, "runs", None)
+        return runs if isinstance(runs, RunsConfig) else RunsConfig()
 
     async def _new_thread_id(self) -> str:
         """Generate a thread id that nobody owns yet.
@@ -436,6 +574,9 @@ class GraphService:
     ):
         is_new_thread = False
         config = client_config(graph_input.config)
+        runs = self.runs_policy()
+        reject_unlisted_keys(config, runs.config_keys, "config", ALWAYS_ALLOWED_CONFIG_KEYS)
+        reject_unlisted_keys(graph_input.initial_state, runs.state_keys, "initial_state")
         # Server-owned keys set by a trusted caller (a protocol adapter), after the client's
         # own config has been stripped of them.
         config.update(server_config or {})
@@ -520,10 +661,8 @@ class GraphService:
                 self.telemetry.start_run(inv_thread_id, inv_run_id, inv_started)
 
             # Execute the graph
-            result = await self._graph.ainvoke(
-                input_data,
-                config=config,
-                response_granularity=graph_input.response_granularity,
+            result = await self._ainvoke_bounded(
+                input_data, config, graph_input.response_granularity
             )
 
             logger.info("Graph execution completed successfully")
@@ -553,11 +692,11 @@ class GraphService:
             context, context_summary = self._extract_context_info(raw_state, result)
 
             if meta["is_new_thread"] and self.config.thread_name_generator_path:
-                messages_str = [msg.text() for msg in messages]
-                thread_name = await self._save_thread_name(
-                    config, config["thread_id"], messages_str
+                # Naming is an extra model call; the caller should not wait for it. The name
+                # is saved on the thread (GET /v1/threads) once it is ready.
+                self._name_thread_in_background(
+                    dict(config), config["thread_id"], [msg.text() for msg in messages]
                 )
-                meta["thread_name"] = thread_name
 
             return GraphInvokeOutputSchema(
                 messages=messages,
@@ -570,15 +709,49 @@ class GraphService:
         except UnsupportedMediaInputError as e:
             logger.warning("Unsupported media input: %s", e.message)
             raise HTTPException(status_code=422, detail=e.message)
+        except RunTimeoutError as e:
+            logger.warning("Graph invoke cancelled: %s", e)
+            raise HTTPException(status_code=504, detail=str(e))
         except ValueError as e:
             logger.warning(f"Graph input validation failed: {e}")
-            raise HTTPException(status_code=422, detail=str(e))
+            raise HTTPException(status_code=422, detail=client_error_detail(e))
         except Exception as e:
             # Let typed/HTTP errors reach their registered handlers instead of
             # collapsing every failure into a generic 500.
             _reraise_framework_errors(e)
             logger.error(f"Graph execution failed: {e}")
             raise HTTPException(status_code=500, detail=f"Graph execution failed: {e!s}")
+
+    async def _ainvoke_bounded(
+        self, input_data: dict, config: dict[str, Any], granularity: Any
+    ) -> dict[str, Any]:
+        """``ainvoke``, cancelled once it runs past ``runs.timeout`` (``None``: no limit)."""
+        timeout = self.runs_policy().timeout
+        deadline = asyncio.timeout(timeout)
+        try:
+            async with deadline:
+                return await self._graph.ainvoke(
+                    input_data, config=config, response_granularity=granularity
+                )
+        except TimeoutError as exc:
+            if timeout is None or not deadline.expired():
+                raise  # a timeout from inside the graph, not ours
+            if self.telemetry:
+                self.telemetry.finish_run(
+                    str(config["thread_id"]),
+                    str(config.get("run_id")),
+                    datetime.now().timestamp(),
+                    "error",
+                )
+            raise RunTimeoutError(timeout) from exc
+
+    def _astream_bounded(
+        self, input_data: dict, config: dict[str, Any], granularity: Any
+    ) -> AsyncIterator[StreamChunk]:
+        """``astream``, cancelled once it runs past ``runs.timeout`` (``None``: no limit)."""
+        stream = self._graph.astream(input_data, config=config, response_granularity=granularity)
+        timeout = self.runs_policy().timeout
+        return stream if timeout is None else _bounded_stream(stream, timeout)
 
     async def stream_graph(
         self,
@@ -651,10 +824,8 @@ class GraphService:
             run_status = "done"
 
             # Stream the graph execution
-            async for chunk in self._graph.astream(
-                input_data,
-                config=config,
-                response_granularity=graph_input.response_granularity,
+            async for chunk in self._astream_bounded(
+                input_data, config, graph_input.response_granularity
             ):
                 mt = chunk.metadata or {}
                 mt.update(meta)
@@ -708,22 +879,9 @@ class GraphService:
                     )
             except Exception as telemetry_exc:
                 logger.debug("Telemetry finish_run failed on stream error: %s", telemetry_exc)
-            # The global error handlers never see this exception (it is caught inside
-            # the generator), so sanitize here too. Otherwise a driver/DB exception
-            # embedding a connection string or internal path would stream verbatim in
-            # production, bypassing MODE=production redaction.
-            # Imported lazily: a top-level import of handle_errors creates a circular
-            # import through the shared utils/exceptions modules.
-            from tenxgraph_api.src.app.core.config.settings import get_settings
-            from tenxgraph_api.src.app.core.exceptions.handle_errors import (
-                _sanitize_error_message,
-            )
-
-            is_production = get_settings().MODE == "production"
-            reason = _sanitize_error_message(str(e), "GRAPH_STREAM_ERROR", is_production)
             yield StreamChunk(
                 event=StreamEvent.ERROR,
-                data={"reason": reason},
+                data={"reason": _stream_error_reason(e)},
                 metadata=meta,
             )
 
@@ -760,23 +918,28 @@ class GraphService:
 
         logger.info("Realtime graph session completed: thread_id=%s", thread_id)
 
-    @staticmethod
-    def _realtime_overrides(init: dict[str, Any]) -> dict[str, Any]:
-        """Translate the client init frame into RealtimeConfig field overrides."""
-        # init key -> RealtimeConfig field name
-        mapping = {
-            "model": "model",
-            "voice": "voice",
-            "modalities": "response_modalities",
-            "vad": "vad",
-            "system_prompt": "system_instruction",
-            "tools_tags": "tools_tags",
-        }
+    def _realtime_overrides(self, init: dict[str, Any]) -> dict[str, Any]:
+        """Translate the client init frame into RealtimeConfig field overrides.
+
+        ``model`` and ``tools_tags`` are always mapped and then restricted by
+        :meth:`_restrict_realtime_overrides`. The other options are mapped only when listed in
+        ``websocket.realtime_client_overrides``; the rest are dropped, so by default a client
+        cannot replace the agent's system prompt.
+        """
+        allowed = set(self.config.websocket.realtime_client_overrides) | {"model", "tools_tags"}
         overrides: dict[str, Any] = {}
-        for init_key, field in mapping.items():
+        for init_key, field in REALTIME_INIT_FIELDS.items():
             value = init.get(init_key)
-            if value is not None:
-                overrides[field] = value
+            if value is None:
+                continue
+            if init_key not in allowed:
+                logger.info(
+                    "Realtime init option %r is not in websocket.realtime_client_overrides; "
+                    "ignored",
+                    init_key,
+                )
+                continue
+            overrides[field] = value
         # Clients commonly send a single modality as a bare string ("AUDIO"); RealtimeConfig
         # expects a list. Coerce so the shorthand doesn't trip the one-modality validator.
         if isinstance(overrides.get("response_modalities"), str):
@@ -832,7 +995,7 @@ class GraphService:
             return GraphSchema(**res)
         except ValueError as e:
             logger.warning(f"Graph details validation failed: {e}")
-            raise HTTPException(status_code=422, detail=str(e))
+            raise HTTPException(status_code=422, detail=client_error_detail(e))
         except Exception as e:
             logger.error(f"Failed to get graph details: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to get graph details: {e!s}")
@@ -1111,7 +1274,7 @@ class GraphService:
             return res.model_json_schema()
         except ValueError as e:
             logger.warning(f"State schema validation failed: {e}")
-            raise HTTPException(status_code=422, detail=str(e))
+            raise HTTPException(status_code=422, detail=client_error_detail(e))
         except Exception as e:
             logger.error(f"Failed to get state schema: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to get state schema: {e!s}")
@@ -1212,7 +1375,7 @@ class GraphService:
             }
         except ValueError as e:
             logger.warning(f"Fix graph input validation failed: {e}")
-            raise HTTPException(status_code=422, detail=str(e))
+            raise HTTPException(status_code=422, detail=client_error_detail(e))
         except Exception as e:
             _reraise_framework_errors(e)
             logger.error(f"Fix graph operation failed: {e}")

@@ -17,8 +17,10 @@ def mock_request():
 
 @pytest.fixture
 def mock_service():
-    """Mock MediaService."""
-    return AsyncMock()
+    """Mock MediaService (not a local filesystem store, so downloads use get_file)."""
+    service = AsyncMock()
+    service.local_file.return_value = None
+    return service
 
 
 @pytest.fixture

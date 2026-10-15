@@ -10,7 +10,7 @@ Use this when deciding where a change belongs or explaining how 10xGraph package
 |---|---|---|---|
 | `10xgraph` | PyPI | `pip install 10xgraph` | `tenxgraph/` in 10xGraph/10xGraph |
 | `10xgraph-api` | PyPI | `pip install 10xgraph-api` | `10xgraph-api/tenxgraph_api` |
-| `@10xscale/agentflow-client` | npm | `npm install @10xscale/agentflow-client` | `agentflow-client/src` |
+| `10xgraph-client` | npm | `npm install 10xgraph-client` | `src/` in 10xGraph/10xgraph-client |
 
 ---
 
@@ -35,7 +35,7 @@ Use this when deciding where a change belongs or explaining how 10xGraph package
 
 Owns `10xgraph api`, `10xgraph play`, `10xgraph init`, `10xgraph build`, REST routers, auth/middleware, config loading, and graph service execution.
 
-### `@10xscale/agentflow-client` — TypeScript HTTP client
+### `10xgraph-client` — TypeScript HTTP client
 
 Typed methods for invoke, stream, threads, memory store, file uploads, graph metadata, remote tools, and auth helpers. Calls a running 10xGraph API server — does not run Python graphs.
 
@@ -43,7 +43,7 @@ Typed methods for invoke, stream, threads, memory store, file uploads, graph met
 
 ## Request flow: invoke
 
-1. `@10xscale/agentflow-client` or another HTTP caller sends messages plus `config.thread_id`.
+1. `10xgraph-client` or another HTTP caller sends messages plus `config.thread_id`.
 2. FastAPI receives the request through auth and routers.
 3. `GraphService` invokes against the compiled graph loaded at startup.
 4. The compiled graph loads state from the checkpointer when `thread_id` exists.
@@ -87,5 +87,5 @@ Identical through authentication and state loading. The difference: the graph se
 - Memory stores: https://github.com/10xGraph/10xGraph/tree/main/tenxgraph/storage/store
 - Media stores: https://github.com/10xGraph/10xGraph/tree/main/tenxgraph/storage/media
 - API routers: https://github.com/10xGraph/10xgraph-api/tree/main/tenxgraph_api/src/app/routers
-- TS client: https://github.com/10xHub/agentflow-client/blob/main/src/client.ts
+- TS client: https://github.com/10xGraph/10xgraph-client/blob/master/src/client.ts
 - Concepts: https://10xgraph.com/concepts/architecture

@@ -26,6 +26,8 @@ from tenxgraph.core.state import (
 )
 from tenxgraph.core.state.message_block import MediaRef
 
+from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
+
 
 _MEDIA_BLOCKS = {
     "image": ImageBlock,
@@ -53,7 +55,7 @@ def parse_run_input(body: Any) -> RunAgentInput:
     try:
         return RunAgentInput.model_validate(body)
     except ValidationError as exc:
-        raise ValueError(f"Invalid AG-UI RunAgentInput: {exc}") from exc
+        raise ClientInputError(f"Invalid AG-UI RunAgentInput: {exc}") from exc
 
 
 # Limits on the tools an AG-UI client may bring to a run. The name rule matches what model
@@ -74,24 +76,24 @@ def check_client_tools(tools: list[Any]) -> None:
         ValueError: A tool breaks one of the limits above.
     """
     if len(tools) > MAX_CLIENT_TOOLS:
-        raise ValueError(f"At most {MAX_CLIENT_TOOLS} client tools are allowed per run")
+        raise ClientInputError(f"At most {MAX_CLIENT_TOOLS} client tools are allowed per run")
     seen: set[str] = set()
     for tool in tools:
         if not _TOOL_NAME.match(tool.name or ""):
-            raise ValueError(
+            raise ClientInputError(
                 f"Invalid client tool name {tool.name!r}: use 1-64 letters, digits, '_' or '-'"
             )
         if tool.name in seen:
-            raise ValueError(f"Duplicate client tool name {tool.name!r}")
+            raise ClientInputError(f"Duplicate client tool name {tool.name!r}")
         seen.add(tool.name)
         if len(tool.description or "") > MAX_TOOL_DESCRIPTION_CHARS:
-            raise ValueError(
+            raise ClientInputError(
                 f"Client tool {tool.name!r}: description is longer than "
                 f"{MAX_TOOL_DESCRIPTION_CHARS} characters"
             )
         schema_size = len(json.dumps(tool.parameters or {}, default=str).encode())
         if schema_size > MAX_TOOL_SCHEMA_BYTES:
-            raise ValueError(
+            raise ClientInputError(
                 f"Client tool {tool.name!r}: parameters schema is larger than "
                 f"{MAX_TOOL_SCHEMA_BYTES} bytes"
             )

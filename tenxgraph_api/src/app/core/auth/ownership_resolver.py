@@ -11,9 +11,13 @@ Cache tiers:
 - **L2** (optional): a shared Redis, so workers/instances do not each re-hit the database.
 
 Deleting a thread evicts it from this worker's L1 and from L2, but another worker's L1 cannot
-be reached. A deleted id can be created again by a different user, so a stale L1 entry would
-keep granting the old owner access on that worker. The L1 TTL bounds how long that lasts; the
-L2 TTL covers an eviction that failed to reach Redis.
+be reached. A deleted id could be created again by a different user, and a stale L1 entry on
+another worker would then grant the old owner access to the new owner's thread. So a delete
+also leaves a **tombstone** for one L1 TTL (in L1, and in L2 when Redis is configured), and
+:meth:`ThreadOwnershipResolver.recently_deleted` lets the authorization backend refuse to
+create a thread under that id until every worker's stale entry has expired. Without Redis the
+tombstone only exists on the worker that handled the delete; run multi-worker deployments with
+the shared L2 tier. The L2 TTL covers an eviction that failed to reach Redis.
 
 Only *positive* results (a known owner) are cached. A ``None`` result (the thread does not
 exist yet) is **never** cached: a nonexistent thread can become owned by the very next
@@ -75,6 +79,8 @@ class ThreadOwnershipResolver:
         self._l2_ttl = l2_ttl
         # key -> (owner, monotonic expiry)
         self._l1: OrderedDict[str, tuple[str, float]] = OrderedDict()
+        # key -> (monotonic expiry, deleting owner or "") of the tombstone a delete left here
+        self._tombstones: OrderedDict[str, tuple[float, str]] = OrderedDict()
         self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ public
@@ -105,12 +111,46 @@ class ThreadOwnershipResolver:
         await self._redis_set(key, owner_str)
         return owner_str
 
-    async def evict(self, thread_id: str | int) -> None:
-        """Drop any cached owner for ``thread_id`` (call when a thread is deleted)."""
+    async def evict(self, thread_id: str | int, owner: str | int | None = None) -> None:
+        """Drop any cached owner for ``thread_id`` and tombstone it (call on thread delete).
+
+        ``owner`` is the user who deleted it (the owner, since the delete was authorized); that
+        user may recreate the id at once, because a stale cache entry can only point at them.
+        """
+        key = str(thread_id)
+        owner_str = "" if owner is None else str(owner)
+        async with self._lock:
+            cached = self._l1.pop(key, None)
+            if not owner_str and cached is not None:
+                owner_str = cached[0]
+            self._tombstones[key] = (time.monotonic() + self._l1_ttl, owner_str)
+            self._tombstones.move_to_end(key)
+            while len(self._tombstones) > self._max_size:
+                self._tombstones.popitem(last=False)
+        await self._redis_delete(key)
+        await self._redis_tombstone(key, owner_str)
+
+    async def recently_deleted(self, thread_id: str | int, user_id: str | None = None) -> bool:
+        """Whether ``thread_id`` was deleted within the last L1 TTL by someone other than
+        ``user_id``.
+
+        Until then another worker may still cache the old owner, so the id must not be handed
+        to a new owner yet. The deleting owner is the exception: a stale entry naming them
+        grants nothing they do not already own. A tombstone with no recorded owner blocks
+        everyone.
+        """
         key = str(thread_id)
         async with self._lock:
-            self._l1.pop(key, None)
-        await self._redis_delete(key)
+            entry = self._tombstones.get(key)
+            if entry is not None:
+                expires_at, owner = entry
+                if time.monotonic() < expires_at:
+                    return not (owner and user_id is not None and owner == str(user_id))
+                del self._tombstones[key]
+        shared_owner = await self._redis_tombstone_owner(key)
+        if shared_owner is None:
+            return False
+        return not (shared_owner and user_id is not None and shared_owner == str(user_id))
 
     # ------------------------------------------------------------------ L1
 
@@ -160,6 +200,35 @@ class ThreadOwnershipResolver:
             )
         except Exception as exc:
             logger.debug("Ownership L2 set failed for %s: %s", key, exc)
+
+    def _tombstone_key(self, key: str) -> str:
+        return f"{self._prefix}:deleted:{key}"
+
+    async def _redis_tombstone(self, key: str, owner: str) -> None:
+        if self._redis is None:
+            return
+        try:
+            await self._redis.set(  # type: ignore[attr-defined]
+                self._tombstone_key(key),
+                owner.encode() or b"-",
+                ex=max(1, int(self._l1_ttl + 0.999)),
+            )
+        except Exception as exc:
+            logger.debug("Ownership L2 tombstone failed for %s: %s", key, exc)
+
+    async def _redis_tombstone_owner(self, key: str) -> str | None:
+        """The deleting owner in a shared tombstone ("" when unknown), or None when none."""
+        if self._redis is None:
+            return None
+        try:
+            value = await self._redis.get(self._tombstone_key(key))  # type: ignore[attr-defined]
+        except Exception as exc:  # degrade to "not deleted"; L1 already answered for us
+            logger.debug("Ownership L2 tombstone read failed for %s: %s", key, exc)
+            return None
+        if value is None:
+            return None
+        text = value.decode() if isinstance(value, bytes | bytearray) else str(value)
+        return "" if text == "-" else text
 
     async def _redis_delete(self, key: str) -> None:
         if self._redis is None:

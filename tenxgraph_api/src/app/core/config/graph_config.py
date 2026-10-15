@@ -105,6 +105,24 @@ def _expand_env(value: str | None) -> str | None:
     return expanded
 
 
+# Where X-Forwarded-For is trusted from when ``trusted_proxy_headers`` is on but no
+# ``trusted_proxies`` are listed: loopback and private networks, which is where a reverse proxy,
+# ingress or sidecar in front of the app connects from. A client on the public internet that
+# reaches the app directly is keyed by its own address. List ``0.0.0.0/0`` and ``::/0`` to
+# trust every peer (only when nothing can reach the app except through your proxy).
+DEFAULT_TRUSTED_PROXIES: tuple[str, ...] = (
+    "127.0.0.0/8",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "169.254.0.0/16",
+    "100.64.0.0/10",
+    "::1/128",
+    "fc00::/7",
+    "fe80::/10",
+)
+
+
 def _parse_networks(raw: object) -> tuple[str, ...]:
     if not isinstance(raw, list | tuple):
         raise ValueError("rate_limit.trusted_proxies must be a list of IPs or CIDR ranges")
@@ -177,9 +195,10 @@ class RateLimitConfig:
     # infrastructure; anything further left came from the caller and is forgeable.
     trusted_proxy_hops: int = 1
     fail_open: bool = True  # on backend error: True=allow, False=deny
-    # Networks your proxies connect from. When set, X-Forwarded-For is honoured only for
-    # requests whose peer address is in one of them, so a client that reaches the app
-    # directly (bypassing the proxy) cannot pick its own address.
+    # Networks your proxies connect from. X-Forwarded-For is honoured only for requests
+    # whose peer address is in one of them, so a client that reaches the app directly
+    # (bypassing the proxy) cannot pick its own address. Empty means
+    # DEFAULT_TRUSTED_PROXIES (loopback and private networks), never "everyone".
     trusted_proxies: tuple[str, ...] = ()
 
     @classmethod
@@ -234,6 +253,13 @@ class RateLimitConfig:
             raise ValueError("rate_limit.window must be a positive integer")
         if trusted_proxy_hops < 1:
             raise ValueError("rate_limit.trusted_proxy_hops must be >= 1")
+        if enabled and trusted_proxy_headers and not trusted_proxies:
+            logger.warning(
+                "rate_limit.trusted_proxy_headers is on without rate_limit.trusted_proxies; "
+                "X-Forwarded-For is trusted only from loopback and private networks. List "
+                "your proxy's addresses in trusted_proxies (or 0.0.0.0/0 and ::/0 if nothing "
+                "can reach the app except through it)."
+            )
 
         # The memory backend counts per PROCESS. Under gunicorn with N workers the
         # effective limit therefore becomes requests x N, and it resets whenever a
@@ -265,6 +291,11 @@ class RateLimitConfig:
 DEFAULT_WS_MAX_CONNECTIONS = 1000
 DEFAULT_WS_MAX_CONNECTIONS_PER_USER = 10
 
+# Realtime init-frame options a client may set (``model`` and ``tools_tags`` are restricted
+# separately). ``system_prompt`` is off by default: it replaces the agent's instructions.
+REALTIME_CLIENT_OVERRIDE_KEYS = frozenset({"voice", "modalities", "vad", "system_prompt"})
+DEFAULT_REALTIME_CLIENT_OVERRIDES: tuple[str, ...] = ("voice", "modalities", "vad")
+
 
 @dataclass
 class WebSocketConfig:
@@ -275,7 +306,8 @@ class WebSocketConfig:
         "websocket": {
             "max_connections": 1000,
             "max_connections_per_user": 10,
-            "realtime_models": ["gemini-2.5-flash-live"]
+            "realtime_models": ["gemini-2.5-flash-live"],
+            "realtime_client_overrides": ["voice", "modalities", "vad"]
         }
 
     ``max_connections`` caps the concurrent WebSocket connections this server *process*
@@ -291,11 +323,18 @@ class WebSocketConfig:
     ``realtime_models`` lists the models a ``/v1/graph/live`` client may ask for in its init
     frame. Any other requested model is ignored and the agent's own model is used. Empty (the
     default) means clients cannot choose the model.
+
+    ``realtime_client_overrides`` lists the other init-frame session options a client may set:
+    any of ``voice``, ``modalities``, ``vad``, ``system_prompt``. The default allows the
+    presentation options (voice, modalities, vad) only. ``system_prompt`` replaces the agent's
+    instructions, so a client could rewrite its rules; list it only when every caller is
+    trusted to do that. ``model`` and ``tools_tags`` have their own rules and are not listed.
     """
 
     max_connections: int | None
     max_connections_per_user: int | None = DEFAULT_WS_MAX_CONNECTIONS_PER_USER
     realtime_models: tuple[str, ...] = ()
+    realtime_client_overrides: tuple[str, ...] = DEFAULT_REALTIME_CLIENT_OVERRIDES
 
     @classmethod
     def from_dict(cls, data: dict) -> "WebSocketConfig":
@@ -307,7 +346,21 @@ class WebSocketConfig:
                 data, "max_connections_per_user", DEFAULT_WS_MAX_CONNECTIONS_PER_USER
             ),
             realtime_models=_string_list(data, "realtime_models"),
+            realtime_client_overrides=_realtime_client_overrides(data),
         )
+
+
+def _realtime_client_overrides(data: dict) -> tuple[str, ...]:
+    if "realtime_client_overrides" not in data:
+        return DEFAULT_REALTIME_CLIENT_OVERRIDES
+    keys = _string_list(data, "realtime_client_overrides")
+    unknown = sorted(set(keys) - REALTIME_CLIENT_OVERRIDE_KEYS)
+    if unknown:
+        raise ValueError(
+            f"websocket.realtime_client_overrides has unknown keys {unknown}; allowed: "
+            f"{sorted(REALTIME_CLIENT_OVERRIDE_KEYS)}"
+        )
+    return keys
 
 
 def _string_list(data: dict, key: str) -> tuple[str, ...]:
@@ -330,6 +383,104 @@ def _connection_limit(data: dict, key: str, default: int) -> int | None:
     if value < 0:
         raise ValueError(f"websocket.{key} must be a non-negative integer")
     return value
+
+
+# Finite default so one account cannot hold an unbounded number of HTTP graph runs open.
+DEFAULT_MAX_CONCURRENT_RUNS_PER_USER = 10
+THREAD_ID_MODES = ("client", "server")
+GRAPH_INTROSPECTION_MODES = ("open", "scoped")
+
+
+@dataclass
+class RunsConfig:
+    """Per-run policy for graph runs (``runs`` key in 10xgraph.json).
+
+    Example::
+
+        "runs": {
+            "thread_ids": "server",
+            "config_keys": ["locale", "tenant_hint"],
+            "state_keys": ["preferences"],
+            "max_concurrent_per_user": 10,
+            "timeout": 600
+        }
+
+    ``thread_ids`` decides who may name a new thread. ``"client"`` (the default) lets a
+    request start a thread under any id it picks. ``"server"`` accepts only ids of threads
+    that already exist; a new thread is started by omitting the id (or sending ``"new"`` over
+    WebSocket), and the server picks it. Use ``"server"`` when ids could be guessed: under
+    owner-only authorization, the first writer of an id owns it, so a user who claims an id
+    first locks its intended owner out. Clients that generate their own ids (the realtime
+    client, AG-UI/CopilotKit) need ``"client"``.
+
+    ``config_keys`` and ``state_keys`` are allow-lists for client input. When set, a request
+    whose ``config`` or ``initial_state`` carries any other key is rejected with 422.
+    ``thread_id`` is always allowed in ``config``. ``null`` (the default) accepts any key
+    except the server-owned ones. Set them when a graph tool or node trusts a value such as
+    ``role`` or ``plan`` from state or config: without an allow-list a client can send it.
+
+    ``max_concurrent_per_user`` caps the HTTP graph runs (invoke, stream, AG-UI) one verified
+    user may have in flight at once in this process; over the cap the request gets 429.
+    Default 10; ``0`` or ``null`` means unlimited. Requests without a verified user (auth off)
+    are not capped. ``timeout`` is the longest a single graph run may take, in seconds; a run
+    that passes it is cancelled (invoke answers 504; a stream, ``/v1/graph/ws`` run or AG-UI
+    run ends with an error). Realtime sessions are not limited. Default ``null``: no limit.
+    """
+
+    thread_ids: str = "client"
+    config_keys: frozenset[str] | None = None
+    state_keys: frozenset[str] | None = None
+    max_concurrent_per_user: int | None = DEFAULT_MAX_CONCURRENT_RUNS_PER_USER
+    timeout: float | None = None
+
+    @property
+    def server_thread_ids(self) -> bool:
+        return self.thread_ids == "server"
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RunsConfig":
+        if not isinstance(data, dict):
+            raise ValueError("runs must be an object")
+        thread_ids = data.get("thread_ids", "client")
+        if thread_ids not in THREAD_ID_MODES:
+            raise ValueError(f"runs.thread_ids must be one of {list(THREAD_ID_MODES)}")
+        return cls(
+            thread_ids=thread_ids,
+            config_keys=_key_allow_list(data, "config_keys"),
+            state_keys=_key_allow_list(data, "state_keys"),
+            max_concurrent_per_user=_runs_limit(data),
+            timeout=_runs_timeout(data),
+        )
+
+
+def _key_allow_list(data: dict, key: str) -> frozenset[str] | None:
+    raw = data.get(key)
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        raise ValueError(f"runs.{key} must be a list of strings or null")
+    return frozenset(item.strip() for item in raw if item.strip())
+
+
+def _runs_limit(data: dict) -> int | None:
+    key = "max_concurrent_per_user"
+    if key not in data:
+        return DEFAULT_MAX_CONCURRENT_RUNS_PER_USER
+    raw = data[key]
+    if raw in (None, 0):
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise ValueError(f"runs.{key} must be a non-negative integer or null")
+    return raw
+
+
+def _runs_timeout(data: dict) -> float | None:
+    raw = data.get("timeout")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int | float) or raw <= 0:
+        raise ValueError("runs.timeout must be a positive number of seconds or null")
+    return float(raw)
 
 
 @dataclass
@@ -458,7 +609,22 @@ class GraphConfig:
         return self.data.get("authorization", None)
 
     def auth_config(self) -> dict | None:
+        """The parsed ``auth`` setting. Called on every request, so the result is cached.
+
+        The cache is keyed by the raw ``auth`` value, so a changed config is parsed again. The
+        JWT environment check therefore runs once, not per request.
+        """
         res = self.data.get("auth", None)
+        key = json.dumps(res, sort_keys=True, default=str)
+        cached = getattr(self, "_auth_config_cache", None)
+        if cached is not None and cached[0] == key:
+            return dict(cached[1]) if cached[1] is not None else None
+        parsed = self._parse_auth_config(res)
+        self._auth_config_cache = (key, parsed)
+        return dict(parsed) if parsed is not None else None
+
+    @staticmethod
+    def _parse_auth_config(res: Any) -> dict | None:
         if not res:
             return None
 
@@ -521,6 +687,46 @@ class GraphConfig:
         """
         data = self.data.get("websocket", None)
         return WebSocketConfig.from_dict({} if data is None else data)
+
+    @property
+    def graph_introspection(self) -> str:
+        """Who may read the graph's structure, tool schemas and state schema.
+
+        ``"open"``: any authenticated user. ``"scoped"``: only identities that carry the
+        ``graph:read`` scope (from JWT claims or an RBAC role); an identity with no scopes is
+        refused. Defaults to ``"scoped"`` in production and ``"open"`` in development. With
+        auth off there is no identity, so these routes stay open either way.
+        """
+        value = self.data.get("graph_introspection", None)
+        if value is None:
+            from tenxgraph_api.src.app.core.config.settings import get_settings
+
+            return "scoped" if get_settings().MODE == "production" else "open"
+        if value not in GRAPH_INTROSPECTION_MODES:
+            raise ValueError(
+                f"graph_introspection must be one of {list(GRAPH_INTROSPECTION_MODES)}"
+            )
+        return value
+
+    @property
+    def introspection_scoped(self) -> bool:
+        return self.graph_introspection == "scoped"
+
+    @property
+    def token_revocation(self) -> str | None:
+        """``token_revocation`` key: ``"redis"``, ``"memory"``, ``"module:attr"`` or None."""
+        value = self.data.get("token_revocation", None)
+        if value is not None and not isinstance(value, str):
+            raise ValueError("token_revocation must be 'redis', 'memory', 'module:attr' or null")
+        return value or None
+
+    @property
+    def runs(self) -> RunsConfig:
+        """Per-run policy from 10xgraph.json (``runs`` key); defaults when absent."""
+        data = self.data.get("runs", None)
+        if data is None:
+            return RunsConfig()
+        return RunsConfig.from_dict(data)
 
     @property
     def ag_ui(self) -> AgUiConfig:

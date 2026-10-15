@@ -60,4 +60,4 @@ The API exposes thread state/message/thread operations under `/v1/threads...` ro
 - In-memory backend: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/storage/checkpointer/in_memory_checkpointer.py
 - Postgres backend: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/storage/checkpointer/pg_checkpointer.py
 - API router: https://github.com/10xGraph/10xgraph-api/tree/main/tenxgraph_api/src/app/routers/checkpointer
-- TS endpoints: https://github.com/10xHub/agentflow-client/tree/main/src/endpoints
+- TS endpoints: https://github.com/10xGraph/10xgraph-client/tree/master/src/endpoints

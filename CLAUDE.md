@@ -97,10 +97,16 @@ Parsed by `tenxgraph_api/src/app/core/config/graph_config.py`. Supported keys:
 | `redis` | Redis URL string |
 | `rate_limit` | Object (see below) |
 | `ag_ui` | `{"enabled": bool}`, default off. Mounts `POST /v1/ag-ui` (AG-UI protocol, for CopilotKit and other AG-UI clients). Needs the `ag-ui` extra |
+| `websocket` | `max_connections` (1000), `max_connections_per_user` (10), `realtime_models` (models a `/v1/graph/live` client may pick), `realtime_client_overrides` (init options a client may set; default `voice`, `modalities`, `vad`; add `system_prompt` only for trusted callers) |
+| `runs` | `RunsConfig`: `thread_ids` (`client` default, `server` = only existing ids may be named, enforced by the ownership/rbac backends), `config_keys` / `state_keys` (allow-lists for request config and `initial_state`/PUT state; 422 on other keys; `thread_id`, `run_id` always allowed), `max_concurrent_per_user` (HTTP invoke/stream/AG-UI runs in flight, default 10, 429 over it; `routers/graph/run_limits.py`), `timeout` (seconds; invoke 504, streams end with an error chunk) |
+| `token_revocation` | `"redis"` / `"memory"` / `"module:attr"` -> `core/auth/revocation.py::TokenRevocationBackend`, checked by `RequirePermission` (401) and before every WS run; backend errors fail closed (503) |
+| `graph_introspection` | `"open"` or `"scoped"` (default scoped in production): `GET /v1/graph`, `/v1/graph/tools`, `/v1/graph:StateSchema` need an explicit `graph:read` scope (`RequirePermission(..., introspection=True)`) |
 
 `rate_limit` object: `enabled`, `requests` (default 100), `window` secs (60), `by` (`ip` |
-`global`), `backend` (`memory` | `redis` | `custom`), `trusted_proxy_headers` (honour
-`X-Forwarded-For` only when true), `exclude_paths`, `fail_open` (on backend error: allow vs deny),
+`user` | `global`), `backend` (`memory` | `redis` | `custom`), `trusted_proxy_headers` (honour
+`X-Forwarded-For` only when true), `trusted_proxies` (networks the header is honoured from;
+empty means loopback and private networks only, `DEFAULT_TRUSTED_PROXIES`), `trusted_proxy_hops`,
+`exclude_paths`, `fail_open` (on backend error: allow vs deny),
 and for redis backend a `redis` sub-object `{ "url", "prefix" }` (or shorthand URL string). For
 `custom`, bind a `BaseRateLimitBackend` in InjectQ.
 
@@ -114,9 +120,17 @@ and for redis backend a `redis` sub-object `{ "url", "prefix" }` (or shorthand U
   (`AuthorizationBackend` / `DefaultAuthorizationBackend` / `OwnershipAuthorizationBackend`),
   wired via the `authorization` key. That key accepts `"module:attr"` (custom), a built-in
   name (`"ownership"` = owner-only thread access; `"allow_all"`/`"default"`/`"none"`), or
-  `null`. When unset it defaults **by mode**: `ownership` in production (secure by default),
-  `allow_all` in development. Selection lives in `loader._resolve_authorization_backend`;
-  `RequirePermission` passes `resource_id` (thread_id from path or body) to `authorize`.
+  `null`. When unset it is `ownership` whenever auth is configured or `MODE=production`, and
+  `allow_all` only with auth off in development (no identity, so nothing to authorize).
+  Selection lives in `loader._resolve_authorization_backend`; `RequirePermission` passes
+  `resource_id` (thread_id from path or body) to `authorize`.
+- **Ownership fails closed.** No checkpointer, or one whose `aget_thread_owner` raises
+  `NotImplementedError`, denies thread requests; with auth on the loader refuses to boot in that
+  setup (`authorization.assert_ownership_supported`). A thread with no owner allows only
+  `CREATE_ACTIONS` (`graph:invoke`, `graph:stream`, `checkpointer:write`); checkpointer state and
+  message writes claim the thread first (`CheckpointerService._claim_thread`). Every saved
+  thread carries its owner via `request_config.owned_thread_info` (the in-memory and SQLite
+  checkpointers read the owner from `ThreadInfo.user_id`).
 - **Ownership is object-level and enforced on every thread-touching step** (invoke/stream/
   stop/fix + all checkpointer read/write/delete): a thread is accessible only to its owner;
   a foreign `invoke`/`stream` is rejected up front (403), never reaching the graph.
@@ -124,11 +138,17 @@ and for redis backend a `redis` sub-object `{ "url", "prefix" }` (or shorthand U
   `core/auth/ownership_resolver.py::ThreadOwnershipResolver`: in-process LRU (L1) + optional
   shared Redis (L2, reuses `config.redis`/`settings.REDIS_URL`). The backing lookup is
   `BaseCheckpointer.aget_thread_owner` (implemented in pg/in-memory/sqlite; base raises
-  `NotImplementedError`). Cache is evicted on thread delete (`CheckpointerService.delete_thread`);
-  the L2 client is closed in the lifespan shutdown.
+  `NotImplementedError`). Cache is evicted on thread delete (`CheckpointerService.delete_thread`),
+  which also leaves a tombstone for one L1 TTL (L1 + Redis) so the deleted id cannot be
+  recreated by someone else while another worker still caches the old owner
+  (`ThreadOwnershipResolver.recently_deleted`); the L2 client is closed in the lifespan shutdown.
+- **Identity reuse:** with `rate_limit.by == "user"` the limiter's verified identity is reused by
+  `RequirePermission` for backends with `BaseAuth.reusable_within_request = True` (`JwtAuth`),
+  see `core/auth/identity_cache.py`. Look up the app container inside a request with
+  `core/utils/container.py::current_container()`, not `InjectQ.get_instance()`.
 - **Secure by construction:** `core/auth/route_guard.py::assert_all_routes_protected` runs at
   boot (`main.py` after `init_routes`) and refuses to start if any non-public route lacks a
-  `RequirePermission` guard (`/ping` is the only public path).
+  `RequirePermission` guard (`/ping` and `/health/ready` are the only public paths).
 
 ## HTTP + WebSocket surface (all under `/v1` except ping)
 
@@ -150,7 +170,8 @@ and for redis backend a `redis` sub-object `{ "url", "prefix" }` (or shorthand U
   from `RunAgentInput.tools` go to the graph as the server-owned `remote_tools` run-config key
   (via `GraphService.stream_chunks(..., server_config=...)`); `RunAgentInput.resume` becomes the
   graph `resume` input. `GraphInputSchema.resume` also resumes over `/v1/graph/invoke|stream`.
-- **Ping**: `GET /ping`.
+- **Ping**: `GET /ping` (liveness). **Readiness**: `GET /health/ready` (checkpointer, Redis,
+  store; 200 or 503 with only ok/fail/skipped per component; `routers/ping/readiness.py`).
 
 Routers are wired in `routers/setup_router.py` (`init_routes`). The `a2a.py` / `a2ui.py` stubs
 were removed in the 0.5.0 readiness pass; they were fully commented out and never mounted.
@@ -163,9 +184,17 @@ env vars are tolerated). Notable vars: `APP_NAME`, `APP_VERSION`, `MODE` (`devel
 (`SECURITY_HEADERS_ENABLED`, `HSTS_*`, `FRAME_OPTIONS`, `CSP_POLICY`, ...), `ORIGINS` (CORS,
 default `*` with a wildcard warning), `ALLOWED_HOST`, `ROOT_PATH`/`DOCS_PATH`/`REDOCS_PATH`,
 `REDIS_URL`, `SENTRY_DSN`, `SNOWFLAKE_*` (epoch/node/worker/bit layout), `JWT_SECRET_KEY`/
-`JWT_ALGORITHM`, `OTEL_ENABLED`/`OTEL_SERVICE_NAME`/`OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_LEVEL`.
-In production: set `MODE=production`, `IS_DEBUG=false`, a non-`*` `ORIGINS`, and a strong
-`JWT_SECRET_KEY`.
+`JWT_ALGORITHM`, `OTEL_ENABLED`/`OTEL_SERVICE_NAME`/`OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_LEVEL`,
+`STRICT_PRODUCTION_CHECKS` (production refuses wildcard `ALLOWED_HOST`/`ORIGINS` or enabled
+docs). `IS_DEBUG` is forced off in production. Media: `MEDIA_REQUIRE_OWNER` defaults on in
+production. In production: set `MODE=production`, a non-`*` `ORIGINS`, and a strong
+`JWT_SECRET_KEY`; see `SECURITY.md` for the full checklist.
+
+Middleware is pure ASGI. Order, outermost first: CORS, request id, security headers, trusted
+host, rate limit, request size, gzip (`setup_middleware.py`). Run and WebSocket connection caps
+use `core/concurrency.py`: Redis leases when Redis is configured, per process otherwise.
+Production error responses hide only 5xx details; raise `request_config.ClientInputError` for
+422 messages that must survive production.
 
 ## Optional extras (`pyproject.toml`)
 

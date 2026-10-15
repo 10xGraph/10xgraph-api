@@ -4,7 +4,7 @@ Use this when changing TypeScript APIs for thread management, checkpoint state/m
 
 ## Threads
 
-Thread methods on `AgentFlowClient`:
+Thread methods on `TenxGraphClient`:
 
 - `threads(request?)`
 - `threadDetails(threadId)`
@@ -73,8 +73,8 @@ Use returned `file_id` in multimodal messages through `MediaRef(kind: "file_id",
 
 ## Source Map
 
-- Client facade: https://github.com/10xHub/agentflow-client/blob/main/src/client.ts
-- Thread endpoints: https://github.com/10xHub/agentflow-client/tree/main/src/endpoints
-- Memory endpoints: https://github.com/10xHub/agentflow-client/tree/main/src/endpoints
-- File endpoint: https://github.com/10xHub/agentflow-client/blob/main/src/endpoints/files.ts
+- Client facade: https://github.com/10xGraph/10xgraph-client/blob/master/src/client.ts
+- Thread endpoints: https://github.com/10xGraph/10xgraph-client/tree/master/src/endpoints
+- Memory endpoints: https://github.com/10xGraph/10xgraph-client/tree/master/src/endpoints
+- File endpoint: https://github.com/10xGraph/10xgraph-client/blob/master/src/endpoints/files.ts
 - Docs: https://10xgraph.com/

@@ -71,14 +71,24 @@ def test_no_scopes_declared_is_permissive():
 def test_rbac_backend_maps_roles_to_scopes_end_to_end():
     """With the RBAC backend, roles decide scopes: a 'viewer' role grants
     checkpointer:read (GET works) but not checkpointer:delete (DELETE -> 403)."""
+    import anyio
     from tenxgraph.storage.checkpointer import InMemoryCheckpointer as _Cp
+    from tenxgraph.utils.thread_info import ThreadInfo
 
     from tenxgraph_api.src.app.core.auth.authorization import RoleBasedAuthorizationBackend
 
+    checkpointer = _Cp()
     authz = RoleBasedAuthorizationBackend(
         {"viewer": ["checkpointer:read"], "admin": ["*"]},
+        checkpointer=checkpointer,
     )
-    app = build_app(routers=[checkpointer_router], authz=authz, checkpointer=_Cp())
+    for thread_id, owner in (("t1", "alice"), ("t2", "bob")):
+        anyio.run(
+            checkpointer.aput_thread,
+            {"thread_id": thread_id, "user_id": owner},
+            ThreadInfo(thread_id=thread_id, user_id=owner),
+        )
+    app = build_app(routers=[checkpointer_router], authz=authz, checkpointer=checkpointer)
     client = make_client(app)
 
     def roled(user_id: str, role: str) -> dict[str, str]:
@@ -91,7 +101,7 @@ def test_rbac_backend_maps_roles_to_scopes_end_to_end():
     assert r_read.status_code == HTTP_OK
     r_del = client.request("DELETE", "/v1/threads/t1", json={}, headers=roled("alice", "viewer"))
     assert r_del.status_code == HTTP_FORBIDDEN
-    r_admin = client.request("DELETE", "/v1/threads/t1", json={}, headers=roled("bob", "admin"))
+    r_admin = client.request("DELETE", "/v1/threads/t2", json={}, headers=roled("bob", "admin"))
     assert r_admin.status_code == HTTP_OK
 
 

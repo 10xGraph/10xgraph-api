@@ -412,3 +412,46 @@ async def test_attach_all_modules():
         await attach_all_modules(config, container)
         container.bind_instance.assert_any_call(ThreadNameGenerator, None, allow_none=True)
         container.bind_instance.assert_any_call(BaseAuth, None, allow_none=True)
+
+
+# ---------------------------------------------------------------------------
+# Boot check: ownership authz needs a checkpointer that can name owners
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("auth_on", [True, False])
+async def test_attach_refuses_ownership_without_owner_lookup(auth_on):
+    from tenxgraph.storage.checkpointer import BaseCheckpointer
+
+    from tenxgraph_api.src.app.core.auth.authorization import OwnershipAuthorizationBackend
+
+    class _Bare(BaseCheckpointer):  # type: ignore[misc]
+        pass
+
+    _Bare.__abstractmethods__ = frozenset()
+
+    config = MagicMock(spec=GraphConfig)
+    config.graph_path = "mod:graph"
+    config.auth_config.return_value = {"method": "jwt"} if auth_on else None
+    config.thread_name_generator_path = None
+    config.authorization_path = "ownership"
+    config.store_path = None
+    config.redis_url = None
+    config.remote_tools = []
+
+    container = InjectQ()
+    container.bind_instance(BaseCheckpointer, _Bare())
+
+    with (
+        patch("tenxgraph_api.src.app.loader.load_graph", return_value=MagicMock()),
+        patch("tenxgraph_api.src.app.loader.load_and_bind_auth"),
+        patch("tenxgraph_api.src.app.core.config.media_settings.get_media_settings"),
+    ):
+        if auth_on:
+            with pytest.raises(RuntimeError, match="Refusing to start"):
+                await attach_all_modules(config, container)
+        else:
+            # Auth off: no owner checks ever run, so nothing to refuse.
+            await attach_all_modules(config, container)
+            assert isinstance(container.get(AuthorizationBackend), OwnershipAuthorizationBackend)

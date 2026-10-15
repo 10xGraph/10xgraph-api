@@ -316,3 +316,48 @@ def test_none_csp_policy_uses_default(app):
     # Should use default CSP
     assert "Content-Security-Policy" in response.headers
     assert "default-src 'self'" in response.headers["Content-Security-Policy"]
+
+
+# ---------------------------------------------------------------------------
+# Route-set headers win
+# ---------------------------------------------------------------------------
+
+
+def test_route_csp_is_not_replaced_by_the_global_policy(app):
+    from fastapi import Response
+
+    @app.get("/download")
+    async def download():
+        return Response(
+            content=b"<svg/>",
+            headers={
+                "Content-Security-Policy": "default-src 'none'; sandbox",
+                "X-Frame-Options": "SAMEORIGIN",
+            },
+        )
+
+    app.add_middleware(SecurityHeadersMiddleware)
+    response = TestClient(app).get("/download")
+    assert response.headers["Content-Security-Policy"] == "default-src 'none'; sandbox"
+    assert response.headers["X-Frame-Options"] == "SAMEORIGIN"
+    # Headers the route did not set still get the global defaults.
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+
+
+def test_download_route_keeps_its_sandbox_csp_behind_the_middleware():
+    """The real media download response, served through the middleware."""
+    from fastapi import FastAPI
+
+    from tenxgraph_api.src.app.routers.media.router import _download_response
+
+    app = FastAPI()
+
+    @app.get("/file")
+    async def file():
+        return _download_response("f1", b"<html><script>x</script></html>", "text/html")
+
+    app.add_middleware(SecurityHeadersMiddleware)
+    response = TestClient(app).get("/file")
+    assert response.headers["Content-Security-Policy"] == "default-src 'none'; sandbox"
+    assert response.headers["Content-Disposition"].startswith("attachment")

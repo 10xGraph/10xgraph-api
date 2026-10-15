@@ -187,6 +187,7 @@ def checkpointer_service():
     service.checkpointer.aget_state_cache = AsyncMock(return_value=None)
     service.checkpointer.aput_state = AsyncMock(side_effect=lambda cfg, state: state)
     service.checkpointer.aput_state_cache = AsyncMock()
+    service.checkpointer.aget_thread_owner = AsyncMock(return_value="alice")
     service.settings = MagicMock()
     return service
 

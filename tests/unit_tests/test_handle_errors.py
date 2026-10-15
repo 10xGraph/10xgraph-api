@@ -77,20 +77,32 @@ def test_http_exception_handler_returns_error_payload():
 
 
 def test_http_exception_handler_production_mode():
-    """Test HTTPException handler sanitizes in production mode."""
+    """Production hides a 5xx detail but keeps a 4xx one."""
     app = setup_app("production")
 
-    @app.get("/boom")
-    def boom():
-        raise HTTPException(status_code=404, detail="Internal details exposed")
+    @app.get("/server")
+    def server():
+        raise HTTPException(status_code=500, detail="Internal details exposed")
+
+    @app.get("/client/{code}")
+    def client_error(code: int):
+        raise HTTPException(status_code=code, detail=f"client message {code}")
 
     client = TestClient(app)
-    r = client.get("/boom")
-    assert r.status_code == 404
+    r = client.get("/server")
+    assert r.status_code == 500
     body = r.json()
     assert body["error"]["code"] == "HTTPException"
-    # In production, message should be sanitized
     assert body["error"]["message"] != "Internal details exposed"
+
+    for code in (401, 403, 404, 413, 422, 429):
+        r = client.get(f"/client/{code}")
+        assert r.status_code == code
+        assert r.json()["error"]["message"] == f"client message {code}"
+
+    for code in (502, 503, 504):
+        r = client.get(f"/client/{code}")
+        assert r.json()["error"]["message"] != f"client message {code}"
 
     cleanup_env()
 

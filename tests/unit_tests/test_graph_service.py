@@ -1,3 +1,6 @@
+import asyncio
+
+
 """Unit tests for GraphService."""
 
 import json
@@ -111,12 +114,33 @@ class TestGraphServiceMethods:
         )
 
     @pytest.mark.asyncio
-    async def test_stop_graph_validation_error(self, service, mock_graph):
+    async def test_stop_graph_validation_error(self, service, mock_graph, monkeypatch):
+        from tenxgraph_api.src.app.core.config import settings as settings_mod
+
+        monkeypatch.setattr(
+            settings_mod, "get_settings", lambda: type("S", (), {"MODE": "development"})()
+        )
         mock_graph.astop.side_effect = ValueError("invalid input")
         with pytest.raises(HTTPException) as exc:
             await service.stop_graph("t", {})
         assert exc.value.status_code == 422
         assert "invalid input" in exc.value.detail
+
+    @pytest.mark.asyncio
+    async def test_stop_graph_hides_an_arbitrary_value_error_in_production(
+        self, service, mock_graph, monkeypatch
+    ):
+        """A ValueError from inside the graph may carry internals."""
+        from tenxgraph_api.src.app.core.config import settings as settings_mod
+
+        monkeypatch.setattr(
+            settings_mod, "get_settings", lambda: type("S", (), {"MODE": "production"})()
+        )
+        mock_graph.astop.side_effect = ValueError("pg://user:secret@db/internal")
+        with pytest.raises(HTTPException) as exc:
+            await service.stop_graph("t", {})
+        assert exc.value.status_code == 422
+        assert exc.value.detail == "Invalid input provided."
 
     @pytest.mark.asyncio
     async def test_stop_graph_general_error(self, service, mock_graph):
@@ -175,10 +199,17 @@ class TestGraphServiceMethods:
         # Since _save_thread returns True, it's considered a new thread
         mock_checkpointer.aput_thread.return_value = True
 
-        result = await service.invoke_graph(gi, user)
+        from injectq import InjectQ
+
+        with patch("injectq.InjectQ.get_instance", return_value=InjectQ()):  # no task manager
+            result = await service.invoke_graph(gi, user)
         assert result.messages == [mock_msg]
         assert result.summary == "summary"
-        assert result.meta["thread_name"] == "custom_thread_name"
+        # The name is generated in the background, not on the response path.
+        assert "thread_name" not in result.meta
+        await asyncio.gather(*service._naming_tasks)
+        saved = [c.args[1] for c in mock_checkpointer.aput_thread.await_args_list]
+        assert any(info.thread_name == "custom_thread_name" for info in saved)
 
     @pytest.mark.asyncio
     async def test_invoke_graph_errors(self, service, mock_graph):
@@ -329,3 +360,41 @@ class TestGraphServiceMethods:
         c, s = service._extract_context_info(state_obj, {})
         assert c == ["msg3"]
         assert s == "sum3"
+
+
+@pytest.mark.asyncio
+async def test_thread_naming_runs_on_the_background_task_manager():
+    """When the core task manager is bound, naming runs there (drained on shutdown)."""
+    from injectq import InjectQ
+    from tenxgraph.utils.background_task_manager import BackgroundTaskManager
+
+    manager = BackgroundTaskManager()
+    container = InjectQ()
+    container.bind_instance(BackgroundTaskManager, manager)
+
+    srv = GraphService.__new__(GraphService)
+    srv.checkpointer = MagicMock()
+    srv.checkpointer.aput_thread = AsyncMock(return_value=True)
+    srv.thread_name_generator = MagicMock()
+    srv.thread_name_generator.generate_name = AsyncMock(return_value="Weather chat")
+
+    with patch("injectq.InjectQ.get_instance", return_value=container):
+        srv._name_thread_in_background({"thread_id": "t1", "user_id": "u1"}, "t1", ["hi"])
+    assert manager.pending_count == 1
+    await manager.wait_for_all(timeout=5)
+    info = srv.checkpointer.aput_thread.await_args.args[1]
+    assert (info.thread_name, info.user_id) == ("Weather chat", "u1")
+
+
+@pytest.mark.asyncio
+async def test_thread_naming_failure_is_logged_not_raised(caplog):
+    from injectq import InjectQ
+
+    srv = GraphService.__new__(GraphService)
+    srv.checkpointer = MagicMock()
+    srv.thread_name_generator = MagicMock()
+    srv.thread_name_generator.generate_name = AsyncMock(side_effect=RuntimeError("llm down"))
+    with patch("injectq.InjectQ.get_instance", return_value=InjectQ()):
+        srv._name_thread_in_background({"thread_id": "t1"}, "t1", ["hi"])
+    await asyncio.gather(*srv._naming_tasks)
+    assert "Thread naming failed for thread t1" in caplog.text

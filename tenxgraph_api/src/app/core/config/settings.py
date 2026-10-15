@@ -45,7 +45,11 @@ class Settings(BaseSettings):
     # DEBUG = 10
     # NOTSET = 0
     LOG_LEVEL: str = "INFO"
+    # Forced off when MODE=production, whatever the environment says.
     IS_DEBUG: bool = True
+    # When true, MODE=production refuses to start on the settings it otherwise only warns
+    # about: wildcard ALLOWED_HOST, wildcard ORIGINS, and enabled API docs.
+    STRICT_PRODUCTION_CHECKS: bool = False
 
     #################################
     ###### Request Limits ###########
@@ -162,12 +166,12 @@ class Settings(BaseSettings):
                 if field not in self.model_fields_set:
                     setattr(self, field, "")
 
-            warnings = []
-
+            # Debug output is never allowed in production: enforce it rather than warn.
             if self.IS_DEBUG:
-                warnings.append(
-                    "⚠️  DEBUG mode is enabled in production. This may expose sensitive information."
-                )
+                self.IS_DEBUG = False
+                logger.warning("IS_DEBUG=true is ignored in production; debug is forced off.")
+
+            warnings = []
 
             if self.DOCS_PATH or self.REDOCS_PATH:
                 warnings.append(
@@ -181,6 +185,19 @@ class Settings(BaseSettings):
                     "Set to specific hostnames for better security."
                 )
 
+            if self.STRICT_PRODUCTION_CHECKS and "*" in self.ORIGINS.split(","):
+                warnings.append("⚠️  ORIGINS='*' in production. Set the exact allowed origins.")
+
+            if warnings and self.STRICT_PRODUCTION_CHECKS:
+                raise ValueError(
+                    "\n".join(
+                        [
+                            "Refusing to start: STRICT_PRODUCTION_CHECKS=true and MODE=production "
+                            "with insecure settings:",
+                            *warnings,
+                        ]
+                    )
+                )
             if warnings:
                 logger.warning("\n".join(["\n🔒 PRODUCTION SECURITY WARNINGS:", *warnings]))
 

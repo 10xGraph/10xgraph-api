@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import Request
 
+from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
 from tenxgraph_api.src.app.routers.graph.router import (
     fix_graph,
     graph_details,
@@ -35,6 +36,7 @@ def mock_service():
     # stream_graph returns an async generator/iterable, not a direct awaitable coroutine
     # but we can mock it as returning an async iterable or mock object
     service.stream_graph = MagicMock()
+    service.runs_policy = MagicMock(return_value=RunsConfig())
     return service
 
 

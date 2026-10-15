@@ -16,6 +16,9 @@ A small set of keys is owned by the server instead, and a client must never set 
 Every route and service that forwards client config to the graph, checkpointer or store must
 pass it through :func:`client_config` first, then set the server-owned keys itself.
 
+Operators may narrow the open dict further with ``runs.config_keys`` and ``runs.state_keys`` in
+10xgraph.json; :func:`reject_unlisted_keys` enforces them on graph input and state writes.
+
 The thread a request runs on is also server-controlled: routes use the thread the permission
 check approved, and both sides normalise it with :func:`normalize_thread_id`.
 
@@ -50,6 +53,49 @@ def client_config(config: Any) -> dict[str, Any]:
     if not isinstance(config, dict):
         return {}
     return {key: value for key, value in config.items() if _is_client_key(key)}
+
+
+class ClientInputError(ValueError):
+    """A problem with the client's own input, described in words written for the client.
+
+    Routes turn ``ValueError`` into 422. Only this subclass keeps its message in production:
+    any other ``ValueError`` may come from deep inside the graph, a tool or an SDK and carry
+    internal details, so production replaces its message (see :func:`client_error_detail`).
+    """
+
+
+def client_error_detail(exc: Exception) -> str:
+    """The 422 detail for ``exc``: its message, unless production and not a ClientInputError."""
+    if isinstance(exc, ClientInputError):
+        return str(exc)
+    from tenxgraph_api.src.app.core.config.settings import get_settings
+
+    if get_settings().MODE == "production":
+        return "Invalid input provided."
+    return str(exc)
+
+
+# Config keys the API itself reads; always accepted when ``runs.config_keys`` is set.
+ALWAYS_ALLOWED_CONFIG_KEYS: frozenset[str] = frozenset({"thread_id", "run_id"})
+
+
+def reject_unlisted_keys(
+    data: Any,
+    allowed: frozenset[str] | None,
+    field: str,
+    always: frozenset[str] = frozenset(),
+) -> None:
+    """Raise ``ValueError`` when ``data`` carries a key outside ``allowed`` (plus ``always``).
+
+    ``allowed=None`` means no allow-list is configured and every key passes. Used for the
+    ``runs.config_keys`` / ``runs.state_keys`` settings, so a graph that trusts a value such as
+    ``role`` from config or state cannot be handed one by the client.
+    """
+    if allowed is None or not isinstance(data, dict):
+        return
+    unlisted = sorted(str(key) for key in data if key not in allowed and key not in always)
+    if unlisted:
+        raise ClientInputError(f"{field} keys not allowed by this server: {', '.join(unlisted)}")
 
 
 # Content blocks that ask the server to run a tool. Only the model produces these; tool
@@ -128,3 +174,16 @@ def normalize_thread_id(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def owned_thread_info(config: dict[str, Any], thread_id: Any, **fields: Any) -> Any:
+    """A ``ThreadInfo`` for ``thread_id`` that names the caller in ``config`` as its owner.
+
+    The in-memory and SQLite checkpointers answer ``aget_thread_owner`` from the stored
+    ``ThreadInfo.user_id``, so a thread saved without it has no owner and ownership checks
+    cannot protect it. Every thread the API saves goes through here.
+    """
+    from tenxgraph.utils.thread_info import ThreadInfo
+
+    user_id = config.get("user_id") if isinstance(config, dict) else None
+    return ThreadInfo(thread_id=thread_id, user_id=user_id, **fields)

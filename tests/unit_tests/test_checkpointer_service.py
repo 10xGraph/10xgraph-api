@@ -239,3 +239,78 @@ class TestCheckpointerService:
         """Test _reconstruct_state rebuilds AgentState."""
         # Skip this test as it requires complex Pydantic model setup
         # The core functionality is tested in other tests
+
+
+# ---------------------------------------------------------------------------
+# Thread claiming on writes
+# ---------------------------------------------------------------------------
+
+
+class TestClaimThread:
+    @staticmethod
+    def _service(owner=None, owner_error=None):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from tenxgraph_api.src.app.routers.checkpointer.services.checkpointer_service import (
+            CheckpointerService,
+        )
+
+        service = CheckpointerService.__new__(CheckpointerService)
+        service.checkpointer = MagicMock()
+        service.checkpointer.aget_thread_owner = AsyncMock(
+            return_value=owner, side_effect=owner_error
+        )
+        service.checkpointer.aput_thread = AsyncMock(return_value=True)
+        return service
+
+    @pytest.mark.asyncio
+    async def test_unowned_thread_is_registered_to_the_caller(self):
+        service = self._service(owner=None)
+        cfg = {"thread_id": "t1", "user_id": "alice"}
+        await service._claim_thread(cfg, {"user_id": "alice"})
+        args = service.checkpointer.aput_thread.await_args.args
+        assert args[0] is cfg
+        assert args[1].thread_id == "t1"
+        assert args[1].user_id == "alice"
+
+    @pytest.mark.asyncio
+    async def test_owned_thread_is_left_alone(self):
+        service = self._service(owner="alice")
+        await service._claim_thread({"thread_id": "t1", "user_id": "alice"}, {"user_id": "alice"})
+        service.checkpointer.aput_thread.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_identity_skips_the_claim(self):
+        service = self._service(owner=None)
+        await service._claim_thread({"thread_id": "t1"}, {})
+        service.checkpointer.aget_thread_owner.assert_not_awaited()
+        service.checkpointer.aput_thread.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_checkpointer_without_owner_lookup_skips_the_claim(self):
+        service = self._service(owner_error=NotImplementedError)
+        await service._claim_thread({"thread_id": "t1", "user_id": "alice"}, {"user_id": "alice"})
+        service.checkpointer.aput_thread.assert_not_awaited()
+
+
+def test_owned_thread_info_names_the_caller():
+    from tenxgraph_api.src.app.core.auth.request_config import owned_thread_info
+
+    info = owned_thread_info({"user_id": "alice"}, "t1", thread_name="Chat")
+    assert (info.thread_id, info.user_id, info.thread_name) == ("t1", "alice", "Chat")
+    assert owned_thread_info({}, "t2").user_id is None
+
+
+@pytest.mark.asyncio
+async def test_graph_service_saves_threads_with_their_owner():
+    """GraphService._save_thread must record the owner so in-memory/SQLite lookups see it."""
+    from unittest.mock import MagicMock
+
+    from tenxgraph.storage.checkpointer import InMemoryCheckpointer
+
+    from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
+
+    checkpointer = InMemoryCheckpointer()
+    service = GraphService(graph=MagicMock(), checkpointer=checkpointer, config=MagicMock())
+    await service._save_thread({"thread_id": "t1", "user_id": "alice"}, "t1")
+    assert await checkpointer.aget_thread_owner("t1") == "alice"

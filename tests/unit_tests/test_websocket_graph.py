@@ -21,12 +21,21 @@ def _chunk_json(event: StreamEvent, data: dict | None = None) -> str:
     return StreamChunk(event=event, data=data).model_dump_json() + "\n"
 
 
+def _as_frame(item):
+    """Exceptions (e.g. WebSocketDisconnect) pass through; payloads become JSON text frames."""
+    if isinstance(item, BaseException) or (
+        isinstance(item, type) and issubclass(item, BaseException)
+    ):
+        return item
+    return json.dumps(item)
+
+
 def _make_websocket(receive_side_effects: list) -> MagicMock:
     ws = MagicMock()
     ws.accept = AsyncMock()
     ws.send_text = AsyncMock()
     ws.close = AsyncMock()
-    ws.receive_json = AsyncMock(side_effect=receive_side_effects)
+    ws.receive_text = AsyncMock(side_effect=[_as_frame(x) for x in receive_side_effects])
     return ws
 
 
@@ -285,3 +294,60 @@ class TestWebSocketGraphEndpoint:
         # fresh run uses messages, resume run uses tool_result
         assert service._stream_calls[0].messages[0].role == "user"
         assert service._stream_calls[1].messages[0].role == "tool"
+
+
+@pytest.mark.asyncio
+class TestWebSocketFrameLimits:
+    """Frames over MAX_REQUEST_SIZE are refused before they are parsed."""
+
+    async def test_oversized_frame_closes_with_1009(self, monkeypatch):
+        import importlib
+
+        mod = importlib.import_module("tenxgraph_api.src.app.routers.graph.router")
+        monkeypatch.setattr(mod, "_ws_max_frame_chars", lambda: 100)
+        ws = _make_websocket([])
+        ws.receive_text = AsyncMock(side_effect=["x" * 101, WebSocketDisconnect()])
+        loads = MagicMock(side_effect=AssertionError("must not parse"))
+        monkeypatch.setattr(mod.json, "loads", loads)
+        service = _make_service([])
+
+        await websocket_graph(websocket=ws, service=service, user={})
+
+        ws.close.assert_awaited_with(code=1009)
+        assert service._stream_calls == []
+        assert "exceeds the 100 limit" in ws.send_text.call_args_list[0].args[0]
+
+    async def test_frame_at_the_limit_is_accepted(self, monkeypatch):
+        import importlib
+
+        mod = importlib.import_module("tenxgraph_api.src.app.routers.graph.router")
+        frame = json.dumps(_FRESH_REQUEST)
+        monkeypatch.setattr(mod, "_ws_max_frame_chars", lambda: len(frame))
+        ws = _make_websocket([])
+        ws.receive_text = AsyncMock(side_effect=[frame, WebSocketDisconnect()])
+        service = _make_service([[]])
+
+        await websocket_graph(websocket=ws, service=service, user={})
+
+        assert len(service._stream_calls) == 1
+
+    async def test_non_json_frame_sends_error_and_keeps_the_socket(self):
+        ws = _make_websocket([])
+        ws.receive_text = AsyncMock(
+            side_effect=["{not json", json.dumps(_FRESH_REQUEST), WebSocketDisconnect()]
+        )
+        service = _make_service([[]])
+
+        await websocket_graph(websocket=ws, service=service, user={})
+
+        first = ws.send_text.call_args_list[0].args[0]
+        assert "not valid JSON" in first
+        assert len(service._stream_calls) == 1
+
+    async def test_default_cap_is_max_request_size(self):
+        import importlib
+
+        from tenxgraph_api.src.app.core.config.settings import get_settings
+
+        mod = importlib.import_module("tenxgraph_api.src.app.routers.graph.router")
+        assert mod._ws_max_frame_chars() == get_settings().MAX_REQUEST_SIZE

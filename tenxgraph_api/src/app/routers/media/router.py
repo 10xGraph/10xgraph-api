@@ -7,10 +7,11 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from fastapi.logger import logger
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from injectq.integrations import InjectAPI
 
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
+from tenxgraph_api.src.app.core.auth.request_config import client_error_detail
 from tenxgraph_api.src.app.core.config.media_settings import get_media_settings
 from tenxgraph_api.src.app.routers.media import MediaService
 from tenxgraph_api.src.app.routers.media.schemas import (
@@ -24,8 +25,8 @@ from tenxgraph_api.src.app.utils import success_response
 
 router = APIRouter(tags=["Files"])
 
-# Read uploads in 1 MiB chunks so a size-cap breach is caught before the whole body
-# is buffered in memory.
+# Uploads without a known size are read in 1 MiB chunks, so a size-cap breach is caught
+# before the whole body is buffered in memory.
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 # Stored types come from the uploader. Only types a browser displays without running
@@ -60,8 +61,36 @@ def _is_active_type(mime: str) -> bool:
     )
 
 
-def _download_response(file_id: str, data: bytes, mime_type: str | None) -> Response:
-    """Serve stored bytes so an uploaded HTML or SVG file cannot run script on this origin."""
+async def _read_upload(file: UploadFile, max_bytes: int, max_mb: float) -> bytes:
+    """Read an upload into memory once, refusing it past ``max_bytes``.
+
+    Starlette has already spooled the part (to disk past 1 MiB) and knows its size, so a
+    known size is checked up front and the file read in one piece: one copy in memory, not
+    a chunk list plus the joined result. Without a size, read in chunks with a running cap
+    so an oversized body is refused before it is all in memory.
+    """
+    too_large = HTTPException(status_code=413, detail=f"File exceeds maximum {max_mb}MB")
+    size = getattr(file, "size", None)
+    if isinstance(size, int):
+        if size > max_bytes:
+            raise too_large
+        data = await file.read()
+        if len(data) > max_bytes:  # the part was larger than declared
+            raise too_large
+        return data
+
+    buffer = bytearray()
+    while True:
+        chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            return bytes(buffer)
+        buffer += chunk
+        if len(buffer) > max_bytes:
+            raise too_large
+
+
+def _download_headers(file_id: str, mime_type: str | None) -> tuple[str, dict[str, str]]:
+    """The served media type and headers, so an uploaded HTML or SVG file cannot run script."""
     mime = (mime_type or "").split(";", 1)[0].strip().lower()
     if mime in _INLINE_TYPES or mime.startswith(_INLINE_PREFIXES):
         disposition = "inline"
@@ -72,7 +101,24 @@ def _download_response(file_id: str, data: bytes, mime_type: str | None) -> Resp
     headers = {"Content-Disposition": disposition, "X-Content-Type-Options": "nosniff"}
     if mime != "application/pdf":  # browsers will not render a PDF under a sandbox CSP
         headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
-    return Response(content=data, media_type=mime or "application/octet-stream", headers=headers)
+    return mime or "application/octet-stream", headers
+
+
+def _download_response(file_id: str, data: bytes, mime_type: str | None) -> Response:
+    """Serve stored bytes so an uploaded HTML or SVG file cannot run script on this origin."""
+    mime, headers = _download_headers(file_id, mime_type)
+    return Response(content=data, media_type=mime, headers=headers)
+
+
+def _file_download_response(file_id: str, path: Any, mime_type: str | None) -> Response:
+    """Stream a stored file from disk in chunks, with the same headers as the bytes path.
+
+    ``FileResponse`` reads in small chunks on a worker thread, so a large file neither sits in
+    memory whole nor blocks the event loop while it is read.
+    """
+    mime, headers = _download_headers(file_id, mime_type)
+    # No filename is passed, so FileResponse adds no Content-Disposition of its own.
+    return FileResponse(path, media_type=mime, headers=headers)
 
 
 # ------------------------------------------------------------------
@@ -107,20 +153,7 @@ async def upload_file(
     # would let a multi-GB body OOM-kill the worker. Stop as soon as we exceed the
     # limit and reject, never materializing more than max_size + one chunk.
     max_bytes = int(media_settings.MEDIA_MAX_SIZE_MB * 1024 * 1024)
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = await file.read(_UPLOAD_CHUNK_BYTES)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > max_bytes:
-            raise HTTPException(
-                status_code=413,
-                detail=f"File exceeds maximum {media_settings.MEDIA_MAX_SIZE_MB}MB",
-            )
-        chunks.append(chunk)
-    data = b"".join(chunks)
+    data = await _read_upload(file, max_bytes, media_settings.MEDIA_MAX_SIZE_MB)
     if not data:
         raise HTTPException(status_code=400, detail="Empty file")
 
@@ -131,7 +164,7 @@ async def upload_file(
         # different user who knows the id.
         result = await service.upload_file(data, file.filename, mime, user_id=user.get("user_id"))
     except ValueError as exc:
-        raise HTTPException(status_code=413, detail=str(exc))
+        raise HTTPException(status_code=413, detail=client_error_detail(exc))
 
     return success_response(FileUploadResponse(**result), request)
 
@@ -153,6 +186,10 @@ async def get_file(
         # Authentication alone is not enough: without this, ANY authenticated user
         # who knew a file_id could download another user's file.
         await service.ensure_can_access(file_id, user.get("user_id"))
+        local = await service.local_file(file_id)
+        if local is not None:  # stream from disk instead of loading the whole file
+            path, mime_type = local
+            return _file_download_response(file_id, path, mime_type)
         data, mime_type = await service.get_file(file_id, user.get("user_id"))
     except KeyError:
         raise HTTPException(status_code=404, detail="File not found")

@@ -27,6 +27,19 @@ from tenxgraph_api.cli.core.validation import validate_cli_options
 from tenxgraph_api.cli.exceptions import ConfigurationError, ServerError
 
 
+# Mirrors Settings.MAX_REQUEST_SIZE; read from the environment the command just loaded.
+DEFAULT_MAX_REQUEST_SIZE = 10 * 1024 * 1024
+
+
+def _max_request_size() -> int:
+    raw = os.environ.get("MAX_REQUEST_SIZE")
+    try:
+        value = int(raw) if raw else DEFAULT_MAX_REQUEST_SIZE
+    except ValueError:
+        return DEFAULT_MAX_REQUEST_SIZE
+    return value if value > 0 else DEFAULT_MAX_REQUEST_SIZE
+
+
 class APICommand(BaseCommand):
     """Command to start the 10xGraph API server."""
 
@@ -155,6 +168,9 @@ class APICommand(BaseCommand):
                 port=validated_options["port"],
                 reload=reload,
                 workers=1,
+                # Refuse WebSocket frames over the HTTP body cap before buffering them
+                # (uvicorn's own default is 16 MiB).
+                ws_max_size=_max_request_size(),
             )
 
             return 0

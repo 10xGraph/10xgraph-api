@@ -42,7 +42,7 @@ REST:
 
 TypeScript:
 
-- `AgentFlowClient.stream(messages, options)` returns an async generator.
+- `TenxGraphClient.stream(messages, options)` returns an async generator.
 - Handle `chunk.event === "message"` for incremental text.
 
 ## Source Map
@@ -50,4 +50,4 @@ TypeScript:
 - Stream chunks: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/core/state/stream_chunks.py
 - Compiled graph streaming: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/core/graph/compiled_graph.py
 - Graph API router/service: https://github.com/10xGraph/10xgraph-api/tree/main/tenxgraph_api/src/app/routers/graph
-- TS stream endpoint: https://github.com/10xHub/agentflow-client/blob/main/src/endpoints/stream.ts
+- TS stream endpoint: https://github.com/10xGraph/10xgraph-client/blob/master/src/endpoints/stream.ts

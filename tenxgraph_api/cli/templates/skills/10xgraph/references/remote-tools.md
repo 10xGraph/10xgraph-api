@@ -52,4 +52,4 @@ No setup endpoint exists. A request cannot add, rename, or replace graph tools.
 - Config model: `tenxgraph_api/src/app/core/config/graph_config.py`
 - Startup attachment: `tenxgraph_api/src/app/loader.py`
 - Python remote handling: `tenxgraph/core/graph/tool_node/base.py`
-- TypeScript executor: `agentflow-client/src/tools.ts`
+- TypeScript executor: https://github.com/10xGraph/10xgraph-client/blob/master/src/tools.ts
