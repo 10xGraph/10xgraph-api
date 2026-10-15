@@ -64,7 +64,7 @@ dependencies = [
     # Pre-1.0 and major-version-risky deps are capped; floors are the versions
     # the suite is verified against.
     "fastapi>=0.116,<1.0",
-    "gunicorn>=23.0,<24",
+    "gunicorn>=23.0,<27",
     "orjson>=3.11,<4",
     "platformdirs>=4.0,<5",
     "python-multipart>=0.0.19,<0.1",
