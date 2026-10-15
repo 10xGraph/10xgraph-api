@@ -96,7 +96,7 @@ snowflakekit = [
     "snowflakekit>=0.1.1,<1.0",
 ]
 redis = [
-    "redis>=5.0.7,<7",
+    "redis>=5.0.7,<9",
 ]
 jwt = [
     "PyJWT>=2.8,<3",
