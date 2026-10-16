@@ -13,7 +13,7 @@ from tenxgraph_api.src.app.core.auth.request_config import (
     reject_unlisted_keys,
 )
 from tenxgraph_api.src.app.core.config.settings import get_settings
-from tenxgraph_api.src.app.core.utils.log_sanitizer import sanitize_for_logging
+from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe, sanitize_for_logging
 from tenxgraph_api.src.app.routers.checkpointer.schemas.checkpointer_schemas import (
     MessagesListResponseSchema,
     ResponseSchema,
@@ -214,7 +214,11 @@ class CheckpointerService:
     # Threads
     async def get_thread(self, config: dict[str, Any], user: dict) -> ThreadResponseSchema:
         cfg = self._config(config, user)
-        logger.debug(f"User info: {sanitize_for_logging(user)} and thread config: {cfg}")
+        logger.debug(
+            "User info: %s and thread config: %s",
+            log_safe(sanitize_for_logging(user)),
+            log_safe(cfg),
+        )
         res = await self.checkpointer.aget_thread(cfg)
         return ThreadResponseSchema(thread=res.model_dump() if res else None)
 
@@ -236,7 +240,11 @@ class CheckpointerService:
         thread_id: Any,
     ) -> ResponseSchema:
         cfg = self._config(config, user)
-        logger.debug(f"User info: {sanitize_for_logging(user)} and thread ID: {thread_id}")
+        logger.debug(
+            "User info: %s and thread ID: %s",
+            log_safe(sanitize_for_logging(user)),
+            log_safe(thread_id),
+        )
         res = await self.checkpointer.aclean_thread(cfg)
 
         # Clean telemetry traces if TelemetryStore is bound in InjectQ
@@ -249,7 +257,9 @@ class CheckpointerService:
             if telemetry_store:
                 telemetry_store.delete_thread(str(thread_id))
         except Exception as exc:
-            logger.debug("Telemetry store cleanup failed for thread %s: %s", thread_id, exc)
+            logger.debug(
+                "Telemetry store cleanup failed for thread %s: %s", log_safe(thread_id), exc
+            )
 
         # Invalidate any cached ownership for this thread. Ownership is otherwise
         # immutable, so deletion is the only event that must evict the cache.
@@ -264,7 +274,9 @@ class CheckpointerService:
                 if pending is not None:
                     await pending
         except Exception as exc:
-            logger.debug("Ownership cache eviction failed for thread %s: %s", thread_id, exc)
+            logger.debug(
+                "Ownership cache eviction failed for thread %s: %s", log_safe(thread_id), exc
+            )
 
         return ResponseSchema(success=True, message="Thread deleted successfully", data=res)
 

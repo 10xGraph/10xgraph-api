@@ -26,7 +26,7 @@ from tenxgraph_api.src.app.core.auth.request_config import (
     unanswered_tool_calls,
 )
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RunsConfig
-from tenxgraph_api.src.app.core.utils.log_sanitizer import sanitize_for_logging
+from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe, sanitize_for_logging
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     GraphInputSchema,
     GraphInvokeOutputSchema,
@@ -284,7 +284,11 @@ class GraphService:
             owned_thread_info(config, thread_id, thread_name=thread_name),
         )
         if res:
-            logger.info(f"Generated thread name: {thread_name} for thread_id: {thread_id}")
+            logger.info(
+                "Generated thread name: %s for thread_id: %s",
+                log_safe(thread_name),
+                log_safe(thread_id),
+            )
 
         return thread_name
 
@@ -444,8 +448,8 @@ class GraphService:
             HTTPException: If stop operation fails or user doesn't have permission.
         """
         try:
-            logger.info(f"Stopping graph execution for thread: {thread_id}")
-            logger.debug(f"User info: {sanitize_for_logging(user)}")
+            logger.info("Stopping graph execution for thread: %s", log_safe(thread_id))
+            logger.debug("User info: %s", log_safe(sanitize_for_logging(user)))
 
             # Start with client config if provided, then overlay trusted attributes
             stop_config = client_config(config)
@@ -460,15 +464,21 @@ class GraphService:
             # Call the graph's astop method
             result = await self._graph.astop(stop_config)
 
-            logger.info(f"Graph stop completed for thread {thread_id}: {result}")
+            logger.info(
+                "Graph stop completed for thread %s: %s", log_safe(thread_id), log_safe(result)
+            )
             return result
 
         except ValueError as e:
-            logger.warning(f"Graph stop input validation failed for thread {thread_id}: {e}")
+            logger.warning(
+                "Graph stop input validation failed for thread %s: %s",
+                log_safe(thread_id),
+                log_safe(e),
+            )
             raise HTTPException(status_code=422, detail=client_error_detail(e))
         except Exception as e:
             _reraise_framework_errors(e)
-            logger.error(f"Graph stop failed for thread {thread_id}: {e}")
+            logger.error("Graph stop failed for thread %s: %s", log_safe(thread_id), log_safe(e))
             raise HTTPException(
                 status_code=500, detail=f"Graph stop failed for thread {thread_id}: {e!s}"
             )
@@ -635,7 +645,7 @@ class GraphService:
             HTTPException: If graph execution fails.
         """
         try:
-            logger.debug(f"Invoking graph with input: {graph_input.messages}")
+            logger.debug("Invoking graph with input: %s", log_safe(graph_input.messages))
 
             # Prepare the input
             input_data, config, meta = await self._prepare_input(graph_input, user.get("user_id"))
@@ -794,7 +804,7 @@ class GraphService:
         thread_id: str | None = None
         run_id: str | None = None
         try:
-            logger.debug(f"Streaming graph with input: {graph_input.messages}")
+            logger.debug("Streaming graph with input: %s", log_safe(graph_input.messages))
 
             # Prepare the config
             input_data, config, meta = await self._prepare_input(
@@ -911,12 +921,12 @@ class GraphService:
         if realtime:
             config["realtime"] = realtime
         await self._save_thread(config, thread_id)
-        logger.info("Realtime graph session starting: thread_id=%s", thread_id)
+        logger.info("Realtime graph session starting: thread_id=%s", log_safe(thread_id))
 
         async for event in self._graph.arealtime(input_queue, config):
             yield event
 
-        logger.info("Realtime graph session completed: thread_id=%s", thread_id)
+        logger.info("Realtime graph session completed: thread_id=%s", log_safe(thread_id))
 
     def _realtime_overrides(self, init: dict[str, Any]) -> dict[str, Any]:
         """Translate the client init frame into RealtimeConfig field overrides.
@@ -1327,8 +1337,8 @@ class GraphService:
             HTTPException: If the operation fails
         """
         try:
-            logger.info(f"Starting fix graph operation for thread: {thread_id}")
-            logger.debug(f"User info: {sanitize_for_logging(user)}")
+            logger.info("Starting fix graph operation for thread: %s", log_safe(thread_id))
+            logger.debug("User info: %s", log_safe(sanitize_for_logging(user)))
 
             # Start with client config if provided, then overlay trusted attributes
             fix_config = client_config(config)
@@ -1339,7 +1349,7 @@ class GraphService:
             logger.debug("Fetching current state from checkpointer")
             state: AgentState | None = await self.checkpointer.aget_state(fix_config)
             if not state:
-                logger.warning(f"No state found for thread: {thread_id}")
+                logger.warning("No state found for thread: %s", log_safe(thread_id))
                 return {
                     "success": False,
                     "message": f"No state found for thread: {thread_id}",

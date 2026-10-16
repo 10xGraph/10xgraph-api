@@ -17,6 +17,7 @@ from tenxgraph.storage.media.storage.base import BaseMediaStore
 
 from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
 from tenxgraph_api.src.app.core.config.media_settings import MediaSettings, MediaStorageType
+from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.utils.media.extractor import DocumentExtractor
 from tenxgraph_api.src.app.utils.media.pipeline import DocumentPipeline
 
@@ -257,7 +258,7 @@ class MediaService:
             logger.warning(
                 "File %s has no recorded owner (uploaded before ownership tracking); "
                 "allowing access. Set MEDIA_REQUIRE_OWNER=true to deny these.",
-                file_id,
+                log_safe(file_id),
             )
             return
 
@@ -265,8 +266,8 @@ class MediaService:
             # Deliberately not "you don't own this" -- do not confirm the id exists.
             logger.warning(
                 "User %s attempted to access file %s owned by another user",
-                user_id,
-                file_id,
+                log_safe(user_id),
+                log_safe(file_id),
             )
             raise PermissionError(f"File not accessible: {file_id}")
 
