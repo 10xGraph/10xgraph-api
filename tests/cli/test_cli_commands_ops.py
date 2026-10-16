@@ -97,10 +97,10 @@ def test_api_command_builds_local_playground_url_for_wildcard_host(silent_output
     url = cmd._build_playground_url(
         cmd._normalize_browser_host("0.0.0.0"),
         8000,
-        "https://playground-463bd.web.app",
+        "https://play.10xgraph.com",
     )
 
-    assert url == "https://playground-463bd.web.app?backendUrl=http%3A%2F%2F127.0.0.1%3A8000"
+    assert url == "https://play.10xgraph.com?backendUrl=http%3A%2F%2F127.0.0.1%3A8000"
 
 
 def test_api_command_schedules_playground_launch(monkeypatch, tmp_path, silent_output):
@@ -148,7 +148,7 @@ def test_api_command_schedules_playground_launch(monkeypatch, tmp_path, silent_o
     assert scheduled == {
         "host": "127.0.0.1",
         "port": TEST_PORT,
-        "playground_base_url": "https://playground-463bd.web.app",
+        "playground_base_url": "https://play.10xgraph.com",
     }
 
 

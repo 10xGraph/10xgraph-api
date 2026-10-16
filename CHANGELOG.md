@@ -67,6 +67,9 @@ has tests; see the review notes for the full list.
 
 ### Changed
 
+- `10xgraph play` and `10xgraph dev` open the hosted playground at its new address,
+  `https://play.10xgraph.com`. The previous address, `playground-463bd.web.app`, still
+  serves the same app for older releases.
 - Thread delete leaves a short tombstone so a deleted id cannot be handed to another user
   while other workers still cache the old owner.
 - Every thread the API saves records its owner, which fixes owner lookups on the in-memory
