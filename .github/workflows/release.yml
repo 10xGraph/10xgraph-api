@@ -11,15 +11,9 @@ permissions:
   contents: read
 
 jobs:
-  # 0. Never build a release out of untested code. Runs the full CI workflow
-  #    (lint, mypy, tests on 3.12 + 3.13, artifact verification) against the tag.
-  ci:
-    uses: ./.github/workflows/ci.yaml
-    secrets: inherit
-
   # 1. Build the sdist + wheel and verify the tag matches pyproject version.
+  #    Tests run on the pull request (ci.yaml), so a tag only builds and releases.
   build:
-    needs: ci
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -42,7 +36,7 @@ jobs:
           echo "Tag version:     $TAG"
           echo "Package version: $PKG"
           if [ "$TAG" != "$PKG" ]; then
-            echo "::error::Tag ($TAG) does not match pyproject.toml version ($PKG)."
+            echo "::error::Tag ($TAG) does not match pyproject.toml version ($PKG) at $(git rev-parse --short HEAD). Push the version bump first, then move the tag: git push origin :refs/tags/$GITHUB_REF_NAME && git tag -f $GITHUB_REF_NAME <bump-commit> && git push origin $GITHUB_REF_NAME"
             exit 1
           fi
 
@@ -66,15 +60,20 @@ jobs:
     permissions:
       contents: write  # required to create a release
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist/
 
+      # RELEASE_NOTES.md is the release text; GitHub appends the merged-PR list below it.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: RELEASE_NOTES.md
           generate_release_notes: true
           files: dist/*
           fail_on_unmatched_files: true

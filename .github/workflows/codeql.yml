@@ -1,10 +1,11 @@
 name: CodeQL
 
+# Not on push to main: PRs are scanned before merge, and the weekly run (or a manual
+# run) refreshes the alert list for main.
 on:
-  push:
-    branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
   schedule:
     # Weekly, so newly published queries catch code that has not changed.
     - cron: "27 4 * * 1"

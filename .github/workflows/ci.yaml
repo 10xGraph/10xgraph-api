@@ -1,15 +1,14 @@
 name: CI
 
+# Pull requests only, like the core repo: main receives code through reviewed PRs,
+# and tags release without re-running the suite.
 on:
-  push:
-    branches: [ main ]
   pull_request:
     branches: [ main ]
-  workflow_call:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
