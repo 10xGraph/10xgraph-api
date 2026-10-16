@@ -235,3 +235,14 @@ class TestFixGraph:
         # Verify the correct messages are kept by checking the call to aput_state
         call_args = mock_checkpointer.aput_state.call_args
         updated_state_arg = call_args[0][1]  # Second positional arg
+
+    @pytest.mark.asyncio
+    async def test_fix_graph_returns_state_as_object(self, graph_service, mock_checkpointer):
+        """The response carries ``state`` as a JSON object, not a pre-encoded JSON string."""
+        state = AgentState(context=[Message.text_message("hi", role="user")])
+        mock_checkpointer.aget_state.return_value = state
+
+        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
+
+        assert isinstance(result["state"], dict)
+        assert result["state"]["context"][0]["role"] == "user"

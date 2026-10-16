@@ -66,7 +66,7 @@ def test_success_response_default():
     resp = success_response({"key": "val"}, request)
     assert resp.status_code == 200
     payload: dict[str, Any] = resp.body  # type: ignore[attr-defined]
-    # starlette Response stores bytes; decode & eval JSON via orjson behavior
+    # starlette Response stores bytes; decode the JSON body
     import json
 
     data = json.loads(resp.body)

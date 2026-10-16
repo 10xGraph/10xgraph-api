@@ -3,7 +3,6 @@ import os
 
 from fastapi import FastAPI
 from fastapi.concurrency import asynccontextmanager
-from fastapi.responses import ORJSONResponse
 from injectq import InjectQ
 from injectq.integrations.fastapi import setup_fastapi
 from tenxgraph.core.graph import CompiledGraph
@@ -172,7 +171,6 @@ app = FastAPI(
     redoc_url=settings.REDOCS_PATH if settings.REDOCS_PATH else None,
     # The schema lists every route and model; serve it only alongside the docs.
     openapi_url="/openapi.json" if settings.DOCS_PATH or settings.REDOCS_PATH else None,
-    default_response_class=ORJSONResponse,
     lifespan=lifespan,
     root_path=settings.ROOT_PATH,
 )

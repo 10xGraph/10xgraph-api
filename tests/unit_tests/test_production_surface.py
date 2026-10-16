@@ -9,6 +9,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 
 from tenxgraph_api.cli.templates.defaults import generate_dockerignore_content
@@ -84,7 +85,8 @@ def test_dockerfile_installs_the_published_cli_package():
 def test_dockerfile_installs_pyproject_dependencies():
     content = _dockerfile(has_requirements=False, has_pyproject=True)
     assert "COPY pyproject.toml ." in content
-    assert "pip install --no-cache-dir -r /tmp/requirements.txt" in content
+    assert "pip install -r /tmp/requirements.txt" in content
+    assert "ENV PIP_NO_CACHE_DIR=1" in content
 
 
 def test_requirements_file_still_wins():
@@ -98,10 +100,37 @@ def test_dockerfile_strips_cli_only_assets_before_copying_the_app():
     lines = content.splitlines()
     strip = next(i for i, line in enumerate(lines) if line.startswith("RUN python -I -c"))
     install = max(i for i, line in enumerate(lines) if "pip install" in line)
-    copy_app = lines.index("COPY . .")
+    copy_app = lines.index("COPY --chown=appuser:appuser . .")
     assert install < strip < copy_app
     assert "'templates'" in lines[strip]
     assert "'config_editor'" in lines[strip]
+
+
+def test_dockerfile_runtime_stage_ships_only_the_venv_and_app():
+    content = _dockerfile(has_requirements=False, has_pyproject=True)
+    builder, runtime = content.split("# ---- Stage 2: runtime image ----")
+    assert "AS builder" in builder
+    assert "COPY --from=builder /opt/venv /opt/venv" in runtime
+    commands = [line for line in content.splitlines() if not line.lstrip().startswith("#")]
+    # No compiler or curl in either stage by default, and no duplicate chown layer
+    assert not any("build-essential" in line or "apt-get" in line for line in commands)
+    assert not any("curl" in line for line in commands)
+    assert not any("chown -R" in line for line in commands)
+    assert "pip install" not in runtime
+
+
+def test_requirements_in_subfolder_keep_their_path(tmp_path):
+    from tenxgraph_api.cli.commands.build import BuildCommand
+
+    (tmp_path / "requirements").mkdir()
+    (tmp_path / "requirements" / "base.txt").write_text("10xgraph-api\n")
+    _, chosen = BuildCommand()._discover_requirements(tmp_path)
+    assert chosen == "requirements/base.txt"
+
+    from tenxgraph_api.cli.templates.defaults import generate_dockerfile_content
+
+    content = generate_dockerfile_content("3.13", 8000, chosen, has_requirements=True)
+    assert "COPY requirements/base.txt requirements.txt" in content
 
 
 def test_strip_step_removes_only_cli_assets(tmp_path, monkeypatch):
@@ -127,3 +156,43 @@ def test_strip_step_removes_only_cli_assets(tmp_path, monkeypatch):
 def test_dockerignore_excludes_dev_only_folders():
     ignored = set(generate_dockerignore_content().splitlines())
     assert {"tests/", "evals/", ".claude/", ".agents/", ".github/"} <= ignored
+
+
+def test_dockerfile_installs_only_what_the_dependency_file_lists():
+    # Besides the dependency file, the only install is the process manager the CMD runs.
+    process_manager = 'RUN pip install "gunicorn>=23,<27" "uvicorn-worker>=0.4,<1"'
+    for kwargs in ({"has_requirements": True}, {"has_requirements": False, "has_pyproject": True}):
+        lines = _dockerfile(**kwargs).splitlines()
+        assert process_manager in lines
+        installs = [
+            line
+            for line in lines
+            if "pip install" in line
+            and not line.lstrip().startswith("#")
+            and line != process_manager
+        ]
+        assert len(installs) == 1
+        assert " -r " in installs[0]
+
+
+def test_dockerfile_uses_the_uvicorn_worker_package():
+    content = _dockerfile(has_requirements=False, has_pyproject=True)
+    assert '"uvicorn_worker.UvicornWorker"' in content
+    assert "uvicorn.workers" not in content
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "expected"),
+    [
+        ("requirements.txt", "10xgraph\n10xgraph-api>=0.7\n", True),
+        ("requirements.txt", "10xgraph\ngoogle-genai\n", False),
+        ("pyproject.toml", '[project]\ndependencies = ["10xgraph-api[redis]"]\n', True),
+        ("pyproject.toml", '[project]\ndependencies = ["10xgraph"]\n', False),
+    ],
+)
+def test_build_detects_whether_the_server_package_is_listed(tmp_path, filename, content, expected):
+    from tenxgraph_api.cli.commands.build import BuildCommand
+
+    path = tmp_path / filename
+    path.write_text(content)
+    assert BuildCommand._lists_server_package(path) is expected
