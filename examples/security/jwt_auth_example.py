@@ -185,7 +185,7 @@ if __name__ == "__main__":
     import uvicorn
 
     print("Starting JWT Auth Example Server")
-    print(f"Secret Key: {JWT_SECRET_KEY[:10]}... (truncated)")
+    print(f"Secret Key: {'set' if JWT_SECRET_KEY else 'MISSING'}")
     print(f"Algorithm: {JWT_ALGORITHM}")
     print(f"Token Expiration: {JWT_ACCESS_TOKEN_EXPIRE_MINUTES} minutes")
     print("\nTest the API:")

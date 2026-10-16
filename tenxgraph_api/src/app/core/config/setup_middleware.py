@@ -440,7 +440,7 @@ def setup_middleware(
                 rate_limit_config.window,
                 rate_limit_config.by,
                 rate_limit_config.exclude_paths or "(none)",
-                rate_limit_config.trusted_proxy_headers,
+                "on" if rate_limit_config.trusted_proxy_headers else "off",
             )
 
     app.add_middleware(

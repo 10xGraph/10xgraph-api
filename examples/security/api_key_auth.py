@@ -16,6 +16,7 @@ Setup:
 """
 
 import hashlib
+import hmac
 import os
 from datetime import datetime
 from typing import Any
@@ -26,6 +27,17 @@ from fastapi.security import HTTPAuthorizationCredentials
 # Import the base authentication class
 # In your project: from tenxgraph_api import BaseAuth
 from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
+
+
+def _api_key_pepper() -> bytes:
+    """Server-side secret mixed into every API key hash (``API_KEY_PEPPER``).
+
+    With HMAC, a leaked table of hashes cannot be checked offline without this secret.
+    """
+    pepper = os.getenv("API_KEY_PEPPER", "")
+    if not pepper:
+        raise RuntimeError("Set API_KEY_PEPPER to a long random secret to hash API keys.")
+    return pepper.encode()
 
 
 class APIKeyAuth(BaseAuth):
@@ -106,8 +118,8 @@ class APIKeyAuth(BaseAuth):
         key_metadata = self.valid_keys.get(api_key)
 
         if not key_metadata:
-            # Log failed attempt (without exposing the key)
-            print(f"Invalid API key attempt: {api_key[:4]}...{api_key[-4:]}")
+            # Log the failed attempt without any part of the key
+            print("Invalid API key attempt")
 
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -169,7 +181,7 @@ class HashedAPIKeyAuth(BaseAuth):
 
     def hash_key(self, api_key: str) -> str:
         """
-        Hash an API key using SHA-256.
+        Hash an API key with HMAC-SHA-256 and the server-side pepper.
 
         Args:
             api_key: Plain text API key
@@ -177,7 +189,7 @@ class HashedAPIKeyAuth(BaseAuth):
         Returns:
             Hexadecimal hash of the API key
         """
-        return hashlib.sha256(api_key.encode()).hexdigest()
+        return hmac.new(_api_key_pepper(), api_key.encode(), hashlib.sha256).hexdigest()
 
     async def authenticate(
         self, credentials: HTTPAuthorizationCredentials, response: Response
@@ -238,9 +250,9 @@ def hash_api_key(api_key: str) -> str:
         api_key: Plain text API key
 
     Returns:
-        SHA-256 hash of the key
+        HMAC-SHA-256 of the key (hex)
     """
-    return hashlib.sha256(api_key.encode()).hexdigest()
+    return hmac.new(_api_key_pepper(), api_key.encode(), hashlib.sha256).hexdigest()
 
 
 """
@@ -258,7 +270,8 @@ CONFIGURATION:
 # .env - Plain text keys (development only)
 API_KEYS=ak_dev123:user_dev:developer,ak_admin456:user_admin:admin
 
-# .env - Hashed keys (production)
+# .env - Hashed keys (production); hashes depend on the pepper, so keep it stable
+API_KEY_PEPPER=<long random secret>
 API_KEY_HASHES=<hash1>:user1:admin,<hash2>:user2:developer
 """
 

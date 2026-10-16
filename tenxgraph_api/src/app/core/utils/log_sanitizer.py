@@ -34,7 +34,8 @@ SENSITIVE_PATTERNS = {
 }
 
 # Regex pattern to detect JWT tokens (three base64url parts separated by dots)
-JWT_PATTERN = re.compile(r"^[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]*$")
+# Each part excludes ".", so there is one way to split a string: no polynomial backtracking.
+JWT_PATTERN = re.compile(r"^[A-Za-z0-9_=-]+\.[A-Za-z0-9_=-]+(?:\.[A-Za-z0-9_.+/=-]*)?$")
 
 # Regex pattern to detect bearer tokens
 BEARER_PATTERN = re.compile(r"^Bearer\s+[A-Za-z0-9\-_.~+/]+=*$", re.IGNORECASE)

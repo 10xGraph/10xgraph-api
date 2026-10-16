@@ -1,6 +1,7 @@
 """Tests for log sanitization utilities."""
 
 import logging
+import time
 
 from tenxgraph_api.src.app.core.utils.log_sanitizer import (
     BEARER_PATTERN,
@@ -35,6 +36,14 @@ class TestSensitivePatterns:
         """Test JWT pattern matches JWT with fewer parts."""
         short_jwt = "eyJhbGc.eyJzdWI"
         assert JWT_PATTERN.match(short_jwt)
+
+    def test_jwt_pattern_is_linear_on_adversarial_input(self):
+        """A string built to backtrack (CodeQL py/polynomial-redos) is rejected quickly."""
+        evil = "-.-" + "--" * 20_000 + "!"
+        start = time.perf_counter()
+        assert JWT_PATTERN.match(evil) is None
+        # The old pattern took seconds here; the fixed one takes well under a millisecond.
+        assert time.perf_counter() - start < 0.5
 
     def test_bearer_pattern_matches_bearer_token(self):
         """Test BEARER_PATTERN matches bearer tokens."""
