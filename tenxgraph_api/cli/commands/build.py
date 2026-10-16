@@ -1,5 +1,7 @@
 """Build command implementation."""
 
+import re
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +10,7 @@ from tenxgraph_api.cli.constants import DEFAULT_PORT, DEFAULT_PYTHON_VERSION, DE
 from tenxgraph_api.cli.core.validation import Validator
 from tenxgraph_api.cli.exceptions import DockerError, FileOperationError, ValidationError
 from tenxgraph_api.cli.templates.defaults import (
+    CLI_PACKAGE,
     generate_docker_compose_content,
     generate_dockerfile_content,
     generate_dockerignore_content,
@@ -18,7 +21,7 @@ from tenxgraph_api.cli.templates.defaults import (
 class BuildCommand(BaseCommand):
     """Command to generate Dockerfile and docker-compose.yml for the application."""
 
-    def execute(  # noqa: PLR0915
+    def execute(  # noqa: PLR0912, PLR0915
         self,
         output_file: str = "Dockerfile",
         force: bool = False,
@@ -92,6 +95,15 @@ class BuildCommand(BaseCommand):
                         step.detail(
                             "no requirements.txt or pyproject.toml; installing "
                             "10xgraph-api from PyPI"
+                        )
+                    dep_source = requirements_files[0] if requirements_files else None
+                    if dep_source is None and has_pyproject:
+                        dep_source = Path.cwd() / "pyproject.toml"
+                    if dep_source is not None and not self._lists_server_package(dep_source):
+                        self.output.warning(
+                            f"{dep_source.name} does not list {CLI_PACKAGE}. The image installs "
+                            "only the dependencies you list, so add it or the container "
+                            "cannot start the server."
                         )
 
                 with timeline.step("dockerfile") as step:
@@ -185,11 +197,29 @@ class BuildCommand(BaseCommand):
 
         requirements_file = "requirements.txt"
         if requirements_files:
-            requirements_file = requirements_files[0].name
+            # Path relative to the build context, so `requirements/base.txt` keeps its folder
+            requirements_file = requirements_files[0].relative_to(current_dir).as_posix()
             if len(requirements_files) > 1:
                 self.logger.info(f"Found multiple requirements files, using: {requirements_file}")
 
         return requirements_files, requirements_file
+
+    @staticmethod
+    def _lists_server_package(dep_source: Path) -> bool:
+        """Return whether a requirements file or pyproject.toml lists the API server package."""
+        if dep_source.suffix == ".toml":
+            try:
+                with dep_source.open("rb") as f:
+                    deps = tomllib.load(f).get("project", {}).get("dependencies", [])
+            except (OSError, tomllib.TOMLDecodeError):
+                return True  # Can't tell; don't warn on a file we couldn't read
+        else:
+            try:
+                deps = dep_source.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                return True
+        names = (re.split(r"[\s\[<>=!~;@]", dep.strip(), maxsplit=1)[0] for dep in deps)
+        return any(name.lower().replace("_", "-") == CLI_PACKAGE for name in names)
 
     def _write_dockerfile(self, output_path: Path, content: str) -> None:
         """Write Dockerfile content to file.

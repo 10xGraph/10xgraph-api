@@ -249,7 +249,7 @@ def test_build_command_with_compose(tmp_path, monkeypatch, silent_output):
     assert code == 0
     dockerfile = (tmp_path / "Dockerfile").read_text(encoding="utf-8")
     assert "FROM" in dockerfile
-    # The dockerfile should include the healthcheck CMD curl line but omit the final
+    # The dockerfile should include the HEALTHCHECK CMD line but omit the final
     # application run command (CMD ["gunicorn", ...]) when docker_compose=True (omit_cmd=True).
     # 'gunicorn' will still appear in the installation RUN line, so we specifically
     # assert that no line starts with the application CMD instruction.

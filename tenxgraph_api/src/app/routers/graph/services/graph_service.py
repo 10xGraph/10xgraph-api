@@ -1364,7 +1364,7 @@ class GraphService:
                     "success": True,
                     "message": "No messages found in state",
                     "removed_count": 0,
-                    "state": state.model_dump_json(serialize_as_any=True),
+                    "state": state.model_dump(serialize_as_any=True),
                 }
 
             filtered = [m for m in messages if not self._has_empty_tool_call(m)]
@@ -1381,7 +1381,7 @@ class GraphService:
                 "success": True,
                 "message": message,
                 "removed_count": removed_count,
-                "state": state.model_dump_json(serialize_as_any=True),
+                "state": state.model_dump(serialize_as_any=True),
             }
         except ValueError as e:
             logger.warning(f"Fix graph input validation failed: {e}")

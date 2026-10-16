@@ -18,7 +18,8 @@ Examples:
 from typing import Any, TypeVar
 
 from fastapi import Request
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import Response
+from pydantic import BaseModel
 
 from .schemas import (
     ErrorOutputSchema,
@@ -29,6 +30,26 @@ from .schemas import (
 
 
 T = TypeVar("T")
+
+
+def _json_response(model: BaseModel, status_code: int) -> Response:
+    """Serialize a response model in pydantic-core (Rust) and wrap it in a Response.
+
+    Starlette responses cannot take a model directly, and ``JSONResponse(model.model_dump())``
+    would re-encode through the stdlib ``json`` module.
+    """
+    if type(model) is dict:
+        return Response(
+            content=model,
+            status_code=status_code,
+            media_type="application/json",
+        )
+
+    return Response(
+        content=model.model_dump_json() if model else {},
+        status_code=status_code,
+        media_type="application/json",
+    )
 
 
 def merge_metadata(metadata: dict | None, request: Request, message: str = "") -> dict[Any, Any]:
@@ -84,13 +105,13 @@ def success_response(
             Defaults to None.
 
     Returns:
-        ORJSONResponse: The JSON response containing the data,
+        Response: The JSON response containing the data,
             message, and metadata.
     """
     response: SuccessResponse = SuccessResponse(
         data=res, metadata=merge_metadata(metadata, request, message)
     )
-    return ORJSONResponse(response.model_dump(), status_code=status_code)
+    return _json_response(response, status_code)
 
 
 def error_response(
@@ -117,7 +138,7 @@ def error_response(
             Default is None.
 
     Returns:
-        ORJSONResponse: The JSON response containing the error details, message,
+        Response: The JSON response containing the error details, message,
             and metadata.
     """
     error = ErrorResponse(
@@ -126,4 +147,4 @@ def error_response(
         ),
         metadata=merge_metadata(metadata, request, message),
     )
-    return ORJSONResponse(error.model_dump(), status_code=status_code)
+    return _json_response(error, status_code)

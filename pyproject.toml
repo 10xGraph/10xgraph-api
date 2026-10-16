@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,7 @@ name = "10xgraph-api"
 version = "0.7.0"
 description = "Production server for 10xGraph agents (formerly 10xscale-agentflow-cli). Serves a compiled graph over REST, SSE, WebSocket, realtime audio and AG-UI with JWT or custom auth, scoped authorization on every endpoint, owner-only threads and rate limiting, and generates Docker Compose and Kubernetes files. Includes the 10xgraph CLI. MIT licensed, self-hosted."
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 requires-python = ">=3.12"
 authors = [
     {name = "Shudipto Trafder", email = "shudiptotrafder@gmail.com"},
@@ -48,7 +48,6 @@ keywords = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
@@ -64,13 +63,10 @@ dependencies = [
     # Pre-1.0 and major-version-risky deps are capped; floors are the versions
     # the suite is verified against.
     "fastapi>=0.116,<1.0",
-    "gunicorn>=23.0,<24",
-    "orjson>=3.11,<4",
-    "platformdirs>=4.0,<5",
     "python-multipart>=0.0.19,<0.1",
     "pydantic>=2.13,<3",
     "pydantic-settings>=2.3,<3",
-    "uvicorn>=0.30,<1.0",
+    "uvicorn>=0.36,<1.0",
     "typer>=0.17,<1.0",
     "python-dotenv>=1.0,<2",
     "questionary>=2.0,<3",

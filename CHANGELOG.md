@@ -49,6 +49,19 @@ has tests; see the review notes for the full list.
   background and appears on the thread (`GET /v1/threads`).
 - **Production 4xx responses keep their message**; only 5xx are made generic. A 422 built
   from an unexpected `ValueError` is still made generic.
+- **`gunicorn` is no longer a dependency.** The generated Dockerfile installs it, so
+  `10xgraph build` images are unaffected. If you run `gunicorn` yourself outside that image,
+  install it alongside the API: `pip install gunicorn uvicorn-worker`.
+- **Gunicorn's worker class is now `uvicorn_worker.UvicornWorker`** (from the `uvicorn-worker`
+  package). `uvicorn.workers.UvicornWorker` is deprecated in uvicorn. Regenerate the
+  Dockerfile and compose file with `10xgraph build --force`, or change `-k` in your own
+  command.
+- **`POST /v1/graph/fix` returns `state` as a JSON object.** It used to be a JSON-encoded
+  string. Drop any `JSON.parse` / `json.loads` on that field; the TS client already types it
+  as an object.
+- **Generated Dockerfiles install only the dependencies you list.** The `pyproject.toml` path
+  no longer adds `10xgraph-api` on top of your list. `10xgraph build` warns when the requirements file or `pyproject.toml` does not list
+  `10xgraph-api`.
 
 ### Added
 
@@ -81,6 +94,18 @@ has tests; see the review notes for the full list.
 - Route-set security headers (such as the download sandbox CSP) are no longer overwritten.
 - The JWT is verified once per request when rate limiting by user.
 - Local-store downloads stream from disk; uploads are read into memory once.
+- JSON responses are serialized by pydantic-core (`model_dump_json`) instead of orjson.
+  FastAPI deprecated `ORJSONResponse` in 0.131; the FastAPI floor stays at 0.116.
+- Dependencies: dropped `orjson` and the unused `platformdirs`; the `uvicorn` floor is now
+  0.36 (required by `uvicorn-worker`).
+- Generated Dockerfiles build in two stages: dependencies go into a virtualenv in a builder
+  stage, and only that virtualenv and your code reach the runtime image. The runtime image
+  has no compiler or curl, copies code with `COPY --chown` instead of a second `chown -R`
+  layer, and its healthcheck uses the Python standard library.
+- A requirements file in a subfolder (for example `requirements/base.txt`) keeps its path in
+  the generated Dockerfile.
+- Packaging: `license` is an SPDX expression (`MIT`), so builds no longer warn about the
+  deprecated table form; the build needs setuptools 77 or later.
 
 ## [0.7.0] - 2026-10-10
 
