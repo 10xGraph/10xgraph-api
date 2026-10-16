@@ -22,8 +22,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-16
+
 Security and scalability pass over the API, following an external review. Every item below
-has tests; see the review notes for the full list.
+has tests; see the review notes for the full list. This release has breaking changes: read
+the **Breaking** list before upgrading.
 
 ### Breaking
 
@@ -106,6 +109,20 @@ has tests; see the review notes for the full list.
   the generated Dockerfile.
 - Packaging: `license` is an SPDX expression (`MIT`), so builds no longer warn about the
   deprecated table form; the build needs setuptools 77 or later.
+
+### Security
+
+- **Log injection.** Values a client controls (user and thread ids, file ids, rate-limit
+  keys, request paths, run config and messages) are written to logs through `log_safe()`,
+  which escapes CR and LF, so a request cannot forge extra log lines. This covers the graph,
+  checkpointer and media services, the rate-limit middleware, the WebSocket guard and the
+  run limits.
+- **ReDoS in the log sanitizer.** The JWT detection pattern backtracked polynomially on
+  crafted input (about 585 ms for a 16,000-character string). It now matches in linear time.
+- **Security examples.** `examples/security/` no longer prints any part of an API key or of
+  the JWT secret. The API key example hashes keys with HMAC-SHA-256 and a server-side
+  `API_KEY_PEPPER`; hashes made with the previous example's plain SHA-256 must be
+  regenerated.
 
 ## [0.7.0] - 2026-10-10
 
@@ -438,6 +455,8 @@ can be pinned.
 Initial entry in this changelog. Releases before `0.5.0` were not tracked here; see the
 GitHub release history for their notes.
 
+[Unreleased]: https://github.com/10xGraph/10xgraph-api/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/10xGraph/10xgraph-api/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/10xGraph/10xgraph-api/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/10xHub/agentflow-cli/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/10xHub/agentflow-cli/compare/v0.5.0...v0.5.1

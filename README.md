@@ -515,7 +515,7 @@ sdist + wheel, checks the distribution metadata, and creates a GitHub Release wi
 notes and the artifacts attached. PyPI publishing is manual (`make publish`).
 
 ```bash
-git tag v0.7.0 && git push origin v0.7.0
+git tag v0.8.0 && git push origin v0.8.0
 ```
 
 ---

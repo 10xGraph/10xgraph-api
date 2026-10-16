@@ -5,7 +5,7 @@ core framework see `agentflow/CLAUDE.md`; for the TS client, docs, or playground
 for the monorepo overview see the workspace-root `CLAUDE.md`.
 
 - Package name (PyPI): `10xgraph-api` (formerly `10xscale-agentflow-cli`, last release 0.6.x)
-- Version: `0.7.0` (`pyproject.toml`), the first release under the 10xGraph name. `CLI_VERSION`
+- Version: `0.8.0` (`pyproject.toml`; 0.7.0 was the first release under the 10xGraph name). `CLI_VERSION`
   and `tenxgraph_api.__version__` are single-sourced from the installed distribution metadata
   (falling back to `pyproject.toml` only for a non-installed source checkout).
 - Requires: Python >= 3.12 · Status: `4 - Beta`
