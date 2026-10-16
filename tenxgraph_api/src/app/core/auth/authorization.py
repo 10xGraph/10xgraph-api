@@ -150,8 +150,12 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
     - No ``user_id`` on the request -> deny (must be authenticated).
     - No ``resource_id`` (list / create-without-id, e.g. ``GET /v1/threads``, the graph
       schema endpoint) -> allow; those paths are already user-scoped by the service.
-    - The thread does not exist yet -> allow (a brand-new session / empty read). For
-      ``invoke``/``stream`` this starts a new thread owned by the caller.
+    - The thread has no owner yet -> allow only the actions that create it (``graph:invoke``,
+      ``graph:stream``, ``checkpointer:write``); the caller becomes its owner. With
+      ``server_thread_ids`` (``runs.thread_ids == "server"``) even those are denied: new
+      threads must be started without an id, so the server picks it. Every other
+      action (read, delete, stop, fix) is denied: there is nothing of the caller's to act
+      on, and an ownerless thread may still hold data written before owners were recorded.
     - The thread exists and the caller owns it -> allow.
     - The thread exists and is owned by someone else -> **deny, for every action**
       including ``invoke`` and ``stream``. This is the whole point: you cannot read,
@@ -164,16 +168,24 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
     Ownership is resolved through a :class:`ThreadOwnershipResolver` in front of
     :meth:`BaseCheckpointer.aget_thread_owner`. Ownership is immutable, so the resolver
     caches it (in-process, plus optional shared Redis) -- after the first lookup a check is
-    an in-memory hit, not a database round-trip per request. A checkpointer that cannot
-    resolve ownership (raises ``NotImplementedError``) or that is not configured leaves
-    nothing to enforce, so requests pass through with a warning. The in-memory checkpointer
-    only records a thread when one is explicitly written, which is why this backend is the
-    production default (Postgres) while development defaults to
-    :class:`DefaultAuthorizationBackend`.
+    an in-memory hit, not a database round-trip per request.
+
+    This backend fails closed: with no checkpointer, or one that cannot resolve ownership
+    (``aget_thread_owner`` raises ``NotImplementedError``), every thread-scoped request is
+    denied. The loader refuses to start in that setup (see
+    :func:`assert_ownership_supported`), so this only guards a misconfiguration that slipped
+    past it.
     """
 
     # Resources whose ``resource_id`` is a thread_id and therefore ownership-checkable.
     THREAD_RESOURCES = frozenset({"graph", "checkpointer"})
+
+    # ``(resource, action)`` pairs that may target a thread with no owner yet. Each one
+    # records the caller as the owner (the graph service and the checkpointer service both
+    # register the thread before writing to it).
+    CREATE_ACTIONS = frozenset(
+        {("graph", "invoke"), ("graph", "stream"), ("checkpointer", "write")}
+    )
 
     def isolation_scope(self) -> str:
         # Owner-only access -> storage must be scoped to the caller too.
@@ -185,11 +197,14 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
         *,
         resolver: Any | None = None,
         redis: object | None = None,
+        server_thread_ids: bool = False,
     ) -> None:
         self._checkpointer = checkpointer
         self._resolver = resolver
         self._redis = redis
         self._resolver_built = resolver is not None
+        # ``runs.thread_ids == "server"``: a request may only name a thread that exists.
+        self.server_thread_ids = server_thread_ids
 
     @property
     def checkpointer(self) -> Any | None:
@@ -223,16 +238,17 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
             self._resolver = ThreadOwnershipResolver(cp.aget_thread_owner, redis=self._redis)
         return self._resolver
 
-    def evict(self, thread_id: str | int) -> Any:
+    def evict(self, thread_id: str | int, owner: str | int | None = None) -> Any:
         """Invalidate a thread's cached ownership (call on thread deletion).
 
-        Returns the resolver's ``evict`` coroutine when a resolver exists, so callers may
-        ``await`` it; returns None when there is nothing to evict.
+        ``owner`` is the deleting user; they may recreate the id straight away. Returns the
+        resolver's ``evict`` coroutine when a resolver exists, so callers may ``await`` it;
+        returns None when there is nothing to evict.
         """
         resolver = self._get_resolver()
         if resolver is None:
             return None
-        return resolver.evict(thread_id)
+        return resolver.evict(thread_id, owner)
 
     async def aclose(self) -> None:
         """Close the L2 Redis client this backend created (called on app shutdown)."""
@@ -266,13 +282,14 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
 
         resolver = self._get_resolver()
         if resolver is None:
-            logger.warning(
+            logger.error(
                 "Ownership authorization is active but no checkpointer is configured; "
-                "allowing %s:%s (no persisted threads to protect).",
+                "denying %s:%s on thread %s.",
                 resource,
                 action,
+                resource_id,
             )
-            return True
+            return False
 
         return await self._authorize_ownership(
             resolver, str(resource_id), str(user_id), resource, action
@@ -289,16 +306,15 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
         try:
             owner = await resolver.owner_of(resource_id)
         except NotImplementedError:
-            logger.warning(
-                "Checkpointer %s cannot resolve thread ownership; ownership "
-                "authorization is inactive for %s:%s. Use a checkpointer that "
-                "implements aget_thread_owner (e.g. PgCheckpointer) or configure a "
-                "custom AuthorizationBackend.",
+            logger.error(
+                "Checkpointer %s cannot resolve thread ownership; denying %s:%s. Use a "
+                "checkpointer that implements aget_thread_owner (e.g. PgCheckpointer) or "
+                "configure a custom AuthorizationBackend.",
                 type(self.checkpointer).__name__,
                 resource,
                 action,
             )
-            return True
+            return False
         except Exception as exc:
             # Fail closed: a resolution error must not silently grant access.
             logger.warning(
@@ -309,11 +325,79 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
             )
             return False
 
-        # Unknown thread -> brand-new session (or an empty read); allow. Otherwise the
-        # caller must be the owner, for EVERY action (invoke/stream included).
+        # No owner yet: only an action that creates the thread may proceed, and it makes the
+        # caller the owner. Otherwise the caller must be the owner, for EVERY action.
         if owner is None:
-            return True
+            if await self._recently_deleted(resolver, resource_id, user_id):
+                # Another worker may still cache the deleted thread's owner; handing the id to
+                # a new owner now would let that stale entry reach into the new thread.
+                logger.info(
+                    "Refusing %s:%s on thread %s: it was just deleted",
+                    resource,
+                    action,
+                    resource_id,
+                )
+                return False
+            if self.server_thread_ids:
+                # New threads get server-picked ids; a client may not name one into being,
+                # so nobody can claim an id ahead of the user it was meant for.
+                logger.info(
+                    "Refusing %s:%s on unknown thread %s: runs.thread_ids is 'server'",
+                    resource,
+                    action,
+                    resource_id,
+                )
+                return False
+            return (resource, action) in self.CREATE_ACTIONS
         return str(owner) == user_id
+
+    @staticmethod
+    async def _recently_deleted(resolver: Any, resource_id: str, user_id: str) -> bool:
+        check = getattr(resolver, "recently_deleted", None)
+        if not callable(check):
+            return False
+        try:
+            return bool(await check(resource_id, user_id))
+        except Exception as exc:  # pragma: no cover - the resolver already swallows errors
+            logger.debug("Tombstone check failed for thread %s: %s", resource_id, exc)
+            return False
+
+
+def supports_owner_lookup(checkpointer: Any) -> bool:
+    """Whether ``checkpointer`` can answer ``aget_thread_owner``.
+
+    A :class:`BaseCheckpointer` subclass that does not override it inherits the base method,
+    which always raises ``NotImplementedError``. Other objects are taken at their word if they
+    have the method.
+    """
+    if checkpointer is None:
+        return False
+    from tenxgraph.storage.checkpointer import BaseCheckpointer
+
+    if isinstance(checkpointer, BaseCheckpointer):
+        return type(checkpointer).aget_thread_owner is not BaseCheckpointer.aget_thread_owner
+    return callable(getattr(checkpointer, "aget_thread_owner", None))
+
+
+def assert_ownership_supported(backend: AuthorizationBackend, checkpointer: Any) -> None:
+    """Refuse to start when owner-only authorization has nothing to check ownership with.
+
+    Without this, every ownership check would be denied at request time (the backend fails
+    closed), so the server would start and then reject every thread. Raising at boot names the
+    real problem instead.
+    """
+    if not isinstance(backend, OwnershipAuthorizationBackend):
+        return
+    if supports_owner_lookup(checkpointer):
+        return
+    name = type(checkpointer).__name__ if checkpointer is not None else "no checkpointer"
+    raise RuntimeError(
+        f"Refusing to start: {type(backend).__name__} enforces owner-only thread access, but "
+        f"{name} cannot resolve thread owners (aget_thread_owner is not implemented). Use a "
+        "checkpointer that implements it (PgCheckpointer, SqliteCheckpointer, "
+        "InMemoryCheckpointer), implement aget_thread_owner on your checkpointer, or set "
+        '"authorization" to "allow_all" or a custom backend in 10xgraph.json.'
+    )
 
 
 class RoleBasedAuthorizationBackend(OwnershipAuthorizationBackend):
@@ -349,8 +433,14 @@ class RoleBasedAuthorizationBackend(OwnershipAuthorizationBackend):
         checkpointer: Any | None = None,
         resolver: Any | None = None,
         redis: object | None = None,
+        server_thread_ids: bool = False,
     ) -> None:
-        super().__init__(checkpointer=checkpointer, resolver=resolver, redis=redis)
+        super().__init__(
+            checkpointer=checkpointer,
+            resolver=resolver,
+            redis=redis,
+            server_thread_ids=server_thread_ids,
+        )
         self._role_scopes = {str(r): list(s) for r, s in (role_scopes or {}).items()}
         self._default_scopes = list(default_scopes)
         self._isolation = isolation if isolation in ("owner", "none") else "owner"

@@ -67,8 +67,11 @@ def validate_config(config: Any, base_dir: Path | None = None) -> list[Issue]:
     _check_env(config, out, base_dir)
     _check_auth(config, out, base_dir)
     _check_authorization(config, out, base_dir)
+    _check_token_revocation(config, out, base_dir)
+    _check_graph_introspection(config, out)
     _check_rate_limit(config, out)
     _check_websocket(config, out)
+    _check_runs(config, out)
     _check_ag_ui(config, out)
     _check_observability(config, out)
     _check_plugins(config, out, base_dir)
@@ -218,6 +221,35 @@ def _check_websocket(config: dict, out: _Collector) -> None:
     from tenxgraph_api.src.app.core.config.graph_config import WebSocketConfig
 
     _quietly(lambda: WebSocketConfig.from_dict(data), out, "websocket")
+
+
+def _check_token_revocation(config: dict, out: _Collector, base_dir: Path | None) -> None:
+    value = config.get("token_revocation")
+    if value is None or value in ("", "redis", "memory"):
+        if value == "redis" and not (config.get("redis") or os.environ.get("REDIS_URL")):
+            out.warning("token_revocation", "redis needs the redis key or REDIS_URL.")
+        if value and not config.get("auth"):
+            out.warning("token_revocation", "Auth is off, so there are no tokens to revoke.")
+        return
+    if not isinstance(value, str):
+        out.error("token_revocation", "token_revocation must be redis, memory or module:attr.")
+        return
+    _check_import_path("token_revocation", value, out, base_dir)
+
+
+def _check_graph_introspection(config: dict, out: _Collector) -> None:
+    value = config.get("graph_introspection")
+    if value is not None and value not in ("open", "scoped"):
+        out.error("graph_introspection", "graph_introspection must be open or scoped.")
+
+
+def _check_runs(config: dict, out: _Collector) -> None:
+    data = config.get("runs")
+    if data is None:
+        return
+    from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+
+    _quietly(lambda: RunsConfig.from_dict(data), out, "runs")
 
 
 def _check_ag_ui(config: dict, out: _Collector) -> None:

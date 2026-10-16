@@ -17,7 +17,12 @@ from starlette.requests import HTTPConnection
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.auth.auth_backend import BaseAuth
 from tenxgraph_api.src.app.core.auth.authorization import AuthorizationBackend
+from tenxgraph_api.src.app.core.auth.identity_cache import recall_identity
 from tenxgraph_api.src.app.core.auth.request_config import normalize_thread_id
+from tenxgraph_api.src.app.core.auth.revocation import (
+    TokenRevocationUnavailableError,
+    token_revoked,
+)
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.core.exceptions.general_exception import GeneralException
 from tenxgraph_api.src.app.core.utils.log_sanitizer import sanitize_for_logging
@@ -133,6 +138,39 @@ def _reject(connection: HTTPConnection, status_code: int, detail: str) -> NoRetu
     raise HTTPException(status_code=status_code, detail=detail)
 
 
+def _authenticate(
+    auth_backend: BaseAuth,
+    connection: HTTPConnection,
+    response: Response,
+    credential: HTTPAuthorizationCredentials | None,
+) -> dict[str, Any] | None:
+    """Verify the credential, reusing a result this request already verified when allowed.
+
+    The rate limiter (``rate_limit.by == "user"``) verifies the same token first; for a backend
+    with ``reusable_within_request`` its result is reused instead of decoding the token twice.
+    """
+    if credential is not None:
+        cached = recall_identity(connection, auth_backend, credential.credentials)
+        if cached is not None:
+            return cached
+    return auth_backend.authenticate(connection, response, credential)  # type: ignore[arg-type]
+
+
+async def _reject_if_revoked(connection: HTTPConnection, user: dict[str, Any]) -> None:
+    """Refuse a credential the token revocation backend reports as revoked (401).
+
+    When the backend cannot answer, refuse with 503 instead of serving a token that might have
+    been revoked.
+    """
+    try:
+        revoked = await token_revoked(user)
+    except TokenRevocationUnavailableError:
+        _reject(connection, 503, "Token revocation check unavailable")
+    if revoked:
+        logger.warning("Rejected revoked credential for user %s", user.get("user_id"))
+        _reject(connection, 401, "Token has been revoked, please login again")
+
+
 class RequirePermission:
     """
     FastAPI dependency that combines authentication and authorization.
@@ -159,6 +197,8 @@ class RequirePermission:
         resource: str,
         action: str,
         extract_resource_id: Callable[[HTTPConnection], str | None] | None = None,
+        *,
+        introspection: bool = False,
     ):
         """
         Initialize the permission requirement.
@@ -167,10 +207,14 @@ class RequirePermission:
             resource: Resource type (graph, checkpointer, store)
             action: Action type (invoke, stream, read, write, delete, etc.)
             extract_resource_id: Optional callable that extracts resource_id from request
+            introspection: The route exposes the graph's internals (structure, tool schemas,
+                state schema). Under ``graph_introspection: "scoped"`` the caller must hold
+                the scope explicitly; an identity that declares no scopes is refused.
         """
         self.resource = resource
         self.action = action
         self.extract_resource_id_fn = extract_resource_id
+        self.introspection = introspection
 
     async def __call__(  # noqa: PLR0912
         self,
@@ -217,11 +261,7 @@ class RequirePermission:
             user = {}
         else:
             try:
-                user_result = auth_backend.authenticate(
-                    connection,
-                    response,
-                    credential,
-                )
+                user_result = _authenticate(auth_backend, connection, response, credential)
             except HTTPException as exc:
                 # JWT/custom backends signal auth failure with HTTPException; convert it
                 # to a clean WebSocket close on WS routes (see _reject).
@@ -235,6 +275,9 @@ class RequirePermission:
             if user_result and "user_id" not in user_result:
                 logger.error("Authentication failed: 'user_id' not found in user info")
             user = user_result or {}
+
+        # Step 2b: a verified credential may still have been revoked before it expires.
+        await _reject_if_revoked(connection, user)
 
         # Step 3: Extract resource_id if available
         resource_id = None
@@ -257,6 +300,13 @@ class RequirePermission:
             granted_scopes = user.get("scopes")  # fallback for backends without scopes_for
         if granted_scopes is not None and required_scope not in granted_scopes:
             logger.warning(f"Missing scope '{required_scope}' for user {user.get('user_id')}")
+            _reject(connection, 403, f"Missing required scope: {required_scope}")
+        if (
+            self.introspection
+            and granted_scopes is None
+            and getattr(config, "introspection_scoped", False) is True
+        ):
+            # No scopes declared would normally mean "permissive"; graph internals are not.
             _reject(connection, 403, f"Missing required scope: {required_scope}")
 
         # Step 5: Object-level authorization (ownership etc.)
@@ -337,6 +387,9 @@ class RequirePermission:
         if not _is_json_content_type(connection.headers.get("content-type")):
             return None
 
+        # No second parse: FastAPI reads a JSON body with ``request.json()`` before it resolves
+        # dependencies, and Starlette caches the result on this same Request object, so this
+        # returns the cached value. tests/integration_tests/test_body_parsed_once.py guards it.
         try:
             body = await connection.json()
         except Exception as exc:

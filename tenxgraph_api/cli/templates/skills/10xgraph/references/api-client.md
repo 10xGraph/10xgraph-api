@@ -1,6 +1,6 @@
 # API and TypeScript Client
 
-Use this when aligning REST routes, schemas, generated docs, or the TypeScript npm SDK. The public npm package is `@10xscale/agentflow-client`; install it with `npm install @10xscale/agentflow-client`.
+Use this when aligning REST routes, schemas, generated docs, or the TypeScript npm SDK. The public npm package is `10xgraph-client`; install it with `npm install 10xgraph-client`.
 
 Check current docs first: https://10xgraph.com/
 
@@ -27,7 +27,7 @@ Memory/file routes are summarized in their topic references.
 
 ## TypeScript SDK Facade
 
-`AgentFlowClient` is exported by `@10xscale/agentflow-client`. Its source facade is https://github.com/10xHub/agentflow-client/blob/main/src/client.ts, and it wraps:
+`TenxGraphClient` is exported by `10xgraph-client`. Its source facade is https://github.com/10xGraph/10xgraph-client/blob/master/src/client.ts, and it wraps:
 
 - Connectivity and metadata: `ping`, `graph`, `graphStateSchema`
 - Execution: `invoke`, `stream`, `stopGraph`, `fixGraph`
@@ -48,14 +48,14 @@ For remote tools, read `remote-tools.md`; that flow has a client-managed executi
 
 ## Rules
 
-- Use `@10xscale/agentflow-client` in user-facing examples and docs.
+- Use `10xgraph-client` in user-facing examples and docs.
 - The TypeScript SDK calls a running 10xGraph API server. It does not import or execute Python graph code.
 - Keep endpoint schema changes mirrored in the client endpoints directory.
-- Test both endpoint helpers and the `AgentFlowClient` facade for client-visible changes.
+- Test both endpoint helpers and the `TenxGraphClient` facade for client-visible changes.
 
 ## Source Map
 
-- Client facade: https://github.com/10xHub/agentflow-client/blob/main/src/client.ts
-- Client endpoints: https://github.com/10xHub/agentflow-client/tree/main/src/endpoints
-- Client message model: https://github.com/10xHub/agentflow-client/blob/main/src/message.ts
+- Client facade: https://github.com/10xGraph/10xgraph-client/blob/master/src/client.ts
+- Client endpoints: https://github.com/10xGraph/10xgraph-client/tree/master/src/endpoints
+- Client message model: https://github.com/10xGraph/10xgraph-client/blob/master/src/message.ts
 - API schemas/services: https://github.com/10xGraph/10xgraph-api/tree/main/tenxgraph_api/src/app/routers

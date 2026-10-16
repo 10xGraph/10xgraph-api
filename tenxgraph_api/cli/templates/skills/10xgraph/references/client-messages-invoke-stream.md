@@ -4,7 +4,7 @@ Use this when changing TypeScript message classes, invoke behavior, streaming be
 
 ## Message Model
 
-Message and content block classes live in https://github.com/10xHub/agentflow-client/blob/main/src/message.ts.
+Message and content block classes live in https://github.com/10xGraph/10xgraph-client/blob/master/src/message.ts.
 
 Core classes:
 
@@ -42,7 +42,7 @@ The client serializes message content as arrays of content blocks. Avoid sending
 
 ## Invoke
 
-`AgentFlowClient.invoke(messages, options?)` wraps `/v1/graph/invoke`.
+`TenxGraphClient.invoke(messages, options?)` wraps `/v1/graph/invoke`.
 
 Options:
 
@@ -73,7 +73,7 @@ Read `remote-tools.md` for the full remote tool flow.
 
 ## Stream
 
-`AgentFlowClient.stream(messages, options?)` wraps `/v1/graph/stream` and returns `AsyncGenerator<StreamChunk>`.
+`TenxGraphClient.stream(messages, options?)` wraps `/v1/graph/stream` and returns `AsyncGenerator<StreamChunk>`.
 
 `StreamEventType` values:
 
@@ -107,9 +107,9 @@ Use `client.stopGraph(threadId, config?)` to request cancellation for a running 
 
 ## Source Map
 
-- Message classes: https://github.com/10xHub/agentflow-client/blob/main/src/message.ts
-- Client facade: https://github.com/10xHub/agentflow-client/blob/main/src/client.ts
-- Invoke endpoint: https://github.com/10xHub/agentflow-client/blob/main/src/endpoints/invoke.ts
-- Stream endpoint: https://github.com/10xHub/agentflow-client/blob/main/src/endpoints/stream.ts
-- Stop graph endpoint: https://github.com/10xHub/agentflow-client/blob/main/src/endpoints/stopGraph.ts
+- Message classes: https://github.com/10xGraph/10xgraph-client/blob/master/src/message.ts
+- Client facade: https://github.com/10xGraph/10xgraph-client/blob/master/src/client.ts
+- Invoke endpoint: https://github.com/10xGraph/10xgraph-client/blob/master/src/endpoints/invoke.ts
+- Stream endpoint: https://github.com/10xGraph/10xgraph-client/blob/master/src/endpoints/stream.ts
+- Stop graph endpoint: https://github.com/10xGraph/10xgraph-client/blob/master/src/endpoints/stopGraph.ts
 - Docs: https://10xgraph.com/

@@ -117,3 +117,39 @@ class TestConfigValidation:
     def test_global_still_supported(self):
         cfg = _cfg(by="global")
         assert client_key_for(_conn(), cfg) == "__global__"
+
+
+class TestDefaultTrustedProxies:
+    """An empty trusted_proxies list trusts only loopback and private peers."""
+
+    @pytest.mark.parametrize("peer", ["10.1.2.3", "172.20.0.4", "192.168.1.1", "127.0.0.1", "::1"])
+    def test_private_peer_is_trusted(self, peer):
+        assert client_key_for(_conn("1.1.1.1, 203.0.113.7", peer=peer), _cfg()) == "203.0.113.7"
+
+    @pytest.mark.parametrize("peer", ["198.51.100.7", "2001:db8::1", "not-an-ip"])
+    def test_public_or_unknown_peer_is_keyed_by_itself(self, peer):
+        assert client_key_for(_conn("1.1.1.1, 203.0.113.7", peer=peer), _cfg()) == peer
+
+    def test_explicit_catch_all_restores_trust_everyone(self):
+        cfg = _cfg(trusted_proxies=("0.0.0.0/0", "::/0"))
+        assert client_key_for(_conn("203.0.113.7", peer="198.51.100.7"), cfg) == "203.0.113.7"
+
+    def test_explicit_list_replaces_the_default(self):
+        cfg = _cfg(trusted_proxies=("198.51.100.0/24",))
+        assert client_key_for(_conn("203.0.113.7", peer="198.51.100.7"), cfg) == "203.0.113.7"
+        assert client_key_for(_conn("203.0.113.7", peer="10.0.0.9"), cfg) == "10.0.0.9"
+
+    def test_parsing_warns_when_headers_are_trusted_without_a_list(self, caplog):
+        with caplog.at_level("WARNING", logger="tenxgraph_api"):
+            RateLimitConfig.from_dict({"backend": "redis", "trusted_proxy_headers": True})
+        assert "without rate_limit.trusted_proxies" in caplog.text
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="tenxgraph_api"):
+            RateLimitConfig.from_dict(
+                {
+                    "backend": "redis",
+                    "trusted_proxy_headers": True,
+                    "trusted_proxies": ["10.0.0.0/8"],
+                }
+            )
+        assert "without rate_limit.trusted_proxies" not in caplog.text

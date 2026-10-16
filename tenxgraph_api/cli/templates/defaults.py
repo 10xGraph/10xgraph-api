@@ -712,7 +712,7 @@ def generate_k8s_manifest_content(service_name: str, port: int) -> str:
             f'                  - "sleep {K8S_PRESTOP_SLEEP_SECONDS}"',
             "          readinessProbe:",
             "            httpGet:",
-            "              path: /ping",
+            "              path: /health/ready",
             f"              port: {port}",
             "            initialDelaySeconds: 5",
             "            periodSeconds: 10",

@@ -20,24 +20,24 @@ Configure via environment variables or settings:
 - CSP_POLICY: Custom CSP policy (default: strict policy)
 """
 
-from collections.abc import Callable
-
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import Response
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+class SecurityHeadersMiddleware:
     """
     Middleware to add security headers to responses.
 
     This middleware enhances security by adding standard security headers
     that protect against common web vulnerabilities.
+
+    Pure ASGI: it edits the ``http.response.start`` message on the way out, so it adds no
+    per-request task and never buffers a streaming body (``BaseHTTPMiddleware`` does both).
     """
 
     def __init__(  # noqa: PLR0913
         self,
-        app,
+        app: ASGIApp,
         enable_hsts: bool = True,
         hsts_max_age: int = 31536000,  # 1 year
         hsts_include_subdomains: bool = True,
@@ -65,7 +65,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             permissions_policy: Permissions-Policy value (optional)
             csp_policy: Content-Security-Policy value (optional)
         """
-        super().__init__(app)
+        self.app = app
         self.enable_hsts = enable_hsts
         self.hsts_max_age = hsts_max_age
         self.hsts_include_subdomains = hsts_include_subdomains
@@ -125,66 +125,48 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
         return "; ".join(hsts_parts)
 
-    def _is_https(self, request: Request) -> bool:
-        """
-        Check if request is using HTTPS.
+    def _headers_for(self, is_https: bool) -> list[tuple[str, str]]:
+        """The headers this middleware adds, in order, for a plain or an HTTPS request."""
+        headers = [
+            ("X-Content-Type-Options", self.content_type_options),
+            ("X-Frame-Options", self.frame_options),
+            ("X-XSS-Protection", self.xss_protection),  # legacy browsers
+            ("Referrer-Policy", self.referrer_policy),
+        ]
+        if self.permissions_policy:
+            headers.append(("Permissions-Policy", self.permissions_policy))
+        if self.csp_policy:
+            headers.append(("Content-Security-Policy", self.csp_policy))
+        if self.enable_hsts and is_https:  # only meaningful over HTTPS
+            headers.append(("Strict-Transport-Security", self._build_hsts_header()))
+        return headers
 
-        Checks both the request scheme and X-Forwarded-Proto header
-        (for proxied requests).
-
-        Args:
-            request: Starlette request object
-
-        Returns:
-            True if HTTPS, False otherwise
-        """
-        # Check request scheme
-        if request.url.scheme == "https":
+    @staticmethod
+    def _is_https(scope: Scope) -> bool:
+        """Whether the request came over HTTPS, directly or through a TLS-terminating proxy."""
+        if scope.get("scheme") == "https":
             return True
-
-        # Check X-Forwarded-Proto header (for proxied requests)
-        forwarded_proto = request.headers.get("X-Forwarded-Proto", "")
+        forwarded_proto = Headers(scope=scope).get("x-forwarded-proto", "")
         return forwarded_proto.lower() == "https"
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        """
-        Process request and add security headers to response.
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-        Args:
-            request: Incoming request
-            call_next: Next middleware/handler
+        defaults = self._headers_for(self._is_https(scope))
 
-        Returns:
-            Response with security headers
-        """
-        # Process request
-        response = await call_next(request)
+        async def send_with_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                # A header the route set itself wins: it knows its content better than a
+                # global default does (e.g. the file download's sandbox CSP for uploads).
+                for name, value in defaults:
+                    if name not in headers:
+                        headers[name] = value
+            await send(message)
 
-        # Add X-Content-Type-Options header
-        response.headers["X-Content-Type-Options"] = self.content_type_options
-
-        # Add X-Frame-Options header
-        response.headers["X-Frame-Options"] = self.frame_options
-
-        # Add X-XSS-Protection header (for legacy browser support)
-        response.headers["X-XSS-Protection"] = self.xss_protection
-
-        # Add Referrer-Policy header
-        response.headers["Referrer-Policy"] = self.referrer_policy
-
-        # Add Permissions-Policy header
-        if self.permissions_policy:
-            response.headers["Permissions-Policy"] = self.permissions_policy
-
-        # Add Content-Security-Policy header
-        if self.csp_policy:
-            response.headers["Content-Security-Policy"] = self.csp_policy
-
-        # Add Strict-Transport-Security header (only for HTTPS)
-        if self.enable_hsts and self._is_https(request):
-            response.headers["Strict-Transport-Security"] = self._build_hsts_header()
-
-        return response
+        await self.app(scope, receive, send_with_headers)
 
 
 def create_security_headers_middleware(

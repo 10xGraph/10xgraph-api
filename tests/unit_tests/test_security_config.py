@@ -3,6 +3,9 @@
 import os
 from unittest.mock import patch
 
+import pytest
+from pydantic import ValidationError
+
 from tenxgraph_api.src.app.core.config.settings import Settings, get_settings
 
 
@@ -31,11 +34,17 @@ def test_cors_wildcard_no_warning_in_development(caplog):
         assert "CORS ORIGINS" not in caplog.text or "production" not in caplog.text
 
 
-def test_debug_mode_warning_in_production(caplog):
-    """Test warning for DEBUG mode enabled in production."""
+def test_debug_mode_is_forced_off_in_production(caplog):
+    """IS_DEBUG=true is overridden in production, not just warned about."""
     with patch.dict(os.environ, {"MODE": "production", "IS_DEBUG": "true"}):
         settings = Settings()
-        assert "DEBUG mode is enabled in production" in caplog.text
+        assert settings.IS_DEBUG is False
+        assert "IS_DEBUG=true is ignored in production" in caplog.text
+
+
+def test_debug_mode_kept_in_development():
+    with patch.dict(os.environ, {"MODE": "development", "IS_DEBUG": "true"}):
+        assert Settings().IS_DEBUG is True
 
 
 def test_docs_enabled_warning_in_production(caplog):
@@ -75,7 +84,7 @@ def test_multiple_warnings_in_production(caplog):
 
         log_text = caplog.text
         assert "CORS ORIGINS='*'" in log_text
-        assert "DEBUG mode is enabled" in log_text
+        assert "IS_DEBUG=true is ignored" in log_text
         assert "ALLOWED_HOST='*'" in log_text
 
 
@@ -101,3 +110,51 @@ def test_settings_caching():
     settings2 = get_settings()
 
     assert settings1 is settings2
+
+
+# ---------------------------------------------------------------------------
+# STRICT_PRODUCTION_CHECKS
+# ---------------------------------------------------------------------------
+
+
+STRICT_SAFE = {
+    "MODE": "production",
+    "STRICT_PRODUCTION_CHECKS": "true",
+    "ALLOWED_HOST": "api.example.com",
+    "ORIGINS": "https://app.example.com",
+}
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"ALLOWED_HOST": "*"}, "ALLOWED_HOST='*'"),
+        ({"ORIGINS": "*"}, "ORIGINS='*'"),
+        ({"ORIGINS": "https://a.example.com,*"}, "ORIGINS='*'"),
+        ({"DOCS_PATH": "/docs"}, "documentation endpoints"),
+    ],
+)
+def test_strict_mode_refuses_insecure_production_settings(override, message):
+    with patch.dict(os.environ, {**STRICT_SAFE, **override}), pytest.raises(ValidationError) as exc:
+        Settings()
+    assert "Refusing to start" in str(exc.value)
+    assert message in str(exc.value)
+
+
+def test_strict_mode_accepts_hardened_production_settings():
+    with patch.dict(os.environ, STRICT_SAFE):
+        settings = Settings()
+    assert settings.STRICT_PRODUCTION_CHECKS is True
+
+
+def test_strict_mode_is_ignored_in_development():
+    with patch.dict(
+        os.environ, {"MODE": "development", "STRICT_PRODUCTION_CHECKS": "true", "ALLOWED_HOST": "*"}
+    ):
+        Settings()
+
+
+def test_without_strict_mode_production_only_warns(caplog):
+    with patch.dict(os.environ, {"MODE": "production", "ALLOWED_HOST": "*"}):
+        Settings()
+    assert "PRODUCTION SECURITY WARNINGS" in caplog.text

@@ -16,6 +16,7 @@ from tenxgraph_api.src.app.core.auth.authorization import (
     DefaultAuthorizationBackend,
     OwnershipAuthorizationBackend,
     RoleBasedAuthorizationBackend,
+    assert_ownership_supported,
 )
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.utils.thread_name_generator import ThreadNameGenerator
@@ -341,7 +342,10 @@ def _build_ownership_redis(redis_url: str | None) -> object | None:
 
 
 def _resolve_authorization_backend(
-    authorization: str | dict | None, redis_url: str | None = None
+    authorization: str | dict | None,
+    redis_url: str | None = None,
+    server_thread_ids: bool = False,
+    auth_enabled: bool = False,
 ) -> AuthorizationBackend:
     """Pick the authorization backend from config, defaulting by run mode.
 
@@ -351,11 +355,19 @@ def _resolve_authorization_backend(
     2. ``"module:attr"`` -> the developer's custom :class:`AuthorizationBackend`.
     3. A built-in name (``"ownership"``, ``"allow_all"``/``"default"``/``"none"``) ->
        that backend, regardless of mode.
-    4. Not configured (``null``) -> secure-by-default in production
-       (:class:`OwnershipAuthorizationBackend`), permissive in development
-       (:class:`DefaultAuthorizationBackend`). Either can be overridden via (1)/(2)/(3).
+    4. Not configured (``null``) -> secure by default
+       (:class:`OwnershipAuthorizationBackend`) whenever requests carry an identity
+       (``auth_enabled``) or ``MODE=production``. Only with auth off in development is it
+       :class:`DefaultAuthorizationBackend`, which then changes nothing: without an identity
+       no authorization check runs. Either can be overridden via (1)/(2)/(3).
+
+    The default used to depend on the mode alone, so a server shipped with the default
+    ``MODE=development`` and auth on ran ``allow_all``: the API stamped isolation scope
+    ``none`` and every authenticated user could read every thread and memory.
 
     ``redis_url`` (when set) backs the ownership cache's shared L2 tier.
+    ``server_thread_ids`` (``runs.thread_ids == "server"``) makes the built-in ownership
+    backends refuse client-named ids for threads that do not exist yet.
     """
     # 1. Config-driven RBAC: {"backend": "rbac", "roles": {...}, "default_scopes": [...]}
     if isinstance(authorization, dict):
@@ -367,6 +379,7 @@ def _resolve_authorization_backend(
                 default_scopes=authorization.get("default_scopes") or (),
                 isolation=authorization.get("isolation", "owner"),
                 redis=_build_ownership_redis(redis_url),
+                server_thread_ids=server_thread_ids,
             )
         raise ValueError(
             f"Unknown authorization backend config: {authorization!r}. For RBAC use "
@@ -387,36 +400,127 @@ def _resolve_authorization_backend(
                 f"path or one of: {', '.join(sorted(_BUILTIN_AUTHORIZATION))}."
             )
         logger.info("Using built-in '%s' authorization backend.", key)
+        if builtin is DefaultAuthorizationBackend and auth_enabled and _is_production():
+            logger.warning(
+                'authorization is "%s" with auth enabled in production: every authenticated '
+                'user can read and change every thread and memory. Use "ownership" or '
+                '"rbac" unless that is intended.',
+                key,
+            )
         if builtin is OwnershipAuthorizationBackend:
-            return OwnershipAuthorizationBackend(redis=_build_ownership_redis(redis_url))
+            return OwnershipAuthorizationBackend(
+                redis=_build_ownership_redis(redis_url), server_thread_ids=server_thread_ids
+            )
         return builtin()
 
-    # Not configured: default by mode.
-    from tenxgraph_api.src.app.core.config.settings import get_settings
-
-    if get_settings().MODE == "production":
+    # Not configured: owner-only whenever there is an identity to own threads.
+    if auth_enabled or _is_production():
         logger.info(
             "No authorization configured; defaulting to OwnershipAuthorizationBackend "
-            "(owner-only thread access) because MODE=production. Set "
+            "(owner-only thread access). Set "
             '"authorization": "allow_all" to opt out.'
         )
-        return OwnershipAuthorizationBackend(redis=_build_ownership_redis(redis_url))
+        return OwnershipAuthorizationBackend(
+            redis=_build_ownership_redis(redis_url), server_thread_ids=server_thread_ids
+        )
 
     logger.info(
-        "No authorization configured; defaulting to DefaultAuthorizationBackend "
-        "(allows all authenticated users) in development. Set "
-        '"authorization": "ownership" to enforce owner-only access here too.'
+        "No authorization configured and auth is off; using DefaultAuthorizationBackend "
+        "(requests carry no identity, so there is nothing to authorize)."
     )
     return DefaultAuthorizationBackend()
+
+
+def _is_production() -> bool:
+    from tenxgraph_api.src.app.core.config.settings import get_settings
+
+    return get_settings().MODE == "production"
 
 
 def load_and_bind_authorization(
     container: InjectQ,
     authorization_path: str | None,
     redis_url: str | None = None,
+    server_thread_ids: bool = False,
+    auth_enabled: bool = False,
 ) -> None:
-    backend = _resolve_authorization_backend(authorization_path, redis_url)
+    backend = _resolve_authorization_backend(
+        authorization_path, redis_url, server_thread_ids, auth_enabled
+    )
+    if server_thread_ids and not isinstance(backend, OwnershipAuthorizationBackend):
+        logger.info(
+            'runs.thread_ids is "server" but %s does not check thread ownership; client '
+            "thread ids are only refused by the built-in ownership and rbac backends.",
+            type(backend).__name__,
+        )
     container.bind_instance(AuthorizationBackend, backend)
+
+
+def _bind_token_revocation(
+    container: InjectQ, config: GraphConfig, auth_enabled: bool, redis_url: str | None
+) -> None:
+    """Bind the ``token_revocation`` backend from 10xgraph.json, if one is configured.
+
+    A backend the developer already bound in their InjectQ container is left alone.
+    """
+    from tenxgraph_api.src.app.core.auth.revocation import (
+        TokenRevocationBackend,
+        build_token_revocation,
+    )
+
+    spec = config.token_revocation
+    if not isinstance(spec, str) or not spec:
+        return
+    if not auth_enabled:
+        logger.warning("token_revocation is set but auth is off; there are no tokens to revoke.")
+        return
+    if container.try_get(TokenRevocationBackend) is not None:
+        logger.info("Using the TokenRevocationBackend bound in the InjectQ container.")
+        return
+    container.bind_instance(TokenRevocationBackend, build_token_revocation(spec, redis_url))
+    logger.info("Token revocation enabled (%s).", spec)
+
+
+def _refuse_ag_ui_with_server_thread_ids(config: GraphConfig, backend: object) -> None:
+    """AG-UI clients always name the thread, which ``runs.thread_ids: "server"`` refuses for
+    new threads, so every new AG-UI conversation would get 403. Fail at boot instead."""
+    ag_ui = getattr(config, "ag_ui", None)
+    runs = getattr(config, "runs", None)
+    if (
+        getattr(ag_ui, "enabled", False) is True
+        and getattr(runs, "server_thread_ids", False) is True
+        and isinstance(backend, OwnershipAuthorizationBackend)
+    ):
+        raise ValueError(
+            'ag_ui is enabled with runs.thread_ids "server": AG-UI clients pick their own '
+            "thread ids, so no new AG-UI conversation could start. Use runs.thread_ids "
+            '"client" (the default) or disable ag_ui.'
+        )
+
+
+def _bind_shared_concurrency(container: InjectQ, redis_url: str | None) -> None:
+    """Share the run and WebSocket connection caps across workers when Redis is configured.
+
+    Without Redis each process counts its own slots, so a cap becomes ``limit x workers``. A
+    ``ConcurrencyLimiter`` the developer already bound is left alone.
+    """
+    from tenxgraph_api.src.app.core.concurrency import (
+        ConcurrencyLimiter,
+        RedisConcurrencyLimiter,
+    )
+
+    if not redis_url or container.try_get(ConcurrencyLimiter) is not None:
+        return
+    try:
+        limiter = RedisConcurrencyLimiter.from_url(redis_url)
+    except ImportError:
+        logger.warning(
+            "REDIS configured but the 'redis' package is not installed; run and WebSocket "
+            "caps are counted per process."
+        )
+        return
+    container.bind_instance(ConcurrencyLimiter, limiter)
+    logger.info("Run and WebSocket connection caps are shared through Redis.")
 
 
 async def attach_all_modules(
@@ -497,7 +601,23 @@ async def attach_all_modules(
 
     authorization_path = config.authorization_path
     ownership_redis_url = config.redis_url or get_settings().REDIS_URL
-    load_and_bind_authorization(container, authorization_path, ownership_redis_url)
+    load_and_bind_authorization(
+        container,
+        authorization_path,
+        ownership_redis_url,
+        server_thread_ids=config.runs.server_thread_ids,
+        auth_enabled=bool(auth_config),
+    )
+    _refuse_ag_ui_with_server_thread_ids(config, container.get(AuthorizationBackend))
+    # Owner checks only run for authenticated requests. With auth on, an ownership backend
+    # over a checkpointer that cannot name owners would deny every thread: fail at boot.
+    if auth_config:
+        assert_ownership_supported(
+            container.get(AuthorizationBackend), container.try_get(BaseCheckpointer)
+        )
+
+    _bind_token_revocation(container, config, bool(auth_config), ownership_redis_url)
+    _bind_shared_concurrency(container, ownership_redis_url)
 
     # --- Media service wiring ---
     from tenxgraph_api.src.app.core.config.media_settings import (

@@ -288,3 +288,151 @@ def test_ownership_is_cached_across_requests():
     # 12 HTTP requests touched thread-A; ownership was resolved from the backing
     # store exactly once (everything else served from the in-process cache).
     assert registry.owner_lookups == 1
+
+
+# ---------------------------------------------------------------------------
+# Ownership with the REAL in-memory checkpointer, no owner-registry stub
+# ---------------------------------------------------------------------------
+
+
+def _real_ownership_app():
+    from tenxgraph_api.src.app.core.auth.authorization import OwnershipAuthorizationBackend
+
+    checkpointer = InMemoryCheckpointer()
+    authz = OwnershipAuthorizationBackend(checkpointer=checkpointer)
+    app = build_app(routers=[checkpointer_router], authz=authz, checkpointer=checkpointer)
+    return make_client(app), checkpointer
+
+
+def test_a_state_write_claims_the_thread_for_the_writer():
+    """The writer of a new thread becomes its owner; nobody else can then read or write it.
+
+    Before the fix the in-memory checkpointer reported no owner for API-created threads (the
+    API saved ThreadInfo without user_id) and an unowned thread was open to everyone.
+    """
+    import anyio
+
+    client, checkpointer = _real_ownership_app()
+    body = {"state": {"context": []}, "config": {}}
+
+    put = client.put("/v1/threads/t-new/state", json=body, headers=user_headers("alice"))
+    assert put.status_code == HTTP_OK, put.text
+    assert anyio.run(checkpointer.aget_thread_owner, "t-new") == "alice"
+
+    assert client.get("/v1/threads/t-new/state", headers=user_headers("alice")).status_code == (
+        HTTP_OK
+    )
+    assert (
+        client.get("/v1/threads/t-new/state", headers=user_headers("mallory")).status_code
+        == HTTP_FORBIDDEN
+    )
+    assert (
+        client.put("/v1/threads/t-new/state", json=body, headers=user_headers("mallory"))
+    ).status_code == HTTP_FORBIDDEN
+
+
+def test_a_message_write_claims_the_thread_for_the_writer():
+    import anyio
+
+    client, checkpointer = _real_ownership_app()
+    body = {"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]}
+
+    put = client.post("/v1/threads/t-msg/messages", json=body, headers=user_headers("alice"))
+    assert put.status_code == HTTP_OK, put.text
+    assert anyio.run(checkpointer.aget_thread_owner, "t-msg") == "alice"
+    assert (
+        client.get("/v1/threads/t-msg/messages", headers=user_headers("mallory")).status_code
+        == HTTP_FORBIDDEN
+    )
+
+
+def test_reads_of_an_unowned_thread_are_refused_for_everyone():
+    """No owner means nothing of the caller's is there; only creating it is allowed."""
+    client, _ = _real_ownership_app()
+    for path in ("/v1/threads/ghost/state", "/v1/threads/ghost/messages", "/v1/threads/ghost"):
+        resp = client.get(path, headers=user_headers("alice"))
+        assert resp.status_code == HTTP_FORBIDDEN, f"{path} -> {resp.status_code}"
+    resp = client.request("DELETE", "/v1/threads/ghost", json={}, headers=user_headers("alice"))
+    assert resp.status_code == HTTP_FORBIDDEN
+
+
+def test_server_thread_ids_refuse_a_client_named_new_thread():
+    """runs.thread_ids = "server": nobody can claim an id before the server hands it out."""
+    from tenxgraph_api.src.app.core.auth.authorization import OwnershipAuthorizationBackend
+
+    checkpointer = InMemoryCheckpointer()
+    authz = OwnershipAuthorizationBackend(checkpointer=checkpointer, server_thread_ids=True)
+    client = make_client(
+        build_app(routers=[checkpointer_router], authz=authz, checkpointer=checkpointer)
+    )
+    body = {"state": {"context": []}, "config": {}}
+    resp = client.put("/v1/threads/victim-chat/state", json=body, headers=user_headers("mallory"))
+    assert resp.status_code == HTTP_FORBIDDEN
+
+
+def test_a_deleted_thread_id_is_not_handed_to_another_user_right_away():
+    """Other workers may still cache the old owner for one L1 TTL after a delete."""
+    import anyio
+
+    from tenxgraph_api.src.app.core.auth.authorization import OwnershipAuthorizationBackend
+
+    checkpointer = InMemoryCheckpointer()
+    authz = OwnershipAuthorizationBackend(checkpointer=checkpointer)
+    client = make_client(
+        build_app(routers=[checkpointer_router], authz=authz, checkpointer=checkpointer)
+    )
+    body = {"state": {"context": []}, "config": {}}
+    put = client.put("/v1/threads/t-del/state", json=body, headers=user_headers("alice"))
+    assert put.status_code == HTTP_OK
+    deleted = client.request("DELETE", "/v1/threads/t-del", json={}, headers=user_headers("alice"))
+    assert deleted.status_code == HTTP_OK, deleted.text
+
+    # The delete reached this app's authorization backend: owner evicted, tombstone left.
+    resolver = authz._get_resolver()
+    assert "t-del" not in resolver._l1
+    assert anyio.run(resolver.recently_deleted, "t-del") is True
+
+    reuse = client.put("/v1/threads/t-del/state", json=body, headers=user_headers("mallory"))
+    assert reuse.status_code == HTTP_FORBIDDEN
+
+
+def test_local_store_download_streams_for_the_owner_only(tmp_path):
+    """The disk-streaming download path keeps the ownership check."""
+    import anyio
+
+    from tenxgraph_api.src.app.core.config.media_settings import MediaSettings, MediaStorageType
+
+    settings = MediaSettings(
+        MEDIA_STORAGE_TYPE=MediaStorageType.LOCAL, MEDIA_STORAGE_PATH=str(tmp_path)
+    )
+    service = MediaService(settings=settings)
+    client = make_client(build_app(routers=[media_router], extra_bindings={MediaService: service}))
+
+    upload = client.post(
+        "/v1/files/upload",
+        files={"file": ("a.txt", b"secret-A" * 1000, "text/plain")},
+        headers=user_headers("alice"),
+    )
+    assert upload.status_code == HTTP_OK, upload.text
+    file_id = upload.json()["data"]["file_id"]
+    assert anyio.run(service.local_file, file_id) is not None  # streamed path
+
+    owner = client.get(f"/v1/files/{file_id}", headers=user_headers("alice"))
+    assert owner.status_code == HTTP_OK
+    assert owner.content == b"secret-A" * 1000
+    assert client.get(f"/v1/files/{file_id}", headers=user_headers("mallory")).status_code == (
+        HTTP_NOT_FOUND
+    )
+
+
+def test_the_owner_can_recreate_a_thread_they_just_deleted():
+    client, _ = _real_ownership_app()
+    body = {"state": {"context": []}, "config": {}}
+    headers = user_headers("alice")
+    assert client.put("/v1/threads/t-again/state", json=body, headers=headers).status_code == 200
+    assert client.request(
+        "DELETE", "/v1/threads/t-again", json={}, headers=headers
+    ).status_code == (HTTP_OK)
+    assert client.put("/v1/threads/t-again/state", json=body, headers=headers).status_code == (
+        HTTP_OK
+    )

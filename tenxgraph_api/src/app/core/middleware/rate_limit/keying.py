@@ -7,11 +7,15 @@ Works on any ``HTTPConnection`` (both ``Request`` and ``WebSocket`` subclass it)
 
 import ipaddress
 import logging
+from functools import lru_cache
 
 from starlette.requests import HTTPConnection
 from starlette.responses import Response
 
-from tenxgraph_api.src.app.core.config.graph_config import RateLimitConfig
+from tenxgraph_api.src.app.core.config.graph_config import (
+    DEFAULT_TRUSTED_PROXIES,
+    RateLimitConfig,
+)
 
 
 logger = logging.getLogger("tenxgraph_api")
@@ -34,9 +38,9 @@ def _client_ip(connection: HTTPConnection, config: RateLimitConfig) -> str:
     -- the real peer.
 
     All ``X-Forwarded-For`` header lines are combined in order: a proxy that adds its own
-    line instead of appending to the caller's must not let the caller's line decide. When
-    ``trusted_proxies`` is configured, the header is only honoured for connections that come
-    from one of those networks; anyone reaching the app directly is keyed by their peer.
+    line instead of appending to the caller's must not let the caller's line decide. The
+    header is only honoured for connections that come from ``trusted_proxies`` (by default
+    loopback and private networks); anyone reaching the app directly is keyed by their peer.
     """
     peer = connection.client.host if connection.client else "unknown"
     if config.trusted_proxy_headers and _from_trusted_proxy(peer, config):
@@ -59,14 +63,22 @@ def _client_ip(connection: HTTPConnection, config: RateLimitConfig) -> str:
 
 
 def _from_trusted_proxy(peer: str, config: RateLimitConfig) -> bool:
-    trusted = getattr(config, "trusted_proxies", ())
-    if not trusted:
-        return True  # no list configured: trust the header (the hop count still applies)
+    # An empty list used to mean "trust every peer", which let any direct client spoof its
+    # address. It now means the private-network default.
+    trusted = tuple(getattr(config, "trusted_proxies", ()) or DEFAULT_TRUSTED_PROXIES)
     try:
         address = ipaddress.ip_address(peer)
     except ValueError:
         return False
-    return any(address in ipaddress.ip_network(net) for net in trusted)
+    return any(address in net for net in _networks(trusted))
+
+
+@lru_cache(maxsize=32)
+def _networks(
+    trusted: tuple[str, ...],
+) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    """Parsed networks, cached: the list is fixed per config and checked on every request."""
+    return tuple(ipaddress.ip_network(net, strict=False) for net in trusted)
 
 
 def verified_user_id(connection: HTTPConnection) -> str | None:
@@ -81,6 +93,7 @@ def verified_user_id(connection: HTTPConnection) -> str | None:
     from injectq import InjectQ
 
     from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
+    from tenxgraph_api.src.app.core.auth.identity_cache import remember_identity
     from tenxgraph_api.src.app.core.auth.permissions import _extract_credential
     from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 
@@ -96,8 +109,10 @@ def verified_user_id(connection: HTTPConnection) -> str | None:
         if auth_backend is None:
             return None
         # A throwaway Response: anything the backend sets on it belongs to the real
-        # authentication in RequirePermission, which runs again for the route.
+        # authentication in RequirePermission, which runs again for the route unless the
+        # backend allows reusing this result (identity_cache).
         user = auth_backend.authenticate(connection, Response(), credential)
+        remember_identity(connection, auth_backend, credential.credentials, user)
     except Exception as exc:  # invalid token, backend error: fall back to the address
         logger.debug("Rate limit could not verify caller identity: %s", exc)
         return None

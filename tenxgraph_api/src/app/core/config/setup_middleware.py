@@ -6,10 +6,10 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from injectq import InjectQ
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.datastructures import MutableHeaders
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from tenxgraph_api.src.app.core.middleware.rate_limit import RateLimitMiddleware, build_backend
 from tenxgraph_api.src.app.core.middleware.request_limits import RequestSizeLimitMiddleware
@@ -21,11 +21,12 @@ from .settings import get_settings, logger
 
 
 class HealthCheckAwareTrustedHostMiddleware(TrustedHostMiddleware):
-    """``TrustedHostMiddleware`` that lets the health check through from any Host.
+    """``TrustedHostMiddleware`` that lets the health probes through from any Host.
 
-    Docker and Kubernetes probes call ``/ping`` on ``localhost`` or the pod IP, which are
-    never in ``ALLOWED_HOST``, so the probe would fail and the container would be restarted.
-    ``/ping`` returns a constant and reads nothing, so skipping the Host check there is safe.
+    Docker and Kubernetes probes call ``/ping`` and ``/health/ready`` on ``localhost`` or the
+    pod IP, which are never in ``ALLOWED_HOST``, so the probe would fail and the container would
+    be restarted. Both return only status words and read nothing from the request, so skipping
+    the Host check there is safe.
     """
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -50,10 +51,14 @@ def _upload_path_limits(max_request_size: int) -> dict[str, int]:
     return {"/v1/files/upload": upload_limit}
 
 
+# Liveness and readiness probes come from the orchestrator on localhost or the pod IP.
+HEALTH_PROBE_PATHS = ("/ping", "/health/ready")
+
+
 def _is_health_check(scope: Scope) -> bool:
     path = scope.get("path", "")
     root_path = (scope.get("root_path") or "").rstrip("/")
-    return path in ("/ping", f"{root_path}/ping")
+    return any(path in (probe, f"{root_path}{probe}") for probe in HEALTH_PROBE_PATHS)
 
 
 # Paths that should be excluded from GZip compression (streaming endpoints)
@@ -155,56 +160,40 @@ class SelectiveGZipMiddleware:
             await self.gzip_app(scope, receive, send)
 
 
-class RequestIDMiddleware(BaseHTTPMiddleware):
-    """
-    Middleware to add a unique request ID and timestamp to each request and response.
+class RequestIDMiddleware:
+    """Give every HTTP request a unique id and timestamp.
 
-    This middleware generates a unique request ID and a timestamp when a request is received.
-    It adds these values to the request state and includes them in the response headers.
+    Both go into request state (``request.state.request_id`` / ``.timestamp``, read by the
+    error responses and logs) and onto the response as ``X-Request-ID`` / ``X-Timestamp``.
 
-
-    Methods:
-        dispatch(request: Request, call_next):
-            Generates a unique request ID and timestamp, adds them to the request state,
-            and includes them in the response headers.
-
-    Returns:
-        Response: The HTTP response with added request ID and timestamp headers.
+    Pure ASGI: it edits the ``http.response.start`` message on the way out, so it adds no
+    per-request task and never buffers a streaming body (``BaseHTTPMiddleware`` does both).
     """
 
-    async def dispatch(self, request: Request, call_next):
-        """
-        Middleware dispatch method to handle incoming requests.
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
-        This method generates a unique request ID and a timestamp for each incoming request,
-        adds them to the request state, and includes them in the response headers for
-        logging purposes.
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-        Args:
-            request (Request): The incoming HTTP request.
-            call_next (Callable): The next middleware or route handler to be called.
-
-        Returns:
-            Response: The HTTP response with added headers for request ID and timestamp.
-        """
-        # Generate request ID and timestamp
         request_id = str(uuid.uuid4())
         timestamp = datetime.now().isoformat()
-
-        # Add request ID and timestamp to request headers
-        request.state.request_id = request_id
-        request.state.timestamp = timestamp
+        state = scope.setdefault("state", {})
+        state["request_id"] = request_id
+        state["timestamp"] = timestamp
         logger.debug(f"Requesting: Request ID: {request_id}, Timestamp: {timestamp}")
 
-        # Proceed with the request
-        response = await call_next(request)
+        async def send_with_id(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers["X-Request-ID"] = request_id
+                headers["X-Timestamp"] = timestamp
+            await send(message)
 
-        # Add request ID and timestamp to response headers for logging
-        response.headers["X-Request-ID"] = request_id
-        response.headers["X-Timestamp"] = timestamp
+        await self.app(scope, receive, send_with_id)
         logger.debug(f"Response: Request ID: {request_id}, Timestamp: {timestamp}")
-
-        return response
 
 
 def _attach_otel_publisher(container: InjectQ, settings) -> None:
@@ -409,50 +398,27 @@ def setup_middleware(
     # Declarative Logfire/LangSmith wiring from 10xgraph.json (before compile).
     _setup_observability(container, graph_config)
 
-    # init cors
+    # Starlette runs the LAST added middleware FIRST, so these are added innermost first. The
+    # resulting order, outermost first:
+    #
+    #   CORS -> request id -> security headers -> trusted host -> rate limit -> size limit
+    #   -> gzip -> app
+    #
+    # Anything an inner layer answers on its own (429, 413, a bad Host) still passes back out
+    # through CORS, request id and security headers. With CORS innermost, as before, a browser
+    # could not read those responses at all.
     origins, allow_credentials = _resolve_cors_policy(settings)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=origins,
-        allow_credentials=allow_credentials,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
 
-    app.add_middleware(
-        HealthCheckAwareTrustedHostMiddleware,
-        allowed_hosts=settings.ALLOWED_HOST.split(","),
-    )
+    # Exclude streaming endpoints from compression: they must send data as it is produced.
+    app.add_middleware(SelectiveGZipMiddleware, minimum_size=1000)
 
-    # Add request size limit middleware (protects against DoS via large payloads). The upload
-    # route gets room for MEDIA_MAX_SIZE_MB, which the route itself enforces on the file.
+    # Request size limit (protects against DoS via large payloads). The upload route gets room
+    # for MEDIA_MAX_SIZE_MB, which the route itself enforces on the file.
     app.add_middleware(
         RequestSizeLimitMiddleware,
         max_size=settings.MAX_REQUEST_SIZE,
         path_limits=_upload_path_limits(settings.MAX_REQUEST_SIZE),
     )
-
-    # Add security headers middleware (if enabled)
-    if settings.SECURITY_HEADERS_ENABLED:
-        app.add_middleware(
-            SecurityHeadersMiddleware,
-            enable_hsts=settings.HSTS_ENABLED,
-            hsts_max_age=settings.HSTS_MAX_AGE,
-            hsts_include_subdomains=settings.HSTS_INCLUDE_SUBDOMAINS,
-            hsts_preload=settings.HSTS_PRELOAD,
-            frame_options=settings.FRAME_OPTIONS,
-            content_type_options=settings.CONTENT_TYPE_OPTIONS,
-            xss_protection=settings.XSS_PROTECTION,
-            referrer_policy=settings.REFERRER_POLICY,
-            permissions_policy=settings.PERMISSIONS_POLICY,
-            csp_policy=settings.CSP_POLICY,
-        )
-
-    app.add_middleware(RequestIDMiddleware)
-
-    # Use SelectiveGZipMiddleware to exclude streaming endpoints from compression
-    # Streaming endpoints need immediate data transmission without buffering
-    app.add_middleware(SelectiveGZipMiddleware, minimum_size=1000)
 
     # Apply rate limiting only when configured in 10xgraph.json
     if graph_config is not None:
@@ -476,6 +442,36 @@ def setup_middleware(
                 rate_limit_config.exclude_paths or "(none)",
                 rate_limit_config.trusted_proxy_headers,
             )
+
+    app.add_middleware(
+        HealthCheckAwareTrustedHostMiddleware,
+        allowed_hosts=settings.ALLOWED_HOST.split(","),
+    )
+
+    if settings.SECURITY_HEADERS_ENABLED:
+        app.add_middleware(
+            SecurityHeadersMiddleware,
+            enable_hsts=settings.HSTS_ENABLED,
+            hsts_max_age=settings.HSTS_MAX_AGE,
+            hsts_include_subdomains=settings.HSTS_INCLUDE_SUBDOMAINS,
+            hsts_preload=settings.HSTS_PRELOAD,
+            frame_options=settings.FRAME_OPTIONS,
+            content_type_options=settings.CONTENT_TYPE_OPTIONS,
+            xss_protection=settings.XSS_PROTECTION,
+            referrer_policy=settings.REFERRER_POLICY,
+            permissions_policy=settings.PERMISSIONS_POLICY,
+            csp_policy=settings.CSP_POLICY,
+        )
+
+    app.add_middleware(RequestIDMiddleware)
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=allow_credentials,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     logger.debug("Middleware set up")
 

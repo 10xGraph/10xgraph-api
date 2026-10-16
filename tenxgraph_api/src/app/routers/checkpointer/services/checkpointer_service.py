@@ -9,6 +9,8 @@ from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.auth.request_config import (
     client_config,
     client_tool_call_error,
+    owned_thread_info,
+    reject_unlisted_keys,
 )
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.utils.log_sanitizer import sanitize_for_logging
@@ -51,6 +53,23 @@ class CheckpointerService:
         cfg["user_id"] = user.get("user_id", "anonymous")
         return cfg
 
+    async def _claim_thread(self, cfg: dict[str, Any], user: dict) -> None:
+        """Record the caller as the owner of a thread nobody owns yet, before writing to it.
+
+        Ownership authorization lets a write through to an unowned thread on the promise that
+        the writer becomes its owner. State and message writes do not register the thread on
+        their own, so without this the thread would stay ownerless and stay open to everyone.
+        """
+        thread_id = cfg.get("thread_id")
+        if not user.get("user_id") or thread_id is None:
+            return
+        try:
+            owner = await self.checkpointer.aget_thread_owner(thread_id)
+        except NotImplementedError:
+            return  # this checkpointer keeps no owners; ownership authz refuses to boot on it
+        if owner is None:
+            await self.checkpointer.aput_thread(cfg, owned_thread_info(cfg, thread_id))
+
     async def _check_media_references(self, messages: list[Any], user: dict) -> None:
         """Messages written into a thread are resolved on the next run, so the files they
         reference must belong to the caller, exactly as for graph input."""
@@ -58,6 +77,20 @@ class CheckpointerService:
         if not user_id or not messages:
             return
         await check_media_references(messages, self._media_service(), str(user_id))
+
+    @staticmethod
+    def _state_keys() -> frozenset[str] | None:
+        """``runs.state_keys`` from 10xgraph.json, or ``None`` when unset or unavailable."""
+        try:
+            from injectq import InjectQ
+
+            from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RunsConfig
+
+            graph_config = InjectQ.get_instance().try_get(GraphConfig)
+            runs = getattr(graph_config, "runs", None)
+        except Exception:
+            return None
+        return runs.state_keys if isinstance(runs, RunsConfig) else None
 
     @staticmethod
     def _media_service() -> Any:
@@ -96,11 +129,17 @@ class CheckpointerService:
         state: dict[str, Any],
     ) -> StateResponseSchema:
         cfg = self._config(config, user)
+        # The thread's state is the next run's state, so the initial_state allow-list applies.
+        try:
+            reject_unlisted_keys(state, self._state_keys(), "state")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         # context is appended, so every message here is new and client-authored. A tool call
         # in it would run on the next resume without the model ever requesting it.
         if error := client_tool_call_error(state.get("context")):
             raise HTTPException(status_code=422, detail=error)
         await self._check_media_references(state.get("context") or [], user)
+        await self._claim_thread(cfg, user)
         old_state: AgentState | None = await self.checkpointer.aget_state(cfg)
         if not old_state:
             old_state = await self.checkpointer.aget_state_cache(cfg)
@@ -137,6 +176,7 @@ class CheckpointerService:
     ) -> ResponseSchema:
         cfg = self._config(config, user)
         await self._check_media_references(messages, user)
+        await self._claim_thread(cfg, user)
         res = await self.checkpointer.aput_messages(cfg, messages, metadata)
         return ResponseSchema(success=True, message="Messages put successfully", data=res)
 
@@ -214,14 +254,13 @@ class CheckpointerService:
         # Invalidate any cached ownership for this thread. Ownership is otherwise
         # immutable, so deletion is the only event that must evict the cache.
         try:
-            from injectq import InjectQ
-
             from tenxgraph_api.src.app.core.auth.authorization import AuthorizationBackend
+            from tenxgraph_api.src.app.core.utils.container import current_container
 
-            authz = InjectQ.get_instance().try_get(AuthorizationBackend)
+            authz = current_container().try_get(AuthorizationBackend)
             evict = getattr(authz, "evict", None)
             if callable(evict):
-                pending = evict(str(thread_id))
+                pending = evict(str(thread_id), user.get("user_id"))
                 if pending is not None:
                     await pending
         except Exception as exc:

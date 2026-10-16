@@ -27,6 +27,7 @@ logger = logging.getLogger("tenxgraph_api.route_guard")
 DEFAULT_PUBLIC_PATHS = frozenset(
     {
         "/ping",
+        "/health/ready",
         "/v1/evals/runs",
         "/v1/evals/runs/{run_id}",
     }

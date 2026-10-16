@@ -63,4 +63,4 @@ TypeScript client methods:
 
 - Media config/resolver: https://github.com/10xGraph/10xGraph/tree/main/tenxgraph/storage/media
 - Media router: https://github.com/10xGraph/10xgraph-api/tree/main/tenxgraph_api/src/app/routers/media
-- TS files endpoint: https://github.com/10xHub/agentflow-client/blob/main/src/endpoints/files.ts
+- TS files endpoint: https://github.com/10xGraph/10xgraph-client/blob/master/src/endpoints/files.ts

@@ -65,4 +65,4 @@ Use `ToolResult(message=..., state={...})` when a tool must both return text to 
 - Message model: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/core/state/message.py
 - Content blocks: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/core/state/message_block.py
 - Reducers: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/core/state/reducers.py
-- TS message class: https://github.com/10xHub/agentflow-client/blob/main/src/message.ts
+- TS message class: https://github.com/10xGraph/10xgraph-client/blob/master/src/message.ts

@@ -44,6 +44,9 @@ def _unauthorized(message: str, error_code: str) -> UserAccountError:
 
 
 class JwtAuth(BaseAuth):
+    # Decoding is a pure function of the token, so the rate limiter's result can be reused.
+    reusable_within_request = True
+
     def authenticate(
         self,
         request: Request,

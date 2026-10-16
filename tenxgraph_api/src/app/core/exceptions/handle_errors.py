@@ -87,10 +87,16 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
         # Get request ID for tracking
         request_id = getattr(request.state, "request_id", "unknown")
 
-        message = _sanitize_error_message(str(exc.detail), "HTTPException", is_production)
+        # A 4xx detail is written by the API for the client (401 bad token, 403 missing scope,
+        # 404, 413, 422 bad input, 429): hiding it leaves the client unable to fix the request.
+        # A 5xx detail may embed internals, so production replaces it.
+        is_server_error = exc.status_code >= 500  # noqa: PLR2004
+        message = _sanitize_error_message(
+            str(exc.detail), "HTTPException", is_production and is_server_error
+        )
 
         # Log full details but return sanitized message in production
-        if is_production:
+        if is_production and is_server_error:
             logger.error(f"Request {request_id} - HTTPException details: {exc.detail}")
 
         return error_response(

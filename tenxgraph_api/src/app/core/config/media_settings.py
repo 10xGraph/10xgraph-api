@@ -6,7 +6,7 @@ import logging
 from enum import StrEnum
 from functools import lru_cache
 
-from pydantic import ConfigDict
+from pydantic import ConfigDict, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -34,8 +34,17 @@ class MediaSettings(BaseSettings):
     MEDIA_ALLOWED_CONTENT_TYPES: str = ""
 
     # Deny files with no recorded owner (uploaded before ownership tracking, or while auth
-    # was off) instead of letting any authenticated user read them.
-    MEDIA_REQUIRE_OWNER: bool = False
+    # was off) instead of letting any authenticated user read them. Unset means: on in
+    # production, off in development. An explicit true/false always wins.
+    MEDIA_REQUIRE_OWNER: bool | None = None
+
+    @model_validator(mode="after")
+    def _default_require_owner_by_mode(self) -> MediaSettings:
+        if self.MEDIA_REQUIRE_OWNER is None:
+            from tenxgraph_api.src.app.core.config.settings import get_settings
+
+            self.MEDIA_REQUIRE_OWNER = get_settings().MODE == "production"
+        return self
 
     def allowed_content_types(self) -> list[str]:
         """Parsed, normalized allowlist. Empty list == allow all."""

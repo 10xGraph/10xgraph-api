@@ -36,7 +36,7 @@ DEFAULT_PORT: Final[int] = 8000
 DEFAULT_CONFIG_FILE: Final[str] = "10xgraph.json"
 # Pre-rename config file name. Still read when no 10xgraph.json sits beside it.
 LEGACY_CONFIG_FILE: Final[str] = "agentflow.json"
-DEFAULT_PLAYGROUND_URL: Final[str] = "https://playground-463bd.web.app"
+DEFAULT_PLAYGROUND_URL: Final[str] = "https://play.10xgraph.com"
 DEFAULT_PYTHON_VERSION: Final[str] = "3.13"
 DEFAULT_SERVICE_NAME: Final[str] = "10xgraph-api"
 

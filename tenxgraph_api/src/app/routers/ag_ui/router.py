@@ -8,8 +8,12 @@ from injectq.integrations import InjectAPI
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.auth.authorization import AuthorizationBackend
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
-from tenxgraph_api.src.app.core.auth.request_config import normalize_thread_id
+from tenxgraph_api.src.app.core.auth.request_config import (
+    client_error_detail,
+    normalize_thread_id,
+)
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
+from tenxgraph_api.src.app.routers.graph.run_limits import acquire_run_slot, release_when_done
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
 
 from .converter import check_client_tools, parse_run_input
@@ -59,7 +63,7 @@ async def run_ag_ui(
         run_input = parse_run_input(body)
         check_client_tools(run_input.tools or [])
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=client_error_detail(exc)) from exc
 
     thread_id = normalize_thread_id(run_input.thread_id)
     if thread_id is None:
@@ -72,13 +76,17 @@ async def run_ag_ui(
 
     logger.info("AG-UI run %s received for thread %s", run_input.run_id, thread_id)
     encoder = EventEncoder(accept=request.headers.get("accept") or "")
+    slot = await acquire_run_slot(user, service.runs_policy())
     return StreamingResponse(
-        stream_ag_ui(
-            service,
-            run_input,
-            user,
-            encoder,
-            allow_client_tools=config.ag_ui.allow_client_tools,
+        release_when_done(
+            stream_ag_ui(
+                service,
+                run_input,
+                user,
+                encoder,
+                allow_client_tools=config.ag_ui.allow_client_tools,
+            ),
+            slot,
         ),
         media_type=encoder.get_content_type(),
         headers={

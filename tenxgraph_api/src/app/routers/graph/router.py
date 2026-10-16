@@ -19,10 +19,19 @@ from tenxgraph_api.src.app.core.auth.permissions import (
     ws_bearer_subprotocol,
 )
 from tenxgraph_api.src.app.core.auth.request_config import normalize_thread_id
+from tenxgraph_api.src.app.core.auth.revocation import (
+    TokenRevocationUnavailableError,
+    token_revoked,
+)
 from tenxgraph_api.src.app.routers.graph.realtime_guard import (
     realtime_connection_guard,
     ws_identity_still_valid,
     ws_run_allowed,
+)
+from tenxgraph_api.src.app.routers.graph.run_limits import (
+    acquire_run_slot,
+    release_when_done,
+    run_slot,
 )
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     FixGraphRequestSchema,
@@ -58,6 +67,81 @@ REALTIME_INPUT_QUEUE_MAXSIZE = 1000
 # (16kHz PCM16 = 32KB/s); 1 MiB is ~30s of audio in one frame, far beyond any real chunk.
 # Oversized frames are dropped rather than enqueued (again, the middleware does not see them).
 REALTIME_MAX_FRAME_BYTES = 1024 * 1024
+
+# RFC 6455 close code 1009 "Message Too Big".
+WS_MESSAGE_TOO_BIG = 1009
+
+
+class WsFrameTooLarge(Exception):
+    """A JSON text frame passed the size cap; the socket must be closed with 1009."""
+
+
+async def _receive_json_frame(websocket: WebSocket, max_chars: int) -> Any:
+    """Receive one JSON text frame, refusing it before parsing when it is over ``max_chars``.
+
+    WebSocket frames bypass ``RequestSizeLimitMiddleware`` (it only sees HTTP), and uvicorn
+    accepts frames up to 16 MiB by default, so without this a client could hand the JSON parser
+    frames far larger than the 10 MB HTTP body cap. ``websocket.receive_text`` raises
+    ``WebSocketDisconnect`` on disconnect, like ``receive_json``.
+    """
+    text = await websocket.receive_text()
+    if len(text) > max_chars:
+        raise WsFrameTooLarge(f"Frame of {len(text)} characters exceeds the {max_chars} limit")
+    return json.loads(text)
+
+
+def _ws_max_frame_chars() -> int:
+    """The JSON frame cap for WebSocket input: the same ``MAX_REQUEST_SIZE`` as HTTP bodies."""
+    from tenxgraph_api.src.app.core.config.settings import get_settings
+
+    return get_settings().MAX_REQUEST_SIZE
+
+
+# Returned by _next_ws_input for a bad frame the socket survives (an error was sent).
+_WS_SKIP: Any = object()
+
+
+async def _send_ws_error(websocket: WebSocket, reason: str) -> None:
+    await websocket.send_text(
+        StreamChunk(event=StreamEvent.ERROR, data={"reason": reason}).model_dump_json()
+    )
+
+
+async def _next_ws_input(websocket: WebSocket, max_frame: int) -> Any:
+    """Read the next run request from ``/v1/graph/ws``.
+
+    Returns the parsed ``WsGraphInputSchema``, ``_WS_SKIP`` for a frame that was rejected with
+    an error message (the socket stays open), or ``None`` when the socket is done: the client
+    left, or sent a frame over the size cap (closed with 1009).
+    """
+    try:
+        data = await _receive_json_frame(websocket, max_frame)
+    except WebSocketDisconnect:
+        logger.info("WebSocket client disconnected")
+        return None
+    except WsFrameTooLarge as exc:
+        await _close_too_big(websocket, exc)
+        return None
+    except json.JSONDecodeError as exc:
+        logger.warning("WebSocket received non-JSON frame: %s", exc)
+        await _send_ws_error(websocket, "Invalid request: frame is not valid JSON")
+        return _WS_SKIP
+    try:
+        return WsGraphInputSchema(**data)
+    except Exception as e:
+        logger.warning("WebSocket received invalid input: %s", e)
+        await _send_ws_error(websocket, f"Invalid request: {e}")
+        return _WS_SKIP
+
+
+async def _close_too_big(websocket: WebSocket, exc: WsFrameTooLarge) -> None:
+    logger.warning("WebSocket frame refused: %s", exc)
+    with contextlib.suppress(Exception):
+        await websocket.send_text(
+            StreamChunk(event=StreamEvent.ERROR, data={"reason": str(exc)}).model_dump_json()
+        )
+    with contextlib.suppress(Exception):
+        await websocket.close(code=WS_MESSAGE_TOO_BIG)
 
 
 router = APIRouter(
@@ -103,10 +187,11 @@ async def invoke_graph(
     """
     logger.info(f"Graph invoke request received with {len(graph_input.messages)} messages")
 
-    result: GraphInvokeOutputSchema = await service.invoke_graph(
-        graph_input,
-        user,
-    )
+    async with run_slot(user, service.runs_policy()):
+        result: GraphInvokeOutputSchema = await service.invoke_graph(
+            graph_input,
+            user,
+        )
 
     logger.info("Graph invoke completed successfully")
 
@@ -133,10 +218,9 @@ async def stream_graph(
     """
     logger.info(f"Graph stream request received with {len(graph_input.messages)} messages")
 
-    result = service.stream_graph(
-        graph_input,
-        user,
-    )
+    # Taken before the response starts so an over-cap request still gets a 429.
+    slot = await acquire_run_slot(user, service.runs_policy())
+    result = release_when_done(service.stream_graph(graph_input, user), slot)
 
     return StreamingResponse(
         result,
@@ -160,7 +244,7 @@ async def stream_graph(
 async def graph_details(
     request: Request,
     service: GraphService = InjectAPI(GraphService),
-    user: dict[str, Any] = Depends(RequirePermission("graph", "read")),
+    user: dict[str, Any] = Depends(RequirePermission("graph", "read", introspection=True)),
 ):
     """
     Invoke the graph with the provided input and return the final result.
@@ -190,7 +274,7 @@ async def graph_details(
 async def graph_tools(
     request: Request,
     service: GraphService = InjectAPI(GraphService),
-    user: dict[str, Any] = Depends(RequirePermission("graph", "read")),
+    user: dict[str, Any] = Depends(RequirePermission("graph", "read", introspection=True)),
 ):
     """List the tools exposed by the graph's tool nodes."""
     logger.info("Graph getting tools")
@@ -243,7 +327,7 @@ async def observability(
 async def state_schema(
     request: Request,
     service: GraphService = InjectAPI(GraphService),
-    user: dict[str, Any] = Depends(RequirePermission("graph", "read")),
+    user: dict[str, Any] = Depends(RequirePermission("graph", "read", introspection=True)),
 ):
     """
     Invoke the graph with the provided input and return the final result.
@@ -356,13 +440,21 @@ async def fix_graph(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+async def _ws_token_revoked(user: dict[str, Any]) -> bool:
+    """Whether the socket's token was revoked since the handshake (an outage counts as yes)."""
+    try:
+        return await token_revoked(user)
+    except TokenRevocationUnavailableError:
+        return True
+
+
 async def _ws_run_gate(websocket: WebSocket, user: dict[str, Any]) -> str:
     """Per-run checks for a WebSocket: ``"run"``, ``"skip"`` (rate limited) or ``"close"``.
 
     The handshake guard runs once, so a socket that stays open must be re-checked before each
     run: the token may have expired or been revoked, and every run counts against the limit.
     """
-    if not ws_identity_still_valid(websocket, user):
+    if not ws_identity_still_valid(websocket, user) or await _ws_token_revoked(user):
         logger.info("WebSocket credential no longer valid; closing")
         await websocket.send_text(
             StreamChunk(
@@ -529,24 +621,13 @@ async def websocket_graph(
             await websocket.close(code=1008)
         return
 
+    max_frame = _ws_max_frame_chars()
     try:
         while True:
-            try:
-                data = await websocket.receive_json()
-            except WebSocketDisconnect:
-                logger.info("WebSocket client disconnected")
+            ws_input = await _next_ws_input(websocket, max_frame)
+            if ws_input is None:
                 break
-
-            try:
-                ws_input = WsGraphInputSchema(**data)
-            except Exception as e:
-                logger.warning("WebSocket received invalid input: %s", e)
-                await websocket.send_text(
-                    StreamChunk(
-                        event=StreamEvent.ERROR,
-                        data={"reason": f"Invalid request: {e}"},
-                    ).model_dump_json()
-                )
+            if ws_input is _WS_SKIP:
                 continue
 
             # The handshake checks happen once; these apply to every run on the socket.
@@ -606,6 +687,35 @@ def _client_error(exc: Exception) -> str:
 
     is_production = get_settings().MODE == "production"
     return _sanitize_error_message(str(exc), "VALIDATION_ERROR", is_production)
+
+
+def _dispatch_realtime_control(queue: Any, text: str) -> str | None:
+    """Apply one realtime text control frame to the input queue; ``"close"`` ends the session.
+
+    Oversized and non-JSON frames are dropped (logged), never parsed or forwarded.
+    """
+    if len(text) > REALTIME_MAX_FRAME_BYTES:
+        logger.warning(
+            "Realtime upstream: dropping oversized control frame (%d chars > %d)",
+            len(text),
+            REALTIME_MAX_FRAME_BYTES,
+        )
+        return None
+    try:
+        control = json.loads(text)
+    except json.JSONDecodeError:
+        logger.warning("Realtime upstream: non-JSON text frame ignored")
+        return None
+    ctype = control.get("type") if isinstance(control, dict) else None
+    if ctype == "text":
+        queue.send_text(control.get("text", ""))
+    elif ctype == "activity_start":
+        queue.send_activity_start()
+    elif ctype == "activity_end":
+        queue.send_activity_end()
+    elif ctype == "close":
+        return "close"
+    return None
 
 
 def _realtime_event_json(event: Any) -> str:
@@ -678,9 +788,14 @@ async def realtime_graph_ws(  # noqa: PLR0912, PLR0915
         return
 
     try:
-        init = await websocket.receive_json()
+        init = await _receive_json_frame(websocket, REALTIME_MAX_FRAME_BYTES)
     except WebSocketDisconnect:
         logger.info("Realtime client disconnected before init")
+        return
+    except WsFrameTooLarge as exc:
+        logger.warning("Realtime init frame refused: %s", exc)
+        with contextlib.suppress(Exception):
+            await websocket.close(code=WS_MESSAGE_TOO_BIG)
         return
     except Exception as e:
         logger.warning("Realtime init frame invalid: %s", e)
@@ -737,21 +852,7 @@ async def realtime_graph_ws(  # noqa: PLR0912, PLR0915
                     queue.send_audio(data)
                     continue
                 text = message.get("text")
-                if text is None:
-                    continue
-                try:
-                    control = json.loads(text)
-                except json.JSONDecodeError:
-                    logger.warning("Realtime upstream: non-JSON text frame ignored")
-                    continue
-                ctype = control.get("type")
-                if ctype == "text":
-                    queue.send_text(control.get("text", ""))
-                elif ctype == "activity_start":
-                    queue.send_activity_start()
-                elif ctype == "activity_end":
-                    queue.send_activity_end()
-                elif ctype == "close":
+                if text is not None and _dispatch_realtime_control(queue, text) == "close":
                     break
         except WebSocketDisconnect:
             logger.info("Realtime client disconnected (upstream)")

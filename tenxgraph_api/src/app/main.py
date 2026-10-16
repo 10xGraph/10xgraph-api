@@ -105,6 +105,26 @@ async def lifespan(app: FastAPI):
     if backend is not None:
         await backend.close()
 
+    # Close the shared concurrency limiter (its Redis client), if one is bound.
+    try:
+        from tenxgraph_api.src.app.core.concurrency import ConcurrencyLimiter
+
+        limiter = container.try_get(ConcurrencyLimiter)
+        if limiter is not None:
+            await limiter.aclose()
+    except Exception as exc:
+        logger.debug("Concurrency limiter close failed: %s", exc)
+
+    # Close the token revocation backend (its Redis client), if one is bound.
+    try:
+        from tenxgraph_api.src.app.core.auth.revocation import TokenRevocationBackend
+
+        revocation = container.try_get(TokenRevocationBackend)
+        if revocation is not None:
+            await revocation.aclose()
+    except Exception as exc:
+        logger.debug("Token revocation backend close failed: %s", exc)
+
     # Close the authorization backend's L2 Redis client, if it created one.
     try:
         from tenxgraph_api.src.app.core.auth.authorization import AuthorizationBackend

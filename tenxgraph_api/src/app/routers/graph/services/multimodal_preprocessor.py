@@ -10,9 +10,12 @@ from tenxgraph.core.state import Message
 from tenxgraph.core.state.message_block import DocumentBlock, TextBlock
 from tenxgraph.utils.media_scheme import MEDIA_SCHEME, is_internal_media_url, strip_media_scheme
 
+from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
+
 
 if TYPE_CHECKING:
     from tenxgraph_api.src.app.routers.media import MediaService
+
 
 logger = logging.getLogger("tenxgraph_api.media")
 
@@ -55,7 +58,7 @@ async def _ensure_access(media_service: MediaService, file_id: str, user_id: str
     try:
         await media_service.ensure_can_access(file_id, user_id)
     except (KeyError, PermissionError) as exc:
-        raise ValueError(f"File not found: {file_id}") from exc
+        raise ClientInputError(f"File not found: {file_id}") from exc
 
 
 async def check_media_references(
@@ -74,7 +77,7 @@ async def check_media_references(
         if not keys:
             continue
         if media_service is None:
-            raise ValueError(
+            raise ClientInputError(
                 "Internal media references cannot be verified: file uploads are not "
                 "configured on this server."
             )

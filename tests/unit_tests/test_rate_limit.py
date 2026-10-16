@@ -140,7 +140,7 @@ def test_rate_limit_middleware_uses_forwarded_for_when_trusted():
     def root():
         return {"ok": True}
 
-    client = TestClient(app)
+    client = TestClient(app, client=("10.0.0.5", 50000))  # behind a private proxy
     assert client.get("/", headers={"X-Forwarded-For": "1.1.1.1"}).status_code == 200
     assert client.get("/", headers={"X-Forwarded-For": "2.2.2.2"}).status_code == 200
     assert client.get("/", headers={"X-Forwarded-For": "3.3.3.3"}).status_code == 200
@@ -233,3 +233,22 @@ def test_redis_backend_from_url_requires_optional_extra(monkeypatch):
             redis_url="redis://localhost:6379/0",
             prefix="10xgraph:test",
         )
+
+
+def test_rate_limit_middleware_ignores_forwarded_for_from_a_public_peer():
+    """No trusted_proxies list must not mean "trust everyone"."""
+    app = FastAPI()
+    app.add_middleware(
+        RateLimitMiddleware,
+        config=_config(trusted_proxy_headers=True),
+        backend=MemoryRateLimitBackend(),
+    )
+
+    @app.get("/")
+    def root():
+        return {"ok": True}
+
+    client = TestClient(app, client=("198.51.100.7", 50000))  # reaches the app directly
+    assert client.get("/", headers={"X-Forwarded-For": "1.1.1.1"}).status_code == 200
+    assert client.get("/", headers={"X-Forwarded-For": "2.2.2.2"}).status_code == 200
+    assert client.get("/", headers={"X-Forwarded-For": "3.3.3.3"}).status_code == 429

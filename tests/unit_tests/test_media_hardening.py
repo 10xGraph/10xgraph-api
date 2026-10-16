@@ -22,9 +22,26 @@ def test_require_owner_is_read_from_the_environment(monkeypatch, raw, expected):
     assert MediaSettings(_env_file=None).MEDIA_REQUIRE_OWNER is expected
 
 
-def test_require_owner_defaults_off(monkeypatch):
+@pytest.mark.parametrize(("mode", "expected"), [("production", True), ("development", False)])
+def test_require_owner_defaults_by_mode(monkeypatch, mode, expected):
+    """Ownerless files are denied by default in production."""
+    from tenxgraph_api.src.app.core.config import settings as settings_mod
+
     monkeypatch.delenv("MEDIA_REQUIRE_OWNER", raising=False)
-    assert MediaSettings(_env_file=None).MEDIA_REQUIRE_OWNER is False
+    monkeypatch.setattr(settings_mod, "get_settings", lambda: type("S", (), {"MODE": mode})())
+    assert MediaSettings(_env_file=None).MEDIA_REQUIRE_OWNER is expected
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("false", False), ("true", True)])
+def test_explicit_require_owner_beats_the_mode_default(monkeypatch, raw, expected):
+    from tenxgraph_api.src.app.core.config import settings as settings_mod
+
+    monkeypatch.setenv("MEDIA_REQUIRE_OWNER", raw)
+    for mode in ("production", "development"):
+        monkeypatch.setattr(
+            settings_mod, "get_settings", lambda m=mode: type("S", (), {"MODE": m})()
+        )
+        assert MediaSettings(_env_file=None).MEDIA_REQUIRE_OWNER is expected
 
 
 # ---------------------------------------------------------------------------

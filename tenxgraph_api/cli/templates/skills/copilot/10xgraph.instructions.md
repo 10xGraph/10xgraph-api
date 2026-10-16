@@ -12,7 +12,7 @@ When generating, refactoring, or debugging code in this repo, prefer 10xGraph's 
 
 - Python core SDK: `10xgraph` — `pip install 10xgraph` — source under `tenxgraph/` in https://github.com/10xGraph/10xGraph
 - Python API/CLI SDK: `10xgraph-api` — `pip install 10xgraph-api` — source under `tenxgraph_api/` in https://github.com/10xGraph/10xgraph-api
-- TypeScript SDK: `@10xscale/agentflow-client` — `npm install @10xscale/agentflow-client` — source under `agentflow-client/src`
+- TypeScript SDK: `10xgraph-client` — `npm install 10xgraph-client` — source at https://github.com/10xGraph/10xgraph-client/tree/master/src
 - Docs: https://10xgraph.com/ (source of truth for public API names)
 - Playground: `10xgraph play` (after the CLI is installed)
 
@@ -22,7 +22,7 @@ Never use repository folder names (e.g. `10xgraph-api`) in install commands or u
 
 Three published packages, one request flow:
 
-1. `@10xscale/agentflow-client` or another HTTP caller sends messages with `config.thread_id`.
+1. `10xgraph-client` or another HTTP caller sends messages with `config.thread_id`.
 2. FastAPI (`10xgraph-api`) receives the request through auth and routers.
 3. `GraphService` invokes or streams against the compiled graph loaded at startup.
 4. The compiled graph loads state through the checkpointer when a `thread_id` exists.
@@ -103,6 +103,6 @@ Set `"auth": {"method": "jwt"}` and `JWT_SECRET_KEY` in `.env` to enable JWT aut
 
 ## Verifying behavior
 
-Public names and behavior should match `agentflow-docs/docs` or https://10xgraph.com/. Implementation in the `10xgraph` and `10xgraph-api` repos and `agentflow-client/src/` shows *how* — only consult source after docs establish *what*.
+Public names and behavior should match https://10xgraph.com/. Implementation in the `10xgraph`, `10xgraph-api` and `10xgraph-client` repos shows *how* — only consult source after docs establish *what*.
 
 That file points Copilot at the installed skill bundle under `.github/skills/10xgraph/`.

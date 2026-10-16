@@ -277,3 +277,163 @@ def test_ws_thread_id_is_normalized_before_the_check(raw, expected):
     config = ws_input.to_graph_input().config
     assert config.get("thread_id") == expected
     assert config["plan"] == "pro"
+
+
+# ---------------------------------------------------------------------------
+# runs.config_keys / runs.state_keys allow-lists
+# ---------------------------------------------------------------------------
+
+
+T1 = {"thread_id": "t1"}
+
+
+def _input(**kwargs):
+    return GraphInputSchema(
+        messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}], **kwargs
+    )
+
+
+def test_reject_unlisted_keys():
+    from tenxgraph_api.src.app.core.auth.request_config import reject_unlisted_keys
+
+    reject_unlisted_keys({"plan": "pro"}, None, "config")  # no allow-list: anything goes
+    reject_unlisted_keys(None, frozenset(), "config")  # nothing sent
+    reject_unlisted_keys({"locale": "en"}, frozenset({"locale"}), "config")
+    reject_unlisted_keys({"thread_id": "t"}, frozenset(), "config", frozenset({"thread_id"}))
+    with pytest.raises(ValueError, match="config keys not allowed by this server: plan, role"):
+        reject_unlisted_keys({"role": "x", "plan": "y", "locale": "en"}, {"locale"}, "config")
+
+
+@pytest.mark.asyncio
+async def test_unlisted_config_key_is_rejected(graph_service):
+    from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+
+    graph_service.config.runs = RunsConfig(config_keys=frozenset({"locale"}))
+    with pytest.raises(ValueError, match="plan"):
+        await graph_service._prepare_input(_input(config={"locale": "en", "plan": "pro"}))
+
+
+@pytest.mark.asyncio
+async def test_listed_and_always_allowed_config_keys_pass(graph_service):
+    from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+
+    graph_service.config.runs = RunsConfig(config_keys=frozenset({"locale"}))
+    _, config, _ = await graph_service._prepare_input(
+        _input(config={"locale": "en", "thread_id": "t1", "run_id": "r1"})
+    )
+    assert (config["locale"], config["thread_id"], config["run_id"]) == ("en", "t1", "r1")
+
+
+@pytest.mark.asyncio
+async def test_reserved_keys_are_stripped_not_counted(graph_service):
+    """Server-owned keys are dropped silently as before; the allow-list sees the rest."""
+    from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+
+    graph_service.config.runs = RunsConfig(config_keys=frozenset())
+    _, config, _ = await graph_service._prepare_input(
+        _input(config={"user_id": "forged", "authz": {}, "_node_name": "x", "thread_id": "t1"})
+    )
+    assert "user_id" not in config and "authz" not in config
+
+
+@pytest.mark.asyncio
+async def test_unlisted_initial_state_key_is_rejected(graph_service):
+    from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+
+    graph_service.config.runs = RunsConfig(state_keys=frozenset({"preferences"}))
+    with pytest.raises(ValueError, match="initial_state keys not allowed by this server: role"):
+        await graph_service._prepare_input(
+            _input(config=T1, initial_state={"preferences": {}, "role": "admin"})
+        )
+    input_data, _, _ = await graph_service._prepare_input(
+        _input(config=T1, initial_state={"preferences": {"tone": "brief"}})
+    )
+    assert input_data["state"] == {"preferences": {"tone": "brief"}}
+
+
+@pytest.mark.asyncio
+async def test_no_allow_list_keeps_the_open_dict(graph_service):
+    from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+
+    graph_service.config.runs = RunsConfig()
+    input_data, config, _ = await graph_service._prepare_input(
+        _input(config={"plan": "pro", **T1}, initial_state={"role": "admin"})
+    )
+    assert config["plan"] == "pro" and input_data["state"] == {"role": "admin"}
+
+
+@pytest.mark.asyncio
+async def test_invoke_turns_an_unlisted_key_into_422(graph_service):
+    from fastapi import HTTPException
+
+    from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+
+    graph_service.config.runs = RunsConfig(config_keys=frozenset())
+    with pytest.raises(HTTPException) as exc_info:
+        await graph_service.invoke_graph(_input(config={"plan": "pro"}), {"user_id": "u1"})
+    assert exc_info.value.status_code == 422
+    graph_service._graph.ainvoke.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_put_state_honours_the_state_allow_list(monkeypatch):
+    from fastapi import HTTPException
+    from injectq import InjectQ
+
+    from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RunsConfig
+
+    graph_config = MagicMock(spec=GraphConfig)
+    graph_config.runs = RunsConfig(state_keys=frozenset({"context"}))
+    container = InjectQ()
+    container.bind_instance(GraphConfig, graph_config)
+    monkeypatch.setattr(InjectQ, "get_instance", classmethod(lambda cls: container))
+
+    service = CheckpointerService.__new__(CheckpointerService)
+    service.checkpointer = MagicMock()
+    service.checkpointer.aput_state = AsyncMock()
+    with pytest.raises(HTTPException) as exc_info:
+        await service.put_state({"thread_id": "t1"}, TRUSTED_USER, {"role": "admin"})
+    assert exc_info.value.status_code == 422
+    assert "role" in exc_info.value.detail
+    service.checkpointer.aput_state.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 422 details: ours are kept in production, arbitrary ValueErrors are not
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("mode", "exc", "expected"),
+    [
+        ("production", ValueError("dsn=pg://secret"), "Invalid input provided."),
+        ("development", ValueError("dsn=pg://secret"), "dsn=pg://secret"),
+        ("production", None, "config keys not allowed by this server: role"),
+    ],
+)
+def test_client_error_detail(monkeypatch, mode, exc, expected):
+    from tenxgraph_api.src.app.core.auth.request_config import (
+        ClientInputError,
+        client_error_detail,
+    )
+    from tenxgraph_api.src.app.core.config import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "get_settings", lambda: type("S", (), {"MODE": mode})())
+    exc = exc or ClientInputError("config keys not allowed by this server: role")
+    assert client_error_detail(exc) == expected
+
+
+@pytest.mark.asyncio
+async def test_our_validation_messages_survive_production(graph_service, monkeypatch):
+    from fastapi import HTTPException
+
+    from tenxgraph_api.src.app.core.config import settings as settings_mod
+    from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+
+    monkeypatch.setattr(
+        settings_mod, "get_settings", lambda: type("S", (), {"MODE": "production"})()
+    )
+    graph_service.config.runs = RunsConfig(config_keys=frozenset())
+    with pytest.raises(HTTPException) as exc_info:
+        await graph_service.invoke_graph(_input(config={"plan": "pro"}), {"user_id": "u1"})
+    assert exc_info.value.detail == "config keys not allowed by this server: plan"

@@ -7,6 +7,7 @@ import json
 import logging
 import time
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any
 
 from injectq import InjectQ, inject, singleton
@@ -14,6 +15,7 @@ from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.storage.media.config import DocumentHandling
 from tenxgraph.storage.media.storage.base import BaseMediaStore
 
+from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
 from tenxgraph_api.src.app.core.config.media_settings import MediaSettings, MediaStorageType
 from tenxgraph_api.src.app.utils.media.extractor import DocumentExtractor
 from tenxgraph_api.src.app.utils.media.pipeline import DocumentPipeline
@@ -232,10 +234,9 @@ class MediaService:
         authenticated caller who knew (or guessed) the id. Ownership is recorded in
         the file's own metadata at upload time, so it is as durable as the file.
 
-        Legacy files uploaded before ownership existed carry no `owner_id`. Those are
-        allowed through (with a warning) rather than becoming unreadable, unless
-        ``MEDIA_REQUIRE_OWNER`` is set -- deployments that need a hard guarantee can
-        turn the check strict.
+        Legacy files uploaded before ownership existed, or while auth was off, carry no
+        ``owner_id``. ``MEDIA_REQUIRE_OWNER`` decides what happens to them: denied (the
+        production default) or allowed with a warning (the development default).
         """
         if not user_id:
             return
@@ -285,7 +286,7 @@ class MediaService:
         extracted_text (nullable), and url.
         """
         if len(data) > self.max_size_bytes:
-            raise ValueError(
+            raise ClientInputError(
                 f"File size {len(data)} exceeds maximum {self._settings.MEDIA_MAX_SIZE_MB}MB"
             )
 
@@ -340,6 +341,29 @@ class MediaService:
         if user_id:
             await self.ensure_can_access(file_id, user_id)
         return await self.store.retrieve(file_id)
+
+    async def local_file(self, file_id: str) -> tuple[Path, str] | None:
+        """``(path, mime_type)`` of a file the local filesystem store holds, else None.
+
+        Lets the download route stream the file from disk instead of reading it whole. Only
+        the core ``LocalFileMediaStore`` qualifies; any other store (memory, cloud) and any
+        lookup problem returns None, and the caller falls back to ``get_file``. Call it only
+        after ``ensure_can_access``.
+        """
+        from tenxgraph.storage.media.storage.local_store import LocalFileMediaStore
+
+        store = self.store
+        key_to_path = getattr(store, "_key_to_path", None)
+        if not isinstance(store, LocalFileMediaStore) or not callable(key_to_path):
+            return None
+        try:
+            metadata = await store.get_metadata(file_id)
+            if not metadata or not metadata.get("mime_type"):
+                return None
+            path = Path(key_to_path(file_id, metadata["mime_type"]))
+        except Exception:  # invalid key, unreadable metadata: let get_file decide
+            return None
+        return (path, metadata["mime_type"]) if path.is_file() else None
 
     async def get_file_info(self, file_id: str, user_id: str | None = None) -> dict[str, Any]:
         """Return metadata about a stored file."""
