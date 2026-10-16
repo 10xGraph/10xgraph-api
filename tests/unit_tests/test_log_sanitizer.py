@@ -9,6 +9,7 @@ from tenxgraph_api.src.app.core.utils.log_sanitizer import (
     SanitizingFormatter,
     _sanitize_string,
     _sanitize_value,
+    log_safe,
     sanitize_for_logging,
     sanitize_log_message,
 )
@@ -340,3 +341,16 @@ class TestSanitizingFormatter:
         result = formatter.format(record)
         assert "[WARNING]" in result
         assert "Warning message" in result
+
+
+class TestLogSafe:
+    """Tests for log_safe (log injection guard)."""
+
+    def test_escapes_line_breaks(self):
+        forged = "alice\r\nWARNING Admin login for root"
+        assert log_safe(forged) == "alice\\r\\nWARNING Admin login for root"
+        assert "\n" not in log_safe(forged) and "\r" not in log_safe(forged)
+
+    def test_leaves_plain_values_and_stringifies(self):
+        assert log_safe("runs:user:alice") == "runs:user:alice"
+        assert log_safe(42) == "42"

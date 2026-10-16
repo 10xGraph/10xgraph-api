@@ -36,6 +36,7 @@ from tenxgraph_api.src.app.core.concurrency import (
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.core.middleware.rate_limit import keying
 from tenxgraph_api.src.app.core.middleware.rate_limit.keying import client_key_for
+from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 
 
 # RFC 6455 close code 1013 "Try Again Later" -- the right signal for shed-load rejections.
@@ -103,7 +104,7 @@ async def realtime_connection_guard(
         key = client_key_for(websocket, rl_config)
         decision = await backend.check(key, limit=rl_config.requests, window=rl_config.window)
         if not decision.allowed:
-            logger.warning("WebSocket rate limit exceeded for %s", key)
+            logger.warning("WebSocket rate limit exceeded for %s", log_safe(key))
             raise WebSocketException(code=WS_TRY_AGAIN_LATER, reason="Rate limit exceeded")
 
     # 2) Concurrent-connection cap, then the per-user share of it. Shared across workers when a
@@ -129,7 +130,7 @@ async def realtime_connection_guard(
         _registry.release()
         logger.warning(
             "WebSocket per-user connection limit reached for %s (max=%s)",
-            user_key,
+            log_safe(user_key),
             ws_config.max_connections_per_user,
         )
         raise WebSocketException(
@@ -165,7 +166,7 @@ async def _shared_connection_slots(
             if lease is None:
                 logger.warning(
                     "WebSocket per-user connection limit reached for %s (max=%s)",
-                    user_key,
+                    log_safe(user_key),
                     ws_config.max_connections_per_user,
                 )
                 raise WebSocketException(
@@ -192,7 +193,7 @@ async def ws_run_allowed(websocket: WebSocket) -> int | None:
     decision = await backend.check(key, limit=rl_config.requests, window=rl_config.window)
     if decision.allowed:
         return None
-    logger.warning("WebSocket run rate limit exceeded for %s", key)
+    logger.warning("WebSocket run rate limit exceeded for %s", log_safe(key))
     return decision.reset_after
 
 

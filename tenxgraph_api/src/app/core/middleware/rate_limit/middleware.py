@@ -8,6 +8,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.config.graph_config import RateLimitConfig
+from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 
 from .base import BaseRateLimitBackend
 from .keying import client_key_for
@@ -57,9 +58,9 @@ class RateLimitMiddleware:
             request_id = (scope.get("state") or {}).get("request_id", "unknown")
             logger.warning(
                 "Rate limit exceeded for %s on %s %s",
-                key,
-                request.method,
-                request.url.path,
+                log_safe(key),
+                log_safe(request.method),
+                log_safe(request.url.path),
             )
             response = JSONResponse(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,

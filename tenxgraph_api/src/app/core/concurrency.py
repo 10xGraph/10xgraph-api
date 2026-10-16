@@ -27,6 +27,8 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import Any
 
+from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
+
 
 logger = logging.getLogger("tenxgraph_api.concurrency")
 
@@ -140,7 +142,9 @@ class RedisConcurrencyLimiter(ConcurrencyLimiter):
                 await self._client.zrem(redis_key, member)
                 return None
         except Exception as exc:
-            logger.warning("Shared concurrency limit unavailable (%s); allowing %s", exc, key)
+            logger.warning(
+                "Shared concurrency limit unavailable (%s); allowing %s", exc, log_safe(key)
+            )
             return Lease(None)
 
         refresher = asyncio.create_task(self._refresh(redis_key, member))
@@ -152,7 +156,7 @@ class RedisConcurrencyLimiter(ConcurrencyLimiter):
             try:
                 await self._client.zrem(redis_key, member)
             except Exception as exc:  # the lease expires on its own
-                logger.debug("Lease release failed for %s: %s", key, exc)
+                logger.debug("Lease release failed for %s: %s", log_safe(key), exc)
 
         return Lease(release)
 
@@ -165,7 +169,7 @@ class RedisConcurrencyLimiter(ConcurrencyLimiter):
                 await self._client.zadd(redis_key, {member: time.time() + self._lease_ttl}, xx=True)
                 await self._client.expire(redis_key, int(self._lease_ttl) + 1)
             except Exception as exc:
-                logger.debug("Lease refresh failed for %s: %s", redis_key, exc)
+                logger.debug("Lease refresh failed for %s: %s", log_safe(redis_key), exc)
 
     async def aclose(self) -> None:
         for task in list(self._refreshers):

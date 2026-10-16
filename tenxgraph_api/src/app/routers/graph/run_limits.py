@@ -24,6 +24,7 @@ from fastapi import HTTPException
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.concurrency import Lease, concurrency_limiter
 from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 
 
 HTTP_TOO_MANY_REQUESTS = 429
@@ -48,7 +49,9 @@ async def acquire_run_slot(user: dict[str, Any], runs: RunsConfig) -> Lease:
         return Lease(None)
     lease = await concurrency_limiter().acquire(run_slot_key(str(user_id)), limit)
     if lease is None:
-        logger.warning("Concurrent run limit reached for user %s (max=%s)", user_id, limit)
+        logger.warning(
+            "Concurrent run limit reached for user %s (max=%s)", log_safe(user_id), limit
+        )
         raise HTTPException(
             status_code=HTTP_TOO_MANY_REQUESTS,
             detail=(

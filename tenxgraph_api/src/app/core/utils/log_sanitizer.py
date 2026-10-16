@@ -46,6 +46,14 @@ _INLINE_SECRET_PATTERNS = (
 )
 
 
+def log_safe(value: Any) -> str:
+    """``value`` as a single log line, for client-influenced values such as ids and paths.
+
+    CR and LF are escaped so a value cannot end the entry and forge a new one.
+    """
+    return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
+
 def redact_text(text: str) -> str:
     """Redact bearer tokens and JWTs that appear anywhere inside ``text``."""
     for pattern, replacement in _INLINE_SECRET_PATTERNS:
