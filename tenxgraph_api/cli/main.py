@@ -276,120 +276,6 @@ def handle_exception(e: Exception) -> int:
 
 
 @app.command()
-def api(
-    config: str = typer.Option(
-        DEFAULT_CONFIG_FILE,
-        "--config",
-        "-c",
-        help="Path to config file",
-    ),
-    host: str = typer.Option(
-        DEFAULT_HOST,
-        "--host",
-        "-H",
-        help="Host to run the API on (default: 127.0.0.1, localhost only; "
-        "use 0.0.0.0 to bind all interfaces)",
-    ),
-    port: int = typer.Option(
-        DEFAULT_PORT,
-        "--port",
-        "-p",
-        help="Port to run the API on",
-    ),
-    reload: bool = typer.Option(
-        True,
-        "--reload/--no-reload",
-        help="Enable auto-reload for development",
-    ),
-    verbose: bool = typer.Option(
-        False,
-        "--verbose",
-        "-v",
-        help="Enable verbose logging",
-    ),
-    quiet: bool = typer.Option(
-        False,
-        "--quiet",
-        "-q",
-        help="Suppress all output except errors",
-    ),
-) -> None:
-    """Start the 10xGraph API server."""
-    # Setup logging
-    _configure_command(verbose=verbose, quiet=quiet)
-
-    try:
-        command = APICommand(output)
-        exit_code = command.execute(
-            config=config,
-            host=host,
-            port=port,
-            reload=reload,
-        )
-        sys.exit(exit_code)
-    except Exception as e:
-        sys.exit(handle_exception(e))
-
-
-@app.command()
-def play(
-    config: str = typer.Option(
-        DEFAULT_CONFIG_FILE,
-        "--config",
-        "-c",
-        help="Path to config file",
-    ),
-    host: str = typer.Option(
-        DEFAULT_HOST,
-        "--host",
-        "-H",
-        help=(
-            "Host to run the API on for the local playground session "
-            "(use 127.0.0.1 for localhost only)"
-        ),
-    ),
-    port: int = typer.Option(
-        DEFAULT_PORT,
-        "--port",
-        "-p",
-        help="Port to run the API on",
-    ),
-    reload: bool = typer.Option(
-        True,
-        "--reload/--no-reload",
-        help="Enable auto-reload for development",
-    ),
-    verbose: bool = typer.Option(
-        False,
-        "--verbose",
-        "-v",
-        help="Enable verbose logging",
-    ),
-    quiet: bool = typer.Option(
-        False,
-        "--quiet",
-        "-q",
-        help="Suppress all output except errors",
-    ),
-) -> None:
-    """Start the API server and open the hosted playground."""
-    _configure_command(verbose=verbose, quiet=quiet)
-
-    try:
-        command = APICommand(output)
-        exit_code = command.execute(
-            config=config,
-            host=host,
-            port=port,
-            reload=reload,
-            open_playground=True,
-        )
-        sys.exit(exit_code)
-    except Exception as e:
-        sys.exit(handle_exception(e))
-
-
-@app.command()
 def dev(
     config: str = typer.Option(
         DEFAULT_CONFIG_FILE,
@@ -401,7 +287,8 @@ def dev(
         DEFAULT_HOST,
         "--host",
         "-H",
-        help="Host interface for the local development server.",
+        help="Host for the local development server (default: 127.0.0.1, localhost only; "
+        "use 0.0.0.0 to bind all interfaces).",
     ),
     port: int = typer.Option(
         DEFAULT_PORT,
@@ -593,6 +480,16 @@ def init(  # noqa: PLR0913
         "--rate-limit",
         help="Rate limiting: none, memory, or redis.",
     ),
+    provider: str | None = typer.Option(
+        None,
+        "--provider",
+        help="AI provider: google, openai, or anthropic (default google).",
+    ),
+    websocket: bool = typer.Option(
+        False,
+        "--websocket/--no-websocket",
+        help="Enable WebSocket streaming and realtime audio (adds the websocket extra).",
+    ),
     yes: bool = typer.Option(
         False,
         "--yes",
@@ -638,6 +535,8 @@ def init(  # noqa: PLR0913
             template=template,
             auth=auth,
             rate_limit=rate_limit,
+            provider=provider,
+            websocket=websocket,
             yes=yes,
             non_interactive=non_interactive,
             dry_run=dry_run,

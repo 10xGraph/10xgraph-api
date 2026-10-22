@@ -42,7 +42,7 @@ export JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
 
 **Step 3:** Start the application
 ```bash
-10xgraph api
+10xgraph dev --no-open
 ```
 
 ### 2. Custom Authentication

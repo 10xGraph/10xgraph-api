@@ -19,6 +19,33 @@ _SKIP_DIRS = {"__pycache__", ".ruff_cache"}
 # Directories inside prod/ that are only included based on user choices
 _AUTH_DIR = "auth"
 
+# AI provider choices: the core extra that installs the SDK, the model the scaffold
+# starts with, the model the eval user simulator uses, and the API key variable.
+_PROVIDERS: dict[str, dict[str, str]] = {
+    "google": {
+        "label": "Google Gemini",
+        "extra": "google-genai",
+        "model": "gemini-2.5-flash",
+        "sim_model": "gemini/gemini-2.5-flash",
+        "api_key_env": "GOOGLE_API_KEY",
+    },
+    "openai": {
+        "label": "OpenAI",
+        "extra": "openai",
+        "model": "gpt-4o-mini",
+        "sim_model": "openai/gpt-4o-mini",
+        "api_key_env": "OPENAI_API_KEY",
+    },
+    "anthropic": {
+        "label": "Anthropic Claude",
+        "extra": "anthropic",
+        "model": "claude-sonnet-5-5",
+        "sim_model": "anthropic/claude-sonnet-5-5",
+        "api_key_env": "ANTHROPIC_API_KEY",
+    },
+}
+_DEFAULT_PROVIDER = "google"
+
 
 def _slugify(name: str) -> str:
     """Convert 'WeatherBot' → 'weather-bot'."""
@@ -44,10 +71,38 @@ def _strip_env_blocks(content: str, *, keep_redis: bool, keep_jwt: bool) -> str:
     return content
 
 
+def _template_vars(context: dict[str, Any]) -> dict[str, Any]:
+    """Derive the template variables that depend on the user's answers.
+
+    The production pyproject.toml lists only what the answers need: the provider SDK
+    through the core extra, PyJWT for JWT auth, redis for the Redis rate limiter, and
+    websockets for WebSocket streaming / realtime. The generated Dockerfile installs
+    exactly this list.
+    """
+    provider = _PROVIDERS[context.get("provider", _DEFAULT_PROVIDER)]
+    api_extras = []
+    if context.get("auth") == "jwt":
+        api_extras.append("jwt")
+    if context.get("rate_limit") == "redis":
+        api_extras.append("redis")
+    if context.get("websocket"):
+        api_extras.append("websocket")
+    return {
+        "llm_provider": context.get("provider", _DEFAULT_PROVIDER),
+        "llm_model": provider["model"],
+        "llm_sim_model": provider["sim_model"],
+        "llm_api_key_env": provider["api_key_env"],
+        "core_requirement": f"10xgraph[{provider['extra']}]",
+        "api_requirement": (
+            f"10xgraph-api[{','.join(api_extras)}]" if api_extras else "10xgraph-api"
+        ),
+    }
+
+
 class InitCommand(BaseCommand):
     """Command to initialize a new agent project interactively."""
 
-    def execute(
+    def execute(  # noqa: PLR0913
         self,
         path: str = ".",
         force: bool = False,
@@ -55,6 +110,8 @@ class InitCommand(BaseCommand):
         template: str | None = None,
         auth: str | None = None,
         rate_limit: str | None = None,
+        provider: str | None = None,
+        websocket: bool = False,
         yes: bool = False,
         non_interactive: bool = False,
         dry_run: bool = False,
@@ -73,6 +130,8 @@ class InitCommand(BaseCommand):
                     template=template,
                     auth=auth,
                     rate_limit=rate_limit,
+                    provider=provider,
+                    websocket=websocket,
                 )
             else:
                 context = self._prompt_user()
@@ -141,6 +200,15 @@ class InitCommand(BaseCommand):
                     step.detail(str(config_path))
 
             agent_name = context["agent_name"]
+            provider_info = _PROVIDERS[context.get("provider", _DEFAULT_PROVIDER)]
+            # Production lists these in pyproject.toml; quick-start has no pyproject, so it
+            # needs the install step.
+            install_step = (
+                []
+                if is_prod
+                else [f'pip install "{_template_vars(context)["core_requirement"]}"']
+                + (['pip install "10xgraph-api[websocket]"'] if context.get("websocket") else [])
+            )
             self.output.completion_screen(
                 "Project ready",
                 f'"{agent_name}" was created successfully',
@@ -148,11 +216,14 @@ class InitCommand(BaseCommand):
                     "Location": base_path.resolve(),
                     "Template": "production" if is_prod else "quick-start",
                     "Auth": context["auth"],
+                    "AI provider": provider_info["label"],
+                    "WebSocket": "on" if context.get("websocket") else "off",
                 },
                 next_steps=[
                     f"cd {base_path}",
-                    "Copy .env.example to .env and add your model API key.",
-                    "10xgraph play",
+                    *install_step,
+                    f"Copy .env.example to .env and set {provider_info['api_key_env']}.",
+                    "10xgraph dev",
                 ],
             )
 
@@ -171,6 +242,8 @@ class InitCommand(BaseCommand):
         template: str | None,
         auth: str | None,
         rate_limit: str | None,
+        provider: str | None = None,
+        websocket: bool = False,
     ) -> dict[str, Any]:
         """Resolve a complete, reproducible scaffold recipe without prompting."""
         resolved_template = (template or "quick-start").strip().lower().replace("_", "-")
@@ -204,6 +277,13 @@ class InitCommand(BaseCommand):
                 field="rate_limit",
             )
 
+        resolved_provider = (provider or _DEFAULT_PROVIDER).strip().lower()
+        if resolved_provider not in _PROVIDERS:
+            raise ValidationError(
+                f"Invalid AI provider '{resolved_provider}'. Choose {', '.join(_PROVIDERS)}.",
+                field="provider",
+            )
+
         if resolved_template == "quick-start" and (
             resolved_auth != "none" or resolved_rate_limit != "none"
         ):
@@ -216,6 +296,8 @@ class InitCommand(BaseCommand):
             "agent_name": resolved_name,
             "agent_name_slug": slug,
             "setup_type": "production" if resolved_template == "production" else "quick_start",
+            "provider": resolved_provider,
+            "websocket": websocket,
             "auth": resolved_auth,
             "rate_limit": resolved_rate_limit,
             "rl_requests": 100,
@@ -228,7 +310,7 @@ class InitCommand(BaseCommand):
     # Prompts
     # ------------------------------------------------------------------
 
-    def _prompt_user(self) -> dict | None:  # noqa: PLR0911
+    def _prompt_user(self) -> dict | None:  # noqa: PLR0911, PLR0912
         prompts = self.output.prompts()
         prompts.require_interactive(
             field="template",
@@ -261,11 +343,33 @@ class InitCommand(BaseCommand):
         if template is None:
             return None
 
+        provider = prompts.select(
+            "Which AI provider?",
+            [
+                Choice("google", "Google Gemini", "Installs google-genai · GOOGLE_API_KEY"),
+                Choice("openai", "OpenAI", "Installs openai · OPENAI_API_KEY"),
+                Choice("anthropic", "Anthropic Claude", "Installs anthropic · ANTHROPIC_API_KEY"),
+            ],
+            default=_DEFAULT_PROVIDER,
+        )
+        if provider is None:
+            return None
+
+        websocket = prompts.confirm(
+            "Enable WebSocket streaming and realtime audio? "
+            "(/v1/graph/ws, /v1/graph/live; installs websockets)",
+            default=False,
+        )
+        if websocket is None:
+            return None
+
         is_prod = template == "production"
         context: dict[str, Any] = {
             "agent_name": agent_name,
             "agent_name_slug": _slugify(agent_name),
             "setup_type": template,
+            "provider": provider,
+            "websocket": websocket,
             "auth": "none",
             "rate_limit": "none",
         }
@@ -359,6 +463,8 @@ class InitCommand(BaseCommand):
             ("Agent name", context["agent_name"]),
             ("Package name", context["agent_name_slug"]),
             ("Setup", setup_label),
+            ("AI provider", _PROVIDERS[context.get("provider", _DEFAULT_PROVIDER)]["label"]),
+            ("WebSocket", "On" if context.get("websocket") else "Off"),
         ]
         if is_prod:
             auth = context["auth"]
@@ -392,8 +498,15 @@ class InitCommand(BaseCommand):
         if is_prod:
             steps.append(("pre-commit install", "Set up Git hooks (ruff, bandit, etc.)"))
 
-        steps.append(("pip install google-genai", "Add the AI provider library"))
-        steps.append(("cp .env.example .env", "Copy env template, then fill in your API keys"))
+        provider = _PROVIDERS[context.get("provider", _DEFAULT_PROVIDER)]
+        if not is_prod:
+            # Production lists the provider SDK in pyproject.toml already.
+            steps.append(
+                (f'pip install "10xgraph[{provider["extra"]}]"', "Add the AI provider library")
+            )
+        steps.append(
+            ("cp .env.example .env", f"Copy env template, then set {provider['api_key_env']}")
+        )
 
         if context["auth"] == "jwt":
             steps.append(("# Set JWT_SECRET_KEY in .env", "Required for JWT auth to work"))
@@ -401,7 +514,7 @@ class InitCommand(BaseCommand):
         if context["rate_limit"] == "redis":
             steps.append(("# Set REDIS_URL in .env", "Required for Redis rate limiting"))
 
-        steps.append(("10xgraph play", "Launch your agent"))
+        steps.append(("10xgraph dev", "Launch your agent"))
 
         self.output.print_table(
             ["#", "Command", "Purpose"],
@@ -424,6 +537,9 @@ class InitCommand(BaseCommand):
             "thread_name_generator": None,
             # AG-UI endpoint for clients such as CopilotKit. Off until turned on here.
             "ag_ui": {"enabled": False},
+            # WebSocket streaming (/v1/graph/ws) and realtime audio (/v1/graph/live).
+            # Off: neither route is mounted and no WebSocket library is needed.
+            "websocket": {"enabled": bool(context.get("websocket"))},
         }
 
         if not is_prod:
@@ -457,6 +573,10 @@ class InitCommand(BaseCommand):
                 "trusted_proxy_headers": context.get("rl_trusted_proxy", False),
                 "exclude_paths": ["/ping", "/docs", "/redoc", "/openapi.json"],
             }
+            if rate_limit == "redis":
+                # Resolved from REDIS_URL in .env; the redis backend refuses to start
+                # without a URL or a Redis client bound in InjectQ.
+                config["rate_limit"]["redis"] = {"url": "${REDIS_URL}"}
 
         return config
 
@@ -486,7 +606,7 @@ class InitCommand(BaseCommand):
             )
 
         with contextlib.suppress(Exception):
-            content = Template(content).safe_substitute(context)
+            content = Template(content).safe_substitute({**context, **_template_vars(context)})
 
         return content
 

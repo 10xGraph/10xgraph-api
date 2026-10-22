@@ -4,6 +4,7 @@ from tenxgraph.core.state import MessageContextManager
 from tenxgraph.prebuilt.agent import ReactAgent
 from tenxgraph.storage.checkpointer import InMemoryCheckpointer
 from dotenv import load_dotenv
+from injectq import InjectQ
 
 from graph.state import WeatherState
 from graph.tools.weather_tool import get_weather
@@ -14,6 +15,9 @@ load_dotenv()
 
 checkpointer = InMemoryCheckpointer()
 
+# Dependency injection container; 10xgraph.json points at it ("injectq": "graph.agent:container").
+container = InjectQ.get_instance()
+
 context_manager = MessageContextManager(
     max_messages=20,  # last 20 user messages will be kept in context
     remove_tool_msgs=True,
@@ -21,8 +25,8 @@ context_manager = MessageContextManager(
 
 react_agent = ReactAgent(
     state=WeatherState(),
-    model="google/gemini-2.5-flash",
-    provider="google",
+    model="$llm_model",
+    provider="$llm_provider",
     system_prompt=[
         {
             "role": "system",
@@ -42,6 +46,7 @@ react_agent = ReactAgent(
     trim_context=True,
     tools=[get_weather],
     context_manager=context_manager,
+    container=container,
 )
 
 app = react_agent.compile(

@@ -310,12 +310,28 @@ _SECTIONS: list[dict[str, Any]] = [
     {
         "id": "websocket",
         "title": "WebSocket",
-        "description": "Caps on concurrent realtime and streaming connections, per process.",
+        "description": (
+            "WebSocket streaming and realtime audio, and per-process caps on concurrent "
+            "connections."
+        ),
         "key": "websocket",
         "optional": True,
-        "off_summary": "Concurrent WebSocket connections are not capped.",
-        "default": {"max_connections": 1000, "max_connections_per_user": 10},
+        "off_summary": (
+            "/v1/graph/ws and /v1/graph/live stay mounted with the default caps "
+            "(1000 per process, 10 per user)."
+        ),
+        "default": {"enabled": True, "max_connections": 1000, "max_connections_per_user": 10},
         "fields": [
+            {
+                "path": ["websocket", "enabled"],
+                "default": True,
+                "label": "Enabled",
+                "type": "bool",
+                "help": (
+                    "Mounts /v1/graph/ws and /v1/graph/live. Needs the websockets package "
+                    '(pip install "10xgraph-api[websocket]"). Off: neither route exists.'
+                ),
+            },
             {
                 "path": ["websocket", "max_connections"],
                 "label": "Max connections",

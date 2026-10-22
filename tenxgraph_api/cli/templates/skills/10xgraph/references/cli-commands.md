@@ -21,21 +21,17 @@ agentflow = tenxgraph_api.cli.main:legacy_main   # deprecated alias, removed in 
 
 `10xgraph init`
 
-- Scaffolds `10xgraph.json`, `graph/__init__.py`, and `graph/react.py`, and suggests `10xgraph skills` as a next step.
-- Options include `--path/-p`, `--force/-f`, `--prod`, `--verbose/-v`, and `--quiet/-q`.
-- `--prod` also adds production project files such as `pyproject.toml` and `.pre-commit-config.yaml`.
+- Scaffolds `10xgraph.json`, `graph/agent.py` and `.env.example`, and suggests `10xgraph skills` as a next step.
+- Asks for the template (quick-start or production), the AI provider (Google, OpenAI, Anthropic) and whether to enable WebSocket streaming / realtime audio; production also asks for auth and rate limiting.
+- Non-interactive options: `--path/-p`, `--force/-f`, `--name`, `--template` (quick-start|production), `--provider` (google|openai|anthropic), `--websocket/--no-websocket` (default off), `--auth` (none|jwt|custom), `--rate-limit` (none|memory|redis), `--yes/-y`, `--non-interactive`, `--dry-run`.
+- Production adds `pyproject.toml` (dependencies follow the answers, e.g. `10xgraph[openai]`, `10xgraph-api[jwt,redis,websocket]`), `.pre-commit-config.yaml`, `tests/` and `evals/`.
 
-`10xgraph api`
+`10xgraph dev`
 
-- Starts the FastAPI server for a compiled graph.
-- Options include `--config/-c`, `--host/-H`, `--port/-p`, `--reload/--no-reload`, `--verbose/-v`, and `--quiet/-q`.
-- Defaults are config `10xgraph.json`, host `127.0.0.1`, port `8000`, reload enabled.
-
-`10xgraph play`
-
-- Starts the API server and opens/prints the hosted playground URL.
-- Accepts the same server options as `api`.
-- Uses host/port to build the playground backend URL.
+- Starts the local development server (Uvicorn, reload on) for a compiled graph and opens the hosted playground when it is ready.
+- Options include `--config/-c`, `--host/-H`, `--port/-p`, `--reload/--no-reload`, `--open/--no-open`, `--verbose/-v`, and `--quiet/-q`.
+- Defaults are config `10xgraph.json`, host `127.0.0.1`, port `8000`, reload on, playground opened. `--no-open` serves only.
+- There is no `10xgraph api` or `10xgraph play`; both were replaced by `dev`. Production runs Gunicorn in the image from `10xgraph build`.
 
 `10xgraph build`
 

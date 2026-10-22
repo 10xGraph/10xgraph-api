@@ -1,5 +1,5 @@
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from injectq import InjectQ
 
@@ -10,8 +10,11 @@ from .memory import MemoryRateLimitBackend
 from .redis import RedisRateLimitBackend
 
 
-if TYPE_CHECKING:
+try:
+    # Needed at runtime: _bind_redis binds the client under its class too.
     from redis.asyncio import Redis
+except ImportError:  # the redis extra is not installed
+    Redis = None  # type: ignore[assignment,misc]
 
 
 logger = logging.getLogger("tenxgraph_api.rate_limit")

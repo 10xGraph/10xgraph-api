@@ -152,8 +152,8 @@ def test_plain_command_header_degrades_to_static_banner() -> None:
         output_format=OutputFormat.PLAIN,
         progress_mode=ProgressMode.PLAIN,
     )
-    rendered.command_header("play", "Start the playground")
-    assert "== Play ==" in stream.getvalue()
+    rendered.command_header("dev", "Start the playground")
+    assert "== Dev ==" in stream.getvalue()
     assert "Start the playground" in stream.getvalue()
 
 
@@ -175,9 +175,9 @@ def test_forced_tty_header_uses_animation_renderer(monkeypatch) -> None:
         output_format=OutputFormat.HUMAN,
         progress_mode=ProgressMode.TTY,
     )
-    rendered.command_header("play", "Start the playground")
+    rendered.command_header("dev", "Start the playground")
     # The intro plays by default, on a temporary screen (not the opt-in pinned frame).
-    assert calls == [("play", "Start the playground", True, False)]
+    assert calls == [("dev", "Start the playground", True, False)]
 
 
 class FakeConsole:
@@ -305,7 +305,7 @@ def test_command_header_claims_the_screen_when_fullscreen_was_requested(monkeypa
     )
 
     rendered.request_fullscreen(True)
-    rendered.command_header("play", "Serve it")
+    rendered.command_header("dev", "Serve it")
     assert rendered.fullscreen_active is True
     assert console.alt_screen_calls == [True]
 
@@ -320,7 +320,7 @@ def test_command_header_stays_in_the_normal_buffer_without_fullscreen(monkeypatc
     )
 
     rendered.request_fullscreen(False)
-    rendered.command_header("play", "Serve it")
+    rendered.command_header("dev", "Serve it")
     assert rendered.fullscreen_active is False
     assert console.alt_screen_calls == []
 
@@ -336,11 +336,11 @@ def test_command_header_pins_chrome_inside_a_fullscreen_session(monkeypatch) -> 
     )
 
     assert rendered.start_fullscreen_session() is True
-    rendered.command_header("play", "Serve it", hint="Ctrl+C to stop")
+    rendered.command_header("dev", "Serve it", hint="Ctrl+C to stop")
 
     written = console.file.getvalue()
     # Header, footer, and a scrolling region confining output between them.
-    assert "play" in written
+    assert "dev" in written
     assert "Ctrl+C to stop" in written
     assert f"\x1b[5;{console.height - 2}r" in written
 

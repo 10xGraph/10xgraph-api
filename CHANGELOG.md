@@ -22,6 +22,64 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- **`10xgraph api` and `10xgraph play` are removed; `10xgraph dev` is the only server command.**
+  All three ran the same local Uvicorn dev server. Migration: `10xgraph api` ->
+  `10xgraph dev --no-open`, `10xgraph play` -> `10xgraph dev`. Options are unchanged
+  (`--config`, `--host`, `--port`, `--reload/--no-reload`). `10xgraph demo --style` no longer
+  accepts the `play` / `api` aliases. Production is unaffected: the image from `10xgraph build`
+  runs Gunicorn directly.
+
+### Added
+
+- **Python 3.14 and 3.15 are officially supported.** The test suite runs on 3.12, 3.13, 3.14
+  and 3.15 in CI, and the package classifiers list all four.
+- **`websocket.enabled` in `10xgraph.json`** turns the WebSocket routes on or off. `false` leaves
+  out `/v1/graph/ws` and `/v1/graph/live`, so the server needs no WebSocket library. `true`
+  without one refuses to boot with the install hint. Unset keeps them mounted, as before, but
+  now logs a warning when no library is installed (previously a non-Google project silently
+  answered 404 on both routes, because only `google-genai` brought in `websockets`).
+- **`10xgraph-api[websocket]` extra** (`websockets`) for those routes.
+- **`10xgraph init` asks whether to enable WebSocket streaming and realtime audio**
+  (`--websocket/--no-websocket`, default off). Yes adds the `websocket` extra to a production
+  `pyproject.toml` and writes `"websocket": {"enabled": true}`; no writes `false`.
+- **`10xgraph init` asks for the AI provider** (Google Gemini, OpenAI or Anthropic Claude;
+  `--provider` for non-interactive runs, default `google`). The scaffold's model, provider,
+  `.env.example` API key, test conftest and eval simulator model follow the answer.
+- **`10xgraph-api[images]` extra.** Pillow is optional in core `10xgraph`; this extra installs it
+  for image resize, EXIF orientation and format conversion.
+
+### Changed
+
+- Replaced `asyncio.iscoroutinefunction`, which is removed in Python 3.16, with
+  `inspect.iscoroutinefunction`. No behaviour change.
+- **Production scaffolds list only the dependencies the answers need.** `pyproject.toml` now
+  depends on `10xgraph[<provider>]` and `10xgraph-api[jwt,redis]` as chosen (no extras when
+  neither is picked), and drops the hardcoded `google-genai`. The generated Dockerfile installs
+  this list, so JWT and Redis work in the image without a separate `requirements.txt`.
+- **The generated Dockerfile removes pip and the CLI's own libraries from the image.** typer,
+  rich, questionary and what only they pull in (pygments, markdown-it-py, mdurl, prompt-toolkit,
+  wcwidth, shellingham) are uninstalled in the builder stage by `tenxgraph_api/_slim_image.py`,
+  unless another installed package still needs them. With pip, about 38 MB smaller.
+- Dropped unused dev dependencies (`mkdocs-gen-files`, `mkdocstrings`, `mypy-extensions`,
+  `lib`, `markdown-it-py`).
+
+### Fixed
+
+- **`10xgraph init` generated a `pyproject.toml` claiming Python 3.10.** The template said
+  `requires-python = ">=3.10"`, but `10xgraph` needs 3.12, so installing a generated project
+  on 3.10 or 3.11 failed. It now says `>=3.12`.
+- **Redis rate limiting from a URL crashed at startup** with `NameError: Redis`: the class was
+  imported only for type checking but used at runtime to bind the client.
+- **A production scaffold with the Redis rate limiter did not start:** `10xgraph.json` had no
+  Redis URL. It now reads `"redis": {"url": "${REDIS_URL}"}` from `.env`.
+- **A production scaffold did not start at all:** `10xgraph.json` points at
+  `graph.agent:container`, which the template never defined. `graph/agent.py` now exports it.
+- **The production scaffold's `tests/test_graph_nodes.py` failed on collection** (it imported
+  `graph.nodes` and `graph.utils`, which the template does not create). It now tests the agent
+  in `graph/agent.py`.
+
 ## [0.8.0] - 2026-10-16
 
 Security and scalability pass over the API, following an external review. Every item below

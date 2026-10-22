@@ -32,7 +32,7 @@ output schema id, `AF-*` CLI error codes.
 
 It turns a 10xGraph `CompiledGraph` into a production FastAPI service, plus a Typer CLI to
 scaffold, run, build, test, and evaluate that service. You write a graph, point `10xgraph.json`
-at it, and `10xgraph api` serves it over REST + WebSocket with auth, rate limiting, media
+at it, and `10xgraph dev` serves it over REST + WebSocket with auth, rate limiting, media
 handling, checkpointer/thread management, and a memory store API.
 
 ## Package layout
@@ -51,17 +51,15 @@ Public exports from the package root (`from tenxgraph_api import ...`): `BaseAut
 
 | Command | Purpose | Notable options |
 |---|---|---|
-| `10xgraph api` | Start the API server | `--config/-c` (default `10xgraph.json`), `--host/-H`, `--port/-p` (8000), `--reload/--no-reload`, `-v/-q` |
-| `10xgraph play` | Start the server and open the hosted playground | same as `api` |
-| `10xgraph dev` | Goal-oriented local dev server: same runner as `api`, opens the playground by default. `api`/`play` stay for compatibility | same as `api`, plus `--open/--no-open` |
-| `10xgraph init` | Interactively scaffold a project (guided prompts pick dev vs production, auth, rate limit) | `--path/-p`, `--force/-f`, `--name`, `--template` (quick-start\|production), `--auth` (none\|jwt\|custom), `--rate-limit` (none\|memory\|redis), `--yes/-y`, `--non-interactive`, `--dry-run`. There is **no `--prod` flag** |
-| `10xgraph build` | Generate a `Dockerfile` (and optionally `docker-compose.yml` / `k8s.yaml`) | `--output/-o`, `--force/-f`, `--python-version` (3.13), `--port`, `--docker-compose/--no-docker-compose`, `--k8s/--no-k8s`, `--service-name` |
+| `10xgraph dev` | The only server command: local Uvicorn dev server (reload on) via `commands/api.py::APICommand`, opens the hosted playground when ready. `api` and `play` were removed (use `dev --no-open` / `dev`); production runs Gunicorn in the `10xgraph build` image | `--config/-c` (default `10xgraph.json`), `--host/-H`, `--port/-p` (8000), `--reload/--no-reload`, `--open/--no-open`, `-v/-q` |
+| `10xgraph init` | Interactively scaffold a project (guided prompts pick dev vs production, auth, rate limit) | `--path/-p`, `--force/-f`, `--name`, `--template` (quick-start\|production), `--auth` (none\|jwt\|custom), `--rate-limit` (none\|memory\|redis), `--provider` (google\|openai\|anthropic), `--websocket/--no-websocket` (default off; writes `websocket.enabled`). Prod `pyproject.toml` depends on `10xgraph[<provider>]` and `10xgraph-api[jwt,redis,websocket]` as chosen, `--yes/-y`, `--non-interactive`, `--dry-run`. There is **no `--prod` flag** |
+| `10xgraph build` | Generate a `Dockerfile` (and optionally `docker-compose.yml` / `k8s.yaml`). The builder stage strips CLI assets, runs `tenxgraph_api/_slim_image.py` (uninstalls typer/rich/questionary and what only they need, unless another package needs them) and removes pip, so the image carries no CLI code paths | `--output/-o`, `--force/-f`, `--python-version` (3.13), `--port`, `--docker-compose/--no-docker-compose`, `--k8s/--no-k8s`, `--service-name` |
 | `10xgraph eval` | Run agent evaluations; discovers `*_eval.py`/`eval_*.py`, runs cases (optionally `--parallel`), writes HTML+JSON to `eval_reports/` | `--output/-o`, `--no-report`, `--threshold/-t`, `--open`, `--parallel/-p`, `--max-concurrency/-c` |
 | `10xgraph test` | Run project tests via pytest (args after `--` forwarded verbatim) | `--coverage/-C`, `--html`, `-k`, path arg |
 | `10xgraph skills` | Install the bundled 10xGraph skill (Agent Skills spec) for Codex/Claude/GitHub, or validate skills | `--agent/-a`, `--path/-p`, `--force/-f`, `--all`, `--list/-l`, `--validate PATH` |
 | `10xgraph version` | Show CLI + core framework version | both resolve from installed distribution metadata |
 | `10xgraph audit` | Read-only audit of the interpreter, installed CLI/core packages, evaluation-API compatibility, `10xgraph.json`, and the default port. Exits `1` on failure, `0` on warnings only, so it works as a CI gate | `-v/--verbose`, `-q/--quiet` |
-| `10xgraph demo` | Preview the animation/timeline/progress themes with no side effects (`Diagnostics` help panel) | `--style` (all\|typing\|network\|init\|build\|eval; `play`/`api` alias to typing/network) |
+| `10xgraph demo` | Preview the animation/timeline/progress themes with no side effects (`Diagnostics` help panel) | `--style` (all\|typing\|network\|init\|build\|eval) |
 | `10xgraph config` | Browser editor for `10xgraph.json` (`Manage` panel). Loopback-only stdlib HTTP server in `cli/config_editor/` (`schema.py` lists every key, `validation.py` reuses the `graph_config` parsers, `store.py` does conflict-checked atomic writes with a `.bak`). The page is a Preact + Tailwind app whose source lives in `config-editor-ui/`; `npm run build` there writes the committed `static/app.js` and `static/app.css`, so rebuild after editing `config-editor-ui/src` | `--config/-c`, `--port/-p` (0 = any free port), `--open/--no-open` |
 
 Defaults (from `cli/constants.py`): `DEFAULT_HOST="127.0.0.1"`, `DEFAULT_PORT=8000`,
@@ -97,7 +95,7 @@ Parsed by `tenxgraph_api/src/app/core/config/graph_config.py`. Supported keys:
 | `redis` | Redis URL string |
 | `rate_limit` | Object (see below) |
 | `ag_ui` | `{"enabled": bool}`, default off. Mounts `POST /v1/ag-ui` (AG-UI protocol, for CopilotKit and other AG-UI clients). Needs the `ag-ui` extra |
-| `websocket` | `max_connections` (1000), `max_connections_per_user` (10), `realtime_models` (models a `/v1/graph/live` client may pick), `realtime_client_overrides` (init options a client may set; default `voice`, `modalities`, `vad`; add `system_prompt` only for trusted callers) |
+| `websocket` | `enabled` (`false` leaves out `/v1/graph/ws` and `/v1/graph/live`; `true` without `websockets`/`wsproto` refuses to boot; unset keeps them and warns if no library; `routers/setup_router.py::_graph_router`), `max_connections` (1000), `max_connections_per_user` (10), `realtime_models` (models a `/v1/graph/live` client may pick), `realtime_client_overrides` (init options a client may set; default `voice`, `modalities`, `vad`; add `system_prompt` only for trusted callers) |
 | `runs` | `RunsConfig`: `thread_ids` (`client` default, `server` = only existing ids may be named, enforced by the ownership/rbac backends), `config_keys` / `state_keys` (allow-lists for request config and `initial_state`/PUT state; 422 on other keys; `thread_id`, `run_id` always allowed), `max_concurrent_per_user` (HTTP invoke/stream/AG-UI runs in flight, default 10, 429 over it; `routers/graph/run_limits.py`), `timeout` (seconds; invoke 504, streams end with an error chunk) |
 | `token_revocation` | `"redis"` / `"memory"` / `"module:attr"` -> `core/auth/revocation.py::TokenRevocationBackend`, checked by `RequirePermission` (401) and before every WS run; backend errors fail closed (503) |
 | `graph_introspection` | `"open"` or `"scoped"` (default scoped in production): `GET /v1/graph`, `/v1/graph/tools`, `/v1/graph:StateSchema` need an explicit `graph:read` scope (`RequirePermission(..., introspection=True)`) |
@@ -199,7 +197,7 @@ Production error responses hide only 5xx details; raise `request_config.ClientIn
 ## Optional extras (`pyproject.toml`)
 
 `sentry`, `firebase`, `snowflakekit`, `redis`, `jwt`, `ag-ui` (AG-UI endpoint), `media` (document text extraction via
-`textxtract`), `gcloud` (Cloud Logging), `otel` (includes FastAPI instrumentation + OTLP exporter).
+`textxtract`), `images` (Pillow via `10xgraph[images]`, for image resize / EXIF / format conversion), `websocket` (`websockets`, needed to serve `/v1/graph/ws` and `/v1/graph/live`), `gcloud` (Cloud Logging), `otel` (includes FastAPI instrumentation + OTLP exporter).
 
 ## Development workflow
 
@@ -207,8 +205,8 @@ Production error responses hide only 5xx details; raise `request_config.ClientIn
 # from this folder (10xgraph-api/); a .venv is present
 .venv/bin/python -m pytest                 # tests in tests/
 10xgraph init                             # scaffold (interactive)
-10xgraph api --reload                     # dev server on 127.0.0.1:8000
-10xgraph play                             # server + hosted playground
+10xgraph dev                              # dev server on 127.0.0.1:8000 + hosted playground
+10xgraph dev --no-open                    # dev server only
 10xgraph build --docker-compose           # Dockerfile + compose
 ruff check . && ruff format .
 ```
@@ -232,6 +230,5 @@ ruff check . && ruff format .
   files from git history if that surface is actually built.
 - The local git remote is still `Iamsdt/pyagenity-api.git`; GitHub redirects it to
   `10xGraph/10xgraph-api`, so pushes work. Repoint it when convenient.
-- The workspace-root `CLAUDE.md` lists only `init/api/play/build` and an older `10xgraph.json`
-  shape; the real CLI has `eval/test/skills/version` too and the config supports `rate_limit`,
-  `thread_name_generator`, and `authorization`.
+- The docs site (`agentflow-docs/`) still uses `10xgraph api` / `10xgraph play` in many pages;
+  both commands were removed in favour of `10xgraph dev` (`dev --no-open` for server only).

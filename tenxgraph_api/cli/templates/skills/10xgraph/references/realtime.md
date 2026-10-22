@@ -140,7 +140,7 @@ per-turn observability stand-in.
 
 ## API server WebSocket bridge (`/v1/graph/live`)
 
-`10xgraph api` exposes `ws://<host>/v1/graph/live` when the configured graph is rooted at a
+`10xgraph dev` exposes `ws://<host>/v1/graph/live` when the configured graph is rooted at a
 `LiveAgent`.
 
 - First frame: a JSON control frame (e.g. `{"model": "...", "thread_id": "abc", "voice": "Puck"}`);

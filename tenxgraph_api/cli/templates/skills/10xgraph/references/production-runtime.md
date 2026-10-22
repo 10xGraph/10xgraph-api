@@ -4,7 +4,7 @@ Use this when changing API serving, deployment, auth/middleware, worker scaling,
 
 ## API Server
 
-`10xgraph api` starts a Uvicorn ASGI server with FastAPI. The server loads the configured compiled graph once at startup and reuses it for requests.
+`10xgraph dev` starts a Uvicorn ASGI server (local development, with reload) with FastAPI. The server loads the configured compiled graph once at startup and reuses it for requests.
 
 Runtime components:
 
@@ -42,8 +42,7 @@ Production should set `MODE=production`, configure CORS origins, and use real au
 
 ## CLI and Docker
 
-- `10xgraph api`: serve graph over HTTP.
-- `10xgraph play`: serve graph and open/use playground flow.
+- `10xgraph dev`: serve graph over HTTP and open the playground (`--no-open` to serve only).
 - `10xgraph init`: scaffold config and graph.
 - `10xgraph build --docker-compose`: generate Docker deployment files.
 

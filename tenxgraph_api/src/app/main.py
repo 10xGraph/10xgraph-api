@@ -32,7 +32,7 @@ logger = logging.getLogger("tenxgraph_api")
 SHUTDOWN_DRAIN_TIMEOUT_SECONDS = 30.0
 
 # GraphConfig loads the ``env`` file named in 10xgraph.json, so it must run before Settings
-# is first built. `10xgraph api` loads that file itself, but plain `gunicorn ...main:app`
+# is first built. `10xgraph dev` loads that file itself, but plain `gunicorn ...main:app`
 # (the generated Dockerfile) does not, and Settings is cached after the first read.
 graph_path = os.environ.get("GRAPH_PATH") or default_config_path()
 graph_config = GraphConfig(graph_path)
@@ -187,8 +187,13 @@ init_errors_handler(app)
 
 # init routes
 # The evals viewer reads local report files and has no auth, so it is a development tool only.
-# The AG-UI endpoint is opt-in through 10xgraph.json.
-init_routes(app, evals=settings.MODE != "production", ag_ui=graph_config.ag_ui.enabled)
+# The AG-UI endpoint is opt-in through 10xgraph.json; the WebSocket routes can be turned off there.
+init_routes(
+    app,
+    evals=settings.MODE != "production",
+    ag_ui=graph_config.ag_ui.enabled,
+    websocket=graph_config.websocket.enabled,
+)
 
 # Secure by construction: refuse to boot if any non-public route forgot its
 # RequirePermission guard (a forgotten guard would otherwise ship an open endpoint).

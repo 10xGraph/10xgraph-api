@@ -3,4 +3,4 @@ from __future__ import annotations
 import os
 
 
-os.environ.setdefault("GEMINI_API_KEY", "test-key")
+os.environ.setdefault("$llm_api_key_env", "test-key")

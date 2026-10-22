@@ -13,7 +13,6 @@ class DemoCommand(BaseCommand):
     """Preview command-specific animations without external side effects."""
 
     _STYLES = ("typing", "network", "init", "build", "eval")
-    _ALIASES = {"play": "typing", "api": "network"}
 
     _SUBTITLES = {
         "typing": "Full-screen 10xGraph identity and workspace transition",
@@ -24,14 +23,14 @@ class DemoCommand(BaseCommand):
     }
     _COMMAND_NAMES = {
         "typing": "typing",
-        "network": "api",
+        "network": "dev",
         "init": "init",
         "build": "build",
         "eval": "eval",
     }
 
     def execute(self, style: str = "all", **kwargs: Any) -> int:
-        normalized = self._ALIASES.get(style.strip().lower(), style.strip().lower())
+        normalized = style.strip().lower()
         if normalized != "all" and normalized not in self._STYLES:
             return self.handle_error(
                 ValidationError(
@@ -57,7 +56,7 @@ class DemoCommand(BaseCommand):
                 "Fallback": "automatic for CI, pipes, and JSON",
             },
             next_steps=[
-                "Run `10xgraph play` to see the network theme in a real workflow.",
+                "Run `10xgraph dev` to see the network theme in a real workflow.",
                 "Use `10xgraph --no-animation COMMAND` for static accessible output.",
                 "Use `10xgraph --fullscreen COMMAND` to hold a dedicated screen.",
             ],

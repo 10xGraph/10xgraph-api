@@ -55,3 +55,105 @@ def test_non_interactive_rejects_production_options_on_quick_start(tmp_path: Pat
         non_interactive=True,
     )
     assert result != 0
+
+
+def _dependencies(target: Path) -> list[str]:
+    import tomllib
+
+    return tomllib.loads((target / "pyproject.toml").read_text())["project"]["dependencies"]
+
+
+def test_production_dependencies_follow_the_answers(tmp_path: Path) -> None:
+    """JWT and Redis add their extras; the Dockerfile installs exactly this list."""
+    target = tmp_path / "secure-agent"
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+    result = command.execute(
+        path=str(target),
+        agent_name="Secure Agent",
+        template="production",
+        auth="jwt",
+        rate_limit="redis",
+        provider="openai",
+        non_interactive=True,
+    )
+    assert result == 0
+    assert _dependencies(target) == ["10xgraph[openai]", "10xgraph-api[jwt,redis]"]
+
+    import json
+
+    config = json.loads((target / "10xgraph.json").read_text())
+    assert config["rate_limit"]["redis"] == {"url": "${REDIS_URL}"}
+
+    agent_py = (target / "graph" / "agent.py").read_text()
+    assert 'model="gpt-4o-mini"' in agent_py
+    assert 'provider="openai"' in agent_py
+    assert 'OPENAI_API_KEY=""' in (target / ".env.example").read_text()
+    assert '"OPENAI_API_KEY"' in (target / "tests" / "conftest.py").read_text()
+    assert "$core_requirement" not in (target / "pyproject.toml").read_text()
+    assert "$api_requirement" not in (target / "pyproject.toml").read_text()
+
+
+def test_production_without_jwt_or_redis_installs_neither(tmp_path: Path) -> None:
+    target = tmp_path / "open-agent"
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+    result = command.execute(
+        path=str(target),
+        agent_name="Open Agent",
+        template="production",
+        auth="custom",
+        rate_limit="memory",
+        provider="anthropic",
+        non_interactive=True,
+    )
+    assert result == 0
+    assert _dependencies(target) == ["10xgraph[anthropic]", "10xgraph-api"]
+    assert 'model="claude-sonnet-5-5"' in (target / "graph" / "agent.py").read_text()
+
+
+def test_quick_start_defaults_to_google(tmp_path: Path) -> None:
+    target = tmp_path / "quick-agent"
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+    assert command.execute(path=str(target), agent_name="Quick", non_interactive=True) == 0
+    agent_py = (target / "graph" / "agent.py").read_text()
+    assert 'model="gemini-2.5-flash"' in agent_py
+    assert 'provider="google"' in agent_py
+    assert 'GOOGLE_API_KEY=""' in (target / ".env.example").read_text()
+
+
+def test_non_interactive_rejects_unknown_provider(tmp_path: Path) -> None:
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+    result = command.execute(path=str(tmp_path / "x"), provider="mistral", non_interactive=True)
+    assert result != 0
+
+
+def test_websocket_off_by_default_and_not_installed(tmp_path: Path) -> None:
+    import json
+
+    target = tmp_path / "no-ws"
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+    result = command.execute(
+        path=str(target), template="production", provider="openai", non_interactive=True
+    )
+    assert result == 0
+    assert _dependencies(target) == ["10xgraph[openai]", "10xgraph-api"]
+    config = json.loads((target / "10xgraph.json").read_text())
+    assert config["websocket"] == {"enabled": False}
+
+
+def test_websocket_on_adds_the_extra_and_enables_the_routes(tmp_path: Path) -> None:
+    import json
+
+    target = tmp_path / "ws"
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+    result = command.execute(
+        path=str(target),
+        template="production",
+        auth="jwt",
+        provider="anthropic",
+        websocket=True,
+        non_interactive=True,
+    )
+    assert result == 0
+    assert _dependencies(target) == ["10xgraph[anthropic]", "10xgraph-api[jwt,websocket]"]
+    config = json.loads((target / "10xgraph.json").read_text())
+    assert config["websocket"] == {"enabled": True}

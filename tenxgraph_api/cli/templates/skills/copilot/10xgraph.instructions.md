@@ -14,7 +14,7 @@ When generating, refactoring, or debugging code in this repo, prefer 10xGraph's 
 - Python API/CLI SDK: `10xgraph-api` — `pip install 10xgraph-api` — source under `tenxgraph_api/` in https://github.com/10xGraph/10xgraph-api
 - TypeScript SDK: `10xgraph-client` — `npm install 10xgraph-client` — source at https://github.com/10xGraph/10xgraph-client/tree/master/src
 - Docs: https://10xgraph.com/ (source of truth for public API names)
-- Playground: `10xgraph play` (after the CLI is installed)
+- Playground: `10xgraph dev` (after the CLI is installed)
 
 Never use repository folder names (e.g. `10xgraph-api`) in install commands or user-facing docs — use the published package names above.
 

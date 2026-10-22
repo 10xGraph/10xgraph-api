@@ -27,9 +27,10 @@ from tenxgraph.qa.evaluation import ConversationScenario, UserSimulatorConfig
 # ---------------------------------------------------------------------------
 # Optional: override the simulator model and settings for this file.
 # If omitted, the CLI uses UserSimulatorConfig defaults (gemini-2.5-flash).
+# The provider prefix picks the SDK ("gemini/", "openai/", "anthropic/").
 # ---------------------------------------------------------------------------
 SIMULATOR_CONFIG = UserSimulatorConfig(
-    model="gemini/gemini-2.5-flash",
+    model="$llm_sim_model",
     max_invocations=8,
     temperature=0.7,
 )

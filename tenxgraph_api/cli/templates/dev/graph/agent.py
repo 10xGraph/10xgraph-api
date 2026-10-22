@@ -37,8 +37,8 @@ def get_weather(
 
 
 react_agent = ReactAgent(
-    model="google/gemini-2.5-flash",
-    provider="google",
+    model="$llm_model",
+    provider="$llm_provider",
     system_prompt=[
         {
             "role": "system",

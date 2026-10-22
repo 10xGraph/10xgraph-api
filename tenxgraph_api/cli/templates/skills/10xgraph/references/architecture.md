@@ -33,7 +33,7 @@ Use this when deciding where a change belongs or explaining how 10xGraph package
 
 ### `10xgraph-api` — API and CLI
 
-Owns `10xgraph api`, `10xgraph play`, `10xgraph init`, `10xgraph build`, REST routers, auth/middleware, config loading, and graph service execution.
+Owns `10xgraph dev`, `10xgraph init`, `10xgraph build`, REST routers, auth/middleware, config loading, and graph service execution.
 
 ### `10xgraph-client` — TypeScript HTTP client
 
