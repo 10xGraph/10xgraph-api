@@ -200,7 +200,7 @@ class InitCommand(BaseCommand):
                     step.detail(str(config_path))
 
             agent_name = context["agent_name"]
-            provider = _PROVIDERS[context.get("provider", _DEFAULT_PROVIDER)]
+            provider_info = _PROVIDERS[context.get("provider", _DEFAULT_PROVIDER)]
             # Production lists these in pyproject.toml; quick-start has no pyproject, so it
             # needs the install step.
             install_step = (
@@ -216,13 +216,13 @@ class InitCommand(BaseCommand):
                     "Location": base_path.resolve(),
                     "Template": "production" if is_prod else "quick-start",
                     "Auth": context["auth"],
-                    "AI provider": provider["label"],
+                    "AI provider": provider_info["label"],
                     "WebSocket": "on" if context.get("websocket") else "off",
                 },
                 next_steps=[
                     f"cd {base_path}",
                     *install_step,
-                    f"Copy .env.example to .env and set {provider['api_key_env']}.",
+                    f"Copy .env.example to .env and set {provider_info['api_key_env']}.",
                     "10xgraph dev",
                 ],
             )
