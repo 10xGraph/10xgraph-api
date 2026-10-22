@@ -22,6 +22,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-22
+
+One server command, a guided `10xgraph init`, leaner production images and Python 3.14 and
+3.15 support. This release has a breaking change: read the **Breaking** list before upgrading.
+
 ### Breaking
 
 - **`10xgraph api` and `10xgraph play` are removed; `10xgraph dev` is the only server command.**
