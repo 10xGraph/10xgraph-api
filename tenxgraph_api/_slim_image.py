@@ -1,17 +1,38 @@
-"""Remove CLI-only packages from a production image. Run by the generated Dockerfile.
+"""Drop the CLI's own libraries from a production Docker image.
 
-The server never imports the CLI libraries (typer, rich, questionary and what they pull in),
-so the image does not need them. A package is removed only when nothing else installed still
-requires it, so a project dependency that uses rich (for example) keeps it and everything it
-needs. Standard library only: it runs in the Docker builder stage.
+Why this exists
+    ``10xgraph-api`` ships the server and the ``10xgraph`` CLI in one package, so installing it
+    also installs the CLI's libraries: typer, rich, questionary and what only they pull in
+    (pygments, markdown-it-py, mdurl, prompt-toolkit, wcwidth, shellingham). The server never
+    imports any of them. In an image they are about 25 MB (bytecode included) that never runs,
+    plus extra packages for vulnerability scanners to flag.
 
-    python -I -m tenxgraph_api._slim_image
+Why not a plain ``pip uninstall`` line in the Dockerfile
+    The user's own project may depend on one of these packages, for example a library that
+    prints with rich. A fixed uninstall list would delete it, and the app would fail at startup
+    with ``ModuleNotFoundError``. This module reads every installed package's requirements and
+    removes a CLI library only when nothing else still needs it, directly or through another
+    package.
+
+How it runs
+    Only inside Docker. The Dockerfile from ``10xgraph build`` (``generate_dockerfile_content``
+    in ``cli/templates/defaults.py``) runs it once in the builders tage, before pip itself is
+    removed, and skips it when the installed 10xgraph-api is older than this module. To run it
+    by hand::
+
+        python -I -m tenxgraph_api._slim_image
+
+    The server and the CLI never import it. It uses only the standard library, so it never
+    imports a package it is about to remove.
 """
 
 from __future__ import annotations
 
 import re
-import subprocess
+
+# Used only to run pip, which has no supported Python API (pip's docs say to call it as a
+# subprocess). See the comment at the call in main().
+import subprocess  # nosec B404
 import sys
 import sysconfig
 from importlib import metadata
@@ -19,7 +40,9 @@ from pathlib import Path
 
 
 CLI_PACKAGE = "10xgraph-api"
-# The CLI's own dependencies and everything only they pull in.
+# The CLI's own dependencies (typer, rich, questionary in pyproject.toml) and everything only
+# they pull in. Keep it in sync when the CLI gains or drops a dependency. click is left out on
+# purpose: uvicorn needs it, so the server does too.
 CLI_ONLY = frozenset(
     {
         "typer",
@@ -77,8 +100,12 @@ def main() -> int:
         sys.stdout.write("slim image: no CLI-only packages to remove\n")
         return 0
 
-    # Fixed package names from CLI_ONLY, never user input.
-    subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", "-q", *remove])  # noqa: S603
+    # Safe to run: the program is this interpreter's own pip (sys.executable, no shell) and the
+    # arguments are names from CLI_ONLY, never user input. pip must run as a subprocess because
+    # it has no supported in-process API.
+    subprocess.check_call(  # noqa: S603  # nosec B603
+        [sys.executable, "-m", "pip", "uninstall", "-y", "-q", *remove]
+    )
     sys.stdout.write(f"slim image: removed {', '.join(remove)}\n")
 
     if "typer" in remove:
