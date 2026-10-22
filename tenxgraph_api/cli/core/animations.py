@@ -82,9 +82,7 @@ _BLOCK_ROWS = 5
 # Each command reveals its own pipeline during the intro, so the animation
 # doubles as a preview of what the command is about to do.
 _SIGNATURES: dict[str, tuple[str, ...]] = {
-    "api": ("config", "runtime", "server", "ready"),
     "dev": ("config", "runtime", "server", "playground"),
-    "play": ("config", "runtime", "server", "playground"),
     "init": ("template", "graph", "config", "project"),
     "build": ("source", "deps", "image", "ship"),
     "test": ("collect", "run", "assert", "report"),
@@ -95,9 +93,7 @@ _SIGNATURES: dict[str, tuple[str, ...]] = {
 _DEFAULT_SIGNATURE = ("boot", "load", "ready")
 
 _TAGLINES: dict[str, str] = {
-    "api": "Serving your agent over REST and WebSocket.",
     "dev": "Local agent runtime with live reload.",
-    "play": "Local agent runtime, wired to the playground.",
     "init": "Scaffolding a production-shaped agent project.",
     "build": "Packaging your agent for deployment.",
     "test": "Exercising your agent's test suite.",

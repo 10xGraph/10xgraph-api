@@ -89,11 +89,17 @@ Optional extras; install only what you configure:
 pip install "10xgraph-api[redis]"   # Redis rate-limit / cache backend
 pip install "10xgraph-api[jwt]"     # JWT authentication
 pip install "10xgraph-api[media]"   # Document text extraction (multimodal)
+pip install "10xgraph-api[images]"  # Image resize / EXIF / format conversion (Pillow)
+pip install "10xgraph-api[ag-ui]"   # AG-UI endpoint
+pip install "10xgraph-api[websocket]"  # WebSocket streaming + realtime audio
 pip install "10xgraph-api[otel]"    # OpenTelemetry tracing
 pip install "10xgraph-api[snowflakekit]"  # Snowflake ID generation
+pip install "10xgraph-api[sentry]"  # Sentry error reporting
+pip install "10xgraph-api[firebase]"  # Firebase Admin SDK
+pip install "10xgraph-api[gcloud]"  # Google Cloud Logging
 ```
 
-Requires Python 3.12 or newer. Installs the core `10xgraph` framework as a dependency.
+Requires Python 3.12 or newer. Tested on 3.12, 3.13, 3.14 and 3.15. Installs the core `10xgraph` framework as a dependency.
 
 ---
 
@@ -113,9 +119,6 @@ Requires Python 3.12 or newer. Installs the core `10xgraph` framework as a depen
 10xgraph build --docker-compose
 ```
 
-`10xgraph api` (server only) and `10xgraph play` (server + playground) remain
-available; `dev` is the goal-oriented wrapper around them.
-
 ---
 
 ## CLI commands
@@ -133,8 +136,16 @@ Initialize a new project with configuration and a sample graph.
 10xgraph init --path ./my-app --name MyAgent --template quick-start \
   --non-interactive            # reproducible CI/agent workflow
 10xgraph init --path ./my-app --template production --auth jwt \
-  --rate-limit redis --yes --dry-run
+  --rate-limit redis --provider openai --yes --dry-run
 ```
+
+`init` asks which AI provider to use (`--provider google|openai|anthropic`, default `google`)
+and writes the matching model and API key variable. It also asks whether to enable WebSocket
+streaming and realtime audio (`--websocket`, default off); off leaves `/v1/graph/ws` and
+`/v1/graph/live` unmounted and installs no WebSocket library. A production project's `pyproject.toml`
+lists only what your answers need, for example `10xgraph[openai]` and
+`10xgraph-api[jwt,redis]`, and `10xgraph build` installs exactly that list, so no separate
+`requirements.txt` is needed.
 
 ### `10xgraph dev`
 
@@ -147,16 +158,18 @@ Start the development API server and open the hosted playground when it is ready
 10xgraph dev --no-open --no-reload        # API only, without auto-reload
 ```
 
-`10xgraph api` and `10xgraph play` remain available as compatibility commands.
+`dev` is the only server command: the old `api` and `play` commands were removed
+(use `10xgraph dev --no-open` and `10xgraph dev`). It runs Uvicorn with reload for local
+work; production runs Gunicorn in the image from `10xgraph build`.
 
 ### Adaptive and structured output
 
 ```bash
-10xgraph play                         # branded intro, then output in your scrollback
+10xgraph dev                          # branded intro, then output in your scrollback
 10xgraph demo                         # preview every animation theme safely
 10xgraph demo --style build           # one theme: typing, network, init, build, or eval
-10xgraph --fullscreen play            # opt-in pinned header/footer surface
-10xgraph --no-animation play          # accessible/static workflow
+10xgraph --fullscreen dev             # opt-in pinned header/footer surface
+10xgraph --no-animation dev           # accessible/static workflow
 10xgraph --format plain --no-color audit
 10xgraph --format jsonl eval --parallel
 10xgraph --quiet build

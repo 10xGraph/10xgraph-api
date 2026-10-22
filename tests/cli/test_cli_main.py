@@ -10,18 +10,14 @@ from tenxgraph_api.cli.exceptions import CLIError
 runner = CliRunner()
 
 
-def test_play_command_delegates_to_api_command(monkeypatch):
+def test_dev_command_opens_the_playground_by_default(monkeypatch):
     called = {}
-
     monkeypatch.setattr(main_mod, "setup_cli_logging", lambda **kwargs: None)
+    monkeypatch.setattr(
+        main_mod.APICommand, "execute", lambda self, **kwargs: called.update(kwargs) or 0
+    )
 
-    def fake_execute(self, **kwargs):
-        called.update(kwargs)
-        return 0
-
-    monkeypatch.setattr(main_mod.APICommand, "execute", fake_execute)
-
-    result = runner.invoke(main_mod.app, ["play", "--port", "9001", "--no-reload"])
+    result = runner.invoke(main_mod.app, ["dev", "--port", "9001", "--no-reload"])
 
     assert result.exit_code == 0
     assert called["config"] == "10xgraph.json"
@@ -31,7 +27,7 @@ def test_play_command_delegates_to_api_command(monkeypatch):
     assert called["open_playground"] is True
 
 
-def test_api_command(monkeypatch):
+def test_dev_command_no_open_serves_only(monkeypatch):
     called = {}
     monkeypatch.setattr(main_mod, "setup_cli_logging", lambda **kwargs: None)
     monkeypatch.setattr(
@@ -39,13 +35,20 @@ def test_api_command(monkeypatch):
     )
     result = runner.invoke(
         main_mod.app,
-        ["api", "-c", "custom.json", "-H", "1.2.3.4", "-p", "8080", "--no-reload", "--verbose"],
+        ["dev", "-c", "custom.json", "-H", "1.2.3.4", "-p", "8080", "--no-reload", "--no-open"],
     )
     assert result.exit_code == 0
     assert called["config"] == "custom.json"
     assert called["host"] == "1.2.3.4"
     assert called["port"] == 8080
     assert called["reload"] is False
+    assert called["open_playground"] is False
+
+
+@pytest.mark.parametrize("removed", ["api", "play"])
+def test_api_and_play_commands_are_removed(removed):
+    result = runner.invoke(main_mod.app, [removed])
+    assert result.exit_code != 0
 
 
 def test_version_command(monkeypatch):

@@ -1,6 +1,6 @@
 """Settings see the ``env`` file from 10xgraph.json under plain gunicorn (L10).
 
-``10xgraph api`` loads that file before importing the app, but the generated Dockerfile
+``10xgraph dev`` loads that file before importing the app, but the generated Dockerfile
 runs ``gunicorn tenxgraph_api.src.app.main:app`` directly. Settings used to be built (and
 cached) before GraphConfig loaded the file, so its values were silently ignored.
 """

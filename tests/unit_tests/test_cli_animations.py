@@ -43,7 +43,7 @@ def plain_tail(rendered: str) -> str:
 
 def test_intro_releases_every_alternate_screen_it_claims() -> None:
     console, stream = terminal()
-    anim.render_command_intro(console, command="play", subtitle="Serve it", unicode=True)
+    anim.render_command_intro(console, command="dev", subtitle="Serve it", unicode=True)
 
     rendered = stream.getvalue()
     assert rendered.count(ALT_SCREEN_ON) == 1
@@ -54,10 +54,10 @@ def test_intro_releases_every_alternate_screen_it_claims() -> None:
 def test_intro_leaves_a_durable_header_in_the_normal_buffer() -> None:
     """The bug this guards: an alternate screen discards whatever it held."""
     console, stream = terminal()
-    anim.render_command_intro(console, command="play", subtitle="Serve it", unicode=True)
+    anim.render_command_intro(console, command="dev", subtitle="Serve it", unicode=True)
 
     survives = plain_tail(stream.getvalue())
-    assert "play" in survives
+    assert "dev" in survives
     assert "Serve it" in survives
     assert UNICODE_GLYPHS.rule in survives
 
@@ -136,11 +136,11 @@ def test_wordmark_uses_the_compact_form_without_block_glyphs() -> None:
 
 def test_signature_pipeline_fills_in_step_with_progress() -> None:
     glyphs = UNICODE_GLYPHS
-    empty = anim._signature_nodes("play", 0.0, glyphs).plain
-    done = anim._signature_nodes("play", 1.0, glyphs).plain
+    empty = anim._signature_nodes("dev", 0.0, glyphs).plain
+    done = anim._signature_nodes("dev", 1.0, glyphs).plain
 
     assert empty.count(glyphs.node) == 0
-    assert done.count(glyphs.node) == len(anim._SIGNATURES["play"])
+    assert done.count(glyphs.node) == len(anim._SIGNATURES["dev"])
 
 
 def test_unknown_commands_get_the_default_signature_and_tagline() -> None:
@@ -166,7 +166,7 @@ def test_every_cinematic_frame_renders_without_error() -> None:
         console.print(
             anim._cinematic_frame(
                 console,
-                command="play",
+                command="dev",
                 tagline="Local agent runtime.",
                 glyphs=UNICODE_GLYPHS,
                 progress=index / 10,
@@ -189,7 +189,7 @@ def test_intro_frame_shows_versions_and_the_skip_hint() -> None:
     console, _stream = terminal()
     frame = anim._cinematic_frame(
         console,
-        command="api",
+        command="dev",
         tagline="Serving",
         glyphs=UNICODE_GLYPHS,
         progress=1.0,
@@ -212,7 +212,7 @@ def test_keypress_ends_the_intro_early(monkeypatch) -> None:
     monkeypatch.setattr(anim, "_skip_on_keypress", pressed)
     console, _stream = terminal()
     started = time.monotonic()
-    anim._play_cinematic(console, command="api", subtitle=None, glyphs=UNICODE_GLYPHS)
+    anim._play_cinematic(console, command="dev", subtitle=None, glyphs=UNICODE_GLYPHS)
     assert time.monotonic() - started < anim.INTRO_DURATION_SECONDS / 2
 
 

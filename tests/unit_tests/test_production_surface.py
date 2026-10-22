@@ -117,6 +117,8 @@ def test_dockerfile_runtime_stage_ships_only_the_venv_and_app():
     assert not any("curl" in line for line in commands)
     assert not any("chown -R" in line for line in commands)
     assert "pip install" not in runtime
+    # pip is removed from the copied venv; the server never runs it
+    assert "RUN pip uninstall -y pip" in builder
 
 
 def test_requirements_in_subfolder_keep_their_path(tmp_path):

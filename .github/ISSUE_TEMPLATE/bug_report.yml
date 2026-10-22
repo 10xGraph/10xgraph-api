@@ -36,7 +36,7 @@ body:
       description: A minimal sequence someone else can run. Include the exact commands.
       placeholder: |
         1. 10xgraph init
-        2. 10xgraph api
+        2. 10xgraph dev
         3. curl -X POST localhost:8000/v1/graph/invoke ...
     validations:
       required: true

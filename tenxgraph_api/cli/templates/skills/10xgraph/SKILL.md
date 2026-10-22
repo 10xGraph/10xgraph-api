@@ -4,7 +4,7 @@ description: >-
   Expert guidance for building, debugging, and extending applications with 10xGraph
   (10xgraph). Use when code imports from tenxgraph or the legacy agentflow name (e.g. `from tenxgraph import`,
   `StateGraph`, `Agent`, `ToolNode`, `AgentState`); when the user references `10xgraph.json`
-  or CLI commands (`10xgraph init`, `10xgraph api`, `10xgraph play`, `10xgraph build`,
+  or CLI commands (`10xgraph init`, `10xgraph dev`, `10xgraph build`,
   `10xgraph skills`); or when the user is building graph-based multi-agent workflows, tools,
   memory, checkpointing, or streaming with this framework. Skip generic Python or multi-agent
   questions that do not reference 10xGraph, and other frameworks (LangGraph, CrewAI, AutoGen)
@@ -25,7 +25,7 @@ Treat https://10xgraph.com/ as the first source of truth for public package name
    - PyPI API/CLI SDK: `10xgraph-api` (`pip install 10xgraph-api`), source at https://github.com/10xGraph/10xgraph-api/tree/main/tenxgraph_api
    - npm TypeScript SDK: `10xgraph-client` (`npm install 10xgraph-client`), source at https://github.com/10xGraph/10xgraph-client/tree/master/src
    - Main docs: https://10xgraph.com/
-   - Playground/UI: `10xgraph play` command after installed cli
+   - Playground/UI: `10xgraph dev` command after installed cli
 
 2. Read the matching reference file before changing behavior. Paths are relative to this skill's directory:
 

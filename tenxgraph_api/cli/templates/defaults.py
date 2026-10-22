@@ -392,7 +392,7 @@ version = "0.1.0"
 description = "10xGraph API application"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 authors = [
         {name = "Your Name", email = "you@example.com"},
 ]
@@ -517,6 +517,15 @@ _STRIP_CLI_ASSETS = (
     f"[shutil.rmtree(cli / d, ignore_errors=True) for d in {CLI_ONLY_ASSET_DIRS!r} if cli]"
 )
 
+# Removes the CLI-only libraries (typer, rich, questionary, ...) unless something else needs
+# them; see ``tenxgraph_api/_slim_image.py``. Skipped when the installed 10xgraph-api is older
+# than that module, so a pinned older version still builds.
+_SLIM_IMAGE = (
+    "import importlib.util, runpy; "
+    "importlib.util.find_spec('tenxgraph_api._slim_image') "
+    "and runpy.run_module('tenxgraph_api._slim_image', run_name='__main__')"
+)
+
 
 def generate_dockerfile_content(
     python_version: str,
@@ -602,6 +611,14 @@ def generate_dockerfile_content(
             "# agent skill, and the local config editor (HTML/JS). Only the server code and",
             "# its dependencies stay in the image.",
             f'RUN python -I -c "{_STRIP_CLI_ASSETS}"',
+            "",
+            "# Remove the CLI's own libraries (typer, rich, questionary and what only they pull",
+            "# in). A package that one of your dependencies still needs is kept.",
+            f'RUN python -I -c "{_SLIM_IMAGE}"',
+            "",
+            "# The server never runs pip, so drop it from the virtualenv the runtime copies",
+            "# (about 13 MB). The base image keeps its own pip for debugging.",
+            "RUN pip uninstall -y pip",
             "",
             "# ---- Stage 2: runtime image ----",
             f"FROM python:{python_version}-slim",

@@ -299,11 +299,12 @@ DEFAULT_REALTIME_CLIENT_OVERRIDES: tuple[str, ...] = ("voice", "modalities", "va
 
 @dataclass
 class WebSocketConfig:
-    """WebSocket connection limits parsed from 10xgraph.json.
+    """WebSocket settings and connection limits parsed from 10xgraph.json.
 
     Example::
 
         "websocket": {
+            "enabled": true,
             "max_connections": 1000,
             "max_connections_per_user": 10,
             "realtime_models": ["gemini-2.5-flash-live"],
@@ -329,9 +330,15 @@ class WebSocketConfig:
     presentation options (voice, modalities, vad) only. ``system_prompt`` replaces the agent's
     instructions, so a client could rewrite its rules; list it only when every caller is
     trusted to do that. ``model`` and ``tools_tags`` have their own rules and are not listed.
+
+    ``enabled`` mounts ``/v1/graph/ws`` and ``/v1/graph/live``. ``false`` leaves both out, so the
+    server needs no WebSocket library. Unset (``None``) keeps them mounted, as before this key
+    existed. Serving them needs ``websockets`` or ``wsproto`` (``10xgraph-api[websocket]``):
+    ``true`` without one refuses to boot, unset only logs a warning.
     """
 
     max_connections: int | None
+    enabled: bool | None = None
     max_connections_per_user: int | None = DEFAULT_WS_MAX_CONNECTIONS_PER_USER
     realtime_models: tuple[str, ...] = ()
     realtime_client_overrides: tuple[str, ...] = DEFAULT_REALTIME_CLIENT_OVERRIDES
@@ -340,8 +347,10 @@ class WebSocketConfig:
     def from_dict(cls, data: dict) -> "WebSocketConfig":
         if not isinstance(data, dict):
             raise ValueError("websocket must be an object")
+        enabled = data.get("enabled")
         return cls(
             max_connections=_connection_limit(data, "max_connections", DEFAULT_WS_MAX_CONNECTIONS),
+            enabled=None if enabled is None else _parse_bool(enabled, field="websocket.enabled"),
             max_connections_per_user=_connection_limit(
                 data, "max_connections_per_user", DEFAULT_WS_MAX_CONNECTIONS_PER_USER
             ),

@@ -6,7 +6,7 @@ from typing import Any
 
 def _is_async_callable(func: Callable[..., Any]) -> bool:
     """Detect if a callable is a coroutine function (async def)."""
-    return asyncio.iscoroutinefunction(func)
+    return inspect.iscoroutinefunction(func)
 
 
 async def call_sync_or_async(func: Callable[..., Any], *args, **kwargs) -> Any:

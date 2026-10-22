@@ -218,6 +218,20 @@ def test_redis_backend_requires_url_when_no_injected_client():
         build_backend(_config(backend="redis"), container=InjectQ())
 
 
+def test_redis_backend_from_url_builds_and_binds_the_client():
+    """A Redis URL with no injected client must build the backend, not crash."""
+    from redis.asyncio import Redis
+
+    container = InjectQ()
+    backend = build_backend(
+        _config(backend="redis", redis={"url": "redis://localhost:6379/0"}), container=container
+    )
+
+    assert isinstance(backend, RedisRateLimitBackend)
+    assert container.try_get("redis") is backend._redis
+    assert container.try_get(Redis) is backend._redis
+
+
 def test_redis_backend_from_url_requires_optional_extra(monkeypatch):
     monkeypatch.setattr(
         "tenxgraph_api.src.app.core.middleware.rate_limit.redis._REDIS_AVAILABLE",
