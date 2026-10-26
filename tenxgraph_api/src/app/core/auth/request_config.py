@@ -12,6 +12,11 @@ A small set of keys is owned by the server instead, and a client must never set 
 - ``remote_tools`` -- per-run client tool schemas the model may call; only protocol adapters
   whose clients legitimately bring tools (AG-UI) set it, from the protocol's own tool list
 - ``_*``      -- framework internals (``_skip_interrupt_at``, ``_node_name``, ...)
+- ``file_tool_root`` / ``workspace_root`` -- the directory the core prebuilt file tools may
+  read and write; a client must not be able to point them at the server's filesystem
+- ``tool_timeout`` / ``node_timeout`` -- core time limits, which ``0`` or ``None`` turns off
+- ``max_parallel_tool_calls`` -- core's cap on tool calls per model turn; the operator sets it
+  with ``runs.max_parallel_tool_calls``
 
 Every route and service that forwards client config to the graph, checkpointer or store must
 pass it through :func:`client_config` first, then set the server-owned keys itself.
@@ -25,6 +30,14 @@ check approved, and both sides normalise it with :func:`normalize_thread_id`.
 Tool calls are server-controlled too: only the model may request a tool. Client messages
 are checked with :func:`client_tool_call_error`. A client may send a tool *result* only as the
 answer to a remote tool call that is still waiting for one (:func:`unanswered_tool_calls`).
+
+Client messages are user messages. :func:`client_message_error` refuses the ``assistant`` and
+``system`` roles (a forged assistant turn persists and the model reads it as its own words) and
+lets a ``tool`` message through only when it carries nothing but tool results. The built-in state
+fields ``context_summary`` and ``execution_meta`` are never client-writable
+(:func:`reject_builtin_state_keys`). The server also generates every message id itself
+(:func:`with_fresh_message_ids`); the AG-UI adapter alone keeps client ids, since its converter
+uses them to skip messages the thread already stores.
 """
 
 from __future__ import annotations
@@ -32,7 +45,21 @@ from __future__ import annotations
 from typing import Any
 
 
-RESERVED_CONFIG_KEYS: frozenset[str] = frozenset({"authz", "user", "user_id", "remote_tools"})
+RESERVED_CONFIG_KEYS: frozenset[str] = frozenset(
+    {
+        "authz",
+        "user",
+        "user_id",
+        "remote_tools",
+        # Read by core: the prebuilt file tools' root, the tool and node time limits and the
+        # parallel tool call cap
+        "file_tool_root",
+        "workspace_root",
+        "tool_timeout",
+        "node_timeout",
+        "max_parallel_tool_calls",
+    }
+)
 INTERNAL_KEY_PREFIX = "_"
 
 
@@ -73,6 +100,24 @@ def client_error_detail(exc: Exception) -> str:
     if get_settings().MODE == "production":
         return "Invalid input provided."
     return str(exc)
+
+
+# State fields only developer code (nodes, context managers) writes. ``context`` is not listed:
+# core already ignores it in caller state, and ``PUT state`` appends to it (see the message rules).
+BUILTIN_STATE_KEYS: frozenset[str] = frozenset({"context_summary", "execution_meta"})
+
+
+def reject_builtin_state_keys(state: Any, field: str) -> None:
+    """Raise ``ClientInputError`` when client ``state`` sets a built-in state field.
+
+    ``context_summary`` is sent to the model as its own earlier words and ``execution_meta``
+    drives the run, so neither may come from a client.
+    """
+    if not isinstance(state, dict):
+        return
+    blocked = sorted(key for key in state if key in BUILTIN_STATE_KEYS)
+    if blocked:
+        raise ClientInputError(f"{field} keys cannot be set by clients: {', '.join(blocked)}")
 
 
 # Config keys the API itself reads; always accepted when ``runs.config_keys`` is set.
@@ -126,6 +171,51 @@ def client_tool_call_error(messages: Any) -> str | None:
         if carries_call:
             return f"messages[{index}] carries a tool call; only the model may request tools"
     return None
+
+
+def client_message_error(messages: Any, *, user_only: bool = True) -> str | None:
+    """Describe the first client message the API must refuse, or ``None``.
+
+    Always refuses tool calls (:func:`client_tool_call_error`). With ``user_only`` (every client
+    route except the admin import) it also refuses the ``assistant`` and ``system`` roles, and a
+    ``tool`` message that carries anything but tool results; whether a result answers a pending
+    call is checked separately (``GraphService._check_tool_results``).
+    """
+    if error := client_tool_call_error(messages):
+        return error
+    if not user_only or not isinstance(messages, list | tuple):
+        return None
+    for index, message in enumerate(messages):
+        role = _field(message, "role")
+        if role in ("assistant", "system"):
+            return f"messages[{index}] has role '{role}'; clients may only send user messages"
+        if role == "tool":
+            blocks = _field(message, "content") or []
+            if not blocks or any(_field(block, "type") != "tool_result" for block in blocks):
+                return f"messages[{index}] has role 'tool' but is not a tool result"
+    return None
+
+
+def with_fresh_message_ids(messages: Any) -> Any:
+    """Copy ``messages`` (``Message`` objects or dicts) with a newly generated ``message_id``.
+
+    Ids are predictable and some checkpointers key messages on the id, so a client must not
+    choose them. The id comes from ``Message``'s own default factory.
+    """
+    if not isinstance(messages, list | tuple):
+        return messages
+    from tenxgraph.core.state import Message
+
+    make_id: Any = Message.model_fields["message_id"].default_factory
+    fresh: list[Any] = []
+    for message in messages:
+        if isinstance(message, dict):
+            fresh.append({**message, "message_id": make_id()})
+        elif hasattr(message, "model_copy"):
+            fresh.append(message.model_copy(update={"message_id": make_id()}))
+        else:
+            fresh.append(message)
+    return fresh
 
 
 def tool_result_ids(messages: Any) -> list[str]:

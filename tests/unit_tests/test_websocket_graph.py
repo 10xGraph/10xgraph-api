@@ -72,7 +72,9 @@ _FRESH_REQUEST = {
 
 _RESUME_REQUEST = {
     "invoke_type": "resume",
-    "tool_result": [{"role": "tool", "content": [{"type": "text", "text": "42"}]}],
+    "tool_result": [
+        {"role": "tool", "content": [{"type": "tool_result", "call_id": "c1", "output": "42"}]}
+    ],
     "config": {"thread_id": "thread-abc"},
 }
 
@@ -201,7 +203,12 @@ class TestWebSocketGraphEndpoint:
     async def test_resume_without_thread_id_sends_error(self):
         bad_resume = {
             "invoke_type": "resume",
-            "tool_result": [{"role": "tool", "content": [{"type": "text", "text": "x"}]}],
+            "tool_result": [
+                {
+                    "role": "tool",
+                    "content": [{"type": "tool_result", "call_id": "c1", "output": "x"}],
+                }
+            ],
             # config omitted → no thread_id
         }
         ws = _make_websocket([bad_resume, WebSocketDisconnect()])

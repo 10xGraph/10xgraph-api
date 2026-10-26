@@ -411,7 +411,8 @@ class RunsConfig:
             "config_keys": ["locale", "tenant_hint"],
             "state_keys": ["preferences"],
             "max_concurrent_per_user": 10,
-            "timeout": 600
+            "timeout": 600,
+            "max_parallel_tool_calls": 10
         }
 
     ``thread_ids`` decides who may name a new thread. ``"client"`` (the default) lets a
@@ -434,6 +435,10 @@ class RunsConfig:
     are not capped. ``timeout`` is the longest a single graph run may take, in seconds; a run
     that passes it is cancelled (invoke answers 504; a stream, ``/v1/graph/ws`` run or AG-UI
     run ends with an error). Realtime sessions are not limited. Default ``null``: no limit.
+
+    ``max_parallel_tool_calls`` caps the tool calls one model turn may run at once. The API
+    puts it into every run's config (clients cannot set it). Default ``null``: core decides,
+    from the ``TENXGRAPH_MAX_PARALLEL_TOOL_CALLS`` environment variable, else 10.
     """
 
     thread_ids: str = "client"
@@ -441,6 +446,7 @@ class RunsConfig:
     state_keys: frozenset[str] | None = None
     max_concurrent_per_user: int | None = DEFAULT_MAX_CONCURRENT_RUNS_PER_USER
     timeout: float | None = None
+    max_parallel_tool_calls: int | None = None
 
     @property
     def server_thread_ids(self) -> bool:
@@ -459,6 +465,7 @@ class RunsConfig:
             state_keys=_key_allow_list(data, "state_keys"),
             max_concurrent_per_user=_runs_limit(data),
             timeout=_runs_timeout(data),
+            max_parallel_tool_calls=_runs_max_parallel_tool_calls(data),
         )
 
 
@@ -490,6 +497,15 @@ def _runs_timeout(data: dict) -> float | None:
     if isinstance(raw, bool) or not isinstance(raw, int | float) or raw <= 0:
         raise ValueError("runs.timeout must be a positive number of seconds or null")
     return float(raw)
+
+
+def _runs_max_parallel_tool_calls(data: dict) -> int | None:
+    raw = data.get("max_parallel_tool_calls")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise ValueError("runs.max_parallel_tool_calls must be a positive integer or null")
+    return raw
 
 
 @dataclass

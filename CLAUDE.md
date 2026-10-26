@@ -96,7 +96,7 @@ Parsed by `tenxgraph_api/src/app/core/config/graph_config.py`. Supported keys:
 | `rate_limit` | Object (see below) |
 | `ag_ui` | `{"enabled": bool}`, default off. Mounts `POST /v1/ag-ui` (AG-UI protocol, for CopilotKit and other AG-UI clients). Needs the `ag-ui` extra |
 | `websocket` | `enabled` (`false` leaves out `/v1/graph/ws` and `/v1/graph/live`; `true` without `websockets`/`wsproto` refuses to boot; unset keeps them and warns if no library; `routers/setup_router.py::_graph_router`), `max_connections` (1000), `max_connections_per_user` (10), `realtime_models` (models a `/v1/graph/live` client may pick), `realtime_client_overrides` (init options a client may set; default `voice`, `modalities`, `vad`; add `system_prompt` only for trusted callers) |
-| `runs` | `RunsConfig`: `thread_ids` (`client` default, `server` = only existing ids may be named, enforced by the ownership/rbac backends), `config_keys` / `state_keys` (allow-lists for request config and `initial_state`/PUT state; 422 on other keys; `thread_id`, `run_id` always allowed), `max_concurrent_per_user` (HTTP invoke/stream/AG-UI runs in flight, default 10, 429 over it; `routers/graph/run_limits.py`), `timeout` (seconds; invoke 504, streams end with an error chunk) |
+| `runs` | `RunsConfig`: `thread_ids` (`client` default, `server` = only existing ids may be named, enforced by the ownership/rbac backends), `config_keys` / `state_keys` (allow-lists for request config and `initial_state`/PUT state; 422 on other keys; `thread_id`, `run_id` always allowed), `max_concurrent_per_user` (HTTP invoke/stream/AG-UI runs in flight, default 10, 429 over it; `routers/graph/run_limits.py`), `timeout` (seconds; invoke 504, streams end with an error chunk), `max_parallel_tool_calls` (positive int, default unset = core's default 10 or env `TENXGRAPH_MAX_PARALLEL_TOOL_CALLS`; set into every run's config in `_prepare_input`, reserved from clients) |
 | `token_revocation` | `"redis"` / `"memory"` / `"module:attr"` -> `core/auth/revocation.py::TokenRevocationBackend`, checked by `RequirePermission` (401) and before every WS run; backend errors fail closed (503) |
 | `graph_introspection` | `"open"` or `"scoped"` (default scoped in production): `GET /v1/graph`, `/v1/graph/tools`, `/v1/graph:StateSchema` need an explicit `graph:read` scope (`RequirePermission(..., introspection=True)`) |
 
@@ -125,7 +125,7 @@ and for redis backend a `redis` sub-object `{ "url", "prefix" }` (or shorthand U
 - **Ownership fails closed.** No checkpointer, or one whose `aget_thread_owner` raises
   `NotImplementedError`, denies thread requests; with auth on the loader refuses to boot in that
   setup (`authorization.assert_ownership_supported`). A thread with no owner allows only
-  `CREATE_ACTIONS` (`graph:invoke`, `graph:stream`, `checkpointer:write`); checkpointer state and
+  `CREATE_ACTIONS` (`graph:invoke`, `graph:stream`, `checkpointer:write`, `checkpointer:import`); checkpointer state and
   message writes claim the thread first (`CheckpointerService._claim_thread`). Every saved
   thread carries its owner via `request_config.owned_thread_info` (the in-memory and SQLite
   checkpointers read the owner from `ThreadInfo.user_id`).
@@ -154,8 +154,21 @@ and for redis backend a `redis` sub-object `{ "url", "prefix" }` (or shorthand U
   `POST /v1/graph/stop`, `POST /v1/graph/fix`, `GET /v1/graph`,
   `WS /v1/graph/ws`.
 - **Checkpointer / threads**: `GET/POST /v1/threads`, `GET/DELETE /v1/threads/{thread_id}`,
-  `GET /v1/threads/{thread_id}/state`, `GET /v1/threads/{thread_id}/messages`,
-  `... /messages/{message_id}`.
+  `GET/PUT/DELETE /v1/threads/{thread_id}/state`, `GET /v1/threads/{thread_id}/messages`,
+  `GET/DELETE ... /messages/{message_id}`. `POST /v1/threads/{thread_id}/messages` (import
+  history, any role) is admin-only: `RequirePermission("checkpointer", "import",
+  explicit_scope=True)`, so the caller must hold `checkpointer:import` explicitly (no scopes
+  means 403; `"*"` roles get it, `authorization.CHECKPOINTER_ADMIN_SCOPES`). Tool calls, media
+  ownership and size limits still apply. `PUT ... /messages/{message_id}` sets
+  `metadata["feedback"]` only (body `{"feedback": {...}}`, 8 KB, depth 10, `checkpointer:write`;
+  calls `aupdate_message_metadata`, 501 on cores older than 0.10.4, 404 for a missing message).
+- **Client input rules** (`core/auth/request_config.py`): `context_summary` and `execution_meta`
+  are never client-writable (`reject_builtin_state_keys`, 422); client messages are user-only
+  (`client_message_error`: no `assistant`/`system`; a `tool` message only as tool results, which
+  must answer a pending remote call, `GraphService._check_tool_results`, also for PUT state
+  `context`); the server replaces client `message_id`s (`with_fresh_message_ids`, in the schema
+  validators; AG-UI validates with `context={KEEP_MESSAGE_IDS: True}` to keep its ids);
+  `current_node` must be a real node and state values must match the state model's types (422).
 - **Store (memory)**: `POST /v1/store/memories`, `/v1/store/memories/list`,
   `/v1/store/memories/forget`, `/v1/store/memories/{memory_id}`, `POST /v1/store/search`.
 - **Media / files** (`tags=["Files"]`): `POST /v1/files/upload`, `GET /v1/files/{file_id}`,

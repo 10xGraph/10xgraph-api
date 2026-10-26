@@ -199,6 +199,7 @@ class RequirePermission:
         extract_resource_id: Callable[[HTTPConnection], str | None] | None = None,
         *,
         introspection: bool = False,
+        explicit_scope: bool = False,
     ):
         """
         Initialize the permission requirement.
@@ -210,11 +211,14 @@ class RequirePermission:
             introspection: The route exposes the graph's internals (structure, tool schemas,
                 state schema). Under ``graph_introspection: "scoped"`` the caller must hold
                 the scope explicitly; an identity that declares no scopes is refused.
+            explicit_scope: Admin-only route. The caller must hold the scope explicitly, always:
+                an identity that declares no scopes (normally unrestricted) is refused.
         """
         self.resource = resource
         self.action = action
         self.extract_resource_id_fn = extract_resource_id
         self.introspection = introspection
+        self.explicit_scope = explicit_scope
 
     async def __call__(  # noqa: PLR0912
         self,
@@ -301,10 +305,9 @@ class RequirePermission:
         if granted_scopes is not None and required_scope not in granted_scopes:
             logger.warning(f"Missing scope '{required_scope}' for user {user.get('user_id')}")
             _reject(connection, 403, f"Missing required scope: {required_scope}")
-        if (
-            self.introspection
-            and granted_scopes is None
-            and getattr(config, "introspection_scoped", False) is True
+        if granted_scopes is None and (
+            self.explicit_scope
+            or (self.introspection and getattr(config, "introspection_scoped", False) is True)
         ):
             # No scopes declared would normally mean "permissive"; graph internals are not.
             _reject(connection, 403, f"Missing required scope: {required_scope}")

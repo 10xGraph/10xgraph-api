@@ -2,15 +2,20 @@ from typing import Any
 
 from fastapi import HTTPException
 from injectq import inject, singleton
+from pydantic import ValidationError
 from tenxgraph.core.state import AgentState, Message
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.auth.request_config import (
+    ClientInputError,
     client_config,
-    client_tool_call_error,
+    client_message_error,
     owned_thread_info,
+    reject_builtin_state_keys,
     reject_unlisted_keys,
+    tool_result_ids,
+    with_fresh_message_ids,
 )
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe, sanitize_for_logging
@@ -78,6 +83,30 @@ class CheckpointerService:
             return
         await check_media_references(messages, self._media_service(), str(user_id))
 
+    async def _check_context_tool_results(self, context: list[Any], cfg: dict[str, Any]) -> None:
+        """Hold tool results in client ``context`` to the rule invoke applies: only as the
+        answer to a pending remote tool call (``GraphService._check_tool_results``)."""
+        if not tool_result_ids(context):
+            return
+        graph_service = self._graph_service()
+        try:
+            if graph_service is None:
+                raise ClientInputError("tool results cannot be written to a thread directly")
+            await graph_service._check_tool_results(context, cfg)
+        except ClientInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @staticmethod
+    def _graph_service() -> Any:
+        try:
+            from injectq import InjectQ
+
+            from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
+
+            return InjectQ.get_instance().try_get(GraphService)
+        except Exception:
+            return None
+
     @staticmethod
     def _state_keys() -> frozenset[str] | None:
         """``runs.state_keys`` from 10xgraph.json, or ``None`` when unset or unavailable."""
@@ -129,15 +158,22 @@ class CheckpointerService:
         state: dict[str, Any],
     ) -> StateResponseSchema:
         cfg = self._config(config, user)
-        # The thread's state is the next run's state, so the initial_state allow-list applies.
+        # The built-in fields are never client-writable; the thread's state is the next run's
+        # state, so the initial_state allow-list applies to the rest.
         try:
+            reject_builtin_state_keys(state, "state")
             reject_unlisted_keys(state, self._state_keys(), "state")
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        # context is appended, so every message here is new and client-authored. A tool call
-        # in it would run on the next resume without the model ever requesting it.
-        if error := client_tool_call_error(state.get("context")):
+        # context is appended, so every message here is new and client-authored: user messages
+        # only, and no tool call, which would run on the next resume without the model ever
+        # requesting it. A tool result is accepted only as the answer to a pending remote call.
+        context = state.get("context")
+        if error := client_message_error(context):
             raise HTTPException(status_code=422, detail=error)
+        if context:
+            await self._check_context_tool_results(context, cfg)
+            state = {**state, "context": with_fresh_message_ids(context)}
         await self._check_media_references(state.get("context") or [], user)
         await self._claim_thread(cfg, user)
         old_state: AgentState | None = await self.checkpointer.aget_state(cfg)
@@ -149,7 +185,12 @@ class CheckpointerService:
         # Merge incoming state dict into existing Pydantic state, then rebuild the model.
 
         merged = self._merge_states(old_state, state)
-        to_store = self._reconstruct_state(old_state, merged)
+        try:
+            to_store = self._reconstruct_state(old_state, merged)
+        except ValidationError as exc:
+            # Name the offending fields, never echo the values.
+            fields = ", ".join(sorted({".".join(str(p) for p in e["loc"]) for e in exc.errors()}))
+            raise HTTPException(status_code=422, detail=f"Invalid state fields: {fields}") from exc
         res = await self.checkpointer.aput_state(cfg, to_store)  # type: ignore[arg-type]
         # update cache as well
         await self.checkpointer.aput_state_cache(cfg, to_store)  # type: ignore
@@ -188,6 +229,31 @@ class CheckpointerService:
     ) -> Message:
         cfg = self._config(config, user)
         return await self.checkpointer.aget_message(cfg, message_id)
+
+    async def update_message_feedback(
+        self,
+        config: dict[str, Any],
+        user: dict,
+        message_id: Any,
+        feedback: dict[str, Any],
+    ) -> Message:
+        """Set ``metadata["feedback"]`` on a message; nothing else on the message changes.
+
+        Raises:
+            HTTPException: 501 when the checkpointer lacks ``aupdate_message_metadata`` (core
+                older than 0.10.4), 404 when the message is not in this thread.
+        """
+        cfg = self._config(config, user)
+        update = getattr(self.checkpointer, "aupdate_message_metadata", None)
+        if not callable(update):
+            raise HTTPException(
+                status_code=501,
+                detail="Updating message feedback needs 10xgraph >= 0.10.4",
+            )
+        message = await update(cfg, message_id, {"feedback": feedback})
+        if message is None:
+            raise HTTPException(status_code=404, detail="Message not found")
+        return message
 
     async def get_messages(
         self,

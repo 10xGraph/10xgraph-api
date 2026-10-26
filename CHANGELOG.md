@@ -22,6 +22,61 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **Clients can no longer set `file_tool_root`, `workspace_root`, `tool_timeout` or
+  `node_timeout` in request `config`.** Core reads these keys from the run config, so a client
+  could point the prebuilt file tools at any directory on the server, or turn off the tool and
+  node time limits with `0` or `null`. They are now dropped like `authz` and `user_id`. Set
+  them in your graph instead (for the file tools, use `create_file_tools(root=...)` from
+  `10xgraph`).
+- **New `runs.max_parallel_tool_calls` in 10xgraph.json** (positive integer, editable in
+  `10xgraph config`). The server sets it as the run's `max_parallel_tool_calls` on every run
+  path, capping how many tool calls one model turn runs at once. Clients cannot set it. Unset,
+  core's default (10, or `TENXGRAPH_MAX_PARALLEL_TOOL_CALLS`) applies. Needs `10xgraph` 0.10.4
+  or later.
+- **Built-in state fields are never client-writable.** `context_summary` and `execution_meta`
+  in `initial_state` (invoke, stream, WebSocket) or in `PUT /v1/threads/{id}/state` now get 422.
+  Before, `PUT state` wrote `context_summary`, which the model reads as its own earlier words.
+  Custom state fields and `runs.state_keys` work as before. AG-UI already dropped them.
+- **Client messages are user messages only.** On invoke, stream, WebSocket and the `context` of
+  `PUT state`, a message with role `assistant` or `system` gets 422, and so does a `tool`
+  message that holds anything but tool results. This closes forged assistant turns that
+  persisted in the thread.
+- **Forged tool results are refused on thread routes too.** `PUT state` applies the check
+  invoke already had: a tool result is accepted only as the answer to a remote tool call that is
+  waiting for one.
+- **The server generates every message id.** A `message_id` sent on invoke, stream, WebSocket
+  or in `PUT state` context is ignored, so a client cannot pre-claim ids. AG-UI keeps client ids
+  (its converter relies on them).
+
+### Added
+
+- `PUT /v1/threads/{thread_id}/messages/{message_id}` sets feedback on a message. Body:
+  `{"feedback": {...}}` (any JSON object, at most 8 KB serialized and 10 levels deep, else 422).
+  It is stored in the message metadata under `feedback` and nothing else on the message can
+  change. Needs `checkpointer:write` and thread ownership; 404 when the thread has no such
+  message; 501 until `10xgraph` 0.10.4 (`aupdate_message_metadata`) is installed.
+- `RequirePermission(..., explicit_scope=True)`: the scope must be granted explicitly, even for
+  an identity that declares no scopes.
+- Scope `checkpointer:import`, granted to `"*"` roles.
+
+### Changed
+
+- An unknown `current_node` in `initial_state` returns 422 (was a 500 from core). Wrong-typed
+  state values (a string for an `int` field) return 422 naming the field, on run input and on
+  `PUT state` (was stored, then crashed a later run).
+
+### Breaking
+
+- **`POST /v1/threads/{thread_id}/messages` is now admin-only.** It needs the
+  `checkpointer:import` scope held explicitly: an identity with no scopes gets 403, and a `"*"`
+  role has it. It still takes any role, since it imports history, but tool calls, media
+  ownership and size limits are still enforced. Normal clients should send messages through
+  invoke or stream, and use the new `PUT .../messages/{message_id}` for feedback.
+- Assistant and system messages, and `context_summary` / `execution_meta`, are rejected with 422
+  on the client routes listed under Security.
+
 ## [0.9.0] - 2026-10-22
 
 One server command, a guided `10xgraph init`, leaner production images and Python 3.14 and

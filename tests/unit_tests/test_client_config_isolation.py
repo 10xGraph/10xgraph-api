@@ -51,6 +51,23 @@ def test_client_config_drops_only_server_owned_keys():
     assert cleaned == {"plan": "pro", "thread_id": "t1", "locale": "bn"}
 
 
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        # The core file tools would read and write under this directory
+        ("file_tool_root", "/"),
+        ("workspace_root", "/"),
+        # 0 and None turn the core time limits off
+        ("tool_timeout", 0),
+        ("node_timeout", None),
+        # Core caps parallel tool calls with it; the operator sets it in runs
+        ("max_parallel_tool_calls", 10_000),
+    ],
+)
+def test_client_config_drops_core_security_keys(key, value):
+    assert client_config({key: value, "plan": "pro"}) == {"plan": "pro"}
+
+
 @pytest.mark.parametrize("value", [None, "text", ["authz"], 5])
 def test_client_config_non_dict_is_empty(value):
     assert client_config(value) == {}

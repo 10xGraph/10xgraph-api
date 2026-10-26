@@ -15,6 +15,9 @@ logger = logging.getLogger("tenxgraph_api.authorization")
 # The /v1/store routes require these. Core releases up to 0.9.1 named them "memory:*", so a
 # "*" role would never reach the memory routes; they are added here until core is bumped.
 STORE_SCOPES = frozenset({"store:read", "store:write", "store:delete"})
+# Admin-only scope: POST /v1/threads/{id}/messages imports history of any role. Newer cores list
+# it in ALL_SCOPES; it is added here so older cores still grant it to a "*" role.
+CHECKPOINTER_ADMIN_SCOPES = frozenset({"checkpointer:import"})
 LEGACY_MEMORY_SCOPES = frozenset({"memory:read", "memory:write", "memory:delete"})
 
 
@@ -22,7 +25,7 @@ def all_scopes() -> frozenset[str]:
     """Every scope the API can require, which is what a ``"*"`` role is granted."""
     from tenxgraph.core.authz import ALL_SCOPES
 
-    return (frozenset(ALL_SCOPES) - LEGACY_MEMORY_SCOPES) | STORE_SCOPES
+    return (frozenset(ALL_SCOPES) - LEGACY_MEMORY_SCOPES) | STORE_SCOPES | CHECKPOINTER_ADMIN_SCOPES
 
 
 class AuthorizationBackend(ABC):
@@ -184,7 +187,12 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
     # records the caller as the owner (the graph service and the checkpointer service both
     # register the thread before writing to it).
     CREATE_ACTIONS = frozenset(
-        {("graph", "invoke"), ("graph", "stream"), ("checkpointer", "write")}
+        {
+            ("graph", "invoke"),
+            ("graph", "stream"),
+            ("checkpointer", "write"),
+            ("checkpointer", "import"),
+        }
     )
 
     def isolation_scope(self) -> str:

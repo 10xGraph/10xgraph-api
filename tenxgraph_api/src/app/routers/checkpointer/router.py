@@ -13,6 +13,7 @@ from tenxgraph_api.src.app.utils.swagger_helper import generate_swagger_response
 
 from .schemas.checkpointer_schemas import (
     ConfigSchema,
+    FeedbackSchema,
     MessagesListResponseSchema,
     PutMessagesSchema,
     ResponseSchema,
@@ -174,15 +175,21 @@ async def clear_state(
     "/v1/threads/{thread_id}/messages",
     status_code=status.HTTP_200_OK,
     responses=generate_swagger_responses(ResponseSchema),
-    summary="Put messages to checkpointer",
-    description="Store messages in the checkpointer using configuration.",
+    summary="Import messages into a thread (admin)",
+    description=(
+        "Append messages of any role to a thread, to import history. Admin only: the caller "
+        "must hold the `checkpointer:import` scope explicitly (an identity with no scopes is "
+        "refused). Tool calls are still refused."
+    ),
 )
 async def put_messages(
     request: Request,
     thread_id: str | int,
     payload: PutMessagesSchema,
     service: CheckpointerService = InjectAPI(CheckpointerService),
-    user: dict[str, Any] = Depends(RequirePermission("checkpointer", "write")),
+    user: dict[str, Any] = Depends(
+        RequirePermission("checkpointer", "import", explicit_scope=True)
+    ),
 ):
     """Put messages to checkpointer.
 
@@ -253,6 +260,53 @@ async def get_message(
         config,
         user,
         message_id,
+    )
+
+    return success_response(
+        result,
+        request,
+    )
+
+
+@router.put(
+    "/v1/threads/{thread_id}/messages/{message_id}",
+    status_code=status.HTTP_200_OK,
+    responses=generate_swagger_responses(Message),
+    summary="Set feedback on a message",
+    description=(
+        "Store a feedback object (at most 8 KB serialized, 10 levels deep) in the message's "
+        "metadata under `feedback`, replacing any earlier feedback. Nothing else on the "
+        "message can change."
+    ),
+)
+async def put_message_feedback(
+    request: Request,
+    thread_id: str | int,
+    message_id: str | int,
+    payload: FeedbackSchema,
+    service: CheckpointerService = InjectAPI(CheckpointerService),
+    user: dict[str, Any] = Depends(RequirePermission("checkpointer", "write")),
+):
+    """Set feedback on a message.
+
+    Args:
+        request: Request object
+        payload: Feedback schema with the feedback object
+        service: Injected checkpointer service
+        user: Current authenticated user
+
+    Returns:
+        The updated message, or 404 when the thread has no such message
+    """
+    validate_thread_id(thread_id)
+    if not message_id or (isinstance(message_id, str) and not str(message_id).strip()):
+        raise HTTPException(status_code=422, detail="message_id is required and cannot be empty")
+
+    result = await service.update_message_feedback(
+        {"thread_id": thread_id},
+        user,
+        message_id,
+        payload.feedback,
     )
 
     return success_response(

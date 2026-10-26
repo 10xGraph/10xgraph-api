@@ -1,11 +1,12 @@
 """Checkpointer API schemas."""
 
+import json
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 from tenxgraph.core.state import Message
 
-from tenxgraph_api.src.app.core.auth.request_config import client_tool_call_error
+from tenxgraph_api.src.app.core.auth.request_config import client_message_error
 
 
 class ConfigSchema(BaseModel):
@@ -37,8 +38,44 @@ class PutMessagesSchema(ConfigSchema):
     @field_validator("messages")
     @classmethod
     def messages_must_not_call_tools(cls, v: list[Message]) -> list[Message]:
-        if error := client_tool_call_error(v):
+        # Admin import of history: any role is fine, but a tool call would still run on resume.
+        if error := client_message_error(v, user_only=False):
             raise ValueError(error)
+        return v
+
+
+MAX_FEEDBACK_BYTES = 8192
+MAX_FEEDBACK_DEPTH = 10
+
+
+def _deeper_than(value: Any, limit: int) -> bool:
+    """Whether ``value`` (level 1) holds a dict or list at a level deeper than ``limit``."""
+    if not isinstance(value, dict | list):
+        return False
+    if limit < 1:
+        return True
+    children = value.values() if isinstance(value, dict) else value
+    return any(_deeper_than(child, limit - 1) for child in children)
+
+
+class FeedbackSchema(BaseModel):
+    """Schema for ``PUT /v1/threads/{thread_id}/messages/{message_id}``: feedback only."""
+
+    feedback: dict[str, Any] = Field(
+        ...,
+        description=(
+            f"Any JSON object, stored whole in the message's metadata['feedback']. At most "
+            f"{MAX_FEEDBACK_BYTES} bytes serialized and {MAX_FEEDBACK_DEPTH} levels deep."
+        ),
+    )
+
+    @field_validator("feedback")
+    @classmethod
+    def feedback_within_limits(cls, v: dict[str, Any]) -> dict[str, Any]:
+        if _deeper_than(v, MAX_FEEDBACK_DEPTH):
+            raise ValueError(f"feedback is nested deeper than {MAX_FEEDBACK_DEPTH} levels")
+        if len(json.dumps(v)) > MAX_FEEDBACK_BYTES:
+            raise ValueError(f"feedback is larger than {MAX_FEEDBACK_BYTES} bytes")
         return v
 
 

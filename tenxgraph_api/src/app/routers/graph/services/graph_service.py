@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 from injectq import InjectQ, inject, singleton
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from tenxgraph.core.exceptions.media_exceptions import UnsupportedMediaInputError
 from tenxgraph.core.graph import CompiledGraph
 from tenxgraph.core.state import AgentState, Message, StreamChunk, StreamEvent
@@ -21,6 +21,7 @@ from tenxgraph_api.src.app.core.auth.request_config import (
     client_error_detail,
     normalize_thread_id,
     owned_thread_info,
+    reject_builtin_state_keys,
     reject_unlisted_keys,
     tool_result_ids,
     unanswered_tool_calls,
@@ -493,15 +494,41 @@ class GraphService:
         from tenxgraph.core.graph import ToolNode
 
         node_name = initial_state.get("current_node")
-        if not isinstance(node_name, str):
+        if node_name is None:
             return
+        if not isinstance(node_name, str):
+            raise ClientInputError("current_node must be a node name")
         state_graph = getattr(self._graph, "_state_graph", None)
         nodes = getattr(state_graph, "nodes", {}) if state_graph else {}
+        # START and END are nodes too; core also maps the legacy "start" / "end" spellings.
+        if nodes and node_name not in nodes and node_name not in ("start", "end"):
+            raise ClientInputError(f"unknown node '{node_name}'")
         node = nodes.get(node_name)
         if node is not None and isinstance(getattr(node, "func", None), ToolNode):
             raise ClientInputError(
                 f"current_node '{node_name}' is a tool node; runs cannot start there"
             )
+
+    def _validate_state_types(self, initial_state: dict[str, Any]) -> dict[str, Any]:
+        """Check client state values against the state model's field types.
+
+        Core stores a value on the state as given, so a wrong type (a string for an ``int``
+        field) is saved and crashes a later run. Fields the model does not declare are ignored
+        by core and pass. Returns the state with the validated (coerced) values.
+        """
+        state_graph = getattr(self._graph, "_state_graph", None)
+        fields = getattr(type(getattr(state_graph, "_state", None)), "model_fields", None) or {}
+        checked = dict(initial_state)
+        for name, value in initial_state.items():
+            field = fields.get(name)
+            if field is None or field.annotation is None:
+                continue
+            try:
+                checked[name] = TypeAdapter(field.annotation).validate_python(value)
+            except ValidationError as exc:
+                reason = exc.errors()[0]["msg"] if exc.errors() else "invalid value"
+                raise ClientInputError(f"initial_state.{name} is invalid: {reason}") from exc
+        return checked
 
     def _remote_tool_names(self) -> set[str]:
         """Names of the tools the client runs (remote tools), across every ToolNode."""
@@ -586,6 +613,7 @@ class GraphService:
         config = client_config(graph_input.config)
         runs = self.runs_policy()
         reject_unlisted_keys(config, runs.config_keys, "config", ALWAYS_ALLOWED_CONFIG_KEYS)
+        reject_builtin_state_keys(graph_input.initial_state, "initial_state")
         reject_unlisted_keys(graph_input.initial_state, runs.state_keys, "initial_state")
         # Server-owned keys set by a trusted caller (a protocol adapter), after the client's
         # own config has been stripped of them.
@@ -602,6 +630,10 @@ class GraphService:
         # check recursion limit set or not
         config["recursion_limit"] = graph_input.recursion_limit or 25
 
+        # Server-owned cap on parallel tool calls per model turn (clients cannot set it)
+        if runs.max_parallel_tool_calls is not None:
+            config["max_parallel_tool_calls"] = runs.max_parallel_tool_calls
+
         # Prepare the input for the graph
         # Preprocess multimodal messages (resolve file_id → cached text, etc.)
         preprocessed = await preprocess_multimodal_messages(
@@ -616,7 +648,7 @@ class GraphService:
             input_data["resume"] = graph_input.resume
         if graph_input.initial_state:
             self._reject_tool_start_node(graph_input.initial_state)
-            input_data["state"] = graph_input.initial_state
+            input_data["state"] = self._validate_state_types(graph_input.initial_state)
 
         return (
             input_data,

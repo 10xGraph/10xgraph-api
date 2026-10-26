@@ -48,6 +48,7 @@ DOCS_URL = "https://10xgraph.com/docs/reference/api-cli/configuration"
 # editor never imports the core framework just to render suggestions.
 AUTHORIZATION_SCOPES: tuple[str, ...] = (
     "checkpointer:delete",
+    "checkpointer:import",
     "checkpointer:read",
     "checkpointer:write",
     "config:read",
@@ -432,6 +433,18 @@ _SECTIONS: list[dict[str, Any]] = [
                 "min": 0,
                 "step": 1,
                 "help": "A run that takes longer is cancelled. Empty means no limit.",
+            },
+            {
+                "path": ["runs", "max_parallel_tool_calls"],
+                "label": "Max parallel tool calls",
+                "type": "number",
+                "min": 1,
+                "step": 1,
+                "placeholder": "10",
+                "help": (
+                    "Tool calls one model turn may run at once. Empty uses core's default, "
+                    "10, or the TENXGRAPH_MAX_PARALLEL_TOOL_CALLS environment variable."
+                ),
             },
         ],
     },

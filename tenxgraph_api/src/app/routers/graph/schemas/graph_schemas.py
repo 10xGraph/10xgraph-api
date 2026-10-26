@@ -1,10 +1,18 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 from tenxgraph.core.state import Message
 from tenxgraph.utils import ResponseGranularity
 
-from tenxgraph_api.src.app.core.auth.request_config import client_tool_call_error
+from tenxgraph_api.src.app.core.auth.request_config import (
+    client_message_error,
+    with_fresh_message_ids,
+)
+
+
+# Validation context key: keep the messages' own ids (the AG-UI adapter, whose converter
+# dedups on them). Without it the server generates every id.
+KEEP_MESSAGE_IDS = "keep_message_ids"
 
 
 class GraphInputSchema(BaseModel):
@@ -42,10 +50,12 @@ class GraphInputSchema(BaseModel):
 
     @field_validator("messages")
     @classmethod
-    def messages_must_not_carry_tool_calls(cls, v: list[Message]) -> list[Message]:
-        if error := client_tool_call_error(v):
+    def client_messages_only(cls, v: list[Message], info: ValidationInfo) -> list[Message]:
+        if error := client_message_error(v):
             raise ValueError(error)
-        return v
+        if (info.context or {}).get(KEEP_MESSAGE_IDS):
+            return v
+        return with_fresh_message_ids(v)
 
     @model_validator(mode="after")
     def messages_or_resume(self) -> "GraphInputSchema":
@@ -362,7 +372,7 @@ class WsGraphInputSchema(BaseModel):
                 raise ValueError("config.thread_id is required for invoke_type='resume'")
         # Resume sends tool *results*; neither run type may carry a tool call.
         for messages in (self.messages, self.tool_result):
-            if error := client_tool_call_error(messages):
+            if error := client_message_error(messages):
                 raise ValueError(error)
         return self
 

@@ -30,6 +30,7 @@ def test_defaults():
     assert runs.state_keys is None
     assert runs.max_concurrent_per_user == DEFAULT_MAX_CONCURRENT_RUNS_PER_USER
     assert runs.timeout is None
+    assert runs.max_parallel_tool_calls is None
 
 
 def test_full_config():
@@ -40,6 +41,7 @@ def test_full_config():
             "state_keys": [],
             "max_concurrent_per_user": 3,
             "timeout": 90,
+            "max_parallel_tool_calls": 4,
         }
     )
     assert runs.server_thread_ids is True
@@ -47,6 +49,7 @@ def test_full_config():
     assert runs.state_keys == frozenset()
     assert runs.max_concurrent_per_user == 3
     assert runs.timeout == 90.0
+    assert runs.max_parallel_tool_calls == 4
 
 
 @pytest.mark.parametrize("value", [0, None])
@@ -67,6 +70,11 @@ def test_zero_or_null_concurrency_means_unlimited(value):
         ({"timeout": 0}, "timeout"),
         ({"timeout": -5}, "timeout"),
         ({"timeout": "60"}, "timeout"),
+        ({"max_parallel_tool_calls": 0}, "max_parallel_tool_calls"),
+        ({"max_parallel_tool_calls": -2}, "max_parallel_tool_calls"),
+        ({"max_parallel_tool_calls": 2.5}, "max_parallel_tool_calls"),
+        ({"max_parallel_tool_calls": "5"}, "max_parallel_tool_calls"),
+        ({"max_parallel_tool_calls": True}, "max_parallel_tool_calls"),
     ],
 )
 def test_invalid_values_are_rejected(data, match):
@@ -176,3 +184,10 @@ def test_ag_ui_with_server_thread_ids_is_refused_at_boot(ag_ui, server, refused)
         _refuse_ag_ui_with_server_thread_ids(config, OwnershipAuthorizationBackend())
     # Backends that do not refuse client ids are unaffected.
     _refuse_ag_ui_with_server_thread_ids(config, DefaultAuthorizationBackend())
+
+
+def test_config_editor_validates_max_parallel_tool_calls():
+    base = {"agent": "graph:app"}
+    assert validate({**base, "runs": {"max_parallel_tool_calls": 5}}) == []
+    issues = validate({**base, "runs": {"max_parallel_tool_calls": 0}})
+    assert [i["path"] for i in issues if i["level"] == "error"] == ["runs"]
