@@ -1,0 +1,125 @@
+"""Per-thread run lock: one graph run at a time on a thread.
+
+Two runs on one thread both load the state, both run and both save, so tools run twice and
+the history interleaves (a double click on Send, two tabs). Every run path (invoke, stream,
+WebSocket, AG-UI) takes this lock for the thread before the graph starts and holds it until
+the run is over.
+
+The lock is a one-slot lease from ``core.concurrency.concurrency_limiter``
+(key ``runs:thread:<thread id>``): shared through Redis when it is configured, otherwise
+per process. A Redis lease is renewed in the background while the run is alive and expires on
+its own if the worker dies, so a crashed worker cannot hold a thread forever. A Redis error
+lets the run proceed (the limiter fails open), as for the per-user run cap.
+
+A run that finds the thread busy waits up to ``THREAD_BUSY_WAIT_SECONDS`` and is then
+rejected with 409. With ``on_busy="cancel"`` it first asks the active run to stop (and
+repeats the request while it waits, in case the run had not saved its state yet).
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Awaitable, Callable
+from typing import Any, Literal
+
+from fastapi import HTTPException
+
+from tenxgraph_api.src.app.core import logger
+from tenxgraph_api.src.app.core.auth.request_config import normalize_thread_id
+from tenxgraph_api.src.app.core.concurrency import Lease, concurrency_limiter
+from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
+
+
+HTTP_CONFLICT = 409
+THREAD_BUSY_DETAIL = "thread is busy"
+
+# Longest a run waits for a busy thread before it is rejected.
+THREAD_BUSY_WAIT_SECONDS = 30.0
+
+# The wait polls, starting short (a finishing run is picked up quickly) and backing off.
+THREAD_BUSY_POLL_MIN_SECONDS = 0.05
+THREAD_BUSY_POLL_MAX_SECONDS = 0.5
+
+# With on_busy="cancel", how often the stop request is repeated while waiting.
+THREAD_BUSY_STOP_RETRY_SECONDS = 1.0
+
+OnBusy = Literal["wait", "cancel"]
+
+
+def thread_lock_key(thread_id: str) -> str:
+    return f"runs:thread:{thread_id}"
+
+
+class ThreadBusyError(HTTPException):
+    """The thread still has an active run after the wait limit."""
+
+    def __init__(self) -> None:
+        super().__init__(status_code=HTTP_CONFLICT, detail=THREAD_BUSY_DETAIL)
+
+
+async def acquire_thread_lock(
+    thread_id: str,
+    *,
+    on_busy: OnBusy = "wait",
+    stop: Callable[[], Awaitable[Any]] | None = None,
+) -> Lease:
+    """Take the run lock for ``thread_id``, waiting for the active run if there is one.
+
+    ``stop`` asks the active run to stop; it is called only for ``on_busy="cancel"`` and only
+    while the thread is busy. Raises :class:`ThreadBusyError` (409) after the wait limit.
+    """
+    limiter = concurrency_limiter()
+    key = thread_lock_key(thread_id)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + THREAD_BUSY_WAIT_SECONDS
+    delay = THREAD_BUSY_POLL_MIN_SECONDS
+    next_stop = 0.0
+    while True:
+        lease = await limiter.acquire(key, 1)
+        if lease is not None:
+            return lease
+        now = loop.time()
+        if now >= deadline:
+            logger.warning("Thread %s is still busy after the wait limit", log_safe(thread_id))
+            raise ThreadBusyError
+        if on_busy == "cancel" and stop is not None and now >= next_stop:
+            next_stop = now + THREAD_BUSY_STOP_RETRY_SECONDS
+            try:
+                await stop()
+            except Exception as exc:  # the wait below still applies; a stop is best effort
+                logger.warning(
+                    "Stop request for busy thread %s failed: %s", log_safe(thread_id), exc
+                )
+        await asyncio.sleep(min(delay, max(deadline - loop.time(), 0)))
+        delay = min(delay * 2, THREAD_BUSY_POLL_MAX_SECONDS)
+
+
+def requested_thread_id(config: dict[str, Any] | None) -> str | None:
+    """The thread a request names, or ``None`` when it starts a new one."""
+    return normalize_thread_id((config or {}).get("thread_id"))
+
+
+async def lock_requested_thread(
+    config: dict[str, Any] | None,
+    on_busy: OnBusy,
+    stop: Callable[[str], Awaitable[Any]],
+) -> Lease:
+    """Lock the thread named in ``config`` before a run, or a no-op lease for a new thread.
+
+    A request without a thread id is creating a thread: nobody can be running on it, and
+    the service locks it as soon as the id exists (``GraphService``).
+    """
+    thread_id = requested_thread_id(config)
+    if thread_id is None:
+        return Lease(None)
+    return await acquire_thread_lock(thread_id, on_busy=on_busy, stop=lambda: stop(thread_id))
+
+
+def combine_leases(*leases: Lease) -> Lease:
+    """One lease that releases all of ``leases`` (in the order given)."""
+
+    def release() -> None:
+        for lease in leases:
+            lease.release()
+
+    return Lease(release)

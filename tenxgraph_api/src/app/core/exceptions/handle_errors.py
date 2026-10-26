@@ -16,6 +16,7 @@ from tenxgraph.core.exceptions import (
 from tenxgraph.utils.validators import ValidationError
 
 from tenxgraph_api.src.app.core import logger
+from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.utils import error_response
 from tenxgraph_api.src.app.utils.schemas import ErrorSchemas
@@ -122,7 +123,18 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
         )
 
         if is_production:
-            message = "The request data is invalid. Please check your input."
+            # A ClientInputError raised in a validator (for example a request size limit) is
+            # written for the client, so its message survives production.
+            client_messages = [
+                str(error["ctx"]["error"])
+                for error in exc.errors()
+                if isinstance((error.get("ctx") or {}).get("error"), ClientInputError)
+            ]
+            message = (
+                client_messages[0]
+                if client_messages
+                else "The request data is invalid. Please check your input."
+            )
         else:
             message = str(exc.body) if exc.body else "Validation error"
 

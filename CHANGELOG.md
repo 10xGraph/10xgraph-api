@@ -15,6 +15,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   least one minor release. Import paths do not break silently.
 - **Breaking changes are documented under a `### Breaking` heading** in the release's
   section, with the migration step spelled out.
+- **Requests over the size limits get 422** (500 messages, 100 blocks per message, 1,000,000
+  characters of text; on AG-UI, for the trailing turn, with a 10,000-message cap on history).
 - Anything under `tenxgraph_api.cli.templates/` is emitted scaffolding, not API; template
   content can change in any release.
 
@@ -74,8 +76,52 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   paths under them) is a symlink, or when the resolved destination is outside `--path`, so a
   hostile repo cannot make it delete or write files elsewhere.
 
+- **One run at a time per thread.** Invoke, stream, `WS /v1/graph/ws` (each run on the socket)
+  and AG-UI take a per-thread lock before the graph starts, so a double submit or two tabs can
+  no longer run tools twice or interleave the history. The lock is a one-slot lease keyed by
+  thread id (`runs:thread:<id>`): shared through Redis when it is configured, otherwise per
+  process. It expires by itself (60 s, renewed while the run is alive), so a crashed worker
+  cannot hold a thread, and it is released when the run ends, fails, is cancelled or the client
+  disconnects. A second run on a busy thread waits up to 30 s, then gets **409**
+  `{"detail": "thread is busy"}` (streaming routes answer before the response starts; on the
+  WebSocket it is an error chunk `{"event": "error", "data": {"reason": "thread is busy"}}` and
+  the socket stays open). A new thread is locked as soon as its id exists. `/v1/graph/live` is
+  not covered. Apps that sent parallel runs on one thread will now see them queue or get 409.
+  A Redis error lets the run proceed (logged), like the per-user run cap.
+- **Production hides raw error text on stream, WebSocket and AG-UI.** A failing node or tool put
+  its exception text (for example a `redis://:SECRET@host` connection string) in the `ERROR`
+  chunk's `data.reason`, `data.error` or `data.message`, and in `state.execution_meta` at full
+  granularity, and the stream forwarded it, while invoke already answered generically. With
+  `MODE=production` the three paths now share one step (`sanitize_error_chunk`, applied in
+  `GraphService.stream_chunks`) that swaps that text for the same generic message invoke uses
+  (`An error occurred in a graph node.`, chosen by the `[NODE_001]` style code when present). The
+  core's own `Tool '<name>' failed with an internal error (reference <id>).` text is kept: it
+  holds no detail. Development is unchanged.
+
+- **A resume can name the interrupt it answers.** `POST /v1/graph/invoke`, `POST /v1/graph/stream`
+  and the `/v1/graph/ws` frame accept an optional `interrupt_id`. If the thread is not paused, or
+  is paused at a different interrupt, the request gets 409 before anything runs (an error chunk on
+  stream and WebSocket). A retried or stale resume can no longer answer the next prompt unseen.
+  The id is also passed to core as `resume_interrupt_id`.
+- **Resume answers are checked against the interrupt's `response_schema`.** A failing answer is
+  422 on invoke and an error chunk on stream, WebSocket and AG-UI; a core interrupt mismatch is
+  409. Needs a core release with `ResumeValidationError` and `InterruptMismatchError`.
+- **Request size limits.** At most 500 messages per request, 100 content blocks per message and
+  1,000,000 characters of text in total across text blocks; over a limit is 422 naming the limit.
+  Applies to invoke, stream, WebSocket (`messages` and `tool_result`), `PUT
+  /v1/threads/{id}/state` `context` and `POST /v1/threads/{id}/messages`. AG-UI clients resend
+  the whole conversation, so on AG-UI the limits apply to the trailing turn (what reaches the
+  graph) and the full history only gets a 10,000-message cap plus the per-message block cap. The
+  limits are fixed, not settings.
+
 ### Added
 
+- **`on_busy` request option** (`"wait"` default, or `"cancel"`), a top-level field next to
+  `recursion_limit` on `POST /v1/graph/invoke`, `POST /v1/graph/stream` and `WS /v1/graph/ws`.
+  With `"cancel"`, a run that finds its thread busy asks the running run to stop (the same
+  mechanism as `POST /v1/graph/stop`, repeated while waiting), then waits for the lock and runs;
+  an idle thread just runs. The 30 s wait limit and 409 still apply. AG-UI has no such field and
+  always waits.
 - **Uploaded files live and die with the messages that use them.** When an accepted message
   carries `graph://media/<key>` (or the legacy `agentflow://media/`), the thread id is added to
   the file's `threads` metadata (owned files only; invoke, stream, WebSocket, AG-UI,
@@ -100,6 +146,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `RequirePermission(..., explicit_scope=True)`: the scope must be granted explicitly, even for
   an identity that declares no scopes.
 - Scope `checkpointer:import`, granted to `"*"` roles.
+
+- `interrupt_id` on graph invoke, stream and WebSocket input. WebSocket input now also accepts
+  `resume`, which was dropped before, so a `fresh` frame can resume an `interrupt()` without
+  messages.
 
 ### Changed
 

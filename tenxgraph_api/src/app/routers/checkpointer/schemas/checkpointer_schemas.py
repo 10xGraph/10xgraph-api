@@ -6,7 +6,11 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 from tenxgraph.core.state import Message
 
-from tenxgraph_api.src.app.core.auth.request_config import client_message_error
+from tenxgraph_api.src.app.core.auth.request_config import (
+    client_message_error,
+    ClientInputError,
+    request_size_error,
+)
 
 
 class ConfigSchema(BaseModel):
@@ -28,12 +32,27 @@ class StateSchema(ConfigSchema):
 
     state: dict[str, Any] = Field(..., description="State data")
 
+    @field_validator("state")
+    @classmethod
+    def context_within_limits(cls, v: dict[str, Any]) -> dict[str, Any]:
+        # ``context`` is client-written messages: same size limits as a run request.
+        if error := request_size_error(v.get("context"), "state.context"):
+            raise ClientInputError(error)
+        return v
+
 
 class PutMessagesSchema(ConfigSchema):
     """Schema for putting messages."""
 
     messages: list[Message] = Field(..., description="List of messages to store")
     metadata: dict[str, Any] | None = Field(None, description="Optional metadata")
+
+    @field_validator("messages", mode="before")
+    @classmethod
+    def messages_within_limits(cls, v: Any) -> Any:
+        if error := request_size_error(v):
+            raise ClientInputError(error)
+        return v
 
     @field_validator("messages")
     @classmethod

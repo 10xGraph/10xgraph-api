@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import re
 from collections.abc import AsyncIterable, AsyncIterator
 from datetime import datetime
 from typing import Any
@@ -17,6 +18,7 @@ from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.auth.request_config import (
     ALWAYS_ALLOWED_CONFIG_KEYS,
     ClientInputError,
+    InterruptConflictError,
     client_config,
     client_error_detail,
     normalize_thread_id,
@@ -26,6 +28,7 @@ from tenxgraph_api.src.app.core.auth.request_config import (
     tool_result_ids,
     unanswered_tool_calls,
 )
+from tenxgraph_api.src.app.core.concurrency import Lease
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RunsConfig
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe, sanitize_for_logging
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
@@ -48,6 +51,7 @@ from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import
     preprocess_multimodal_messages,
     resolve_media_policy,
 )
+from tenxgraph_api.src.app.routers.graph.thread_lock import acquire_thread_lock
 from tenxgraph_api.src.app.utils import DefaultThreadNameGenerator, ThreadNameGenerator
 from tenxgraph_api.src.app.utils.telemetry_store import TelemetryStore
 
@@ -61,6 +65,37 @@ def _run_tool_names(config: dict[str, Any]) -> set[str]:
             if isinstance(spec.get("name"), str):
                 names.add(spec["name"])
     return names
+
+
+def _core_error(name: str) -> tuple[type[Exception], ...]:
+    """The core exception class ``name`` as a tuple for ``isinstance``/``except``, or ``()``.
+
+    Looked up by name so an older core without it still works; imported lazily for the same
+    circular-import reason as in :func:`_reraise_framework_errors`.
+    """
+    from tenxgraph.core import exceptions
+
+    cls = getattr(exceptions, name, None)
+    return (cls,) if isinstance(cls, type) and issubclass(cls, Exception) else ()
+
+
+def _resume_error_types() -> tuple[type[Exception], ...]:
+    """Every error that means "this resume does not fit the open interrupt"."""
+    return (
+        InterruptConflictError,
+        *_core_error("InterruptMismatchError"),
+        *_core_error("ResumeValidationError"),
+    )
+
+
+def _resume_http_error(exc: Exception) -> HTTPException:
+    """409 for a resume aimed at the wrong (or no) interrupt, 422 for an answer that fails the
+    interrupt's schema. Both messages are written for the client, so production keeps them."""
+    conflict = (InterruptConflictError, *_core_error("InterruptMismatchError"))
+    return HTTPException(
+        status_code=409 if isinstance(exc, conflict) else 422,
+        detail=str(getattr(exc, "message", None) or exc),
+    )
 
 
 def _reraise_framework_errors(exc: Exception) -> None:
@@ -122,6 +157,8 @@ def _stream_error_reason(exc: Exception) -> str:
     """
     if isinstance(exc, RunTimeoutError):
         return str(exc)  # our own message, nothing internal to hide
+    if isinstance(exc, _resume_error_types()):
+        return str(getattr(exc, "message", None) or exc)  # written for the client
     # Imported lazily: a top-level import of handle_errors creates a circular import through
     # the shared utils/exceptions modules.
     from tenxgraph_api.src.app.core.config.settings import get_settings
@@ -129,6 +166,53 @@ def _stream_error_reason(exc: Exception) -> str:
 
     is_production = get_settings().MODE == "production"
     return _sanitize_error_message(str(exc), "GRAPH_STREAM_ERROR", is_production)
+
+
+# Chunk ``data`` fields that carry exception text. ``message`` is what a tool's own
+# ``emitter.error()`` sends.
+_ERROR_TEXT_FIELDS = ("reason", "error", "message")
+_ERROR_CODE = re.compile(r"^\[([A-Z][A-Z_]*_\d+)\]")
+# Core's own text for an unexpected tool failure: a tool name and a log reference, no detail.
+_SAFE_TOOL_FAILURE = re.compile(r"failed with an internal error \(reference [0-9a-f]{8}\)\.$")
+
+
+def sanitize_error_chunk(chunk: StreamChunk) -> StreamChunk:
+    """In production, replace the exception text in an ``ERROR`` chunk with a generic message.
+
+    Core puts the raw exception in ``data.reason`` / ``data.error`` (and ``data.message`` for a
+    tool's own error), and in ``state.execution_meta.internal_data["error"]``. The plain HTTP
+    invoke path is already generic; this is the one step the stream, WebSocket and AG-UI
+    paths share (they all read ``stream_chunks``). Development, and every other chunk, passes
+    through unchanged. Returns a copy: the graph reuses and checkpoints its own objects.
+    """
+    if chunk.event != StreamEvent.ERROR:
+        return chunk
+    from tenxgraph_api.src.app.core.config.settings import get_settings
+    from tenxgraph_api.src.app.core.exceptions.handle_errors import _sanitize_error_message
+
+    if get_settings().MODE != "production":
+        return chunk
+
+    def generic(text: Any) -> Any:
+        if not isinstance(text, str) or _SAFE_TOOL_FAILURE.search(text):
+            return text
+        code = _ERROR_CODE.match(text)
+        return _sanitize_error_message(text, code.group(1) if code else "GRAPH_STREAM_ERROR", True)
+
+    update: dict[str, Any] = {}
+    if isinstance(chunk.data, dict):
+        update["data"] = {
+            key: generic(value) if key in _ERROR_TEXT_FIELDS else value
+            for key, value in chunk.data.items()
+        }
+    meta = getattr(chunk.state, "execution_meta", None)
+    internal = getattr(meta, "internal_data", None)
+    if isinstance(internal, dict) and "error" in internal:
+        safe_meta = meta.model_copy(
+            update={"internal_data": {**internal, "error": generic(internal["error"])}}
+        )
+        update["state"] = chunk.state.model_copy(update={"execution_meta": safe_meta})
+    return chunk.model_copy(update=update) if update else chunk
 
 
 async def _bounded_stream(stream: AsyncIterator[Any], timeout: float) -> AsyncIterator[Any]:
@@ -616,6 +700,38 @@ class GraphService:
             logger.warning("Generated thread id %s is already taken; generating another", thread_id)
         raise RuntimeError("Could not generate an unused thread id")
 
+    async def _check_resume_target(
+        self, graph_input: GraphInputSchema, config: dict[str, Any]
+    ) -> None:
+        """Refuse a resume that names an interrupt the thread is not paused at.
+
+        Only when the client sent ``interrupt_id``; without it the resume answers whatever the
+        thread is paused at, as before.
+
+        Raises:
+            InterruptConflictError: The thread is not paused, or is paused at another interrupt.
+        """
+        if not graph_input.is_resume or graph_input.interrupt_id is None:
+            return
+        state = await self.checkpointer.aget_state(config) if self.checkpointer else None
+        pending = None
+        if state is not None:
+            try:
+                from tenxgraph.utils.interrupt import pending_interrupt
+            except ImportError:  # core older than interrupt()
+                pass
+            else:
+                pending = pending_interrupt(state)
+        if pending is None:
+            raise InterruptConflictError(
+                "Nothing to resume: this thread is not paused at an interrupt"
+            )
+        if pending.id != graph_input.interrupt_id:
+            raise InterruptConflictError(
+                f"interrupt_id '{graph_input.interrupt_id}' does not match the open "
+                f"interrupt '{pending.id}'"
+            )
+
     async def _prepare_input(
         self,
         graph_input: GraphInputSchema,
@@ -667,6 +783,10 @@ class GraphService:
         }
         if graph_input.is_resume:
             input_data["resume"] = graph_input.resume
+            if graph_input.interrupt_id is not None:
+                # Read by core 0.10.4+ (checks the id again and validates the answer); an older
+                # core ignores unknown input keys.
+                input_data["resume_interrupt_id"] = graph_input.interrupt_id
         if graph_input.initial_state:
             self._reject_tool_start_node(graph_input.initial_state)
             input_data["state"] = self._validate_state_types(graph_input.initial_state)
@@ -680,7 +800,7 @@ class GraphService:
             },
         )
 
-    async def invoke_graph(
+    async def invoke_graph(  # noqa: PLR0915
         self,
         graph_input: GraphInputSchema,
         user: dict[str, Any],
@@ -697,15 +817,18 @@ class GraphService:
         Raises:
             HTTPException: If graph execution fails.
         """
+        thread_lock = Lease(None)
         try:
             logger.debug("Invoking graph with input: %s", log_safe(graph_input.messages))
 
             # Prepare the input
             input_data, config, meta = await self._prepare_input(graph_input, user.get("user_id"))
+            thread_lock = await self._lock_new_thread(meta)
             # add user inside config
             config["user"] = user
             config["user_id"] = user.get("user_id", "anonymous")
             await self._check_tool_results(input_data["messages"], config)
+            await self._check_resume_target(graph_input, config)
 
             # Try to save thread info in the db even for existing threads
             # this will help in updating last accessed time
@@ -769,6 +892,9 @@ class GraphService:
                 meta=meta,
             )
 
+        except _resume_error_types() as e:
+            logger.warning("Resume rejected: %s", log_safe(str(e)))
+            raise _resume_http_error(e)
         except UnsupportedMediaInputError as e:
             logger.warning("Unsupported media input: %s", e.message)
             raise HTTPException(status_code=422, detail=e.message)
@@ -787,6 +913,19 @@ class GraphService:
             _reraise_framework_errors(e)
             logger.error(f"Graph execution failed: {e}")
             raise HTTPException(status_code=500, detail=f"Graph execution failed: {e!s}")
+        finally:
+            thread_lock.release()
+
+    @staticmethod
+    async def _lock_new_thread(meta: dict[str, Any]) -> Lease:
+        """Lock a thread this request just created. The router locks the ones a client names.
+
+        Nobody is running on a new thread yet, but the client learns its id from the first
+        chunk and could start a second run on it while this one is still going.
+        """
+        if not meta.get("is_new_thread"):
+            return Lease(None)
+        return await acquire_thread_lock(str(meta["thread_id"]))
 
     async def _ainvoke_bounded(
         self, input_data: dict, config: dict[str, Any], granularity: Any
@@ -837,7 +976,7 @@ class GraphService:
         async for chunk in self.stream_chunks(graph_input, user):
             yield chunk.model_dump_json(serialize_as_any=True) + "\n"
 
-    async def stream_chunks(
+    async def stream_chunks(  # noqa: PLR0915
         self,
         graph_input: GraphInputSchema,
         user: dict[str, Any],
@@ -859,6 +998,7 @@ class GraphService:
         meta: dict[str, Any] = {}
         thread_id: str | None = None
         run_id: str | None = None
+        thread_lock = Lease(None)
         try:
             logger.debug("Streaming graph with input: %s", log_safe(graph_input.messages))
 
@@ -866,10 +1006,12 @@ class GraphService:
             input_data, config, meta = await self._prepare_input(
                 graph_input, user.get("user_id"), server_config
             )
+            thread_lock = await self._lock_new_thread(meta)
             # add user inside config
             config["user"] = user
             config["user_id"] = user.get("user_id", "anonymous")
             await self._check_tool_results(input_data["messages"], config)
+            await self._check_resume_target(graph_input, config)
 
             # Try to save thread info in the db even for existing threads
             # this will help in updating last accessed time
@@ -890,9 +1032,10 @@ class GraphService:
             run_status = "done"
 
             # Stream the graph execution
-            async for chunk in self._astream_bounded(
+            async for raw_chunk in self._astream_bounded(
                 input_data, config, graph_input.response_granularity
             ):
+                chunk = sanitize_error_chunk(raw_chunk)
                 mt = chunk.metadata or {}
                 mt.update(meta)
                 chunk.metadata = mt
@@ -950,6 +1093,8 @@ class GraphService:
                 data={"reason": _stream_error_reason(e)},
                 metadata=meta,
             )
+        finally:
+            thread_lock.release()
 
     async def realtime_graph(
         self,

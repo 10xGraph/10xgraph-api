@@ -6,6 +6,8 @@ from tenxgraph.utils import ResponseGranularity
 
 from tenxgraph_api.src.app.core.auth.request_config import (
     client_message_error,
+    ClientInputError,
+    request_size_error,
     with_fresh_message_ids,
 )
 
@@ -33,6 +35,14 @@ class GraphInputSchema(BaseModel):
             "interrupt() returns this value. Send it, possibly as null, only to resume."
         ),
     )
+    interrupt_id: str | None = Field(
+        default=None,
+        description=(
+            "Id of the interrupt `resume` answers (`Interrupt.id`, from the run that paused). "
+            "Optional. When sent, the thread must be paused at that interrupt, or the request "
+            "is rejected with 409 before anything runs."
+        ),
+    )
     initial_state: dict[str, Any] | None = Field(
         default=None,
         description="Initial state for the graph execution",
@@ -47,6 +57,23 @@ class GraphInputSchema(BaseModel):
         le=100,
         description="Maximum recursion limit for graph execution",
     )
+    on_busy: Literal["wait", "cancel"] = Field(
+        default="wait",
+        description=(
+            "What to do when another run is active on the same thread. 'wait' (default) queues "
+            "behind it for up to 30 seconds, then the request is rejected with 409 "
+            "'thread is busy'. 'cancel' asks the active run to stop, then waits for it the "
+            "same way and runs this request."
+        ),
+    )
+
+    @field_validator("messages", mode="before")
+    @classmethod
+    def messages_within_limits(cls, v: Any) -> Any:
+        # Before the messages are parsed into objects: an oversized request is refused cheaply.
+        if error := request_size_error(v):
+            raise ClientInputError(error)
+        return v
 
     @field_validator("messages")
     @classmethod
@@ -340,6 +367,21 @@ class WsGraphInputSchema(BaseModel):
         ),
     )
 
+    resume: Any = Field(
+        default=None,
+        description=(
+            "Answer for a thread paused by interrupt(), with invoke_type 'fresh' and no "
+            "messages needed. Send it, possibly as null, only to resume."
+        ),
+    )
+    interrupt_id: str | None = Field(
+        default=None,
+        description=(
+            "Id of the interrupt `resume` answers. Optional; when sent and the thread is not "
+            "paused at it, an error chunk is sent before anything runs."
+        ),
+    )
+
     # ── Shared fields (mirror GraphInputSchema) ───────────────────────────
     initial_state: dict[str, Any] | None = Field(
         default=None,
@@ -355,15 +397,31 @@ class WsGraphInputSchema(BaseModel):
         le=100,
         description="Maximum recursion limit for graph execution.",
     )
+    on_busy: Literal["wait", "cancel"] = Field(
+        default="wait",
+        description=(
+            "What to do when another run is active on the same thread. 'wait' (default) queues "
+            "behind it for up to 30 seconds, then the request is rejected with 409 "
+            "'thread is busy'. 'cancel' asks the active run to stop, then waits for it the "
+            "same way and runs this request."
+        ),
+    )
     response_granularity: ResponseGranularity = Field(
         default=ResponseGranularity.LOW,
         description="Granularity of the response (full, partial, low).",
     )
 
+    @field_validator("messages", "tool_result", mode="before")
+    @classmethod
+    def messages_within_limits(cls, v: Any, info: ValidationInfo) -> Any:
+        if error := request_size_error(v, info.field_name or "messages"):
+            raise ClientInputError(error)
+        return v
+
     @model_validator(mode="after")
     def validate_by_invoke_type(self) -> "WsGraphInputSchema":
         if self.invoke_type == "fresh":
-            if not self.messages:
+            if not self.messages and "resume" not in self.model_fields_set:
                 raise ValueError("messages must not be empty for invoke_type='fresh'")
         elif self.invoke_type == "resume":
             if not self.tool_result:
@@ -387,10 +445,14 @@ class WsGraphInputSchema(BaseModel):
         then processes to continue execution.
         """
         msgs = self.messages if self.invoke_type == "fresh" else (self.tool_result or [])
+        resume = {"resume": self.resume} if "resume" in self.model_fields_set else {}
         return GraphInputSchema(
+            **resume,
+            interrupt_id=self.interrupt_id,
             messages=msgs,
             initial_state=self.initial_state,
             config=self.config,
             recursion_limit=self.recursion_limit,
+            on_busy=self.on_busy,
             response_granularity=self.response_granularity,
         )

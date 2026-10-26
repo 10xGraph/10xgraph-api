@@ -177,6 +177,21 @@ and for redis backend a `redis` sub-object `{ "url", "prefix" }` (or shorthand U
   message, `MediaURLBlockedError`. `resolve_media_policy` uses `compiled_graph.media_policy`,
   else a default `MediaFetchPolicy`, else skips (core without it). The policy lives in core;
   the API has no config for it.
+- **Per-thread run lock** (`routers/graph/thread_lock.py`): invoke, stream, each WS run and
+  AG-UI take a one-slot lease `runs:thread:<thread id>` from `core/concurrency.py` (Redis when
+  configured, else per process; 60 s lease renewed while alive) before the graph starts, and
+  release it in `finally` (error, cancel, disconnect via `release_when_done`). Routers lock when
+  the request names a thread (streaming routes before the response headers, so the 409 is
+  real); `GraphService` locks a thread it creates (`_lock_new_thread`). Busy: wait up to
+  `THREAD_BUSY_WAIT_SECONDS` (30), then 409 `{"detail": "thread is busy"}` (WS: error chunk
+  `data.reason = "thread is busy"`, socket stays open). Request option `on_busy`
+  (`"wait"` | `"cancel"`, top level next to `recursion_limit`; not on AG-UI): `cancel` calls
+  `GraphService.stop_graph` while waiting. `/v1/graph/live` is not locked.
+- **Production error chunks:** `graph_service.sanitize_error_chunk` (called in
+  `stream_chunks`, so stream, WS and AG-UI share it) replaces `data.reason` / `data.error` /
+  `data.message` and `state.execution_meta.internal_data["error"]` of `ERROR` chunks with the
+  generic `_sanitize_error_message` text when `MODE=production`. Core's
+  `... internal error (reference <id>).` tool text is kept.
 - **Store (memory)**: `POST /v1/store/memories`, `/v1/store/memories/list`,
   `/v1/store/memories/forget`, `/v1/store/memories/{memory_id}`, `POST /v1/store/search`.
 - **Media / files** (`tags=["Files"]`): `POST /v1/files/upload` (first bytes must match the

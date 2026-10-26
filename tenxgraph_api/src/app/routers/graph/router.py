@@ -23,6 +23,7 @@ from tenxgraph_api.src.app.core.auth.revocation import (
     TokenRevocationUnavailableError,
     token_revoked,
 )
+from tenxgraph_api.src.app.core.concurrency import Lease
 from tenxgraph_api.src.app.routers.graph.realtime_guard import (
     realtime_connection_guard,
     ws_identity_still_valid,
@@ -44,6 +45,12 @@ from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     WsGraphInputSchema,
 )
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
+from tenxgraph_api.src.app.routers.graph.thread_lock import (
+    THREAD_BUSY_DETAIL,
+    acquire_thread_lock,
+    combine_leases,
+    lock_requested_thread,
+)
 from tenxgraph_api.src.app.utils import success_response
 from tenxgraph_api.src.app.utils.swagger_helper import generate_swagger_responses
 
@@ -188,11 +195,20 @@ async def invoke_graph(
     logger.info(f"Graph invoke request received with {len(graph_input.messages)} messages")
     service.check_media_urls(graph_input.messages)
 
-    async with run_slot(user, service.runs_policy()):
-        result: GraphInvokeOutputSchema = await service.invoke_graph(
-            graph_input,
-            user,
-        )
+    # One run at a time per thread; 409 when the thread stays busy.
+    thread_lock = await lock_requested_thread(
+        graph_input.config,
+        graph_input.on_busy,
+        lambda thread_id: service.stop_graph(thread_id, user),
+    )
+    try:
+        async with run_slot(user, service.runs_policy()):
+            result: GraphInvokeOutputSchema = await service.invoke_graph(
+                graph_input,
+                user,
+            )
+    finally:
+        thread_lock.release()
 
     logger.info("Graph invoke completed successfully")
 
@@ -221,9 +237,21 @@ async def stream_graph(
     # Before the response starts, so a blocked URL is a real 400 and not an error chunk.
     service.check_media_urls(graph_input.messages)
 
-    # Taken before the response starts so an over-cap request still gets a 429.
-    slot = await acquire_run_slot(user, service.runs_policy())
-    result = release_when_done(service.stream_graph(graph_input, user), slot)
+    # Both taken before the response starts, so a busy thread still gets a real 409 and an
+    # over-cap request a 429.
+    thread_lock = await lock_requested_thread(
+        graph_input.config,
+        graph_input.on_busy,
+        lambda thread_id: service.stop_graph(thread_id, user),
+    )
+    try:
+        slot = await acquire_run_slot(user, service.runs_policy())
+    except BaseException:
+        thread_lock.release()
+        raise
+    result = release_when_done(
+        service.stream_graph(graph_input, user), combine_leases(slot, thread_lock)
+    )
 
     return StreamingResponse(
         result,
@@ -555,8 +583,19 @@ async def _ws_media_urls_allowed(
     return True
 
 
+async def _ws_thread_lock(
+    service: GraphService, user: dict[str, Any], thread_id: str | None, on_busy: Any
+) -> Lease:
+    """The run lock for a WebSocket run (a no-op lease for a thread that does not exist yet)."""
+    if thread_id is None:
+        return Lease(None)
+    return await acquire_thread_lock(
+        thread_id, on_busy=on_busy, stop=lambda: service.stop_graph(thread_id, user)
+    )
+
+
 @router.websocket("/v1/graph/ws")
-async def websocket_graph(  # noqa: PLR0912
+async def websocket_graph(  # noqa: PLR0912, PLR0915
     websocket: WebSocket,
     _bind: None = Depends(_bind_ws_container),
     _guard: None = Depends(realtime_connection_guard),
@@ -677,8 +716,20 @@ async def websocket_graph(  # noqa: PLR0912
             graph_input = ws_input.to_graph_input()
             if not await _ws_media_urls_allowed(websocket, service, graph_input):
                 continue
-            async for chunk_json in service.stream_graph(graph_input, user=user):
-                await websocket.send_text(chunk_json)
+            try:
+                thread_lock = await _ws_thread_lock(service, user, thread_id, ws_input.on_busy)
+            except HTTPException:
+                await websocket.send_text(
+                    StreamChunk(
+                        event=StreamEvent.ERROR, data={"reason": THREAD_BUSY_DETAIL}
+                    ).model_dump_json()
+                )
+                continue
+            try:
+                async for chunk_json in service.stream_graph(graph_input, user=user):
+                    await websocket.send_text(chunk_json)
+            finally:
+                thread_lock.release()
 
             await websocket.send_text(
                 StreamChunk(

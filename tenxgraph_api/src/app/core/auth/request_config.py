@@ -38,6 +38,12 @@ fields ``context_summary`` and ``execution_meta`` are never client-writable
 (:func:`reject_builtin_state_keys`). The server also generates every message id itself
 (:func:`with_fresh_message_ids`); the AG-UI adapter alone keeps client ids, since its converter
 uses them to skip messages the thread already stores.
+
+A request is also bounded in size before anything heavy runs (:func:`request_size_error`): the
+body cap lets a few MB of messages or content blocks through, and core then copies and serialises
+them on the event loop. The limits are fixed module constants (``MAX_MESSAGES`` and friends).
+A resume that names the interrupt it answers is checked against the thread's open interrupt
+(:class:`InterruptConflictError`).
 """
 
 from __future__ import annotations
@@ -152,6 +158,64 @@ def _field(message: Any, name: str) -> Any:
     if isinstance(message, dict):
         return message.get(name)
     return getattr(message, name, None)
+
+
+# Request size limits, applied in schema validation to client messages (graph invoke and stream,
+# WebSocket, AG-UI, PUT state ``context``, POST messages). Fixed on purpose: no setting.
+MAX_MESSAGES = 500
+MAX_BLOCKS_PER_MESSAGE = 100
+# Characters (``len`` of the Python string, not UTF-8 bytes) of text summed over every text block
+# of the request; a plain string ``content`` (AG-UI) counts too.
+MAX_TEXT_CHARS = 1_000_000
+# AG-UI clients resend the whole conversation on every run. Only the trailing turn reaches the
+# graph and gets the limits above; the full history gets this looser message cap (plus the
+# per-message block cap) so a long chat keeps working.
+MAX_AG_UI_HISTORY_MESSAGES = 10_000
+
+
+class InterruptConflictError(Exception):
+    """A resume names an interrupt the thread is not paused at (HTTP 409, or an error chunk)."""
+
+
+def request_size_error(
+    messages: Any,
+    field: str = "messages",
+    *,
+    max_messages: int = MAX_MESSAGES,
+    max_text_chars: int | None = MAX_TEXT_CHARS,
+) -> str | None:
+    """Describe the first size limit ``messages`` breaks, or ``None``.
+
+    Cheap on purpose: counts are checked before anything is iterated, so a huge request is
+    rejected without walking it. Accepts ``Message`` objects, AG-UI messages or plain dicts, and
+    ignores anything that is not a list (schema validation reports that). ``max_text_chars=None``
+    skips the total text check.
+    """
+    if not isinstance(messages, list | tuple):
+        return None
+    if len(messages) > max_messages:
+        return f"{field}: at most {max_messages} messages per request (got {len(messages)})"
+    total = 0
+    for index, message in enumerate(messages):
+        content = _field(message, "content")
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list | tuple):
+            if len(content) > MAX_BLOCKS_PER_MESSAGE:
+                return (
+                    f"{field}[{index}]: at most {MAX_BLOCKS_PER_MESSAGE} content blocks per "
+                    f"message (got {len(content)})"
+                )
+            for block in content:
+                if _field(block, "type") == "text":
+                    text = _field(block, "text")
+                    total += len(text) if isinstance(text, str) else 0
+        if max_text_chars is not None and total > max_text_chars:
+            return (
+                f"{field}: at most {max_text_chars} characters of text in total across all "
+                "text blocks of a request"
+            )
+    return None
 
 
 def client_tool_call_error(messages: Any) -> str | None:

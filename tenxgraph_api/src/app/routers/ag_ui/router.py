@@ -18,6 +18,7 @@ from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphServ
 from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import (
     MediaURLBlockedError,
 )
+from tenxgraph_api.src.app.routers.graph.thread_lock import acquire_thread_lock, combine_leases
 
 from .converter import check_client_tools, parse_run_input, to_tenxgraph_messages
 from .service import stream_ag_ui
@@ -88,7 +89,14 @@ async def run_ag_ui(
 
     logger.info("AG-UI run %s received for thread %s", run_input.run_id, thread_id)
     encoder = EventEncoder(accept=request.headers.get("accept") or "")
-    slot = await acquire_run_slot(user, service.runs_policy())
+    # One run at a time per thread (AG-UI always waits); taken before the response starts so a
+    # busy thread is a real 409.
+    thread_lock = await acquire_thread_lock(thread_id)
+    try:
+        slot = await acquire_run_slot(user, service.runs_policy())
+    except BaseException:
+        thread_lock.release()
+        raise
     return StreamingResponse(
         release_when_done(
             stream_ag_ui(
@@ -98,7 +106,7 @@ async def run_ag_ui(
                 encoder,
                 allow_client_tools=config.ag_ui.allow_client_tools,
             ),
-            slot,
+            combine_leases(slot, thread_lock),
         ),
         media_type=encoder.get_content_type(),
         headers={

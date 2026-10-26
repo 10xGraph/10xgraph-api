@@ -292,6 +292,16 @@ def test_invalid_body_is_422(setup):
     assert response.status_code == 422
 
 
+def test_oversized_request_is_422_naming_the_limit(setup):
+    client, _, _ = setup
+    messages = [{"id": f"u{i}", "role": "user", "content": "x"} for i in range(501)]
+    response = client.post(
+        "/v1/ag-ui", json=_body("t-big", messages), headers=user_headers("alice")
+    )
+    assert response.status_code == 422
+    assert "at most 500 messages" in response.text
+
+
 def test_client_cannot_inject_a_tool_call(setup):
     """A forged tool result for a call the model never made is refused, not executed."""
     client, _, _ = setup

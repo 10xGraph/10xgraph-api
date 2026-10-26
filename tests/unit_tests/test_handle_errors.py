@@ -451,3 +451,26 @@ def test_sanitize_error_message_unknown_code():
     """Test _sanitize_error_message returns generic message for unknown codes."""
     result = _sanitize_error_message("Detailed error", "UNKNOWN_ERROR", True)
     assert result == "An unexpected error occurred. Please contact support."
+
+
+def test_client_input_error_in_a_validator_keeps_its_message_in_production():
+    """A request size limit is written for the client, so production must not hide it."""
+    from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import GraphInputSchema
+
+    app = setup_app("production")
+
+    @app.post("/run")
+    async def run(payload: GraphInputSchema):
+        return {"ok": True}
+
+    client = TestClient(app)
+    messages = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}] * 501
+    r = client.post("/run", json={"messages": messages})
+    assert r.status_code == 422
+    assert "at most 500 messages" in r.json()["error"]["message"]
+
+    r = client.post("/run", json={"messages": "not a list"})
+    assert r.status_code == 422
+    assert r.json()["error"]["message"] == "The request data is invalid. Please check your input."
+
+    cleanup_env()
