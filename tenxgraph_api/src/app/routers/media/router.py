@@ -13,14 +13,17 @@ from injectq.integrations import InjectAPI
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
 from tenxgraph_api.src.app.core.auth.request_config import client_error_detail
 from tenxgraph_api.src.app.core.config.media_settings import get_media_settings
+from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.routers.media import MediaService
 from tenxgraph_api.src.app.routers.media.schemas import (
     FileAccessUrlResponse,
+    FileDeleteResponse,
     FileInfoResponse,
     FileUploadResponse,
     MultimodalConfigResponse,
 )
 from tenxgraph_api.src.app.utils import success_response
+from tenxgraph_api.src.app.utils.media.signatures import content_matches_mime
 
 
 router = APIRouter(tags=["Files"])
@@ -157,7 +160,17 @@ async def upload_file(
     if not data:
         raise HTTPException(status_code=400, detail="Empty file")
 
-    logger.info("File upload: %s (%s, %d bytes)", file.filename, mime, len(data))
+    if not content_matches_mime(data, mime):
+        logger.warning(
+            "Rejected upload %s: content does not match %s", log_safe(file.filename), log_safe(mime)
+        )
+        raise HTTPException(
+            status_code=415, detail=f"file content does not match {mime.split(';', 1)[0].strip()}"
+        )
+
+    logger.info(
+        "File upload: %s (%s, %d bytes)", log_safe(file.filename), log_safe(mime), len(data)
+    )
 
     try:
         # Record the uploader as the owner, so the file cannot later be read by a
@@ -254,6 +267,36 @@ async def get_file_access_url(
         mime_type=info["mime_type"],
     )
     return success_response(payload, request)
+
+
+# ------------------------------------------------------------------
+# DELETE /v1/files/{file_id}  — owner-only manual cleanup
+# ------------------------------------------------------------------
+@router.delete(
+    "/v1/files/{file_id}",
+    summary="Delete a file",
+    description=(
+        "Deletes the stored file and its metadata. Only the uploader may delete it; a file "
+        "that is missing or belongs to someone else gives 404."
+    ),
+    response_model=FileDeleteResponse,
+)
+async def delete_file(
+    request: Request,
+    file_id: str,
+    service: MediaService = InjectAPI(MediaService),
+    user: dict[str, Any] = Depends(RequirePermission("files", "delete")),
+):
+    try:
+        await service.ensure_can_access(file_id, user.get("user_id"))
+        deleted = await service.delete_file(file_id)
+    except (KeyError, PermissionError, ValueError):
+        # 404, not 403: do not confirm that someone else's file_id exists.
+        raise HTTPException(status_code=404, detail="File not found")
+    if not deleted:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return success_response(FileDeleteResponse(file_id=file_id, deleted=True), request)
 
 
 # ------------------------------------------------------------------

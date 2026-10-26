@@ -3,7 +3,7 @@ import contextlib
 import json
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.logger import logger
 from fastapi.responses import StreamingResponse
 from injectq import InjectQ
@@ -186,6 +186,7 @@ async def invoke_graph(
     Invoke the graph with the provided input and return the final result.
     """
     logger.info(f"Graph invoke request received with {len(graph_input.messages)} messages")
+    service.check_media_urls(graph_input.messages)
 
     async with run_slot(user, service.runs_policy()):
         result: GraphInvokeOutputSchema = await service.invoke_graph(
@@ -217,6 +218,8 @@ async def stream_graph(
     Stream the graph execution with real-time output.
     """
     logger.info(f"Graph stream request received with {len(graph_input.messages)} messages")
+    # Before the response starts, so a blocked URL is a real 400 and not an error chunk.
+    service.check_media_urls(graph_input.messages)
 
     # Taken before the response starts so an over-cap request still gets a 429.
     slot = await acquire_run_slot(user, service.runs_policy())
@@ -538,8 +541,22 @@ async def _ws_thread_authorized(
     return await authz.authorize(user, "graph", action, resource_id=str(thread_id))
 
 
+async def _ws_media_urls_allowed(
+    websocket: WebSocket, service: GraphService, graph_input: GraphInputSchema
+) -> bool:
+    """Apply the media URL policy to a WebSocket run; a blocked URL is sent as an error chunk."""
+    try:
+        service.check_media_urls(graph_input.messages)
+    except HTTPException as exc:
+        await websocket.send_text(
+            StreamChunk(event=StreamEvent.ERROR, data={"reason": str(exc.detail)}).model_dump_json()
+        )
+        return False
+    return True
+
+
 @router.websocket("/v1/graph/ws")
-async def websocket_graph(
+async def websocket_graph(  # noqa: PLR0912
     websocket: WebSocket,
     _bind: None = Depends(_bind_ws_container),
     _guard: None = Depends(realtime_connection_guard),
@@ -658,6 +675,8 @@ async def websocket_graph(
             )
 
             graph_input = ws_input.to_graph_input()
+            if not await _ws_media_urls_allowed(websocket, service, graph_input):
+                continue
             async for chunk_json in service.stream_graph(graph_input, user=user):
                 await websocket.send_text(chunk_json)
 

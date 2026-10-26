@@ -73,6 +73,7 @@ def validate_config(config: Any, base_dir: Path | None = None) -> list[Issue]:
     _check_websocket(config, out)
     _check_runs(config, out)
     _check_ag_ui(config, out)
+    _check_media(config, out)
     _check_observability(config, out)
     _check_plugins(config, out, base_dir)
     _check_remote_tools(config, out)
@@ -259,6 +260,15 @@ def _check_ag_ui(config: dict, out: _Collector) -> None:
     from tenxgraph_api.src.app.core.config.graph_config import AgUiConfig
 
     _quietly(lambda: AgUiConfig.from_dict(data), out, "ag_ui")
+
+
+def _check_media(config: dict, out: _Collector) -> None:
+    data = config.get("media")
+    if data is None:
+        return
+    from tenxgraph_api.src.app.core.config.graph_config import MediaConfig
+
+    _quietly(lambda: MediaConfig.from_dict(data), out, "media")
 
 
 def _check_observability(config: dict, out: _Collector) -> None:

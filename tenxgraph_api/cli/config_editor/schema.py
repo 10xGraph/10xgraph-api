@@ -52,6 +52,7 @@ AUTHORIZATION_SCOPES: tuple[str, ...] = (
     "checkpointer:read",
     "checkpointer:write",
     "config:read",
+    "files:delete",
     "files:read",
     "files:upload",
     "graph:fix",
@@ -80,6 +81,7 @@ KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
         "websocket",
         "runs",
         "ag_ui",
+        "media",
         "observability",
         "injectq",
         "store",
@@ -479,6 +481,29 @@ _SECTIONS: list[dict[str, Any]] = [
             'Needs the ag-ui extra: pip install "10xgraph-api[ag-ui]".',
             "Client tools run in the caller's browser, cannot reuse a server tool's name, and are "
             "size-limited.",
+        ],
+    },
+    {
+        "id": "media",
+        "title": "Uploaded files",
+        "description": "What happens to uploaded files when the messages that use them go away.",
+        "key": "media",
+        "optional": True,
+        "off_summary": "Files are deleted together with the last thread that uses them.",
+        "default": {"delete_with_thread": True},
+        "fields": [
+            {
+                "path": ["media", "delete_with_thread"],
+                "default": True,
+                "label": "Delete files with their thread",
+                "type": "bool",
+                "help": (
+                    "When the last message or thread that references an uploaded file is "
+                    "deleted, delete the file too. Off: nothing is deleted automatically "
+                    "(use DELETE /v1/files/{file_id}). Files uploaded before this setting "
+                    "existed are never deleted automatically."
+                ),
+            },
         ],
     },
     {

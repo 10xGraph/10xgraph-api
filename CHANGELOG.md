@@ -49,8 +49,48 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The server generates every message id.** A `message_id` sent on invoke, stream, WebSocket
   or in `PUT state` context is ignored, so a client cannot pre-claim ids. AG-UI keeps client ids
   (its converter relies on them).
+- **External media URLs are checked before the run.** Every media block with a non-internal URL
+  (`http(s)://`, `gs://` and so on) in client input is run through the graph's media fetch
+  policy (`compiled_graph.media_policy`, or the default `MediaFetchPolicy`) on invoke, stream,
+  WebSocket, AG-UI, `POST /v1/threads/{id}/messages` and `PUT /v1/threads/{id}/state`. A blocked
+  URL gets 400 with the policy's message (on the WebSocket, an error chunk). No network is
+  touched. The policy lives in core and is set in code; the API has no setting for it. Needs a
+  core release that ships `MediaFetchPolicy`; on older cores the check is skipped.
+- **Uploads must look like their declared type.** `POST /v1/files/upload` compares the first
+  bytes with the declared type for PNG, JPEG, GIF, WebP, BMP, TIFF, ICO, PDF, Office (ZIP and
+  OLE), MP3, WAV, OGG, FLAC, MP4 and WebM, and answers 415 `file content does not match <type>`
+  on a mismatch. Types with no known signature (plain text, JSON, CSV) are accepted as before.
+  EXIF is kept.
+- **Log lines escape control characters.** `log_safe` now also escapes ESC and the other C0
+  control characters (not just CR and LF), and the upload route logs the client filename
+  through it.
+- **Document text extraction is bounded.** HTML, XML, CSV, Markdown, JSON and plain-text
+  uploads over 5 MiB are no longer parsed (a 12 MB HTML file used about 1.2 GB of RAM); they
+  are stored without extracted text and a warning is logged. At most 2 extractions run at once,
+  and a slot stays taken until the worker thread actually finishes, so the 30 s timeout can no
+  longer let threads pile up.
+- **`10xgraph skills` no longer follows symlinks in the target project.** It refuses to install
+  when any existing component of the destination (`.claude`, `.agents`, `.github` and the
+  paths under them) is a symlink, or when the resolved destination is outside `--path`, so a
+  hostile repo cannot make it delete or write files elsewhere.
 
 ### Added
+
+- **Uploaded files live and die with the messages that use them.** When an accepted message
+  carries `graph://media/<key>` (or the legacy `agentflow://media/`), the thread id is added to
+  the file's `threads` metadata (owned files only; invoke, stream, WebSocket, AG-UI,
+  `POST /v1/threads/{id}/messages`, `PUT .../state`). Deleting a message (only when no other
+  message in the thread still uses the file) or a thread drops the link, and a file with no
+  link left is deleted. A file shared by two threads stays until both are gone. Files uploaded
+  before this release have no `threads` key and are never deleted automatically. Cleanup
+  failures are logged and never fail the delete. Needs a core release with
+  `BaseMediaStore.update_metadata`; on older cores nothing is tracked or auto-deleted.
+- `media.delete_with_thread` in 10xgraph.json (default `true`, editable in `10xgraph config`).
+  `false` keeps recording links but never deletes a file automatically.
+- `DELETE /v1/files/{file_id}` deletes a file and its metadata. Owner only: 404 (not 403) for a
+  missing file or one that belongs to someone else. Returns `{"data": {"file_id": "...",
+  "deleted": true}, "metadata": {...}}`. Needs the new `files:delete` scope, which `"*"` roles
+  have.
 
 - `PUT /v1/threads/{thread_id}/messages/{message_id}` sets feedback on a message. Body:
   `{"feedback": {...}}` (any JSON object, at most 8 KB serialized and 10 levels deep, else 422).
@@ -66,6 +106,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An unknown `current_node` in `initial_state` returns 422 (was a 500 from core). Wrong-typed
   state values (a string for an `int` field) return 422 naming the field, on run input and on
   `PUT state` (was stored, then crashed a later run).
+- Uploaded documents over the extraction size limit no longer cause a slow or memory-heavy
+  parse; the upload succeeds with `extracted_text` null.
 
 ### Breaking
 

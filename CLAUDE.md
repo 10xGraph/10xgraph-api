@@ -98,6 +98,7 @@ Parsed by `tenxgraph_api/src/app/core/config/graph_config.py`. Supported keys:
 | `websocket` | `enabled` (`false` leaves out `/v1/graph/ws` and `/v1/graph/live`; `true` without `websockets`/`wsproto` refuses to boot; unset keeps them and warns if no library; `routers/setup_router.py::_graph_router`), `max_connections` (1000), `max_connections_per_user` (10), `realtime_models` (models a `/v1/graph/live` client may pick), `realtime_client_overrides` (init options a client may set; default `voice`, `modalities`, `vad`; add `system_prompt` only for trusted callers) |
 | `runs` | `RunsConfig`: `thread_ids` (`client` default, `server` = only existing ids may be named, enforced by the ownership/rbac backends), `config_keys` / `state_keys` (allow-lists for request config and `initial_state`/PUT state; 422 on other keys; `thread_id`, `run_id` always allowed), `max_concurrent_per_user` (HTTP invoke/stream/AG-UI runs in flight, default 10, 429 over it; `routers/graph/run_limits.py`), `timeout` (seconds; invoke 504, streams end with an error chunk), `max_parallel_tool_calls` (positive int, default unset = core's default 10 or env `TENXGRAPH_MAX_PARALLEL_TOOL_CALLS`; set into every run's config in `_prepare_input`, reserved from clients) |
 | `token_revocation` | `"redis"` / `"memory"` / `"module:attr"` -> `core/auth/revocation.py::TokenRevocationBackend`, checked by `RequirePermission` (401) and before every WS run; backend errors fail closed (503) |
+| `media` | `delete_with_thread` (default true): delete an uploaded file when the last message or thread that references it is deleted. Links are recorded in the file's `threads` metadata (`MediaService.link_threads` / `unlink_threads`); files without a `threads` key (uploaded before link tracking) and stores without `update_metadata` (core older than the release that added it) are never auto-deleted. `false` still records links. Parsed by `graph_config.MediaConfig` |
 | `graph_introspection` | `"open"` or `"scoped"` (default scoped in production): `GET /v1/graph`, `/v1/graph/tools`, `/v1/graph:StateSchema` need an explicit `graph:read` scope (`RequirePermission(..., introspection=True)`) |
 
 `rate_limit` object: `enabled`, `requests` (default 100), `window` secs (60), `by` (`ip` |
@@ -169,10 +170,21 @@ and for redis backend a `redis` sub-object `{ "url", "prefix" }` (or shorthand U
   `context`); the server replaces client `message_id`s (`with_fresh_message_ids`, in the schema
   validators; AG-UI validates with `context={KEEP_MESSAGE_IDS: True}` to keep its ids);
   `current_node` must be a real node and state values must match the state model's types (422).
+  Every external media URL in client input (`media.kind="url"`, not `graph://media/` or
+  `data:`; `gs://` included) is run through the graph's `media_policy.check_url` before the run
+  (`multimodal_preprocessor.check_external_media_urls`, via `GraphService.check_media_urls`,
+  also called by `CheckpointerService` for `POST messages` and `PUT state`): 400 with the policy
+  message, `MediaURLBlockedError`. `resolve_media_policy` uses `compiled_graph.media_policy`,
+  else a default `MediaFetchPolicy`, else skips (core without it). The policy lives in core;
+  the API has no config for it.
 - **Store (memory)**: `POST /v1/store/memories`, `/v1/store/memories/list`,
   `/v1/store/memories/forget`, `/v1/store/memories/{memory_id}`, `POST /v1/store/search`.
-- **Media / files** (`tags=["Files"]`): `POST /v1/files/upload`, `GET /v1/files/{file_id}`,
-  `/{file_id}/info`, `/{file_id}/url`, `GET /v1/config/multimodal`.
+- **Media / files** (`tags=["Files"]`): `POST /v1/files/upload` (first bytes must match the
+  declared type for formats with a signature, else 415; table in `utils/media/signatures.py`),
+  `GET /v1/files/{file_id}`, `/{file_id}/info`, `/{file_id}/url`, `DELETE /v1/files/{file_id}`
+  (owner only, 404 otherwise, scope `files:delete`, added in `authorization.FILES_DELETE_SCOPES`
+  until core lists it), `GET /v1/config/multimodal`. Deleting a message or thread also releases
+  the files it referenced (`CheckpointerService.delete_message` / `delete_thread`).
 - **AG-UI** (`tags=["AG-UI"]`, only when `ag_ui.enabled`): `POST /v1/ag-ui`. `routers/ag_ui/`:
   `converter.py` (RunAgentInput -> new user/tool messages only; the checkpoint is the record),
   `event_mapper.py` (StreamChunk -> AG-UI events), `service.py` (runs `GraphService.stream_chunks`).

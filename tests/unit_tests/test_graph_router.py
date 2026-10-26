@@ -37,6 +37,7 @@ def mock_service():
     # but we can mock it as returning an async iterable or mock object
     service.stream_graph = MagicMock()
     service.runs_policy = MagicMock(return_value=RunsConfig())
+    service.check_media_urls = MagicMock()
     return service
 
 

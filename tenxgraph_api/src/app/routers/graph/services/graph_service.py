@@ -42,7 +42,11 @@ from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     ToolSchema,
 )
 from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import (
+    MediaURLBlockedError,
+    check_external_media_urls,
+    internal_media_keys,
     preprocess_multimodal_messages,
+    resolve_media_policy,
 )
 from tenxgraph_api.src.app.utils import DefaultThreadNameGenerator, ThreadNameGenerator
 from tenxgraph_api.src.app.utils.telemetry_store import TelemetryStore
@@ -263,6 +267,15 @@ class GraphService:
             except Exception:
                 self._media_service = None
         return self._media_service
+
+    @property
+    def media_policy(self) -> Any:
+        """The graph's media fetch policy (``None`` when the installed core has none)."""
+        return resolve_media_policy(self._graph)
+
+    def check_media_urls(self, messages: list[Any]) -> None:
+        """Reject external media URLs the graph's fetch policy blocks (400, no network)."""
+        check_external_media_urls(messages, self.media_policy)
 
     async def _save_thread_name(
         self,
@@ -635,12 +648,20 @@ class GraphService:
             config["max_parallel_tool_calls"] = runs.max_parallel_tool_calls
 
         # Prepare the input for the graph
+        # External media URLs first: the checks are cheap and need no network.
+        self.check_media_urls(graph_input.messages)
         # Preprocess multimodal messages (resolve file_id → cached text, etc.)
         preprocessed = await preprocess_multimodal_messages(
             graph_input.messages,
             self.media_service,
             user_id,
         )
+        # The accepted messages now use these files: record the thread on each (owned files
+        # only; the ownership check above already ran).
+        if user_id and self.media_service is not None:
+            keys = [k for m in preprocessed for k in internal_media_keys(m)]
+            if keys:
+                await self.media_service.link_threads(keys, str(thread_id), str(user_id))
         input_data: dict = {
             "messages": preprocessed,
         }
@@ -754,6 +775,9 @@ class GraphService:
         except RunTimeoutError as e:
             logger.warning("Graph invoke cancelled: %s", e)
             raise HTTPException(status_code=504, detail=str(e))
+        except MediaURLBlockedError as e:
+            logger.warning("Blocked external media URL: %s", log_safe(str(e)))
+            raise
         except ValueError as e:
             logger.warning(f"Graph input validation failed: {e}")
             raise HTTPException(status_code=422, detail=client_error_detail(e))

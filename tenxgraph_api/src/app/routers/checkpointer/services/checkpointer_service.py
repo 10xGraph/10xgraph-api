@@ -27,7 +27,10 @@ from tenxgraph_api.src.app.routers.checkpointer.schemas.checkpointer_schemas imp
     ThreadsListResponseSchema,
 )
 from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import (
+    check_external_media_urls,
     check_media_references,
+    internal_media_keys,
+    resolve_media_policy,
 )
 from tenxgraph_api.src.app.utils.parse_output import parse_state_output
 
@@ -39,6 +42,10 @@ class CheckpointerUnavailableError(HTTPException, ValueError):
         detail = "Checkpointer is not configured"
         HTTPException.__init__(self, status_code=503, detail=detail)
         ValueError.__init__(self, detail)
+
+
+# Messages read per page when collecting a thread's media references for cleanup.
+_CLEANUP_PAGE = 500
 
 
 @singleton
@@ -82,6 +89,63 @@ class CheckpointerService:
         if not user_id or not messages:
             return
         await check_media_references(messages, self._media_service(), str(user_id))
+
+    def _check_media_urls(self, messages: list[Any]) -> None:
+        """External media URLs in written messages get the same policy check as graph input
+        (400), since the next run on the thread may make the server fetch them."""
+        if not messages:
+            return
+        graph_service = self._graph_service()
+        policy = (
+            graph_service.media_policy if graph_service is not None else resolve_media_policy(None)
+        )
+        check_external_media_urls(messages, policy)
+
+    async def _link_media(self, messages: list[Any], cfg: dict[str, Any], user: dict) -> None:
+        """Record the thread on every owned file the written messages reference."""
+        user_id = user.get("user_id")
+        media = self._media_service()
+        thread_id = cfg.get("thread_id")
+        if not user_id or media is None or thread_id is None:
+            return
+        keys = [k for m in messages for k in internal_media_keys(m)]
+        if keys:
+            await media.link_threads(keys, str(thread_id), str(user_id))
+
+    def _link_tracking_media(self) -> Any:
+        """The media service when it can track thread links, else ``None``. Never raises."""
+        media = self._media_service()
+        try:
+            return media if media is not None and media.supports_links else None
+        except Exception as exc:
+            logger.debug("Media store unavailable for file cleanup: %s", exc)
+            return None
+
+    async def _thread_media_keys(
+        self, cfg: dict[str, Any], skip_message_id: Any = None
+    ) -> list[str]:
+        """Media keys referenced by the thread's messages (all pages), minus one message.
+
+        A read failure raises, so a partial list is never used: cleanup can only miss a file
+        (it stays), never delete one that is still referenced.
+        """
+        keys: list[str] = []
+        offset = 0
+        try:
+            while True:
+                page = await self.checkpointer.alist_messages(cfg, None, offset, _CLEANUP_PAGE)
+                for message in page:
+                    if skip_message_id is not None and str(message.message_id) == str(
+                        skip_message_id
+                    ):
+                        continue
+                    keys.extend(internal_media_keys(message))
+                if len(page) < _CLEANUP_PAGE:
+                    return keys
+                offset += len(page)
+        except Exception as exc:
+            logger.warning("Could not read thread messages for file cleanup: %s", exc)
+            raise
 
     async def _check_context_tool_results(self, context: list[Any], cfg: dict[str, Any]) -> None:
         """Hold tool results in client ``context`` to the rule invoke applies: only as the
@@ -174,6 +238,7 @@ class CheckpointerService:
         if context:
             await self._check_context_tool_results(context, cfg)
             state = {**state, "context": with_fresh_message_ids(context)}
+        self._check_media_urls(state.get("context") or [])
         await self._check_media_references(state.get("context") or [], user)
         await self._claim_thread(cfg, user)
         old_state: AgentState | None = await self.checkpointer.aget_state(cfg)
@@ -194,6 +259,7 @@ class CheckpointerService:
         res = await self.checkpointer.aput_state(cfg, to_store)  # type: ignore[arg-type]
         # update cache as well
         await self.checkpointer.aput_state_cache(cfg, to_store)  # type: ignore
+        await self._link_media(state.get("context") or [], cfg, user)
 
         return StateResponseSchema(
             state=parse_state_output(
@@ -216,9 +282,11 @@ class CheckpointerService:
         metadata: dict[str, Any] | None = None,
     ) -> ResponseSchema:
         cfg = self._config(config, user)
+        self._check_media_urls(messages)
         await self._check_media_references(messages, user)
         await self._claim_thread(cfg, user)
         res = await self.checkpointer.aput_messages(cfg, messages, metadata)
+        await self._link_media(messages, cfg, user)
         return ResponseSchema(success=True, message="Messages put successfully", data=res)
 
     async def get_message(
@@ -274,7 +342,21 @@ class CheckpointerService:
         message_id: Any,
     ) -> ResponseSchema:
         cfg = self._config(config, user)
+        # Files only this message references lose their link to the thread. Read before the
+        # delete; a read failure just leaves the files in place.
+        released: list[str] = []
+        media = self._link_tracking_media()
+        if media is not None:
+            try:
+                gone = internal_media_keys(await self.checkpointer.aget_message(cfg, message_id))
+                if gone:
+                    kept = set(await self._thread_media_keys(cfg, skip_message_id=message_id))
+                    released = [k for k in dict.fromkeys(gone) if k not in kept]
+            except Exception as exc:
+                logger.debug("File cleanup skipped for message %s: %s", log_safe(message_id), exc)
         res = await self.checkpointer.adelete_message(cfg, message_id)
+        if released and media is not None and cfg.get("thread_id") is not None:
+            await media.unlink_threads(released, str(cfg["thread_id"]))
         return ResponseSchema(success=True, message="Message deleted successfully", data=res)
 
     # Threads
@@ -311,7 +393,17 @@ class CheckpointerService:
             log_safe(sanitize_for_logging(user)),
             log_safe(thread_id),
         )
+        # Collect the files the thread's messages reference before they are gone.
+        thread_keys: list[str] = []
+        media = self._link_tracking_media()
+        if media is not None:
+            try:
+                thread_keys = list(dict.fromkeys(await self._thread_media_keys(cfg)))
+            except Exception as exc:
+                logger.debug("File cleanup skipped for thread %s: %s", log_safe(thread_id), exc)
         res = await self.checkpointer.aclean_thread(cfg)
+        if thread_keys and media is not None:
+            await media.unlink_threads(thread_keys, str(thread_id))
 
         # Clean telemetry traces if TelemetryStore is bound in InjectQ
         try:

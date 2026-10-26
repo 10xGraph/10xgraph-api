@@ -26,6 +26,11 @@ class FileInfoResponse(BaseModel):
     direct_url_expires_at: int | None = None
 
 
+class FileDeleteResponse(BaseModel):
+    file_id: str
+    deleted: bool = True
+
+
 class FileAccessUrlResponse(BaseModel):
     file_id: str
     url: str

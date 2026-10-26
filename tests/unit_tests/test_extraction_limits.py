@@ -160,3 +160,59 @@ async def test_upload_uses_its_declared_type():
 
     await service.upload_file(b"hello", "a.zip", "text/plain", user_id="u1")
     assert fake.filenames == ["upload.txt"]
+
+
+# ---- B22: size cap and bounded concurrency ----
+
+
+@pytest.mark.asyncio
+async def test_oversized_text_document_is_skipped_with_a_warning(caplog):
+    fake = RecordingExtractor()
+    big = b"<p>x</p>" * (extractor_module.MAX_TEXT_DOCUMENT_BYTES // 8 + 1)
+    with caplog.at_level("WARNING", logger="tenxgraph_api.media.extractor"):
+        result = await DocumentExtractor(extractor=fake).extract(big, "a.html", "text/html")
+    assert result is None
+    assert fake.filenames == []
+    assert "exceeds" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_small_html_document_is_still_extracted():
+    fake = RecordingExtractor(result="hello")
+    result = await DocumentExtractor(extractor=fake).extract(b"<p>hi</p>", "a.html", "text/html")
+    assert result == "hello"
+    assert fake.filenames == ["upload.html"]
+
+
+@pytest.mark.asyncio
+async def test_timed_out_extractions_cannot_exceed_the_concurrency_bound(monkeypatch):
+    monkeypatch.setattr(extractor_module, "EXTRACTION_TIMEOUT_SECONDS", 0.05)
+    release = asyncio.Event()
+    running = 0
+    peak = 0
+
+    class StuckExtractor:
+        async def extract(self, data, filename=None):
+            nonlocal running, peak
+            running += 1
+            peak = max(peak, running)
+            try:
+                await release.wait()  # stands in for a worker thread that cannot be stopped
+            finally:
+                running -= 1
+            return "late"
+
+    extractor = DocumentExtractor(extractor=StuckExtractor())
+    results = await asyncio.gather(
+        *(extractor.extract(b"x", "a.txt", "text/plain") for _ in range(6)),
+        return_exceptions=True,
+    )
+    assert all(isinstance(r, ValueError) for r in results)
+    assert peak == extractor_module.MAX_CONCURRENT_EXTRACTIONS
+    assert running == extractor_module.MAX_CONCURRENT_EXTRACTIONS  # still held after timeout
+
+    release.set()
+    await asyncio.sleep(0.05)
+    assert running == 0
+    ok = await extractor.extract(b"x", "a.txt", "text/plain")  # slots came back
+    assert ok == "late"

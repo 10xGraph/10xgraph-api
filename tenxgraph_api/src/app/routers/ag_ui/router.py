@@ -15,8 +15,11 @@ from tenxgraph_api.src.app.core.auth.request_config import (
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.routers.graph.run_limits import acquire_run_slot, release_when_done
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
+from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import (
+    MediaURLBlockedError,
+)
 
-from .converter import check_client_tools, parse_run_input
+from .converter import check_client_tools, parse_run_input, to_tenxgraph_messages
 from .service import stream_ag_ui
 
 
@@ -73,6 +76,15 @@ async def run_ag_ui(
         user, "graph", "stream", resource_id=thread_id
     ):
         raise HTTPException(status_code=403, detail="Not allowed to access this thread")
+
+    # External media URLs in the request, checked before the response starts so a blocked
+    # one is a 400. Anything the converter rejects is left to the run, which reports it.
+    try:
+        service.check_media_urls(to_tenxgraph_messages(run_input.messages))
+    except MediaURLBlockedError:
+        raise
+    except ValueError:
+        pass
 
     logger.info("AG-UI run %s received for thread %s", run_input.run_id, thread_id)
     encoder = EventEncoder(accept=request.headers.get("accept") or "")

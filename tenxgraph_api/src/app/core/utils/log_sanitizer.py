@@ -47,12 +47,21 @@ _INLINE_SECRET_PATTERNS = (
 )
 
 
+_LOG_ESCAPES = {
+    **{code: f"\\x{code:02x}" for code in [*range(0x20), 0x7F] if code != ord("\t")},
+    ord("\r"): "\\r",
+    ord("\n"): "\\n",
+}
+
+
 def log_safe(value: Any) -> str:
     """``value`` as a single log line, for client-influenced values such as ids and paths.
 
-    CR and LF are escaped so a value cannot end the entry and forge a new one.
+    CR and LF are escaped so a value cannot end the entry and forge a new one. Other control
+    characters (ESC and the rest of C0, DEL) are written as ``\\xNN`` so a terminal that
+    tails the log does not act on them. Tab is kept.
     """
-    return str(value).replace("\r", "\\r").replace("\n", "\\n")
+    return str(value).translate(_LOG_ESCAPES)
 
 
 def redact_text(text: str) -> str:

@@ -544,6 +544,34 @@ class AgUiConfig:
         )
 
 
+@dataclass
+class MediaConfig:
+    """Uploaded-file lifecycle settings parsed from 10xgraph.json.
+
+    Example::
+
+        "media": {"delete_with_thread": true}
+
+    The API records which threads use an uploaded file (``graph://media/`` references in
+    accepted messages). With ``delete_with_thread`` (default ``true``), deleting a message or a
+    thread drops that link, and a file with no thread left is deleted too. Set it to ``false``
+    to keep the links but never delete automatically. Files uploaded before link tracking
+    existed are never deleted automatically either way.
+    """
+
+    delete_with_thread: bool = True
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "MediaConfig":
+        if not isinstance(data, dict):
+            raise ValueError("media must be an object")
+        return cls(
+            delete_with_thread=_parse_bool(
+                data.get("delete_with_thread", True), field="media.delete_with_thread"
+            ),
+        )
+
+
 CONFIG_FILE = "10xgraph.json"
 # Pre-rename name, read only when no 10xgraph.json exists. Removed in 2.0.
 LEGACY_CONFIG_FILE = "agentflow.json"
@@ -761,3 +789,9 @@ class GraphConfig:
         """
         data = self.data.get("ag_ui", None)
         return AgUiConfig.from_dict({} if data is None else data)
+
+    @property
+    def media(self) -> MediaConfig:
+        """Uploaded-file lifecycle settings (``media`` key); defaults when absent."""
+        data = self.data.get("media", None)
+        return MediaConfig.from_dict({} if data is None else data)
