@@ -166,6 +166,40 @@ def test_setup_otel_no_endpoint():
         mock_provider.add_span_processor.assert_called_once()
 
 
+def test_setup_otel_no_endpoint_in_production_skips_console():
+    settings = MagicMock()
+    settings.OTEL_ENABLED = True
+    settings.OTEL_SERVICE_NAME = "test-service"
+    settings.OTEL_EXPORTER_OTLP_ENDPOINT = None
+    settings.MODE = "production"
+
+    mock_trace = MagicMock()
+    mock_instrumentor = MagicMock()
+    mock_provider = MagicMock()
+    mock_processor = MagicMock()
+
+    modules = {
+        "opentelemetry": mock_trace,
+        "opentelemetry.trace": mock_trace,
+        "opentelemetry.instrumentation.fastapi": mock_instrumentor,
+        "opentelemetry.sdk.resources": MagicMock(),
+        "opentelemetry.sdk.trace": mock_provider,
+        "opentelemetry.sdk.trace.export": mock_processor,
+    }
+
+    with patch.dict("sys.modules", modules):
+        from tenxgraph_api.src.app.core.config import setup_middleware as module
+
+        with patch.object(module.logger, "warning") as warning:
+            module._setup_otel(MagicMock(), settings)
+
+        mock_processor.ConsoleSpanExporter.assert_not_called()
+        mock_provider.TracerProvider.return_value.add_span_processor.assert_not_called()
+        mock_trace.trace.set_tracer_provider.assert_not_called()
+        mock_instrumentor.FastAPIInstrumentor.instrument_app.assert_not_called()
+        assert "not exported" in warning.call_args.args[0]
+
+
 def test_setup_otel_grpc_exporter_import_error():
     settings = MagicMock()
     settings.OTEL_ENABLED = True

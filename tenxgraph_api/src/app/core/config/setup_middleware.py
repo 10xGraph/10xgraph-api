@@ -350,7 +350,8 @@ def _setup_otel(app: FastAPI, settings) -> None:
     the standard OTEL_EXPORTER_OTLP_ENDPOINT env var (honoured automatically
     by the OTLP exporter). A ConsoleSpanExporter is used when no endpoint is
     configured and the app is not in production, so traces are visible locally
-    without any collector.
+    without any collector. In production with no endpoint nothing is set up and a warning
+    is logged.
     """
     try:
         from opentelemetry import trace
@@ -381,6 +382,14 @@ def _setup_otel(app: FastAPI, settings) -> None:
                 "is not installed. Install with: pip install '10xgraph-api[otel]'"
             )
             return
+    elif settings.MODE == "production":
+        # Printing spans to stdout would put request URLs and, at OTEL_LEVEL=full, message
+        # content in the container logs, so production exports nowhere instead.
+        logger.warning(
+            "OTEL_ENABLED=true but OTEL_EXPORTER_OTLP_ENDPOINT is not set; traces are not "
+            "exported. Console span output is development-only. Set the endpoint to export."
+        )
+        return
     else:
         from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
 

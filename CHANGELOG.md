@@ -24,6 +24,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **OTEL no longer prints spans to stdout in production.** With `OTEL_ENABLED=true` and no
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, `MODE=production` now sets up no exporter and logs a warning;
+  the console exporter is development-only.
 - **Generated deployment files are locked down by default.** `10xgraph build` images run as a
   fixed uid 10001 (`USER 10001:10001`). `--k8s` sets a restricted `securityContext` (non-root,
   read-only root filesystem, no privilege escalation, all capabilities dropped,
@@ -252,6 +255,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `PUT state` (was stored, then crashed a later run).
 - Uploaded documents over the extraction size limit no longer cause a slow or memory-heavy
   parse; the upload succeeds with `extracted_text` null.
+
+### Fixed
+
+- **`POST /v1/graph/fix` no longer deletes healthy tool-call messages.** It treated every
+  assistant message with tool calls as broken (provider-shaped tool calls never carry
+  `content`), which orphaned the tool results. It now removes only assistant messages with a
+  tool call that has no result (matched by call id), then the tool results left without a call.
+  The unanswered calls of the latest assistant message are kept while the thread is paused
+  (`interrupt()`, HITL `interrupt_before` / `interrupt_after`) or waiting on a client tool.
+  A thread with nothing to repair returns `removed_count` 0 and is not written.
 
 ### Breaking
 

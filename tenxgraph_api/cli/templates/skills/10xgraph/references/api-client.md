@@ -21,7 +21,7 @@ Graph routes include:
 - `GET /v1/graph`
 - `GET /v1/graph:StateSchema`
 - `POST /v1/graph/stop`
-- `POST /v1/graph/fix`
+- `POST /v1/graph/fix` - repair a stuck thread: removes assistant tool calls with no result and tool results with no call; keeps calls a paused thread is waiting on
 
 Memory/file routes are summarized in their topic references.
 

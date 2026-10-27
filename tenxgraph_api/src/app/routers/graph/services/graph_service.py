@@ -19,6 +19,8 @@ from tenxgraph_api.src.app.core.auth.request_config import (
     ALWAYS_ALLOWED_CONFIG_KEYS,
     ClientInputError,
     InterruptConflictError,
+    _field,
+    _tool_calls,
     client_config,
     client_error_detail,
     normalize_thread_id,
@@ -1493,24 +1495,47 @@ class GraphService:
             logger.error(f"Failed to get state schema: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to get state schema: {e!s}")
 
-    def _has_empty_tool_call(self, msg: Message) -> bool:
-        """Return True if any tool call on the message has empty content.
+    def _protected_tool_calls(self, state: Any, messages: list[Any]) -> set[str]:
+        """Ids of the unanswered tool calls the thread is legitimately waiting on.
 
-        A tool call is considered empty if its ``content`` attribute/key is ``None`` or
-        an empty string. Tool calls may be dict-like or objects with a ``content`` attribute.
+        Only the latest assistant message can be waiting. Its unanswered calls are pending
+        work, not broken history, when the thread is paused (``interrupt()``, or HITL
+        ``interrupt_before`` / ``interrupt_after``: ``execution_meta`` reports an interrupted
+        status) or when a call belongs to a remote tool the client has yet to answer.
         """
-        tool_calls = getattr(msg, "tools_calls", None)
-        if not tool_calls:
-            return False
-        for tool_call in tool_calls:
-            content = (
-                tool_call.get("content")
-                if isinstance(tool_call, dict)
-                else getattr(tool_call, "content", None)
+        assistants = [m for m in messages if _field(m, "role") == "assistant"]
+        if not assistants:
+            return set()
+        waiting = unanswered_tool_calls(messages)
+        mine = {cid: name for cid, name in _tool_calls(assistants[-1]) if cid in waiting}
+        if not mine:
+            return set()
+        if state.is_interrupted() or any(
+            name in self._remote_tool_names() for name in mine.values()
+        ):
+            return set(mine)
+        return set()
+
+    def _drop_broken_tool_calls(self, state: Any, messages: list[Any]) -> list[Any]:
+        """``messages`` without unanswered assistant tool calls and orphaned tool results."""
+        keep_pending: set[str] = set()
+        broken = set(unanswered_tool_calls(messages))
+        if broken:
+            keep_pending = self._protected_tool_calls(state, messages)
+        kept = [
+            m
+            for m in messages
+            if not (
+                _field(m, "role") == "assistant"
+                and any(cid in broken and cid not in keep_pending for cid, _ in _tool_calls(m))
             )
-            if content in (None, ""):
-                return True
-        return False
+        ]
+        live = {cid for m in kept if _field(m, "role") == "assistant" for cid, _ in _tool_calls(m)}
+        return [
+            m
+            for m in kept
+            if not ((ids := tool_result_ids([m])) and not any(i in live for i in ids))
+        ]
 
     async def fix_graph(
         self,
@@ -1519,11 +1544,15 @@ class GraphService:
         config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
-        Fix graph state by removing messages with empty tool call content.
+        Repair a thread whose history has a tool call that never got its result.
 
-        This method retrieves the current state from the checkpointer, identifies messages
-        with tool calls that have empty content, removes those messages, and updates the
-        state.
+        A run that dies after the model asked for tools but before the results were saved
+        leaves an assistant message with an unanswered tool call, which providers reject.
+        This method removes every assistant message that has a tool call with no matching
+        tool result (matched by call id), then removes tool results whose call is gone, and
+        saves the state. Messages without tool calls are never removed. The unanswered calls
+        of the latest assistant message are kept while the thread is paused or waiting on a
+        client tool, because they are pending work.
 
         Args:
             thread_id (str): The thread ID to fix the graph state for
@@ -1571,7 +1600,7 @@ class GraphService:
                     "state": state.model_dump(serialize_as_any=True),
                 }
 
-            filtered = [m for m in messages if not self._has_empty_tool_call(m)]
+            filtered = self._drop_broken_tool_calls(state, messages)
             removed_count = len(messages) - len(filtered)
 
             if removed_count:
@@ -1579,7 +1608,7 @@ class GraphService:
                 await self.checkpointer.aput_state(fix_config, state)
                 message = f"Successfully removed {removed_count} message(s)"
             else:
-                message = "No messages with empty tool calls found"
+                message = "No unanswered tool calls or orphaned tool results found"
 
             return {
                 "success": True,

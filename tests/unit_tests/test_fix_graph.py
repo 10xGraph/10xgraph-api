@@ -4,7 +4,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
-from tenxgraph.core.state import AgentState, Message, TextBlock
+from tenxgraph.core.state import (
+    AgentState,
+    ExecutionStatus,
+    Message,
+    TextBlock,
+    ToolCallBlock,
+    ToolResultBlock,
+)
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
@@ -74,80 +81,192 @@ class TestFixGraph:
 
         return state
 
-    @pytest.mark.asyncio
-    async def test_fix_graph_no_messages_with_empty_tool_calls(
-        self, graph_service, mock_checkpointer
-    ):
-        """Test fix_graph when no messages have empty tool calls."""
-        # Create messages without empty tool calls
-        messages = [
-            self._create_mock_message("msg1", tool_calls=None),
-            self._create_mock_message("msg2", tool_calls=[{"name": "tool1", "content": "ok"}]),
-        ]
+    @staticmethod
+    def _call(call_id: str, name: str = "lookup") -> dict:
+        return {"id": call_id, "type": "function", "function": {"name": name, "arguments": "{}"}}
 
-        mock_state = self._create_mock_state(messages)
-        mock_checkpointer.aget_state.return_value = mock_state
+    @staticmethod
+    def _assistant(*call_ids: str) -> Message:
+        return Message(
+            role="assistant",
+            content=[TextBlock(text="calling")],
+            tools_calls=[TestFixGraph._call(c) for c in call_ids],
+        )
+
+    @staticmethod
+    def _result(call_id: str) -> Message:
+        return Message.tool_message(
+            [ToolResultBlock(call_id=call_id, output="ok", status="completed")]
+        )
+
+    @staticmethod
+    def _user(text: str = "hi") -> Message:
+        return Message.text_message(text, role="user")
+
+    def _roles(self, mock_checkpointer) -> list[str]:
+        saved = mock_checkpointer.aput_state.call_args[0][1]
+        return [m.role for m in saved.context]
+
+    @pytest.mark.asyncio
+    async def test_healthy_tool_call_history_is_untouched(self, graph_service, mock_checkpointer):
+        """[user, assistant(tool call), tool, assistant] has nothing to fix."""
+        state = AgentState(
+            context=[
+                self._user(),
+                self._assistant("c1"),
+                self._result("c1"),
+                Message.text_message("done", role="assistant"),
+            ]
+        )
+        mock_checkpointer.aget_state.return_value = state
 
         result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
 
         assert result["success"] is True
         assert result["removed_count"] == 0
-        assert "No messages with empty tool calls found" in result["message"]
+        assert "No unanswered tool calls" in result["message"]
         mock_checkpointer.aput_state.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_fix_graph_removes_messages_with_empty_tool_calls(
-        self, graph_service, mock_checkpointer
-    ):
-        """Test fix_graph removes messages with empty tool call content."""
-        # Create messages: one with empty tool call, one normal, one with non-empty tool call
-        msg1 = self._create_mock_message("msg1", tool_calls=[{"name": "tool1", "content": ""}])
-        msg2 = self._create_mock_message("msg2", tool_calls=None)
-        msg3 = self._create_mock_message(
-            "msg3", tool_calls=[{"name": "tool2", "content": "result"}]
+    async def test_dangling_tool_call_is_removed(self, graph_service, mock_checkpointer):
+        state = AgentState(
+            context=[
+                self._user("a"),
+                self._assistant("c1"),
+                self._user("b"),
+                Message.text_message("answer", role="assistant"),
+            ]
         )
-
-        original_messages = [msg1, msg2, msg3]
-        mock_state = self._create_mock_state(original_messages)
-        mock_checkpointer.aget_state.return_value = mock_state
-
-        # Create updated state for after the fix
-        updated_state = self._create_mock_state([msg2, msg3])
-        mock_checkpointer.aput_state.return_value = updated_state
+        mock_checkpointer.aget_state.return_value = state
 
         result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
 
-        assert result["success"] is True
         assert result["removed_count"] == 1
         assert "Successfully removed 1 message(s)" in result["message"]
         mock_checkpointer.aput_state.assert_called_once()
+        assert self._roles(mock_checkpointer) == ["user", "user", "assistant"]
 
     @pytest.mark.asyncio
-    async def test_fix_graph_removes_multiple_messages_with_empty_tool_calls(
+    async def test_partially_answered_message_and_its_result_are_removed(
         self, graph_service, mock_checkpointer
     ):
-        """Test fix_graph removes multiple messages with empty tool calls."""
-        # Create messages with multiple empty tool calls
-        msg1 = self._create_mock_message("msg1", tool_calls=[{"name": "tool1", "content": ""}])
-        msg2 = self._create_mock_message("msg2", tool_calls=[{"name": "tool2", "content": ""}])
-        msg3 = self._create_mock_message("msg3", tool_calls=None)
-        msg4 = self._create_mock_message(
-            "msg4", tool_calls=[{"name": "tool3", "content": "result"}]
+        state = AgentState(
+            context=[
+                self._user(),
+                self._assistant("c1", "c2"),
+                self._result("c1"),
+                Message.text_message("later", role="assistant"),
+            ]
         )
-
-        original_messages = [msg1, msg2, msg3, msg4]
-        mock_state = self._create_mock_state(original_messages)
-        mock_checkpointer.aget_state.return_value = mock_state
-
-        updated_state = self._create_mock_state([msg3, msg4])
-        mock_checkpointer.aput_state.return_value = updated_state
+        mock_checkpointer.aget_state.return_value = state
 
         result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
 
-        assert result["success"] is True
         assert result["removed_count"] == 2
-        assert "Successfully removed 2 message(s)" in result["message"]
-        mock_checkpointer.aput_state.assert_called_once()
+        assert self._roles(mock_checkpointer) == ["user", "assistant"]
+
+    @pytest.mark.asyncio
+    async def test_orphan_result_without_any_call_is_removed(
+        self, graph_service, mock_checkpointer
+    ):
+        state = AgentState(
+            context=[
+                self._user(),
+                self._result("ghost"),
+                Message.text_message("x", role="assistant"),
+            ]
+        )
+        mock_checkpointer.aget_state.return_value = state
+
+        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
+
+        assert result["removed_count"] == 1
+        assert self._roles(mock_checkpointer) == ["user", "assistant"]
+
+    @pytest.mark.asyncio
+    async def test_tool_call_content_blocks_are_handled(self, graph_service, mock_checkpointer):
+        answered = Message(
+            role="assistant", content=[ToolCallBlock(id="b1", name="lookup", args={})]
+        )
+        dangling = Message(
+            role="assistant", content=[ToolCallBlock(id="b2", name="lookup", args={})]
+        )
+        state = AgentState(
+            context=[
+                self._user(),
+                answered,
+                self._result("b1"),
+                dangling,
+                Message.text_message("end", role="assistant"),
+            ]
+        )
+        mock_checkpointer.aget_state.return_value = state
+
+        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
+
+        assert result["removed_count"] == 1
+        assert self._roles(mock_checkpointer) == ["user", "assistant", "tool", "assistant"]
+
+    @pytest.mark.asyncio
+    async def test_paused_thread_keeps_pending_trailing_call(
+        self, graph_service, mock_checkpointer
+    ):
+        state = AgentState(context=[self._user(), self._assistant("c1")])
+        state.execution_meta.set_interrupt(
+            "TOOL", "interrupt_before", ExecutionStatus.INTERRUPTED_BEFORE
+        )
+        mock_checkpointer.aget_state.return_value = state
+
+        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
+
+        assert result["removed_count"] == 0
+        mock_checkpointer.aput_state.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_paused_thread_still_removes_earlier_dangling_call(
+        self, graph_service, mock_checkpointer
+    ):
+        state = AgentState(
+            context=[
+                self._user("a"),
+                self._assistant("old"),
+                self._user("b"),
+                self._assistant("c1"),
+            ]
+        )
+        state.execution_meta.set_interrupt("TOOL", "interrupt", ExecutionStatus.INTERRUPTED_AFTER)
+        mock_checkpointer.aget_state.return_value = state
+
+        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
+
+        assert result["removed_count"] == 1
+        assert self._roles(mock_checkpointer) == ["user", "user", "assistant"]
+        saved = mock_checkpointer.aput_state.call_args[0][1]
+        assert saved.context[-1].tools_calls[0]["id"] == "c1"
+
+    @pytest.mark.asyncio
+    async def test_pending_remote_tool_call_is_kept(
+        self, graph_service, mock_checkpointer, monkeypatch
+    ):
+        """A client tool call awaiting its result is pending work even without an interrupt."""
+        monkeypatch.setattr(graph_service, "_remote_tool_names", lambda: {"lookup"})
+        state = AgentState(context=[self._user(), self._assistant("c1")])
+        mock_checkpointer.aget_state.return_value = state
+
+        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
+
+        assert result["removed_count"] == 0
+        mock_checkpointer.aput_state.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unpaused_trailing_server_call_is_removed(self, graph_service, mock_checkpointer):
+        state = AgentState(context=[self._user(), self._assistant("c1")])
+        mock_checkpointer.aget_state.return_value = state
+
+        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
+
+        assert result["removed_count"] == 1
+        assert self._roles(mock_checkpointer) == ["user"]
 
     @pytest.mark.asyncio
     async def test_fix_graph_no_state_found(self, graph_service, mock_checkpointer):
@@ -189,52 +308,6 @@ class TestFixGraph:
 
         assert exc_info.value.status_code == 500
         assert "Fix graph operation failed" in exc_info.value.detail
-
-    @pytest.mark.asyncio
-    async def test_fix_graph_handles_mixed_empty_content(self, graph_service, mock_checkpointer):
-        """Test fix_graph correctly identifies empty string vs None content."""
-        # Mix of empty string, None, and non-empty content
-        msg1 = self._create_mock_message("msg1", tool_calls=[{"name": "tool1", "content": ""}])
-        msg2 = self._create_mock_message("msg2", tool_calls=[{"name": "tool2", "content": None}])
-        msg3 = self._create_mock_message("msg3", tool_calls=[{"name": "tool3", "content": "valid"}])
-
-        original_messages = [msg1, msg2, msg3]
-        mock_state = self._create_mock_state(original_messages)
-        mock_checkpointer.aget_state.return_value = mock_state
-
-        updated_state = self._create_mock_state([msg3])
-        mock_checkpointer.aput_state.return_value = updated_state
-
-        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
-
-        # Should remove both empty string and None content
-        assert result["removed_count"] == 2
-        assert result["success"] is True
-
-    @pytest.mark.asyncio
-    async def test_fix_graph_preserves_message_order(self, graph_service, mock_checkpointer):
-        """Test fix_graph preserves the order of remaining messages."""
-        msg1 = self._create_mock_message("msg1", tool_calls=None)
-        msg2 = self._create_mock_message("msg2", tool_calls=[{"name": "tool", "content": ""}])
-        msg3 = self._create_mock_message("msg3", tool_calls=None)
-        msg4 = self._create_mock_message("msg4", tool_calls=[{"name": "tool", "content": ""}])
-        msg5 = self._create_mock_message("msg5", tool_calls=None)
-
-        original_messages = [msg1, msg2, msg3, msg4, msg5]
-        mock_state = self._create_mock_state(original_messages)
-        mock_checkpointer.aget_state.return_value = mock_state
-
-        updated_state = self._create_mock_state([msg1, msg3, msg5])
-        mock_checkpointer.aput_state.return_value = updated_state
-
-        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
-
-        assert result["success"] is True
-        assert result["removed_count"] == 2
-
-        # Verify the correct messages are kept by checking the call to aput_state
-        call_args = mock_checkpointer.aput_state.call_args
-        updated_state_arg = call_args[0][1]  # Second positional arg
 
     @pytest.mark.asyncio
     async def test_fix_graph_returns_state_as_object(self, graph_service, mock_checkpointer):
