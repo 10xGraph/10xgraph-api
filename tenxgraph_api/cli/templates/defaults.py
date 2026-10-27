@@ -738,6 +738,9 @@ def generate_k8s_manifest_content(service_name: str, port: int) -> str:
             "            # CORS: production refuses wildcard origins with credentials.",
             "            - name: ORIGINS",
             '              value: "https://your-frontend.example.com"',
+            "            # Production refuses a wildcard host; set your public hostname.",
+            "            - name: ALLOWED_HOST",
+            '              value: "your-app.example.com"',
             "          lifecycle:",
             "            preStop:",
             "              exec:",
@@ -800,6 +803,9 @@ def generate_docker_compose_content(service_name: str, port: int) -> str:
             # Default to production; local in-memory telemetry stays disabled.
             "      - MODE=production",
             "      - IS_DEBUG=false",
+            # Production refuses to start on wildcard hosts/origins; replace the placeholders.
+            "      - ORIGINS=https://your-frontend.example.com",
+            "      - ALLOWED_HOST=your-app.example.com",
             "    ports:",
             f"      - '{port}:{port}'",
             (

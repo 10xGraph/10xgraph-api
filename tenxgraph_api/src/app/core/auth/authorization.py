@@ -35,6 +35,42 @@ def all_scopes() -> frozenset[str]:
     )
 
 
+class ScopeClaimError(ValueError):
+    """A scope claim is present but not a string or a collection of strings."""
+
+
+def _split_scope_claim(name: str, value: Any) -> set[str]:
+    if isinstance(value, str):
+        return set(value.split())
+    if isinstance(value, list | tuple | set | frozenset) and all(
+        isinstance(item, str) for item in value
+    ):
+        return {item for item in value if item}
+    raise ScopeClaimError(f"Invalid {name!r} claim: expected a string or a list of strings")
+
+
+def scopes_from_claims(user: Any) -> list[str] | None:
+    """Exact scope names an identity carries, or None when it has no scope claim.
+
+    Reads the OAuth ``scope`` claim (a space-separated string) and ``scopes`` (a list, tuple or
+    set of strings, or a space-separated string) and merges them. Callers compare with
+    ``required in scopes``, so a scope only matches by exact name, never as a substring.
+
+    Raises:
+        ScopeClaimError: a claim is present but of the wrong type (number, dict, a list with
+            non-strings, ...). ``RequirePermission`` turns it into a 401.
+    """
+    if not isinstance(user, dict):
+        return None
+    present = [name for name in ("scope", "scopes") if user.get(name) is not None]
+    if not present:
+        return None
+    granted: set[str] = set()
+    for name in present:
+        granted |= _split_scope_claim(name, user[name])
+    return sorted(granted)
+
+
 class AuthorizationBackend(ABC):
     """
     Abstract base class for authorization backends.
@@ -42,6 +78,12 @@ class AuthorizationBackend(ABC):
     Developers should implement this class to define custom authorization logic
     for their 10xGraph applications. The authorize method is called before
     any resource operation to check if the user has permission.
+
+    Storage isolation is separate from ``authorize``: ``isolation_scope()`` decides whether
+    threads and memories are scoped to the calling user. It defaults to ``"owner"`` (each user
+    sees only their own data), so a backend that implements only ``authorize`` is isolated.
+    Return ``"none"`` from ``isolation_scope`` on purpose to let every authenticated user see
+    the same data.
 
     Example:
         class MyAuthorizationBackend(AuthorizationBackend):
@@ -51,6 +93,11 @@ class AuthorizationBackend(ABC):
                     return True
                 # Add custom logic here
                 return False
+
+            def isolation_scope(self) -> str:
+                # "owner" (the default): each user sees only their own threads and memories.
+                # Return "none" only when users are meant to share data.
+                return "owner"
     """
 
     @abstractmethod
@@ -89,10 +136,11 @@ class AuthorizationBackend(ABC):
         - ``"owner"`` -> storage is scoped to the caller's ``user_id`` (owner-only).
         - ``"none"``  -> storage is not scoped (any authenticated user sees everything).
 
-        Defaults to ``"none"``. Override (or return ``"owner"``) to make a custom backend
-        drive per-user storage isolation too.
+        Defaults to ``"owner"`` (fail closed): a custom backend that implements only
+        ``authorize`` still isolates users. Override and return ``"none"`` to share data on
+        purpose.
         """
-        return "none"
+        return "owner"
 
     def scopes_for(self, user: dict[str, Any]) -> list[str] | None:
         """Return the scopes this identity is granted, or None for "unrestricted".
@@ -101,14 +149,15 @@ class AuthorizationBackend(ABC):
         this list. Returning ``None`` means the identity is not scope-restricted
         (permissive -- the default, so nothing breaks until scopes are issued).
 
-        The default passes through scopes the identity already carries
-        (``user["scopes"]``, e.g. from a JWT ``scope`` claim). A role-based backend
+        The default passes through the scopes the identity already carries: the OAuth
+        ``scope`` claim (space-separated) and ``scopes`` (list or space-separated string),
+        merged into exact names (see :func:`scopes_from_claims`). A role-based backend
         overrides this to map ``user["roles"]`` to scopes.
+
+        Raises:
+            ScopeClaimError: a scope claim has the wrong type.
         """
-        scopes = user.get("scopes") if isinstance(user, dict) else None
-        if isinstance(scopes, list | tuple | set | frozenset):
-            return list(scopes)
-        return None
+        return scopes_from_claims(user)
 
 
 class DefaultAuthorizationBackend(AuthorizationBackend):
@@ -146,6 +195,10 @@ class DefaultAuthorizationBackend(AuthorizationBackend):
         # Only check if user is authenticated (has user_id)
         return bool(user.get("user_id"))
 
+    def isolation_scope(self) -> str:
+        # allow_all shares data on purpose: authenticated == authorized, no per-user scoping.
+        return "none"
+
 
 class OwnershipAuthorizationBackend(AuthorizationBackend):
     """Object-level authorization: a user may only touch threads they own.
@@ -163,7 +216,9 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
     - The thread has no owner yet -> allow only the actions that create it (``graph:invoke``,
       ``graph:stream``, ``checkpointer:write``); the caller becomes its owner. With
       ``server_thread_ids`` (``runs.thread_ids == "server"``) even those are denied: new
-      threads must be started without an id, so the server picks it. Every other
+      threads must be started without an id, so the server picks it. The two routes whose
+      clients make their own ids (AG-UI and ``/v1/graph/live``) pass ``client_thread_ids=True``
+      in the authorize context, which lifts that one refusal for them. Every other
       action (read, delete, stop, fix) is denied: there is nothing of the caller's to act
       on, and an ownerless thread may still hold data written before owners were recorded.
     - The thread exists and the caller owns it -> allow.
@@ -307,7 +362,12 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
             return False
 
         return await self._authorize_ownership(
-            resolver, str(resource_id), str(user_id), resource, action
+            resolver,
+            str(resource_id),
+            str(user_id),
+            resource,
+            action,
+            client_thread_ids=context.get("client_thread_ids") is True,
         )
 
     async def _authorize_ownership(
@@ -317,6 +377,8 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
         user_id: str,
         resource: str,
         action: str,
+        *,
+        client_thread_ids: bool = False,
     ) -> bool:
         try:
             owner = await resolver.owner_of(resource_id)
@@ -353,9 +415,10 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
                     resource_id,
                 )
                 return False
-            if self.server_thread_ids:
+            if self.server_thread_ids and not client_thread_ids:
                 # New threads get server-picked ids; a client may not name one into being,
-                # so nobody can claim an id ahead of the user it was meant for.
+                # so nobody can claim an id ahead of the user it was meant for. AG-UI and
+                # realtime clients make their own ids and are exempt (``client_thread_ids``).
                 logger.info(
                     "Refusing %s:%s on unknown thread %s: runs.thread_ids is 'server'",
                     resource,

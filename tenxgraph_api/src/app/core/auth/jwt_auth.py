@@ -4,6 +4,7 @@ from fastapi import Request, Response
 from fastapi.security import HTTPAuthorizationCredentials
 
 from tenxgraph_api.src.app.core import logger
+from tenxgraph_api.src.app.core.auth.authorization import ScopeClaimError, scopes_from_claims
 from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
 from tenxgraph_api.src.app.core.config.settings import Settings, get_settings
 from tenxgraph_api.src.app.core.exceptions import UserAccountError
@@ -41,6 +42,17 @@ def check_jwt_settings(settings: Settings) -> None:
 
 def _unauthorized(message: str, error_code: str) -> UserAccountError:
     return UserAccountError(message=message, error_code=error_code, status_code=401)
+
+
+def _normalise_user_id(value: Any) -> str:
+    """A non-empty string, or a whole number (not a bool) as its string form; else 401."""
+    if isinstance(value, bool):
+        raise _unauthorized("Invalid token, user_id is malformed", "INVALID_TOKEN")
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str) and value.strip():
+        return value
+    raise _unauthorized("Invalid token, user_id is malformed", "INVALID_TOKEN")
 
 
 class JwtAuth(BaseAuth):
@@ -122,4 +134,9 @@ class JwtAuth(BaseAuth):
         # check if user_id exists in the token
         if "user_id" not in decoded_token:
             raise _unauthorized("Invalid token, user_id missing", "INVALID_TOKEN")
+        decoded_token["user_id"] = _normalise_user_id(decoded_token["user_id"])
+        try:
+            scopes_from_claims(decoded_token)
+        except ScopeClaimError:
+            raise _unauthorized("Invalid token, scope claim is malformed", "INVALID_TOKEN")
         return decoded_token

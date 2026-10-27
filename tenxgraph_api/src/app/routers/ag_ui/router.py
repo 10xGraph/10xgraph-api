@@ -73,8 +73,10 @@ async def run_ag_ui(
     if thread_id is None:
         raise HTTPException(status_code=422, detail="threadId is required")
     run_input.thread_id = thread_id
+    # AG-UI clients make their own thread ids, so a new one is allowed even under
+    # runs.thread_ids "server" (client_thread_ids); an existing thread is still owner-checked.
     if config.auth_config() and not await authz.authorize(
-        user, "graph", "stream", resource_id=thread_id
+        user, "graph", "stream", resource_id=thread_id, client_thread_ids=True
     ):
         raise HTTPException(status_code=403, detail="Not allowed to access this thread")
 

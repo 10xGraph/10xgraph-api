@@ -297,7 +297,12 @@ class TestGraphServiceMethods:
 
         # The reason is only generic in production; do not depend on which test cached
         # the settings first.
-        production = settings_module.Settings(MODE="production", _env_file=None)
+        production = settings_module.Settings(
+            MODE="production",
+            ALLOWED_HOST="api.example.com",
+            ORIGINS="https://app.example.com",
+            _env_file=None,
+        )
         monkeypatch.setattr(settings_module, "get_settings", lambda: production)
         gi = GraphInputSchema(
             messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],

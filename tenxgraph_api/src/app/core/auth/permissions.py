@@ -16,7 +16,11 @@ from starlette.requests import HTTPConnection
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.auth.auth_backend import BaseAuth
-from tenxgraph_api.src.app.core.auth.authorization import AuthorizationBackend
+from tenxgraph_api.src.app.core.auth.authorization import (
+    AuthorizationBackend,
+    ScopeClaimError,
+    scopes_from_claims,
+)
 from tenxgraph_api.src.app.core.auth.identity_cache import recall_identity
 from tenxgraph_api.src.app.core.auth.request_config import normalize_thread_id
 from tenxgraph_api.src.app.core.auth.revocation import (
@@ -76,12 +80,18 @@ def _extract_credential(
        browser-settable and kept out of URLs/logs; the preferred browser mechanism.
     3. ``?token=<token>`` query parameter -- last-resort fallback; the token is exposed in
        URLs/access logs/history, so prefer (2) for browser clients.
+
+    Sources (2) and (3) exist only because browsers cannot set headers on a WebSocket, so
+    they are accepted on WebSocket connections only; HTTP routes take the header alone.
     """
     authorization = connection.headers.get("Authorization")
     if authorization:
         scheme, _, token = authorization.partition(" ")
         if scheme.lower() == "bearer" and token:
             return HTTPAuthorizationCredentials(scheme=scheme, credentials=token)
+
+    if not _is_websocket(connection):
+        return None
 
     # [sentinel, token] -- the two subprotocols a browser client offers to carry the bearer.
     parts = _subprotocols(connection)
@@ -90,17 +100,18 @@ def _extract_credential(
 
     ws_token = connection.query_params.get("token")
     if ws_token:
-        is_ws = False
-        if hasattr(connection, "scope") and isinstance(connection.scope, dict):
-            is_ws = connection.scope.get("type") == "websocket"
-        if not is_ws:
-            from fastapi import WebSocket
-
-            is_ws = isinstance(connection, WebSocket)
-        if is_ws:
-            return HTTPAuthorizationCredentials(scheme="Bearer", credentials=ws_token)
+        return HTTPAuthorizationCredentials(scheme="Bearer", credentials=ws_token)
 
     return None
+
+
+def _is_websocket(connection: HTTPConnection) -> bool:
+    scope = getattr(connection, "scope", None)
+    if isinstance(scope, dict) and scope.get("type") == "websocket":
+        return True
+    from fastapi import WebSocket
+
+    return isinstance(connection, WebSocket)
 
 
 # RFC 6455 close code 1008 "Policy Violation" -- the right signal for an auth/authz
@@ -169,6 +180,24 @@ async def _reject_if_revoked(connection: HTTPConnection, user: dict[str, Any]) -
     if revoked:
         logger.warning("Rejected revoked credential for user %s", user.get("user_id"))
         _reject(connection, 401, "Token has been revoked, please login again")
+
+
+def _granted_scopes(
+    connection: HTTPConnection, authz: AuthorizationBackend, user: dict[str, Any]
+) -> list[str] | None:
+    """Scopes the backend grants this identity, or None for unrestricted.
+
+    A scope claim of the wrong type is a malformed token: 401.
+    """
+    scopes_fn = getattr(authz, "scopes_for", None)
+    try:
+        granted = scopes_fn(user) if callable(scopes_fn) else None
+        if granted is None:
+            granted = scopes_from_claims(user)  # backends without scopes_for
+    except ScopeClaimError as exc:
+        logger.warning("Rejected scope claim for user %s: %s", user.get("user_id"), exc)
+        _reject(connection, 401, "Invalid token, malformed scope claim")
+    return granted
 
 
 class RequirePermission:
@@ -294,15 +323,12 @@ class RequirePermission:
 
         # Step 4: Scope check -- does this identity carry the permission for this
         # endpoint at all? The required scope is "<resource>:<action>". Scopes come from
-        # the authenticated identity (user["scopes"], populated by the auth backend / JWT
-        # claims). If the identity declares no scopes, we stay permissive (backward
+        # the authenticated identity (the ``scope`` / ``scopes`` claims, merged into exact
+        # names). If the identity declares no scopes, we stay permissive (backward
         # compatible) -- once scopes are issued, they are enforced.
         required_scope = f"{self.resource}:{self.action}"
-        scopes_fn = getattr(authz, "scopes_for", None)
-        granted_scopes = scopes_fn(user) if callable(scopes_fn) else None
-        if granted_scopes is None and isinstance(user, dict):
-            granted_scopes = user.get("scopes")  # fallback for backends without scopes_for
-        if granted_scopes is not None and required_scope not in granted_scopes:
+        granted_scopes = _granted_scopes(connection, authz, user)
+        if granted_scopes is not None and required_scope not in set(granted_scopes):
             logger.warning(f"Missing scope '{required_scope}' for user {user.get('user_id')}")
             _reject(connection, 403, f"Missing required scope: {required_scope}")
         if granted_scopes is None and (

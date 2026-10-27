@@ -231,6 +231,8 @@ def test_only_server_errors_are_reported_and_sampling_is_configurable():
     settings = Settings(
         SENTRY_DSN="https://example@sentry.io/1",
         MODE="production",
+        ALLOWED_HOST="api.example.com",
+        ORIGINS="https://app.example.com",
         SENTRY_TRACES_SAMPLE_RATE=0.25,
         _env_file=None,
     )

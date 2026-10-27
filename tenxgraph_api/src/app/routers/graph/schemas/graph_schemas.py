@@ -5,8 +5,8 @@ from tenxgraph.core.state import Message
 from tenxgraph.utils import ResponseGranularity
 
 from tenxgraph_api.src.app.core.auth.request_config import (
-    client_message_error,
     ClientInputError,
+    client_message_error,
     request_size_error,
     with_fresh_message_ids,
 )

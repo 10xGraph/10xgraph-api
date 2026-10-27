@@ -139,3 +139,35 @@ class TestExtractCredential:
     def test_no_credentials_returns_none(self):
         conn = type("_C", (), {"headers": {}, "query_params": {}, "scope": {"type": "http"}})()
         assert _extract_credential(conn) is None
+
+    def test_subprotocol_token_accepted_on_websocket(self):
+        conn = type(
+            "_C",
+            (),
+            {
+                "headers": {"sec-websocket-protocol": "10xgraph-bearer, sptok"},
+                "query_params": {},
+                "scope": {"type": "websocket"},
+            },
+        )()
+        assert _extract_credential(conn).credentials == "sptok"
+
+    def test_subprotocol_token_ignored_on_http(self):
+        conn = type(
+            "_C",
+            (),
+            {
+                "headers": {"sec-websocket-protocol": "10xgraph-bearer, sptok"},
+                "query_params": {},
+                "scope": {"type": "http"},
+            },
+        )()
+        assert _extract_credential(conn) is None
+
+    def test_query_token_ignored_on_http(self):
+        conn = type(
+            "_C",
+            (),
+            {"headers": {}, "query_params": {"token": "qtok"}, "scope": {"type": "http"}},
+        )()
+        assert _extract_credential(conn) is None

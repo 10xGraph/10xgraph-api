@@ -11,21 +11,20 @@ The memory store is cross-thread, cross-user long-term knowledge. It is not the 
 
 ## Access Pattern
 
-Agents access memory through tools, especially `memory_tool`. The LLM can decide to:
+Memory is configured on the Agent: `Agent(..., memory=MemoryConfig(...))`. In `postload` mode the Agent registers two tools on its `ToolNode`:
 
-- `store`: save or update a memory.
-- `search`: recall relevant memories.
-- `delete`: remove a memory by ID.
+- `user_memory_tool(action, text)`: `action="search"` (default) recalls user facts, `action="remember"` saves one. User memory is enabled by default. The model never passes memory ids.
+- `agent_memory_tool(query)`: search only. Agent memory is off by default (`AgentMemoryConfig(enabled=True, agent_id=...)`), and the model cannot write it.
 
-Writes can run in the background and memory keys deduplicate/update records.
+Writes run in the background. A near-identical memory (similarity score 0.95 or higher) is skipped instead of stored twice.
 
 ## Retrieval Modes
 
-- `"no_retrieval"`: model cannot read memory automatically but can write memories.
-- `"preload"`: relevant memories are injected before the model call.
-- `"postload"`: model searches memory on demand through the tool.
+`MemoryConfig(retrieval_mode=...)`, default `"postload"`:
 
-All modes can include write instructions.
+- `"no_retrieval"`: no memory tools and nothing injected.
+- `"preload"`: the Agent searches with the latest user message once per invocation (one invoke or stream run) and adds the results to the latest user message as a fenced `<user_memories_...>` block. Every model call in a tool loop reuses the same block. It is never saved to state, and the model gets no memory tools.
+- `"postload"`: the model searches and remembers on demand through the tools above.
 
 ## Backends
 
@@ -34,19 +33,12 @@ All modes can include write instructions.
 
 Embedding helpers such as `OpenAIEmbedding` and factories like `create_local_qdrant_store` exist in the store package where available.
 
-## Wiring Options
+## Wiring
 
-High-level `Agent`:
-
-- Pass `MemoryConfig(store=..., retrieval_mode=...)`.
-- Also pass a `ToolNode`; memory setup registers memory tools there.
-
-Lower-level graph:
-
-- Use `MemoryIntegration`.
-- Add `memory.tools` to your `ToolNode`.
-- Use `memory.system_prompt`.
-- Let `memory.wire(graph, entry_to="AGENT")` add preload routing when needed.
+- Pass `MemoryConfig(store=..., retrieval_mode=...)` to `Agent`. Optional: `limit`, `score_threshold`, `max_tokens`, `inject_system_prompt`, `user_memory=UserMemoryConfig(...)`, `agent_memory=AgentMemoryConfig(...)`.
+- In `postload` mode the Agent needs a `ToolNode` (or the name of a `ToolNode` node); memory setup registers the tools there. `preload` needs no ToolNode for memory.
+- Pass the store to `compile(store=...)` too.
+- The graph-level API (`MemoryIntegration`, `create_memory_preload_node`, `get_memory_system_prompt`) and the `memory_tool` function were removed. Do not use them.
 
 ## REST and Client
 
@@ -65,6 +57,6 @@ TypeScript client methods include `storeMemory`, `searchMemory`, `getMemory`, `u
 ## Source Map
 
 - Store interfaces/backends: https://github.com/10xGraph/10xGraph/tree/main/tenxgraph/storage/store
-- Memory tool: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/prebuilt/tools/memory.py
+- Memory tools: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/prebuilt/tools/memory.py
 - API store router: https://github.com/10xGraph/10xgraph-api/tree/main/tenxgraph_api/src/app/routers/store
 - TS memory endpoints: https://github.com/10xGraph/10xgraph-client/tree/master/src/endpoints

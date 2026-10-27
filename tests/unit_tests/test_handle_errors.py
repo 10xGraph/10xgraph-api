@@ -39,8 +39,10 @@ def setup_app(mode: str = "development"):
     # production deployment must declare its origins, so these tests do too.
     if mode == "production":
         os.environ["ORIGINS"] = "https://example.com"
+        os.environ["ALLOWED_HOST"] = "testserver"
     else:
         os.environ.pop("ORIGINS", None)
+        os.environ.pop("ALLOWED_HOST", None)
 
     from tenxgraph_api.src.app.core.config.settings import get_settings
 
@@ -56,6 +58,7 @@ def cleanup_env():
     """Clean up environment variables."""
     if "MODE" in os.environ:
         del os.environ["MODE"]
+    os.environ.pop("ALLOWED_HOST", None)
 
 
 def test_http_exception_handler_returns_error_payload():

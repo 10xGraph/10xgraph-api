@@ -78,6 +78,19 @@ REALTIME_MAX_FRAME_BYTES = 1024 * 1024
 # RFC 6455 close code 1009 "Message Too Big".
 WS_MESSAGE_TOO_BIG = 1009
 
+# Total bytes of input (audio, text, image) a live session may have buffered at once, on top of
+# the frame-count bound. 1000 frames of up to 1 MiB would otherwise be ~1 GiB per socket. 16 MiB
+# is ~8 minutes of 16 kHz PCM16 audio (32 KB/s), far more than the ~20 s the count bound allows
+# in normal use, so a healthy session never reaches it. Over the budget a frame is dropped (logged).
+REALTIME_INPUT_QUEUE_MAX_BYTES = 16 * 1024 * 1024
+
+# Seconds between credential re-checks during a live session (token expiry and revocation).
+# A live session has no per-run boundary to hook into, so a timer bounds how long a token that
+# expired or was revoked keeps streaming. Each check is one local token verification plus one
+# revocation lookup (a single Redis GET when Redis is used), so 30 s costs ~2 lookups a minute per
+# session while keeping the exposure window short next to a session that can run for hours.
+REALTIME_RECHECK_INTERVAL = 30.0
+
 
 class WsFrameTooLarge(Exception):
     """A JSON text frame passed the size cap; the socket must be closed with 1009."""
@@ -541,8 +554,13 @@ async def _ws_thread_authorized(
     user: dict[str, Any],
     thread_id: str | None,
     action: str,
+    *,
+    client_thread_ids: bool = False,
 ) -> bool:
     """Owner-check ``thread_id`` for a WebSocket run.
+
+    ``client_thread_ids`` is for ``/v1/graph/live``, whose client makes its own thread ids: it
+    lets a new unknown id through under ``runs.thread_ids: "server"`` (the caller claims it).
 
     Returns ``True`` when the run may proceed. Ownership is only enforced when auth is
     configured (``GraphConfig.auth_config``); an unauthenticated dev graph and fresh
@@ -566,6 +584,10 @@ async def _ws_thread_authorized(
     if not has_auth:
         return True
 
+    if client_thread_ids:
+        return await authz.authorize(
+            user, "graph", action, resource_id=str(thread_id), client_thread_ids=True
+        )
     return await authz.authorize(user, "graph", action, resource_id=str(thread_id))
 
 
@@ -759,6 +781,68 @@ def _client_error(exc: Exception) -> str:
     return _sanitize_error_message(str(exc), "VALIDATION_ERROR", is_production)
 
 
+class _ByteBoundedLiveInputQueue(LiveInputQueue):
+    """``LiveInputQueue`` that also bounds the bytes it holds, not just the frame count.
+
+    A frame that would push the buffered payload over ``max_bytes`` is dropped (logged), like a
+    frame that does not fit the count bound. Bytes are released as the consumer takes frames.
+    """
+
+    def __init__(self, maxsize: int = 0, max_bytes: int = REALTIME_INPUT_QUEUE_MAX_BYTES) -> None:
+        super().__init__(maxsize=maxsize)
+        self._max_bytes = max_bytes
+        self._buffered = 0
+
+    @staticmethod
+    def _size(item: Any) -> int:
+        if item.data is not None:
+            return len(item.data)
+        return len(item.text.encode()) if item.text is not None else 0
+
+    def _put(self, item: Any) -> None:
+        size = self._size(item)
+        if self._buffered + size > self._max_bytes:
+            logger.warning(
+                "Realtime input queue over its byte budget (%d + %d > %d); dropping %s frame",
+                self._buffered,
+                size,
+                self._max_bytes,
+                item.kind,
+            )
+            return
+        before = self._queue.qsize()
+        super()._put(item)
+        if self._queue.qsize() > before:  # not dropped as full or closed
+            self._buffered += size
+
+    def _released(self, item: Any) -> Any:
+        self._buffered = max(0, self._buffered - self._size(item))
+        return item
+
+    async def get(self) -> Any:
+        return self._released(await super().get())
+
+    def get_nowait(self) -> Any:
+        return self._released(super().get_nowait())
+
+    async def __aiter__(self) -> Any:
+        while True:
+            item = self._released(await self._queue.get())
+            if item.kind == "close":
+                return
+            yield item
+
+
+async def _live_credential_error(websocket: WebSocket, user: dict[str, Any]) -> bool:
+    """Whether a live session's credential no longer holds (expired, revoked or backend down).
+
+    Same two checks as ``_ws_run_gate`` uses before each ``/v1/graph/ws`` run: the token is
+    re-verified (catches expiry) and the revocation backend is asked (an outage counts as
+    revoked, so it fails closed).
+    """
+    return not ws_identity_still_valid(websocket, user) or await _ws_token_revoked(user)
+
+
 def _dispatch_realtime_control(queue: Any, text: str) -> str | None:
     """Apply one realtime text control frame to the input queue; ``"close"`` ends the session.
 
@@ -799,7 +883,7 @@ def _realtime_event_json(event: Any) -> str:
 
 
 @router.websocket("/v1/graph/live")
-async def realtime_graph_ws(  # noqa: PLR0912, PLR0915
+async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
     websocket: WebSocket,
     _bind: None = Depends(_bind_ws_container),
     _guard: None = Depends(realtime_connection_guard),
@@ -876,7 +960,9 @@ async def realtime_graph_ws(  # noqa: PLR0912, PLR0915
     if isinstance(init, dict):
         # Same rules as /v1/graph/ws: "new" starts a fresh thread, never a shared one.
         thread_id = _resolve_ws_thread(init)
-        if not await _ws_thread_authorized(authz, user, thread_id, "stream"):
+        if not await _ws_thread_authorized(
+            authz, user, thread_id, "stream", client_thread_ids=True
+        ):
             logger.warning(
                 f"Realtime WebSocket authorization failed for user {user.get('user_id')} "
                 f"on thread {thread_id}"
@@ -901,7 +987,28 @@ async def realtime_graph_ws(  # noqa: PLR0912, PLR0915
             await websocket.close(code=1003)
         return
 
-    queue = LiveInputQueue(maxsize=REALTIME_INPUT_QUEUE_MAXSIZE)
+    async def close_session_expired() -> None:
+        logger.info("Realtime credential no longer valid; closing")
+        with contextlib.suppress(Exception):
+            await websocket.send_text(
+                _realtime_event_json(
+                    ErrorEvent(
+                        code="session_expired",
+                        message="Session expired. Reconnect with a valid token.",
+                        fatal=True,
+                    )
+                )
+            )
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1008, reason="Session expired")
+
+    # The handshake guard ran before the init frame; re-check before the session (the run)
+    # starts, then on a timer for as long as it lasts.
+    if await _live_credential_error(websocket, user):
+        await close_session_expired()
+        return
+
+    queue = _ByteBoundedLiveInputQueue(maxsize=REALTIME_INPUT_QUEUE_MAXSIZE)
 
     async def upstream() -> None:
         """Pump client frames into the input queue until close/disconnect."""
@@ -949,12 +1056,30 @@ async def realtime_graph_ws(  # noqa: PLR0912, PLR0915
                     )
                 )
 
+    async def credential_watchdog() -> None:
+        """End the session once its token expires or is revoked."""
+        while True:
+            await asyncio.sleep(REALTIME_RECHECK_INTERVAL)
+            if await _live_credential_error(websocket, user):
+                await close_session_expired()
+                return
+
     up_task = asyncio.create_task(upstream())
     down_task = asyncio.create_task(downstream())
+    watch_task = asyncio.create_task(credential_watchdog())
     try:
-        _done, pending = await asyncio.wait(
-            {up_task, down_task}, return_when=asyncio.FIRST_COMPLETED
+        done, pending = await asyncio.wait(
+            {up_task, down_task, watch_task}, return_when=asyncio.FIRST_COMPLETED
         )
+
+        # Credential gone: no grace period, stop at once.
+        if watch_task in done:
+            queue.close()
+            for task in (up_task, down_task):
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+            return
 
         # If the client side finished first (sent ``close`` or disconnected) while the
         # model is still responding, give downstream a bounded grace period to drain the
@@ -967,7 +1092,7 @@ async def realtime_graph_ws(  # noqa: PLR0912, PLR0915
 
         # Cancel whatever is still running: downstream that overran the grace window, or
         # upstream once the session ended.
-        for task in (up_task, down_task):
+        for task in (up_task, down_task, watch_task):
             if not task.done():
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):

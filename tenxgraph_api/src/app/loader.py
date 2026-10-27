@@ -448,7 +448,7 @@ def load_and_bind_authorization(
         authorization_path, redis_url, server_thread_ids, auth_enabled
     )
     if server_thread_ids and not isinstance(backend, OwnershipAuthorizationBackend):
-        logger.info(
+        logger.debug(
             'runs.thread_ids is "server" but %s does not check thread ownership; client '
             "thread ids are only refused by the built-in ownership and rbac backends.",
             type(backend).__name__,
@@ -479,23 +479,6 @@ def _bind_token_revocation(
         return
     container.bind_instance(TokenRevocationBackend, build_token_revocation(spec, redis_url))
     logger.info("Token revocation enabled (%s).", spec)
-
-
-def _refuse_ag_ui_with_server_thread_ids(config: GraphConfig, backend: object) -> None:
-    """AG-UI clients always name the thread, which ``runs.thread_ids: "server"`` refuses for
-    new threads, so every new AG-UI conversation would get 403. Fail at boot instead."""
-    ag_ui = getattr(config, "ag_ui", None)
-    runs = getattr(config, "runs", None)
-    if (
-        getattr(ag_ui, "enabled", False) is True
-        and getattr(runs, "server_thread_ids", False) is True
-        and isinstance(backend, OwnershipAuthorizationBackend)
-    ):
-        raise ValueError(
-            'ag_ui is enabled with runs.thread_ids "server": AG-UI clients pick their own '
-            "thread ids, so no new AG-UI conversation could start. Use runs.thread_ids "
-            '"client" (the default) or disable ag_ui.'
-        )
 
 
 def _bind_shared_concurrency(container: InjectQ, redis_url: str | None) -> None:
@@ -608,7 +591,6 @@ async def attach_all_modules(
         server_thread_ids=config.runs.server_thread_ids,
         auth_enabled=bool(auth_config),
     )
-    _refuse_ag_ui_with_server_thread_ids(config, container.get(AuthorizationBackend))
     # Owner checks only run for authenticated requests. With auth on, an ownership backend
     # over a checkpointer that cannot name owners would deny every thread: fail at boot.
     if auth_config:

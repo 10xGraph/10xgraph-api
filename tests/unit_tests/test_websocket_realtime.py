@@ -6,6 +6,7 @@ and a mock WebSocket drives the binary/JSON frame protocol.
 
 import asyncio
 import json
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,6 +14,20 @@ import pytest
 from fastapi import WebSocketDisconnect
 
 from tenxgraph_api.src.app.routers.graph.router import realtime_graph_ws
+
+
+def _router_module():
+    # ``routers.graph.router`` the attribute is the APIRouter; patch the module itself.
+    return sys.modules[realtime_graph_ws.__module__]
+
+
+@pytest.fixture(autouse=True)
+def _credential_valid(monkeypatch):
+    """The mock sockets carry no credential: treat it as valid unless a test says otherwise."""
+    graph_router = _router_module()
+
+    monkeypatch.setattr(graph_router, "ws_identity_still_valid", lambda ws, user: True)
+    monkeypatch.setattr(graph_router, "_ws_token_revoked", AsyncMock(return_value=False))
 
 
 def _audio_event(data: bytes):
@@ -475,3 +490,131 @@ class TestRealtimeFrameLimits:
         assert _dispatch_realtime_control(queue, '{"type": "close"}') == "close"
         assert _dispatch_realtime_control(queue, "not json") is None
         assert _dispatch_realtime_control(queue, '["a list"]') is None
+
+
+class TestRealtimeCredentialRecheck:
+    """A live session ends when its token expires or is revoked, not only at the handshake."""
+
+    @staticmethod
+    def _slow_service():
+        service = _make_service([])
+
+        async def _gen(input_queue, init, user):
+            await asyncio.sleep(30)  # a session that would run on
+            yield
+
+        service.realtime_graph = _gen
+        return service
+
+    @staticmethod
+    def _closes(ws):
+        return [c for c in ws.close.call_args_list if c.kwargs.get("code") == 1008]
+
+    @pytest.mark.asyncio
+    async def test_revoked_mid_session_closes_with_1008(self, monkeypatch):
+        graph_router = _router_module()
+
+        monkeypatch.setattr(graph_router, "REALTIME_RECHECK_INTERVAL", 0.01)
+        revoked = iter([False, True])  # valid at start, revoked at the first re-check
+        monkeypatch.setattr(
+            graph_router, "_ws_token_revoked", AsyncMock(side_effect=lambda u: next(revoked, True))
+        )
+
+        async def _hang(*a, **k):
+            await asyncio.sleep(30)
+
+        ws = _make_websocket([], init={"model": "m"})
+        ws.receive = AsyncMock(side_effect=_hang)
+        await asyncio.wait_for(
+            realtime_graph_ws(websocket=ws, service=self._slow_service(), user={"user_id": "u1"}),
+            timeout=5,
+        )
+
+        assert self._closes(ws)
+        sent = [json.loads(c.args[0]) for c in ws.send_text.call_args_list]
+        assert any(e.get("code") == "session_expired" for e in sent)
+
+    @pytest.mark.asyncio
+    async def test_expired_token_mid_session_closes_with_1008(self, monkeypatch):
+        graph_router = _router_module()
+
+        monkeypatch.setattr(graph_router, "REALTIME_RECHECK_INTERVAL", 0.01)
+        valid = iter([True])  # the token verifies at start, then stops verifying
+        monkeypatch.setattr(
+            graph_router, "ws_identity_still_valid", lambda ws, user: next(valid, False)
+        )
+
+        async def _hang(*a, **k):
+            await asyncio.sleep(30)
+
+        ws = _make_websocket([], init={"model": "m"})
+        ws.receive = AsyncMock(side_effect=_hang)
+        await asyncio.wait_for(
+            realtime_graph_ws(websocket=ws, service=self._slow_service(), user={"user_id": "u1"}),
+            timeout=5,
+        )
+
+        assert self._closes(ws)
+
+    @pytest.mark.asyncio
+    async def test_revoked_before_session_start_is_refused(self, monkeypatch):
+        graph_router = _router_module()
+
+        monkeypatch.setattr(graph_router, "_ws_token_revoked", AsyncMock(return_value=True))
+        ws = _make_websocket([WebSocketDisconnect()], init={"model": "m"})
+        service = _make_service([])
+
+        await realtime_graph_ws(websocket=ws, service=service, user={"user_id": "u1"})
+
+        assert self._closes(ws)
+        assert "queue" not in service._captured  # the model session never started
+
+    @pytest.mark.asyncio
+    async def test_normal_session_is_unaffected(self, monkeypatch):
+        graph_router = _router_module()
+
+        monkeypatch.setattr(graph_router, "REALTIME_RECHECK_INTERVAL", 0.01)
+        ws = _make_websocket([WebSocketDisconnect()], init={"model": "m"})
+        service = _make_service([_audio_event(b"\x01")])
+
+        await realtime_graph_ws(websocket=ws, service=service, user={"user_id": "u1"})
+
+        ws.send_bytes.assert_awaited_once_with(b"\x01")
+        assert not self._closes(ws)
+
+
+class TestRealtimeSessionLimits:
+    def test_live_route_is_behind_the_per_user_connection_guard(self):
+        """Live sessions share ``websocket.max_connections_per_user`` with ``/v1/graph/ws``."""
+        from tenxgraph_api.src.app.routers.graph.realtime_guard import realtime_connection_guard
+        from tenxgraph_api.src.app.routers.graph.router import router
+
+        route = next(r for r in router.routes if getattr(r, "path", "") == "/v1/graph/live")
+        calls = [d.call for d in route.dependant.dependencies]
+        assert realtime_connection_guard in calls
+
+    def test_byte_budget_drops_frames_over_it(self):
+        from tenxgraph_api.src.app.routers.graph.router import _ByteBoundedLiveInputQueue
+
+        q = _ByteBoundedLiveInputQueue(maxsize=1000, max_bytes=100)
+        q.send_audio(b"a" * 60)
+        q.send_audio(b"b" * 60)  # 120 > 100: dropped
+        q.send_audio(b"c" * 40)  # exactly 100: kept
+        first, second = q.get_nowait(), q.get_nowait()
+        assert (first.data[:1], second.data[:1]) == (b"a", b"c")
+        assert q._queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_consumed_bytes_free_the_budget(self):
+        from tenxgraph_api.src.app.routers.graph.router import _ByteBoundedLiveInputQueue
+
+        q = _ByteBoundedLiveInputQueue(maxsize=1000, max_bytes=100)
+        q.send_audio(b"a" * 100)
+        assert (await q.get()).data == b"a" * 100
+        q.send_audio(b"b" * 100)  # room again
+        q.send_text("hi")  # 100 buffered: dropped
+        q.close()
+        got = [i async for i in q]
+        assert [i.kind for i in got] == ["audio"]
+        q.send_audio(b"c")  # closed queue drops and does not leak budget
+        assert q._buffered == 0

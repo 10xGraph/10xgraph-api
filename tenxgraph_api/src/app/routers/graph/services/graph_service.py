@@ -141,7 +141,10 @@ class RunTimeoutError(TimeoutError):
     """A graph run passed ``runs.timeout`` and was cancelled."""
 
     def __init__(self, timeout: float) -> None:
-        super().__init__(f"Graph run timed out after {timeout:g}s")
+        super().__init__(
+            f"Graph run passed the runs.timeout limit of {timeout:g}s and was cancelled. "
+            'Raise "runs.timeout" in 10xgraph.json to allow longer runs.'
+        )
         self.timeout = timeout
 
 

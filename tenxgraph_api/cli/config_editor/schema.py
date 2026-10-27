@@ -384,21 +384,22 @@ _SECTIONS: list[dict[str, Any]] = [
         "key": "runs",
         "optional": True,
         "off_summary": (
-            "Clients may name new threads, any non-reserved input key reaches the graph, "
+            "The server picks new thread ids, any non-reserved input key reaches the graph, "
             "each user may hold 10 HTTP runs at once, and runs have no time limit."
         ),
-        "default": {"thread_ids": "client", "max_concurrent_per_user": 10},
+        "default": {"thread_ids": "server", "max_concurrent_per_user": 10},
         "fields": [
             {
                 "path": ["runs", "thread_ids"],
                 "label": "New thread ids",
                 "type": "select",
                 "options": ["client", "server"],
-                "default": "client",
+                "default": "server",
                 "help": (
-                    "server: a request may only name a thread that exists, so nobody can claim "
-                    "an id before its owner. New threads are started without an id. Clients "
-                    "that pick their own ids (realtime, AG-UI) need client."
+                    "server (default): a request may only name a thread that exists, so nobody "
+                    "can claim an id before its owner. New threads are started without an id. "
+                    "AG-UI and realtime clients still pick their own ids. client: any request "
+                    "may start a thread under an id it picks."
                 ),
             },
             {
@@ -434,7 +435,11 @@ _SECTIONS: list[dict[str, Any]] = [
                 "type": "number",
                 "min": 0,
                 "step": 1,
-                "help": "A run that takes longer is cancelled. Empty means no limit.",
+                "help": (
+                    "A run that takes longer is cancelled. Empty uses the default: 300 in "
+                    "production (MODE=production), no limit in development. Set null in the "
+                    "file for no limit in production."
+                ),
             },
             {
                 "path": ["runs", "max_parallel_tool_calls"],

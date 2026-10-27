@@ -7,8 +7,8 @@ from pydantic import BaseModel, Field, field_validator
 from tenxgraph.core.state import Message
 
 from tenxgraph_api.src.app.core.auth.request_config import (
-    client_message_error,
     ClientInputError,
+    client_message_error,
     request_size_error,
 )
 

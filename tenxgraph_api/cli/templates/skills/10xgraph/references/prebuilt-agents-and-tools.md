@@ -298,7 +298,6 @@ Import from `tenxgraph.prebuilt.tools`:
 | `file_search` | Search files by glob pattern. | `["file", "search"]` |
 | `google_web_search` | Call Google Custom Search API. Needs `GOOGLE_API_KEY` + `GOOGLE_CSE_ID`. | `["search", "web", "google"]` |
 | `vertex_ai_search` | Call Google Vertex AI Search. Needs GCP credentials + `VERTEX_AI_DATA_STORE_ID`. | `["search", "vertex", "google"]` |
-| `memory_tool` | General-purpose memory search/write tool (without `MemoryConfig`). | — |
 | `make_user_memory_tool` | Factory for per-user memory tools (used by `MemoryConfig`). | — |
 | `make_agent_memory_tool` | Factory for agent-scoped memory tools (used by `MemoryConfig`). | — |
 | `create_handoff_tool` | Creates a tool that transfers control to a named agent node. | — |
@@ -328,7 +327,7 @@ All three enforce paths are within the working directory or an explicit allowed 
 
 ### Memory tools
 
-The typical pattern is `Agent(..., memory=MemoryConfig(...))` — this injects memory tools automatically. Add `memory_tool`, `make_user_memory_tool`, or `make_agent_memory_tool` manually only when you need explicit control.
+The typical pattern is `Agent(..., memory=MemoryConfig(...))` — in `postload` mode this registers `user_memory_tool` and `agent_memory_tool` on the Agent's `ToolNode` automatically. Call `make_user_memory_tool` or `make_agent_memory_tool` yourself only when you need explicit control. There is no general-purpose `memory_tool`.
 
 ### create_handoff_tool
 

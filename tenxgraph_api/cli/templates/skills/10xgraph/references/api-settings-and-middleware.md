@@ -56,7 +56,9 @@ Active middleware areas:
 
 ## Production Warnings
 
-Production mode warns about unsafe defaults such as:
+Production mode warns about unsafe defaults such as the ones below, and refuses to start on
+wildcard `ORIGINS`/`ALLOWED_HOST` and enabled docs because `STRICT_PRODUCTION_CHECKS` is on by
+default in production (`STRICT_PRODUCTION_CHECKS=false` downgrades them to warnings):
 
 - `ORIGINS=*`
 - debug enabled

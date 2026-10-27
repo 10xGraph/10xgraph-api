@@ -37,13 +37,20 @@ def test_evals_viewer_can_be_left_out():
 def test_docs_are_off_in_production_by_default(monkeypatch):
     monkeypatch.delenv("DOCS_PATH", raising=False)
     monkeypatch.delenv("REDOCS_PATH", raising=False)
-    settings = Settings(MODE="production", _env_file=None)
+    settings = Settings(
+        MODE="production",
+        ALLOWED_HOST="api.example.com",
+        ORIGINS="https://app.example.com",
+        _env_file=None,
+    )
     assert (settings.DOCS_PATH, settings.REDOCS_PATH) == ("", "")
 
 
 def test_docs_explicitly_enabled_in_production_stay_on(monkeypatch):
     monkeypatch.delenv("REDOCS_PATH", raising=False)
-    settings = Settings(MODE="production", DOCS_PATH="/docs", _env_file=None)
+    settings = Settings(
+        MODE="production", DOCS_PATH="/docs", STRICT_PRODUCTION_CHECKS=False, _env_file=None
+    )
     assert settings.DOCS_PATH == "/docs"
 
 

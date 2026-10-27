@@ -1,17 +1,22 @@
 """Unit tests for security configuration warnings."""
 
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
 
+import tenxgraph_api
 from tenxgraph_api.src.app.core.config.settings import Settings, get_settings
+
+
+SAFE_HOSTS = {"ALLOWED_HOST": "api.example.com", "ORIGINS": "https://app.example.com"}
 
 
 def test_mode_normalization():
     """Test that MODE is normalized to lowercase."""
-    with patch.dict(os.environ, {"MODE": "PRODUCTION"}):
+    with patch.dict(os.environ, {"MODE": "PRODUCTION", **SAFE_HOSTS}):
         settings = Settings()
         assert settings.MODE == "production"
 
@@ -22,7 +27,9 @@ def test_mode_normalization():
 
 def test_cors_wildcard_warning_in_production(caplog):
     """Test warning for CORS wildcard in production."""
-    with patch.dict(os.environ, {"MODE": "production", "ORIGINS": "*"}):
+    with patch.dict(
+        os.environ, {"MODE": "production", "ORIGINS": "*", "STRICT_PRODUCTION_CHECKS": "false"}
+    ):
         settings = Settings()
         assert "CORS ORIGINS='*' in production" in caplog.text
 
@@ -36,7 +43,7 @@ def test_cors_wildcard_no_warning_in_development(caplog):
 
 def test_debug_mode_is_forced_off_in_production(caplog):
     """IS_DEBUG=true is overridden in production, not just warned about."""
-    with patch.dict(os.environ, {"MODE": "production", "IS_DEBUG": "true"}):
+    with patch.dict(os.environ, {"MODE": "production", "IS_DEBUG": "true", **SAFE_HOSTS}):
         settings = Settings()
         assert settings.IS_DEBUG is False
         assert "IS_DEBUG=true is ignored in production" in caplog.text
@@ -49,7 +56,15 @@ def test_debug_mode_kept_in_development():
 
 def test_docs_enabled_warning_in_production(caplog):
     """Test warning for API docs enabled in production."""
-    with patch.dict(os.environ, {"MODE": "production", "DOCS_PATH": "/docs"}):
+    with patch.dict(
+        os.environ,
+        {
+            "MODE": "production",
+            "DOCS_PATH": "/docs",
+            **SAFE_HOSTS,
+            "STRICT_PRODUCTION_CHECKS": "false",
+        },
+    ):
         settings = Settings()
         # Production turns docs off by default; the warning is for an explicit path.
         assert "API documentation endpoints are enabled" in caplog.text
@@ -57,7 +72,9 @@ def test_docs_enabled_warning_in_production(caplog):
 
 def test_allowed_host_wildcard_warning_in_production(caplog):
     """Test warning for ALLOWED_HOST wildcard in production."""
-    with patch.dict(os.environ, {"MODE": "production", "ALLOWED_HOST": "*"}):
+    with patch.dict(
+        os.environ, {"MODE": "production", "ALLOWED_HOST": "*", "STRICT_PRODUCTION_CHECKS": "false"}
+    ):
         settings = Settings()
         assert "ALLOWED_HOST='*' in production" in caplog.text
 
@@ -78,6 +95,7 @@ def test_multiple_warnings_in_production(caplog):
             "ORIGINS": "*",
             "IS_DEBUG": "true",
             "ALLOWED_HOST": "*",
+            "STRICT_PRODUCTION_CHECKS": "false",
         },
     ):
         settings = Settings()
@@ -131,6 +149,9 @@ STRICT_SAFE = {
         ({"ALLOWED_HOST": "*"}, "ALLOWED_HOST='*'"),
         ({"ORIGINS": "*"}, "ORIGINS='*'"),
         ({"ORIGINS": "https://a.example.com,*"}, "ORIGINS='*'"),
+        ({"ORIGINS": " *"}, "ORIGINS='*'"),
+        ({"ALLOWED_HOST": " *"}, "ALLOWED_HOST='*'"),
+        ({"ALLOWED_HOST": "api.example.com, *"}, "ALLOWED_HOST='*'"),
         ({"DOCS_PATH": "/docs"}, "documentation endpoints"),
     ],
 )
@@ -155,6 +176,56 @@ def test_strict_mode_is_ignored_in_development():
 
 
 def test_without_strict_mode_production_only_warns(caplog):
-    with patch.dict(os.environ, {"MODE": "production", "ALLOWED_HOST": "*"}):
+    with patch.dict(
+        os.environ, {"MODE": "production", "ALLOWED_HOST": "*", "STRICT_PRODUCTION_CHECKS": "false"}
+    ):
         Settings()
     assert "PRODUCTION SECURITY WARNINGS" in caplog.text
+
+
+UNSAFE_PRODUCTION = {"MODE": "production", "ALLOWED_HOST": "*", "ORIGINS": "*"}
+
+
+def test_strict_checks_are_on_by_default_in_production(monkeypatch):
+    monkeypatch.delenv("STRICT_PRODUCTION_CHECKS", raising=False)
+    with patch.dict(os.environ, UNSAFE_PRODUCTION), pytest.raises(ValidationError) as exc:
+        Settings(_env_file=None)
+    message = str(exc.value)
+    assert "Refusing to start" in message
+    assert "STRICT_PRODUCTION_CHECKS=false" in message
+
+
+def test_wildcard_allowed_host_alone_refuses_production_start(monkeypatch):
+    monkeypatch.delenv("STRICT_PRODUCTION_CHECKS", raising=False)
+    env = {"MODE": "production", "ORIGINS": "https://app.example.com", "ALLOWED_HOST": "*"}
+    with patch.dict(os.environ, env), pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_explicit_false_opts_out_of_strict_checks(caplog):
+    with patch.dict(os.environ, {**UNSAFE_PRODUCTION, "STRICT_PRODUCTION_CHECKS": "false"}):
+        settings = Settings(_env_file=None)
+    assert settings.STRICT_PRODUCTION_CHECKS is False
+    assert "PRODUCTION SECURITY WARNINGS" in caplog.text
+
+
+def test_strict_checks_default_on_in_production_off_in_development(monkeypatch):
+    monkeypatch.delenv("STRICT_PRODUCTION_CHECKS", raising=False)
+    safe = {"ALLOWED_HOST": "api.example.com", "ORIGINS": "https://app.example.com"}
+    with patch.dict(os.environ, {"MODE": "production", **safe}):
+        assert Settings(_env_file=None).STRICT_PRODUCTION_CHECKS is True
+    with patch.dict(os.environ, {"MODE": "development", "ALLOWED_HOST": "*"}):
+        assert Settings(_env_file=None).STRICT_PRODUCTION_CHECKS is False
+
+
+def test_prod_env_example_has_no_wildcard_origin_or_host():
+    path = Path(tenxgraph_api.__file__).parent / "cli" / "templates" / "prod" / ".env.example"
+    values = {}
+    for line in path.read_text().splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key in ("ORIGINS", "ALLOWED_HOST"):
+            values[key] = value.strip().strip('"')
+    assert set(values) == {"ORIGINS", "ALLOWED_HOST"}
+    assert all("*" not in value for value in values.values())
+    with patch.dict(os.environ, {"MODE": "production", **values}):
+        Settings(_env_file=None)  # strict checks pass with the template's values

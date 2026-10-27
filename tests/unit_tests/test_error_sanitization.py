@@ -79,6 +79,8 @@ def test_http_exception_sanitized_in_production():
 
     # Set environment before importing
     os.environ["MODE"] = "production"
+    os.environ["ALLOWED_HOST"] = "api.example.com"
+    os.environ["ORIGINS"] = "https://app.example.com"
 
     # Clear settings cache to pick up new environment
     from tenxgraph_api.src.app.core.config.settings import get_settings
@@ -110,6 +112,8 @@ def test_http_exception_sanitized_in_production():
 
     # Cleanup
     del os.environ["MODE"]
+    os.environ.pop("ALLOWED_HOST", None)
+    os.environ.pop("ORIGINS", None)
     get_settings.cache_clear()
 
 
@@ -149,6 +153,8 @@ def test_http_exception_detailed_in_development():
 
     # Cleanup
     del os.environ["MODE"]
+    os.environ.pop("ALLOWED_HOST", None)
+    os.environ.pop("ORIGINS", None)
     get_settings.cache_clear()
 
 
@@ -158,6 +164,8 @@ def test_validation_error_sanitized_in_production():
 
     # Set environment before importing
     os.environ["MODE"] = "production"
+    os.environ["ALLOWED_HOST"] = "api.example.com"
+    os.environ["ORIGINS"] = "https://app.example.com"
 
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -188,6 +196,8 @@ def test_validation_error_sanitized_in_production():
 
     # Cleanup
     del os.environ["MODE"]
+    os.environ.pop("ALLOWED_HOST", None)
+    os.environ.pop("ORIGINS", None)
 
 
 def test_error_response_includes_request_id(app_with_error_handlers):

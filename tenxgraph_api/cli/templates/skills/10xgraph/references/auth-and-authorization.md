@@ -69,7 +69,7 @@ class MyAuthz(AuthorizationBackend):
         resource_id: str | None = None, **context,
     ) -> bool: ...                     # required; False -> 403
 
-    def isolation_scope(self) -> str:  # optional; "owner" | "none" (default "none")
+    def isolation_scope(self) -> str:  # optional; "owner" | "none" (default "owner")
         return "owner"
 
     def scopes_for(self, user: dict) -> list[str] | None:  # optional; None = permissive
@@ -83,6 +83,8 @@ what you need.
 
 Each endpoint requires the scope `"<resource>:<action>"`. `RequirePermission` checks it against
 `authz.scopes_for(user)`; `None` = permissive (default, nothing breaks until scopes are issued).
+The default reads the token's `scope` claim (space-separated, OAuth style) and `scopes` (list or
+space-separated string) and matches exact names; a claim of the wrong type is a 401.
 
 - `graph`: `invoke`, `stream`, `stop`, `fix`, `setup`, `read`
 - `checkpointer`: `read`, `write`, `delete`

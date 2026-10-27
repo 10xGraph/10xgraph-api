@@ -15,8 +15,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   least one minor release. Import paths do not break silently.
 - **Breaking changes are documented under a `### Breaking` heading** in the release's
   section, with the migration step spelled out.
-- **Requests over the size limits get 422** (500 messages, 100 blocks per message, 1,000,000
-  characters of text; on AG-UI, for the trailing turn, with a 10,000-message cap on history).
 - Anything under `tenxgraph_api.cli.templates/` is emitted scaffolding, not API; template
   content can change in any release.
 
@@ -26,6 +24,35 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **Thread ids are server-made by default (`runs.thread_ids: "server"`).** The default was
+  `"client"`, where the first user to name an id owned it (squatting `"default"` locked out its
+  intended owner) and a run on an unknown id answered 200 while a taken one answered 403 (an
+  existence oracle). Now REST `invoke`/`stream`, `/v1/graph/ws` and the checkpointer write routes
+  accept only ids of threads that exist, with the same 403 for an unknown and a foreign id; a new
+  thread is started by omitting the id (or `"new"` over WebSocket) and the server picks the id.
+  AG-UI (`POST /v1/ag-ui`) and `/v1/graph/live` still accept an id the frontend made, because
+  CopilotKit and the realtime client create their own; the caller owns a new one, and an existing
+  thread is owner-checked as before. They pass `client_thread_ids=True` to
+  `AuthorizationBackend.authorize` (a custom backend sees it in `**context`). The boot refusal for
+  `ag_ui` with `thread_ids: "server"` is gone. `"client"` stays available as an explicit opt-in.
+- **`/v1/graph/live` now re-checks the token during the session.** It was verified only at the
+  handshake, so a token that expired or was revoked (`token_revocation`) kept streaming audio to
+  the provider. The credential is now re-checked before the session starts and every 30 seconds
+  after, with the same expiry and revocation checks `/v1/graph/ws` runs before each run
+  (a revocation backend outage counts as revoked). On failure the server sends a fatal
+  `session_expired` event and closes with 1008. Live sessions already count against
+  `websocket.max_connections_per_user`. Buffered input is also capped at 16 MiB per session
+  (frames over it are dropped and logged), where before only the frame count was bounded
+  (1000 frames of up to 1 MiB each). Clients must reconnect with a fresh token when a session
+  ends this way.
+- **`MODE` is now validated.** It is trimmed and lowercased, and `prod` means `production`;
+  `dev` and `local` mean `development`. Before, any value other than exactly `production`
+  (`prod`, a typo) silently ran with the development posture: docs on, evals router mounted,
+  weak JWT secret only warned, CORS wildcard accepted. Unset still means `development`.
+- **HTTP routes now take the bearer token only from the `Authorization` header.** The
+  `Sec-WebSocket-Protocol: 10xgraph-bearer, <token>` credential (and the legacy
+  `agentflow-bearer` form) was also accepted on plain HTTP requests; it is now honoured on
+  WebSocket connections only, like `?token=`. Browser WebSocket clients are unaffected.
 - **Clients can no longer set `file_tool_root`, `workspace_root`, `tool_timeout` or
   `node_timeout` in request `config`.** Core reads these keys from the run config, so a client
   could point the prebuilt file tools at any directory on the server, or turn off the tool and
@@ -82,9 +109,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   thread id (`runs:thread:<id>`): shared through Redis when it is configured, otherwise per
   process. It expires by itself (60 s, renewed while the run is alive), so a crashed worker
   cannot hold a thread, and it is released when the run ends, fails, is cancelled or the client
-  disconnects. A second run on a busy thread waits up to 30 s, then gets **409**
-  `{"detail": "thread is busy"}` (streaming routes answer before the response starts; on the
-  WebSocket it is an error chunk `{"event": "error", "data": {"reason": "thread is busy"}}` and
+  disconnects. A second run on a busy thread waits up to 30 s, then gets **409** with the
+  message "thread is busy" in the standard error envelope (streaming routes answer before the
+  response starts; on the WebSocket it is an error chunk `{"event": "error", "data": {"reason": "thread is busy"}}` and
   the socket stays open). A new thread is locked as soon as its id exists. `/v1/graph/live` is
   not covered. Apps that sent parallel runs on one thread will now see them queue or get 409.
   A Redis error lets the run proceed (logged), like the per-user run cap.
@@ -113,6 +140,32 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the whole conversation, so on AG-UI the limits apply to the trailing turn (what reaches the
   graph) and the full history only gets a 10,000-message cap plus the per-message block cap. The
   limits are fixed, not settings.
+- **A custom `AuthorizationBackend` now isolates users by default.** `isolation_scope()` used to
+  default to `"none"`, so a backend that implemented only `authorize()` silently turned off
+  per-user storage isolation: every user saw every thread and memory. It now defaults to
+  `"owner"`. Return `"none"` from `isolation_scope()` to share data on purpose. The built-in
+  backends behave as before (`allow_all` / `default` / `none` share, `ownership` and RBAC isolate;
+  `DefaultAuthorizationBackend` now says `"none"` explicitly).
+- **JWT `user_id` and scope claims are validated.** `user_id` must be a non-empty string or a
+  whole number (not a boolean), which is stored as a string (`7` becomes `"7"`); null, empty or
+  whitespace-only, boolean, float, list and dict get 401. Revocation is checked on `jti` even
+  when `user_id` is missing or odd (it was skipped for a falsy `user_id`); per-user revocation
+  applies to a valid `user_id`. The OAuth `scope` claim (space-separated) was ignored, leaving
+  the token unrestricted, and a string `scopes` was matched by substring (`xgraph:invoke_admin`
+  granted `graph:invoke`). Both `scope` and `scopes` (a list, or a space-separated string) are now
+  read and merged into a set of exact scope names. A scope claim of the wrong type (number,
+  dict, list holding non-strings) gets 401. A token with no scope claim stays unrestricted.
+
+- **`runs.timeout` defaults to 300 seconds in production** (no limit in development). Set a
+  number in `10xgraph.json` to change it, or `null` to remove the limit. The timeout error tells
+  the client to raise `runs.timeout` in `10xgraph.json`. Realtime sessions stay unlimited.
+- **`STRICT_PRODUCTION_CHECKS` is on by default in production.** A wildcard `ALLOWED_HOST` or
+  `ORIGINS`, or enabled `DOCS_PATH`/`REDOCS_PATH`, stops the server from starting. Set
+  `STRICT_PRODUCTION_CHECKS=false` to opt out.
+- **The wildcard check in `ORIGINS` and `ALLOWED_HOST` strips entries**, so `" *"` and
+  `"api.example.com, *"` are no longer missed.
+- **Generated production files use placeholders instead of `*`.** The production `.env.example`
+  and the generated docker-compose and Kubernetes files set placeholder origins and hosts.
 
 ### Added
 
@@ -161,6 +214,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- **`runs.thread_ids` defaults to `"server"`** (was `"client"`). REST and WebSocket clients that
+  invent a thread id for a new thread now get 403 on `/v1/graph/invoke`, `/v1/graph/stream`,
+  `/v1/graph/ws` and the checkpointer write routes (`PUT /v1/threads/{id}/state`, message
+  writes). Migrate by omitting the id on the first request and using the `meta.thread_id` the
+  server returns from then on (`"new"` over `/v1/graph/ws`), or set
+  `"runs": {"thread_ids": "client"}` in `10xgraph.json`. AG-UI and `/v1/graph/live` need no change. Only the built-in ownership and
+  rbac backends refuse; `allow_all` and custom backends do not unless they read
+  `server_thread_ids` themselves.
+- **Production deployments with the default or wildcard `ALLOWED_HOST` or `ORIGINS` refuse to
+  start.** Set explicit values, or `STRICT_PRODUCTION_CHECKS=false`. A public, token-less API
+  that runs in production with `ORIGINS=*` and `CORS_ALLOW_CREDENTIALS=false` also needs the
+  opt-out.
+- **Production runs longer than 300 s are cancelled** (invoke 504, stream and AG-UI error). Raise
+  `runs.timeout`, or set it to `null`.
+- **An unknown `MODE` now refuses to start.** Accepted values (case-insensitive):
+  `production`, `prod`, `development`, `dev`, `local`. Anything else, such as `staging` or
+  `test`, fails at startup (and in `10xgraph dev`) with an error listing them. Set `MODE` to
+  one of these values.
+- **Requests over the size limits get 422** (500 messages, 100 blocks per message, 1,000,000
+  characters of text; on AG-UI, for the trailing turn, with a 10,000-message cap on history).
 - **`POST /v1/threads/{thread_id}/messages` is now admin-only.** It needs the
   `checkpointer:import` scope held explicitly: an identity with no scopes gets 403, and a `"*"`
   role has it. It still takes any role, since it imports history, but tool calls, media
@@ -168,6 +241,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   invoke or stream, and use the new `PUT .../messages/{message_id}` for feedback.
 - Assistant and system messages, and `context_summary` / `execution_meta`, are rejected with 422
   on the client routes listed under Security.
+- **Custom authorization backends are isolated by default.** A backend that implements only
+  `authorize()` now gets per-owner storage isolation (`isolation_scope()` returns `"owner"`),
+  where it used to share all threads and memories. If you relied on sharing, add
+  `def isolation_scope(self) -> str: return "none"`.
+- **JWTs with an invalid `user_id` or scope claim are refused with 401.** `user_id` must be a
+  non-empty string or an integer; null, empty, boolean, float, list and dict are rejected, and an
+  integer becomes a string. A `scope` / `scopes` claim that is not a string or a list of strings
+  is rejected. Fix the issuer. A string `scopes` is now split on spaces instead of matched by
+  substring, so tokens that depended on that stop matching.
 
 ## [0.9.0] - 2026-10-22
 
