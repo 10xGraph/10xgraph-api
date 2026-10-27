@@ -24,6 +24,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **Generated deployment files are locked down by default.** `10xgraph build` images run as a
+  fixed uid 10001 (`USER 10001:10001`). `--k8s` sets a restricted `securityContext` (non-root,
+  read-only root filesystem, no privilege escalation, all capabilities dropped,
+  `RuntimeDefault` seccomp), turns off the service account token, reads secrets from a
+  `<service>-secrets` Secret via `envFrom`, and uses a pinned placeholder image instead of
+  `:latest`. `--docker-compose` publishes the port on `127.0.0.1` only, reads `.env` through
+  `env_file`, and runs read-only with `cap_drop: ALL` and `no-new-privileges`. `/tmp` and
+  `/app/uploads` are the only writable paths in both. `.dockerignore` also excludes private
+  keys, certificates and cloud credential files, and an existing `.dockerignore` gets the
+  missing patterns appended instead of being left as is. Regenerate with `--force` to pick
+  this up; the compose file now expects `ORIGINS` and `ALLOWED_HOST` in `.env`.
+
+- **`10xgraph init` writes a `.gitignore`** that keeps `.env`, keys and credential files out of
+  git (`.env.example` stays tracked), plus `uploads/` and `eval_reports/`. An existing
+  `.gitignore` is never replaced; only the missing secret patterns are appended.
+
 - **A client can no longer pick the vector store collection on a graph run.** `collection` is now
   a server-owned config key: invoke, stream, `/v1/graph/ws` and AG-UI drop it from client config,
   as the store routes already did, so the memory tools cannot be pointed at another
@@ -188,6 +204,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`observability.user_id_mode`** in `10xgraph.json` (`"raw"` default, `"hash"`, `"mask"`):
+  how the user id appears in traces. It is passed to the `OtelPublisher` the server binds, for
+  both the `observability` block and `OTEL_ENABLED`, and shown in the `10xgraph config`
+  editor's Observability section. `hash` is keyed when `TENXGRAPH_TRACE_USER_ID_KEY` is set.
+  Message and tool content stay in traces at the `full` level. A core without the option
+  keeps the raw id and logs a warning.
 - **`on_busy` request option** (`"wait"` default, or `"cancel"`), a top-level field next to
   `recursion_limit` on `POST /v1/graph/invoke`, `POST /v1/graph/stream` and `WS /v1/graph/ws`.
   With `"cancel"`, a run that finds its thread busy asks the running run to stop (the same

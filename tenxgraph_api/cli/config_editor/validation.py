@@ -25,6 +25,7 @@ Issue = dict[str, str]
 
 _IMPORT_PATH = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_][\w.]*$")
 _OBSERVABILITY_LEVELS = ("spans", "standard", "full")
+_USER_ID_MODES = ("raw", "hash", "mask")
 _MAX_PERCENT = 100
 
 
@@ -282,6 +283,12 @@ def _check_observability(config: dict, out: _Collector) -> None:
     if level not in _OBSERVABILITY_LEVELS:
         out.error(
             "observability.level", f"level must be one of {', '.join(_OBSERVABILITY_LEVELS)}."
+        )
+    user_id_mode = data.get("user_id_mode", "raw")
+    if user_id_mode not in _USER_ID_MODES:
+        out.error(
+            "observability.user_id_mode",
+            f"user_id_mode must be one of {', '.join(_USER_ID_MODES)}.",
         )
     any_enabled = False
     for backend in ("logfire", "langsmith"):

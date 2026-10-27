@@ -534,6 +534,18 @@ _SECTIONS: list[dict[str, Any]] = [
                 "help": "full records prompts and tool I/O and may contain PII.",
             },
             {
+                "path": ["observability", "user_id_mode"],
+                "group": "Tracing",
+                "default": "raw",
+                "label": "User id in traces",
+                "type": "select",
+                "options": ["raw", "hash", "mask"],
+                "help": (
+                    "raw sends the user id as is; hash sends a SHA-256 of it (keyed when "
+                    "TENXGRAPH_TRACE_USER_ID_KEY is set); mask hides the middle of it."
+                ),
+            },
+            {
                 "path": ["observability", "logfire", "enabled"],
                 "group": "Logfire",
                 "default": False,

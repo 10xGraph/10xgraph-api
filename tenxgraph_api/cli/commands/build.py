@@ -11,10 +11,12 @@ from tenxgraph_api.cli.core.validation import Validator
 from tenxgraph_api.cli.exceptions import DockerError, FileOperationError, ValidationError
 from tenxgraph_api.cli.templates.defaults import (
     CLI_PACKAGE,
+    SECRET_FILE_PATTERNS,
     generate_docker_compose_content,
     generate_dockerfile_content,
     generate_dockerignore_content,
     generate_k8s_manifest_content,
+    merge_ignore_patterns,
 )
 
 
@@ -121,7 +123,15 @@ class BuildCommand(BaseCommand):
                 dockerignore_path = output_path.parent / ".dockerignore"
                 with timeline.step("dockerignore") as step:
                     if dockerignore_path.exists() and not force:
-                        step.skip(f"{dockerignore_path} already exists")
+                        # Keep the developer's file, but never let it ship credentials
+                        merged = merge_ignore_patterns(
+                            dockerignore_path.read_text(encoding="utf-8"), SECRET_FILE_PATTERNS
+                        )
+                        if merged is None:
+                            step.skip(f"{dockerignore_path} already exists")
+                        else:
+                            dockerignore_path.write_text(merged, encoding="utf-8")
+                            step.detail(f"{dockerignore_path}: added missing secret patterns")
                     else:
                         dockerignore_path.write_text(
                             generate_dockerignore_content(), encoding="utf-8"

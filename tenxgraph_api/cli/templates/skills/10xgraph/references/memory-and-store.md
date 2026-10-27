@@ -33,6 +33,15 @@ Writes run in the background. A near-identical memory (similarity score 0.95 or 
 
 Embedding helpers such as `OpenAIEmbedding` and factories like `create_local_qdrant_store` exist in the store package where available.
 
+## Collections
+
+Keep kinds of data apart (user, shared agent/system, company data) with Qdrant collections.
+
+- A client can never choose a collection. The API drops `collection` from client config on every route (invoke, stream, `/v1/graph/ws`, AG-UI, store routes), ignored and logged at debug, like `user_id`, `user`, `authz`, `file_tool_root`.
+- Precedence: 1) `UserMemoryConfig(collection=...)` / `AgentMemoryConfig(collection=...)` (a name or a function of the run config; always wins), 2) `collection` in a run config built by developer code, 3) `QdrantStore(collection=...)` default (a name or a function of the config; default `"agentflow_memories"`). With a function default, `asetup()` creates nothing; collections are created on first write or search. `RAGAgent`: `store_config={"collection": ...}` or `store_config_builder` returning `collection`.
+- `/v1/store/...` routes always use the store default (and call it if it is a function, with the authenticated `user` in the config). Keep user memory in the default collection; put agent memory and RAG in named collections.
+- Company data: either one shared collection with owner `system_user_id(f"company:{tenant_id}")`, or one collection per company: `UserMemoryConfig(collection=company_collection)` where the function reads `(cfg.get("user") or {}).get("tenant_id")` and raises if it is missing (with auth off there is no `user`). For RAG: `store_config_builder=lambda cfg: {"user_id": system_user_id(f"company:{t}"), "collection": f"company_{t}"}` with `t` read the same way. Read identity from `cfg["user"]` or `cfg["user_id"]`, never from state.
+
 ## Wiring
 
 - Pass `MemoryConfig(store=..., retrieval_mode=...)` to `Agent`. Optional: `limit`, `score_threshold`, `max_tokens`, `inject_system_prompt`, `user_memory=UserMemoryConfig(...)`, `agent_memory=AgentMemoryConfig(...)`.

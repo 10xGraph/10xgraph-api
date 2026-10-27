@@ -5,6 +5,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from tenxgraph_api.src.app.core.config import setup_middleware as setup_middleware_module
 from tenxgraph_api.src.app.core.config.setup_middleware import (
     SelectiveGZipMiddleware,
     setup_middleware,
@@ -415,7 +416,7 @@ def test_setup_middleware_all():
         mock_build_backend.assert_called_once_with(rate_limit_config, container=container)
         assert app.state.rate_limit_backend == "mock_backend"
         mock_setup_otel.assert_called_once_with(app, settings)
-        mock_attach.assert_called_once_with(container, settings)
+        mock_attach.assert_called_once_with(container, settings, graph_config)
 
 
 # ── _setup_observability ──────────────────────────────────────────────────────
@@ -590,3 +591,33 @@ def test_setup_observability_invalid_level_falls_back():
 
     # Falls back to STANDARD and still binds.
     container.bind_instance.assert_called_once()
+
+
+def test_user_id_mode_reads_the_observability_block():
+    cfg = MagicMock()
+    cfg.observability = {"user_id_mode": "hash"}
+    assert setup_middleware_module._user_id_mode(cfg) == "hash"
+    cfg.observability = None
+    assert setup_middleware_module._user_id_mode(cfg) == "raw"
+    assert setup_middleware_module._user_id_mode(None) == "raw"
+
+
+def test_make_otel_publisher_passes_the_mode_only_when_set():
+    calls = []
+
+    class NewCorePublisher:
+        def __init__(self, level, user_id_mode="raw"):
+            calls.append((level, user_id_mode))
+
+    setup_middleware_module._make_otel_publisher(NewCorePublisher, "standard", "raw")
+    setup_middleware_module._make_otel_publisher(NewCorePublisher, "standard", "mask")
+    assert calls == [("standard", "raw"), ("standard", "mask")]
+
+
+def test_make_otel_publisher_falls_back_on_an_older_core():
+    class OldCorePublisher:
+        def __init__(self, level):
+            self.level = level
+
+    publisher = setup_middleware_module._make_otel_publisher(OldCorePublisher, "standard", "hash")
+    assert publisher.level == "standard"

@@ -117,6 +117,8 @@ trusted policy. After a successful check, `RequirePermission` stamps
 copy the trusted `user` into `config["user"]`, so the core library reads `config["user"]["authz"]`
 and scopes rows to the caller (`owner`) or not (`none`). Set server-side only — not client-forgeable.
 
+Server-owned config keys (`RESERVED_CONFIG_KEYS` in `core/auth/request_config.py`: `authz`, `user`, `user_id`, `remote_tools`, `file_tool_root`, `workspace_root`, `tool_timeout`, `node_timeout`, `max_parallel_tool_calls`, `collection`, plus any `_`-prefixed key) are dropped from client config by `client_config` on every route. They are ignored, not refused (debug log). A client never picks a Qdrant `collection`; see memory-and-store.md.
+
 ## Guarantees
 
 - Routes are guarded by construction: `assert_all_routes_protected` refuses to boot if any
