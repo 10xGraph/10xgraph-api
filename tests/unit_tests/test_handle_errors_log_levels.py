@@ -19,6 +19,9 @@ from tenxgraph_api.src.app.core.exceptions.user_exception import (
 
 def _client(raiser, mode: str = "development") -> TestClient:
     os.environ["MODE"] = mode
+    if mode == "production":
+        os.environ["ALLOWED_HOST"] = "api.example.com"
+        os.environ["ORIGINS"] = "https://app.example.com"
     from tenxgraph_api.src.app.core.config.settings import get_settings
 
     get_settings.cache_clear()
@@ -36,6 +39,8 @@ def _client(raiser, mode: str = "development") -> TestClient:
 def _reset_mode():
     yield
     os.environ.pop("MODE", None)
+    os.environ.pop("ALLOWED_HOST", None)
+    os.environ.pop("ORIGINS", None)
     from tenxgraph_api.src.app.core.config.settings import get_settings
 
     get_settings.cache_clear()

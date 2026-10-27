@@ -1,7 +1,11 @@
 from fastapi import Request
 from starlette.requests import Request as StarletteRequest
 
-from tenxgraph_api.src.app.utils.response_helper import error_response, success_response
+from tenxgraph_api.src.app.utils.response_helper import (
+    error_response,
+    merge_metadata,
+    success_response,
+)
 
 
 HTTP_OK = 200
@@ -46,3 +50,14 @@ def test_error_response_contains_error_fields():
     assert resp.status_code == HTTP_I_AM_A_TEAPOT
     body = resp.body
     assert b"APP_ERROR" in body and b"boom" in body
+
+
+def test_error_response_without_request_id_middleware():
+    scope = {"type": "http", "method": "GET", "path": "/", "headers": []}
+    req: Request = StarletteRequest(scope, DummyReceive())  # type: ignore[call-arg]
+    meta = merge_metadata(None, req, "m")
+    assert meta["request_id"] == "unknown"
+    assert meta["timestamp"]
+    resp = error_response(req, error_code="APP_ERROR", message="boom", status_code=400)
+    assert resp.status_code == 400
+    assert b"unknown" in resp.body

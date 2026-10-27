@@ -15,6 +15,7 @@ Examples:
 
 """
 
+from datetime import datetime
 from typing import Any, TypeVar
 
 from fastapi import Request
@@ -67,19 +68,23 @@ def merge_metadata(metadata: dict | None, request: Request, message: str = "") -
         metadata: A dictionary containing merged metadata with request details
             and the message.
     """
+    # RequestIDMiddleware sets these; error handlers must still work without it.
+    request_id = getattr(request.state, "request_id", "unknown")
+    timestamp = getattr(request.state, "timestamp", None) or datetime.now().isoformat()
+
     if metadata:
         metadata.update(
             {
-                "request_id": request.state.request_id,
-                "timestamp": request.state.timestamp,
+                "request_id": request_id,
+                "timestamp": timestamp,
                 "message": message,
             }
         )
         return metadata
 
     return {
-        "request_id": request.state.request_id,
-        "timestamp": request.state.timestamp,
+        "request_id": request_id,
+        "timestamp": timestamp,
         "message": message,
     }
 
