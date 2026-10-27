@@ -181,6 +181,20 @@ _ERROR_CODE = re.compile(r"^\[([A-Z][A-Z_]*_\d+)\]")
 _SAFE_TOOL_FAILURE = re.compile(r"failed with an internal error \(reference [0-9a-f]{8}\)\.$")
 
 
+def generic_error_text(text: Any) -> Any:
+    """The production form of an error text: a generic message keeping only its error code.
+
+    Core's own safe tool-failure text (a tool name and a log reference) and non-strings pass
+    through unchanged.
+    """
+    from tenxgraph_api.src.app.core.exceptions.handle_errors import _sanitize_error_message
+
+    if not isinstance(text, str) or _SAFE_TOOL_FAILURE.search(text):
+        return text
+    code = _ERROR_CODE.match(text)
+    return _sanitize_error_message(text, code.group(1) if code else "GRAPH_STREAM_ERROR", True)
+
+
 def sanitize_error_chunk(chunk: StreamChunk) -> StreamChunk:
     """In production, replace the exception text in an ``ERROR`` chunk with a generic message.
 
@@ -193,17 +207,11 @@ def sanitize_error_chunk(chunk: StreamChunk) -> StreamChunk:
     if chunk.event != StreamEvent.ERROR:
         return chunk
     from tenxgraph_api.src.app.core.config.settings import get_settings
-    from tenxgraph_api.src.app.core.exceptions.handle_errors import _sanitize_error_message
 
     if get_settings().MODE != "production":
         return chunk
 
-    def generic(text: Any) -> Any:
-        if not isinstance(text, str) or _SAFE_TOOL_FAILURE.search(text):
-            return text
-        code = _ERROR_CODE.match(text)
-        return _sanitize_error_message(text, code.group(1) if code else "GRAPH_STREAM_ERROR", True)
-
+    generic = generic_error_text
     update: dict[str, Any] = {}
     if isinstance(chunk.data, dict):
         update["data"] = {
@@ -409,7 +417,7 @@ class GraphService:
             try:
                 await self._save_thread_name(config, thread_id, messages)
             except Exception as exc:
-                logger.warning("Thread naming failed for thread %s: %s", thread_id, exc)
+                logger.warning("Thread naming failed for thread %s: %s", log_safe(thread_id), exc)
 
         from tenxgraph.utils.background_task_manager import BackgroundTaskManager
 

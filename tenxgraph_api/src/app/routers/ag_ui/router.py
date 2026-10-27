@@ -13,6 +13,8 @@ from tenxgraph_api.src.app.core.auth.request_config import (
     normalize_thread_id,
 )
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
+from tenxgraph_api.src.app.core.config.settings import get_settings
+from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.routers.graph.run_limits import acquire_run_slot, release_when_done
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
 from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import (
@@ -89,7 +91,10 @@ async def run_ag_ui(
     except ValueError:
         pass
 
-    logger.info("AG-UI run %s received for thread %s", run_input.run_id, thread_id)
+    if get_settings().MODE != "production":
+        logger.info(
+            "AG-UI run %s received for thread %s", log_safe(run_input.run_id), log_safe(thread_id)
+        )
     encoder = EventEncoder(accept=request.headers.get("accept") or "")
     # One run at a time per thread (AG-UI always waits); taken before the response starts so a
     # busy thread is a real 409.

@@ -123,10 +123,12 @@ class _Config:
 
     thread_name_generator_path = None
 
-    def __init__(self, allow_client_tools: bool = True) -> None:
+    def __init__(self, allow_client_tools: bool = True, runs: Any = None) -> None:
         from tenxgraph_api.src.app.core.config.graph_config import AgUiConfig
 
         self.ag_ui = AgUiConfig(enabled=True, allow_client_tools=allow_client_tools)
+        if runs is not None:
+            self.runs = runs
 
     def auth_config(self) -> str:
         return "custom"
@@ -550,3 +552,49 @@ def test_client_tools_can_be_turned_off(graph_and_checkpointer):
     result = next(e for e in events if e.type == EventType.TOOL_CALL_RESULT)
     assert result.tool_call_id == "call-theme"
     assert "set_theme" in result.content
+
+
+def test_runs_config_keys_does_not_block_ag_ui(graph_and_checkpointer):
+    """B28: the server's own ``ag_ui`` key is not subject to the client allow-list."""
+    from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+
+    runs = RunsConfig(config_keys=frozenset({"thread_id"}))
+    client, _, _ = _client(graph_and_checkpointer, _Config(runs=runs))
+    events = _events(
+        client.post(
+            "/v1/ag-ui",
+            json=_body("t-keys", [{"id": "u1", "role": "user", "content": "weather?"}]),
+            headers=user_headers("alice"),
+        )
+    )
+    types = _types(events)
+    assert EventType.RUN_ERROR not in types
+    assert types[-1] == EventType.RUN_FINISHED
+
+
+def test_ag_ui_data_is_server_config_not_client_config():
+    """``ag_ui`` reaches the graph through the server config, never the client config."""
+    from ag_ui.core import RunAgentInput
+
+    from tenxgraph_api.src.app.core.auth.request_config import client_config
+    from tenxgraph_api.src.app.routers.ag_ui.service import _NO_RESUME, _graph_request
+
+    run_input = RunAgentInput.model_validate(
+        {
+            "threadId": "t",
+            "runId": "r",
+            "state": {},
+            "messages": [],
+            "tools": [],
+            "context": [{"description": "page", "value": "home"}],
+            "forwardedProps": {"theme": "dark"},
+        }
+    )
+    message = Message.text_message("hi")
+    graph_input, server_config = _graph_request(run_input, [message], None, _NO_RESUME)
+
+    assert "ag_ui" not in (graph_input.config or {})
+    assert server_config["ag_ui"]["forwarded_props"] == {"theme": "dark"}
+    assert server_config["ag_ui"]["context"] == [{"description": "page", "value": "home"}]
+    # A client of the plain graph routes cannot set it either.
+    assert "ag_ui" not in client_config({"ag_ui": {"forwarded_props": {}}, "locale": "en"})

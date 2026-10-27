@@ -2,7 +2,7 @@ from typing import Any
 
 from fastapi import HTTPException
 from injectq import inject, singleton
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from tenxgraph.core.state import AgentState, Message
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 
@@ -203,6 +203,8 @@ class CheckpointerService:
         res = await self.checkpointer.aget_state(cfg)
         if not res:
             rs = await self.checkpointer.aget_state_cache(cfg)
+            if isinstance(rs, BaseModel):
+                rs = parse_state_output(self.settings, rs)
             return StateResponseSchema(state=rs)
 
         if res:
@@ -233,6 +235,12 @@ class CheckpointerService:
         # only, and no tool call, which would run on the next resume without the model ever
         # requesting it. A tool result is accepted only as the answer to a pending remote call.
         context = state.get("context")
+        if context is not None and not (
+            isinstance(context, list) and all(isinstance(m, dict | Message) for m in context)
+        ):
+            raise HTTPException(
+                status_code=422, detail="Invalid state fields: context must be a list of messages"
+            )
         if error := client_message_error(context):
             raise HTTPException(status_code=422, detail=error)
         if context:
@@ -296,7 +304,26 @@ class CheckpointerService:
         message_id: Any,
     ) -> Message:
         cfg = self._config(config, user)
-        return await self.checkpointer.aget_message(cfg, message_id)
+        return await self._read_message(cfg, message_id)
+
+    async def _read_message(self, cfg: dict[str, Any], message_id: Any) -> Message:
+        """The message, or a 404 when the thread has none with that id.
+
+        Checkpointers disagree on a missing message: in-memory and SQLite raise ``IndexError``,
+        Postgres raises ``ValueError("Message not found: ...")``. Any other error is not a
+        client mistake and passes through.
+        """
+        try:
+            message = await self.checkpointer.aget_message(cfg, message_id)
+        except IndexError as exc:
+            raise HTTPException(status_code=404, detail="Message not found") from exc
+        except ValueError as exc:
+            if str(exc).startswith("Message not found"):
+                raise HTTPException(status_code=404, detail="Message not found") from exc
+            raise
+        if message is None:
+            raise HTTPException(status_code=404, detail="Message not found")
+        return message
 
     async def update_message_feedback(
         self,
@@ -342,13 +369,21 @@ class CheckpointerService:
         message_id: Any,
     ) -> ResponseSchema:
         cfg = self._config(config, user)
-        # Files only this message references lose their link to the thread. Read before the
-        # delete; a read failure just leaves the files in place.
+        # Read first: a missing message is a 404 on every checkpointer (Postgres alone would
+        # delete silently), and its files are needed for the cleanup below. Any other read
+        # failure just leaves the files in place.
+        message: Message | None = None
+        try:
+            message = await self._read_message(cfg, message_id)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.debug("File cleanup skipped for message %s: %s", log_safe(message_id), exc)
         released: list[str] = []
         media = self._link_tracking_media()
-        if media is not None:
+        if media is not None and message is not None:
             try:
-                gone = internal_media_keys(await self.checkpointer.aget_message(cfg, message_id))
+                gone = internal_media_keys(message)
                 if gone:
                     kept = set(await self._thread_media_keys(cfg, skip_message_id=message_id))
                     released = [k for k in dict.fromkeys(gone) if k not in kept]

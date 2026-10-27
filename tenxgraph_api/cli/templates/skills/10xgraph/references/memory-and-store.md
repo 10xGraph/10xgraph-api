@@ -61,6 +61,8 @@ Store API routes include:
 - `DELETE /v1/store/memories/{memory_id}`
 - `POST /v1/store/memories/forget`
 
+Forget deletes only what matches `memory_type`, `category` and `filters` (all combined). `Mem0Store` cannot narrow and rejects those fields. `query` is capped at 8,000 characters and `content` at 100,000 (`422` above). Client `options` accept only `infer` and `replace_metadata`.
+
 TypeScript client methods include `storeMemory`, `searchMemory`, `getMemory`, `updateMemory`, `deleteMemory`, `listMemories`, and `forgetMemories`.
 
 ## Source Map

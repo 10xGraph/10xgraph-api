@@ -92,7 +92,7 @@ class TestStoreMemory:
         mock_store.astore.return_value = memory_id
         payload = StoreMemorySchema(
             content="Test memory",
-            options={"timeout": 30, "retry": True},
+            options={"infer": False, "replace_metadata": True},
         )
 
         # Act
@@ -101,8 +101,8 @@ class TestStoreMemory:
         # Assert
         assert result.memory_id == memory_id
         call_args = mock_store.astore.call_args
-        assert call_args[1]["timeout"] == 30
-        assert call_args[1]["retry"] is True
+        assert call_args[1]["infer"] is False
+        assert call_args[1]["replace_metadata"] is True
 
     async def test_store_memory_no_store_raises_error(self, mock_user):
         """Test storing memory when store is not configured."""
@@ -244,14 +244,14 @@ class TestGetMemory:
         """Test retrieving memory with options."""
         # Arrange
         mock_store.aget.return_value = sample_memory_result
-        options = {"include_deleted": False}
+        options = {"infer": False}
 
         # Act
         result = await store_service.get_memory(sample_memory_id, {}, mock_user, options=options)
 
         # Assert
         call_args = mock_store.aget.call_args
-        assert call_args[1]["include_deleted"] is False
+        assert call_args[1]["infer"] is False
 
     async def test_get_memory_not_found(
         self, store_service, mock_store, mock_user, sample_memory_id
@@ -308,14 +308,14 @@ class TestListMemories:
         """Test listing memories with options."""
         # Arrange
         mock_store.aget_all.return_value = sample_memory_results
-        options = {"sort_by": "created_at"}
+        options = {"infer": False}
 
         # Act
         result = await store_service.list_memories({}, mock_user, options=options)
 
         # Assert
         call_args = mock_store.aget_all.call_args
-        assert call_args[1]["sort_by"] == "created_at"
+        assert call_args[1]["infer"] is False
 
     async def test_list_memories_empty(self, store_service, mock_store, mock_user):
         """Test listing memories when none exist."""
@@ -380,7 +380,7 @@ class TestUpdateMemory:
         mock_store.aupdate.return_value = {"updated": True}
         payload = UpdateMemorySchema(
             content="Updated content",
-            options={"force": True},
+            options={"replace_metadata": True},
         )
 
         # Act
@@ -388,7 +388,7 @@ class TestUpdateMemory:
 
         # Assert
         call_args = mock_store.aupdate.call_args
-        assert call_args[1]["force"] is True
+        assert call_args[1]["replace_metadata"] is True
 
 
 @pytest.mark.asyncio
@@ -433,14 +433,14 @@ class TestDeleteMemory:
         """Test deleting memory with options."""
         # Arrange
         mock_store.adelete.return_value = {"deleted": True}
-        options = {"force": True}
+        options = {"infer": False}
 
         # Act
         result = await store_service.delete_memory(sample_memory_id, {}, mock_user, options=options)
 
         # Assert
         call_args = mock_store.adelete.call_args
-        assert call_args[1]["force"] is True
+        assert call_args[1]["infer"] is False
 
 
 @pytest.mark.asyncio
@@ -500,7 +500,7 @@ class TestForgetMemory:
         mock_store.aforget_memory.return_value = {"count": 1}
         payload = ForgetMemorySchema(
             memory_type=MemoryType.EPISODIC,
-            options={"dry_run": True},
+            options={"infer": False},
         )
 
         # Act
@@ -508,7 +508,7 @@ class TestForgetMemory:
 
         # Assert
         call_args = mock_store.aforget_memory.call_args
-        assert call_args[1]["dry_run"] is True
+        assert call_args[1]["infer"] is False
 
     async def test_forget_memory_excludes_none_values(self, store_service, mock_store, mock_user):
         """Test that None values are excluded from forget call."""

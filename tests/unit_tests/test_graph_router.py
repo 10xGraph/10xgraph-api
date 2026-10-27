@@ -151,3 +151,65 @@ async def test_fix_graph_endpoint(mock_request, mock_service, mock_user):
         )
         assert res == {"status": "success"}
         mock_service.fix_graph.assert_called_once_with("thread-abc", mock_user, {"clean": True})
+
+
+FORGED_THREAD_ID = "x\n2026-10-26 ERROR admin login ok"
+ROUTER_MODULE = "tenxgraph_api.src.app.routers.graph.router"
+
+
+async def _call_thread_endpoints(which, request, service, user):
+    from tenxgraph_api.src.app.routers.graph.router import observability
+
+    if "observability" in which:
+        await observability(
+            request=request, thread_id=FORGED_THREAD_ID, run_id=None, service=service, user=user
+        )
+    if "stop" in which:
+        await stop_graph(
+            request=request,
+            stop_request=GraphStopSchema.model_construct(thread_id=FORGED_THREAD_ID, config={}),
+            service=service,
+            user=user,
+        )
+    if "fix" in which:
+        await fix_graph(
+            request=request,
+            fix_request=FixGraphRequestSchema.model_construct(
+                thread_id=FORGED_THREAD_ID, config={}
+            ),
+            service=service,
+            user=user,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["observability", "stop", "fix"])
+async def test_client_thread_id_is_escaped_in_development_logs(
+    endpoint, mock_request, mock_service, mock_user, caplog
+):
+    caplog.set_level("INFO")
+    with (
+        patch(f"{ROUTER_MODULE}._is_production", return_value=False),
+        patch(f"{ROUTER_MODULE}.success_response"),
+    ):
+        await _call_thread_endpoints([endpoint], mock_request, mock_service, mock_user)
+
+    assert "\\n2026-10-26 ERROR admin login ok" in caplog.text
+    assert all("\n2026" not in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_client_thread_id_lines_not_emitted_in_production(
+    mock_request, mock_service, mock_user, caplog
+):
+    caplog.set_level("DEBUG")
+    with (
+        patch(f"{ROUTER_MODULE}._is_production", return_value=True),
+        patch(f"{ROUTER_MODULE}.success_response"),
+    ):
+        await _call_thread_endpoints(
+            ["observability", "stop", "fix"], mock_request, mock_service, mock_user
+        )
+
+    assert "ERROR admin login ok" not in caplog.text
+    assert "thread" not in caplog.text

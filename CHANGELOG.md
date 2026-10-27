@@ -24,6 +24,31 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **The memory rate limiter evicts in constant time at its key cap.** Keys are kept in
+  least-recently-used order, so a new key at the 50,000-key cap drops the oldest entry from the
+  front instead of sweeping and scanning every key (about 2.5 ms of blocked event loop per new
+  key before). Idle-key cleanup runs in the background only, pops from the front and stops at
+  the first fresh key. The "bucket cap reached" warning is logged at most once a minute.
+- **REST state responses hide error text in production.** `GET /v1/threads/{id}/state`
+  returned `execution_meta.internal_data.error` with the raw exception text. With
+  `MODE=production` it is now the same generic message (keeping the error code) that stream,
+  WebSocket and AG-UI error chunks already send. Development is unchanged.
+- **Ownership cache keys can no longer collide with delete markers.** Redis owner entries
+  now live under `<prefix>:id:<thread_id>` and "just deleted" markers under
+  `<prefix>:tomb:<thread_id>`. Before, a thread named `deleted:X` shared a key with the marker
+  for `X`, so it could block other users from creating `X` for up to an hour. Old keys are no
+  longer read; the cache refills from the database.
+- **Client thread ids are escaped in request logs, and not logged in production.** The graph
+  observability, stop, fix and WebSocket run lines, and the AG-UI run line, now log the id with
+  `log_safe` and are only emitted outside `MODE=production`. The WebSocket authorization-failure
+  warnings and the thread-naming warning stay in production but escape the id, so a thread id
+  with a newline can no longer forge a log line.
+- **Store routes cap free text and forward only known options.** `query` is limited to 8,000
+  characters and `content` (store and update, string form) to 100,000; longer input returns
+  `422`. The client `options` field now passes only `infer` and `replace_metadata` to the store
+  (everything else, `memory_id` included, is dropped) instead of arbitrary keyword arguments.
+  With core `aforget_memory` now applying `memory_type`, `category` and `filters`, a narrow
+  forget no longer deletes all of the caller's memories; `Mem0Store` rejects narrowing.
 - **OTEL no longer prints spans to stdout in production.** With `OTEL_ENABLED=true` and no
   `OTEL_EXPORTER_OTLP_ENDPOINT`, `MODE=production` now sets up no exporter and logs a warning;
   the console exporter is development-only.
@@ -258,6 +283,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Client mistakes on thread routes are a 404 or 422, not a 500, and state and message
+  responses no longer carry provider or framework internals.** `GET` and `DELETE` of a message
+  the thread does not have return 404 on every checkpointer (in-memory and SQLite raised
+  `IndexError`, Postgres deleted silently). `PUT /v1/threads/{thread_id}/state` with a `context`
+  that is not a list of messages returns 422 naming the field. Message `raw` is no longer
+  returned by the thread state and message routes, and `execution_meta.internal_data` in state
+  responses keeps only `error` (the playground shows it). `usages` and the interrupt fields are
+  unchanged.
+- **Development error responses for node and graph errors are no longer a 422.** Outside
+  production, `GraphError`, `NodeError`, recursion, storage, transient storage, metrics, schema
+  version and serialization errors put their `context` dict into `details`, which expects a
+  list, so the client got `422 VALIDATION_ERROR` instead of the real status and code. Each
+  context key now becomes one `details` entry (`loc` the key, `msg` the value, `type`
+  `context`). Production still hides `details`.
 - **`POST /v1/graph/fix` no longer deletes healthy tool-call messages.** It treated every
   assistant message with tool calls as broken (provider-shaped tool calls never carry
   `content`), which orphaned the tool results. It now removes only assistant messages with a

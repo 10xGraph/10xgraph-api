@@ -8,6 +8,8 @@ from tenxgraph.core.state import Message
 
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
 from tenxgraph_api.src.app.core.auth.request_config import client_config
+from tenxgraph_api.src.app.core.config.settings import get_settings
+from tenxgraph_api.src.app.utils.parse_output import parse_message_output
 from tenxgraph_api.src.app.utils.response_helper import success_response
 from tenxgraph_api.src.app.utils.swagger_helper import generate_swagger_responses
 
@@ -263,7 +265,7 @@ async def get_message(
     )
 
     return success_response(
-        result,
+        parse_message_output(get_settings(), result),
         request,
     )
 
@@ -310,7 +312,7 @@ async def put_message_feedback(
     )
 
     return success_response(
-        result,
+        parse_message_output(get_settings(), result),
         request,
     )
 
@@ -360,7 +362,7 @@ async def list_messages(
     )
 
     return success_response(
-        result,
+        parse_message_output(get_settings(), result),
         request,
     )
 

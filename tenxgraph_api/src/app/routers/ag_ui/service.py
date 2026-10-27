@@ -176,25 +176,24 @@ def _graph_request(
         {
             "messages": messages,
             "initial_state": initial_state,
-            "config": {
-                "thread_id": run_input.thread_id,
-                "run_id": run_input.run_id,
-                AG_UI_CONFIG_KEY: {
-                    "context": [c.model_dump(mode="json") for c in run_input.context or []],
-                    "tools": [t.model_dump(mode="json") for t in run_input.tools or []],
-                    "forwarded_props": run_input.forwarded_props,
-                },
-            },
+            "config": {"thread_id": run_input.thread_id, "run_id": run_input.run_id},
             "response_granularity": ResponseGranularity.FULL,
             **extra,
         },
         context={KEEP_MESSAGE_IDS: True},
     )
-    # The client's own tools, offered to the model for this run only.
+    # Server-owned keys go in after the client allow-list check (``runs.config_keys``), so that
+    # setting cannot reject them, and clients of the plain graph routes cannot set them.
     server_config = {
+        AG_UI_CONFIG_KEY: {
+            "context": [c.model_dump(mode="json") for c in run_input.context or []],
+            "tools": [t.model_dump(mode="json") for t in run_input.tools or []],
+            "forwarded_props": run_input.forwarded_props,
+        },
+        # The client's own tools, offered to the model for this run only.
         RUN_REMOTE_TOOLS_KEY: [
             {"name": t.name, "description": t.description, "parameters": t.parameters}
             for t in run_input.tools or []
-        ]
+        ],
     }
     return graph_input, server_config

@@ -1,5 +1,6 @@
 """Tests for Sentry configuration initialization."""
 
+import logging
 from unittest.mock import Mock, patch
 
 from tenxgraph_api.src.app.core.config.sentry_config import init_sentry
@@ -226,6 +227,9 @@ def test_only_server_errors_are_reported_and_sampling_is_configurable():
         module = ModuleType(f"sentry_sdk.integrations.{name}")
         setattr(module, cls, lambda **kwargs: kwargs)
         modules[f"sentry_sdk.integrations.{name}"] = module
+    logging_module = ModuleType("sentry_sdk.integrations.logging")
+    logging_module.LoggingIntegration = lambda **kwargs: {"logging": kwargs}
+    modules["sentry_sdk.integrations.logging"] = logging_module
     modules["sentry_sdk.integrations"] = ModuleType("sentry_sdk.integrations")
 
     settings = Settings(
@@ -239,7 +243,13 @@ def test_only_server_errors_are_reported_and_sampling_is_configurable():
     with patch.dict("sys.modules", modules):
         init_sentry(settings)
 
-    for integration in captured["integrations"]:
+    web = [i for i in captured["integrations"] if "failed_request_status_codes" in i]
+    logging_kwargs = next(i["logging"] for i in captured["integrations"] if "logging" in i)
+    assert logging_kwargs == {"level": logging.INFO, "event_level": logging.ERROR}
+    assert captured["max_request_body_size"] == "never"
+    assert captured["include_local_variables"] is False
+    assert captured["send_default_pii"] is False
+    for integration in web:
         codes = integration["failed_request_status_codes"]
         assert 403 not in codes
         assert {500, 502, 599} <= codes

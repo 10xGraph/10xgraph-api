@@ -38,8 +38,8 @@ def test_parse_message_output(is_debug: bool):
     settings = Settings(IS_DEBUG=is_debug)
     model = _MessageModel(content="hello", raw={"tokens": 5})
     out = parse_message_output(settings, model)
-    # Current implementation always includes raw regardless of debug
-    assert out["raw"] == {"tokens": 5}
+    # raw is never returned to clients, whatever the debug flag
+    assert "raw" not in out
     assert out["content"] == "hello"
 
 

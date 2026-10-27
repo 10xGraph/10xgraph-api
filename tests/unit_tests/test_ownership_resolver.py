@@ -90,7 +90,7 @@ async def test_evict_clears_l1_and_l2():
 
     await r.owner_of("t1")
     await r.evict("t1")
-    assert list(redis.store) == ["af:authz:owner:deleted:t1"]  # owner cleared, tombstone left
+    assert list(redis.store) == ["af:authz:owner:tomb:t1"]  # owner cleared, tombstone left
 
     await r.owner_of("t1")
     assert lookup.calls == 2  # had to re-resolve after eviction
@@ -204,7 +204,7 @@ async def test_tombstone_reaches_other_workers_through_redis():
     other = ThreadOwnershipResolver(_CountingLookup({}), redis=redis, l1_ttl=30.0)
     await deleting.evict("t1")
     assert await other.recently_deleted("t1") is True
-    assert redis.ttls["af:authz:owner:deleted:t1"] == 30
+    assert redis.ttls["af:authz:owner:tomb:t1"] == 30
 
 
 @pytest.mark.asyncio
@@ -266,3 +266,20 @@ async def test_shared_tombstone_carries_the_deleting_owner():
     assert await other.recently_deleted("t1", "bob") is True
     await deleting.evict("t2")  # owner unknown: blocks everyone
     assert await other.recently_deleted("t2", "alice") is True
+
+
+@pytest.mark.asyncio
+async def test_thread_id_cannot_collide_with_a_delete_marker():
+    """B31: a thread named "deleted:V" or "tomb:V" must not read or write V's delete marker."""
+    redis = _FakeRedis()
+    r = ThreadOwnershipResolver(
+        _CountingLookup({"deleted:v": "mallory", "tomb:v": "mallory"}), redis=redis
+    )
+    other = ThreadOwnershipResolver(_CountingLookup({}), redis=redis)
+
+    await r.owner_of("deleted:v")
+    await r.owner_of("tomb:v")
+    assert await other.recently_deleted("v") is False
+
+    await r.evict("v", "alice")
+    assert await other.owner_of("tomb:v") == "mallory"

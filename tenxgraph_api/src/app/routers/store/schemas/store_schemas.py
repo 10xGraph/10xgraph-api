@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 from tenxgraph.core.state import Message
 from tenxgraph.storage.store.store_schema import (
     DistanceMetric,
@@ -20,6 +20,12 @@ from tenxgraph.storage.store.store_schema import (
 MAX_SEARCH_LIMIT = 100
 MAX_LIST_LIMIT = 1000
 MAX_SEARCH_TOKENS = 16_000
+# Character caps on free text. The text is embedded, so an unbounded body costs embedding
+# tokens and memory. A query is a short question; stored content may be a long note.
+MAX_QUERY_LENGTH = 8_000
+MAX_CONTENT_LENGTH = 100_000
+
+MemoryText = Annotated[str, StringConstraints(max_length=MAX_CONTENT_LENGTH)]
 
 
 class BaseConfigSchema(BaseModel):
@@ -38,7 +44,7 @@ class BaseConfigSchema(BaseModel):
 class StoreMemorySchema(BaseConfigSchema):
     """Schema for storing a memory item."""
 
-    content: str | Message = Field(..., description="Memory content or structured message.")
+    content: MemoryText | Message = Field(..., description="Memory content or structured message.")
     memory_type: MemoryType = Field(
         default=MemoryType.EPISODIC,
         description="Memory classification used by the backend store.",
@@ -53,7 +59,11 @@ class StoreMemorySchema(BaseConfigSchema):
 class SearchMemorySchema(BaseConfigSchema):
     """Schema for searching memories."""
 
-    query: str = Field(..., description="Textual query used for memory retrieval.")
+    query: str = Field(
+        ...,
+        max_length=MAX_QUERY_LENGTH,
+        description="Textual query used for memory retrieval.",
+    )
     memory_type: MemoryType | None = Field(
         default=None,
         description="Optional memory type filter.",
@@ -95,7 +105,7 @@ class SearchMemorySchema(BaseConfigSchema):
 class UpdateMemorySchema(BaseConfigSchema):
     """Schema for updating a memory."""
 
-    content: str | Message = Field(..., description="Updated memory content or message.")
+    content: MemoryText | Message = Field(..., description="Updated memory content or message.")
     metadata: dict[str, Any] | None = Field(
         default=None,
         description="Updated metadata for the memory.",

@@ -64,6 +64,8 @@ RESERVED_CONFIG_KEYS: frozenset[str] = frozenset(
         "user",
         "user_id",
         "remote_tools",
+        # Set by the AG-UI endpoint from the AG-UI request; never from a plain graph request
+        "ag_ui",
         # Read by core: the prebuilt file tools' root, the tool and node time limits and the
         # parallel tool call cap
         "file_tool_root",

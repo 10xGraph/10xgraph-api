@@ -82,3 +82,38 @@ async def test_store_memory_without_metadata_still_works(store_service, mock_sto
     mock_store.astore.return_value = "new-id"
     await store_service.store_memory(StoreMemorySchema(content="hi"), mock_user)
     assert mock_store.astore.call_args.kwargs["metadata"] is None
+
+
+@pytest.mark.asyncio
+async def test_unknown_options_are_dropped(store_service, mock_store, mock_user):
+    from tenxgraph_api.src.app.routers.store.schemas.store_schemas import ForgetMemorySchema
+
+    mock_store.aforget_memory.return_value = None
+    payload = ForgetMemorySchema(
+        category="travel",
+        options={"dry_run": True, "memory_id": "x", "infer": False, "timeout": 1},
+    )
+
+    await store_service.forget_memory(payload, mock_user)
+
+    kwargs = mock_store.aforget_memory.call_args.kwargs
+    assert kwargs == {"category": "travel", "infer": False}
+
+
+def test_free_text_length_limits():
+    from pydantic import ValidationError
+
+    from tenxgraph_api.src.app.routers.store.schemas.store_schemas import (
+        MAX_CONTENT_LENGTH,
+        MAX_QUERY_LENGTH,
+    )
+
+    SearchMemorySchema(query="q" * MAX_QUERY_LENGTH)
+    with pytest.raises(ValidationError):
+        SearchMemorySchema(query="q" * (MAX_QUERY_LENGTH + 1))
+
+    StoreMemorySchema(content="c" * MAX_CONTENT_LENGTH)
+    with pytest.raises(ValidationError):
+        StoreMemorySchema(content="c" * (MAX_CONTENT_LENGTH + 1))
+    with pytest.raises(ValidationError):
+        UpdateMemorySchema(content="c" * (MAX_CONTENT_LENGTH + 1))

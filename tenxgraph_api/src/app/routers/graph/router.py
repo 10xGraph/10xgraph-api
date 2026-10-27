@@ -24,6 +24,7 @@ from tenxgraph_api.src.app.core.auth.revocation import (
     token_revoked,
 )
 from tenxgraph_api.src.app.core.concurrency import Lease
+from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.routers.graph.realtime_guard import (
     realtime_connection_guard,
     ws_identity_still_valid,
@@ -115,6 +116,13 @@ def _ws_max_frame_chars() -> int:
     from tenxgraph_api.src.app.core.config.settings import get_settings
 
     return get_settings().MAX_REQUEST_SIZE
+
+
+def _is_production() -> bool:
+    """True in production, where request log lines that carry client thread ids are not emitted."""
+    from tenxgraph_api.src.app.core.config.settings import get_settings
+
+    return get_settings().MODE == "production"
 
 
 # Returned by _next_ws_input for a bad frame the socket survives (an error was sent).
@@ -351,7 +359,8 @@ async def observability(
     user: dict[str, Any] = Depends(RequirePermission("graph", "read")),
 ):
     """Return the reconstructed observability trace for a thread."""
-    logger.info(f"Observability requested for thread {thread_id}")
+    if not _is_production():
+        logger.info("Observability requested for thread %s", log_safe(thread_id))
 
     result: ObservabilitySchema = await service.get_observability(thread_id, run_id)
 
@@ -410,11 +419,13 @@ async def stop_graph(
     Returns:
         Status information about the stop operation
     """
-    logger.info(f"Graph stop request received for thread: {stop_request.thread_id}")
+    if not _is_production():
+        logger.info("Graph stop request received for thread: %s", log_safe(stop_request.thread_id))
 
     result = await service.stop_graph(stop_request.thread_id, user, stop_request.config)
 
-    logger.info(f"Graph stop completed for thread {stop_request.thread_id}")
+    if not _is_production():
+        logger.info("Graph stop completed for thread %s", log_safe(stop_request.thread_id))
 
     return success_response(
         result,
@@ -463,7 +474,8 @@ async def fix_graph(
         HTTPException: If the fix operation fails or if no state is found
             for the given thread_id
     """
-    logger.info(f"Graph fix request received for thread: {fix_request.thread_id}")
+    if not _is_production():
+        logger.info("Graph fix request received for thread: %s", log_safe(fix_request.thread_id))
 
     result = await service.fix_graph(
         fix_request.thread_id,
@@ -471,7 +483,8 @@ async def fix_graph(
         fix_request.config,
     )
 
-    logger.info(f"Graph fix completed for thread {fix_request.thread_id}")
+    if not _is_production():
+        logger.info("Graph fix completed for thread %s", log_safe(fix_request.thread_id))
 
     return success_response(
         result,
@@ -718,8 +731,9 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
             thread_id = _ws_run_thread_id(ws_input)
             if not await _ws_thread_authorized(authz, user, thread_id, "stream"):
                 logger.warning(
-                    f"WebSocket authorization failed for user {user.get('user_id')} "
-                    f"on thread {thread_id}"
+                    "WebSocket authorization failed for user %s on thread %s",
+                    log_safe(user.get("user_id")),
+                    log_safe(thread_id),
                 )
                 await websocket.send_text(
                     StreamChunk(
@@ -729,11 +743,12 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
                 )
                 continue
 
-            logger.info(
-                "WebSocket graph run: invoke_type=%s, thread_id=%s",
-                ws_input.invoke_type,
-                thread_id,
-            )
+            if not _is_production():
+                logger.info(
+                    "WebSocket graph run: invoke_type=%s, thread_id=%s",
+                    ws_input.invoke_type,
+                    log_safe(thread_id),
+                )
 
             graph_input = ws_input.to_graph_input()
             if not await _ws_media_urls_allowed(websocket, service, graph_input):
@@ -964,8 +979,9 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
             authz, user, thread_id, "stream", client_thread_ids=True
         ):
             logger.warning(
-                f"Realtime WebSocket authorization failed for user {user.get('user_id')} "
-                f"on thread {thread_id}"
+                "Realtime WebSocket authorization failed for user %s on thread %s",
+                log_safe(user.get("user_id")),
+                log_safe(thread_id),
             )
             with contextlib.suppress(Exception):
                 await websocket.send_text(
