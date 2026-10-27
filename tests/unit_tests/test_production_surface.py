@@ -7,6 +7,7 @@
 
 # ruff: noqa: S101
 
+import io
 from types import SimpleNamespace
 
 import pytest
@@ -37,13 +38,20 @@ def test_evals_viewer_can_be_left_out():
 def test_docs_are_off_in_production_by_default(monkeypatch):
     monkeypatch.delenv("DOCS_PATH", raising=False)
     monkeypatch.delenv("REDOCS_PATH", raising=False)
-    settings = Settings(MODE="production", _env_file=None)
+    settings = Settings(
+        MODE="production",
+        ALLOWED_HOST="api.example.com",
+        ORIGINS="https://app.example.com",
+        _env_file=None,
+    )
     assert (settings.DOCS_PATH, settings.REDOCS_PATH) == ("", "")
 
 
 def test_docs_explicitly_enabled_in_production_stay_on(monkeypatch):
     monkeypatch.delenv("REDOCS_PATH", raising=False)
-    settings = Settings(MODE="production", DOCS_PATH="/docs", _env_file=None)
+    settings = Settings(
+        MODE="production", DOCS_PATH="/docs", STRICT_PRODUCTION_CHECKS=False, _env_file=None
+    )
     assert settings.DOCS_PATH == "/docs"
 
 
@@ -198,3 +206,99 @@ def test_build_detects_whether_the_server_package_is_listed(tmp_path, filename, 
     path = tmp_path / filename
     path.write_text(content)
     assert BuildCommand._lists_server_package(path) is expected
+
+
+# ---------------------------------------------------------------------------
+# C8 / C7: generated deploy files and ignore files are locked down by default
+# ---------------------------------------------------------------------------
+
+
+def test_dockerignore_excludes_credentials():
+    from tenxgraph_api.cli.templates.defaults import SECRET_FILE_PATTERNS
+
+    ignored = set(generate_dockerignore_content().splitlines())
+    assert set(SECRET_FILE_PATTERNS) <= ignored
+    assert {".env", "*.pem", "service_account*.json", "credentials*.json", ".aws/"} <= ignored
+
+
+def test_dockerfile_runs_as_fixed_numeric_user():
+    from tenxgraph_api.cli.templates.defaults import APP_UID
+
+    lines = _dockerfile(has_requirements=False).splitlines()
+    assert f"USER {APP_UID}:{APP_UID}" in lines
+    assert not any(line.startswith("USER appuser") for line in lines)
+
+
+def test_k8s_manifest_is_locked_down():
+    from tenxgraph_api.cli.templates.defaults import APP_UID, generate_k8s_manifest_content
+
+    yaml = pytest.importorskip("yaml")
+
+    deployment, service = yaml.safe_load_all(generate_k8s_manifest_content("svc", 8000))
+    pod = deployment["spec"]["template"]["spec"]
+    assert pod["automountServiceAccountToken"] is False
+    assert pod["securityContext"]["runAsNonRoot"] is True
+    assert pod["securityContext"]["runAsUser"] == APP_UID
+    assert pod["securityContext"]["seccompProfile"] == {"type": "RuntimeDefault"}
+
+    container = pod["containers"][0]
+    assert not container["image"].endswith(":latest")
+    ctx = container["securityContext"]
+    assert ctx["allowPrivilegeEscalation"] is False
+    assert ctx["readOnlyRootFilesystem"] is True
+    assert ctx["capabilities"]["drop"] == ["ALL"]
+    assert container["envFrom"] == [{"secretRef": {"name": "svc-secrets"}}]
+    # The read-only root needs writable /tmp (gunicorn) and uploads (local media)
+    mounts = {m["mountPath"] for m in container["volumeMounts"]}
+    assert mounts == {"/tmp", "/app/uploads"}
+    assert service["kind"] == "Service"
+
+
+def test_compose_binds_loopback_and_reads_secrets_at_runtime():
+    from tenxgraph_api.cli.templates.defaults import generate_docker_compose_content
+
+    yaml = pytest.importorskip("yaml")
+
+    compose = yaml.safe_load(generate_docker_compose_content("svc", 8000))
+    svc = compose["services"]["svc"]
+    assert svc["ports"] == ["127.0.0.1:8000:8000"]
+    assert svc["env_file"] == [".env"]
+    # ORIGINS/ALLOWED_HOST come from .env; a value in `environment` would override it
+    assert not any(e.startswith(("ORIGINS=", "ALLOWED_HOST=")) for e in svc["environment"])
+    assert svc["read_only"] is True
+    assert svc["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in svc["security_opt"]
+    assert "uploads:/app/uploads" in svc["volumes"]
+    assert "uploads" in compose["volumes"]
+
+
+def test_merge_ignore_patterns_appends_only_missing_and_keeps_negation_last():
+    from tenxgraph_api.cli.templates.defaults import (
+        GITIGNORE_SECRET_PATTERNS,
+        merge_ignore_patterns,
+    )
+
+    existing = "node_modules/\n.env\n!.env.example\n"
+    merged = merge_ignore_patterns(existing, GITIGNORE_SECRET_PATTERNS)
+    assert merged is not None
+    assert merged.startswith(existing)
+    lines = merged.splitlines()
+    assert lines.count(".env") == 1
+    assert ".env.*" in lines
+    # The exception must come after `.env.*`, or git ignores .env.example again
+    assert lines[-1] == "!.env.example"
+    assert merge_ignore_patterns(merged, GITIGNORE_SECRET_PATTERNS) is None
+
+
+def test_build_adds_secret_patterns_to_an_existing_dockerignore(tmp_path, monkeypatch):
+    from tenxgraph_api.cli.commands.build import BuildCommand
+    from tenxgraph_api.cli.core.output import OutputFormatter
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".dockerignore").write_text(".git/\n.env\n", encoding="utf-8")
+    output = OutputFormatter(stream=io.StringIO(), quiet=True)
+    code = BuildCommand(output=output).execute(force=False)
+    assert code == 0
+    lines = (tmp_path / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    assert lines[:2] == [".git/", ".env"]
+    assert {"*.pem", "credentials*.json"} <= set(lines)

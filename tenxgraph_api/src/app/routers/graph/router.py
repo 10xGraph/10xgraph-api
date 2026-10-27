@@ -3,7 +3,7 @@ import contextlib
 import json
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.logger import logger
 from fastapi.responses import StreamingResponse
 from injectq import InjectQ
@@ -23,6 +23,8 @@ from tenxgraph_api.src.app.core.auth.revocation import (
     TokenRevocationUnavailableError,
     token_revoked,
 )
+from tenxgraph_api.src.app.core.concurrency import Lease
+from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.routers.graph.realtime_guard import (
     realtime_connection_guard,
     ws_identity_still_valid,
@@ -44,6 +46,12 @@ from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     WsGraphInputSchema,
 )
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
+from tenxgraph_api.src.app.routers.graph.thread_lock import (
+    THREAD_BUSY_DETAIL,
+    acquire_thread_lock,
+    combine_leases,
+    lock_requested_thread,
+)
 from tenxgraph_api.src.app.utils import success_response
 from tenxgraph_api.src.app.utils.swagger_helper import generate_swagger_responses
 
@@ -71,6 +79,19 @@ REALTIME_MAX_FRAME_BYTES = 1024 * 1024
 # RFC 6455 close code 1009 "Message Too Big".
 WS_MESSAGE_TOO_BIG = 1009
 
+# Total bytes of input (audio, text, image) a live session may have buffered at once, on top of
+# the frame-count bound. 1000 frames of up to 1 MiB would otherwise be ~1 GiB per socket. 16 MiB
+# is ~8 minutes of 16 kHz PCM16 audio (32 KB/s), far more than the ~20 s the count bound allows
+# in normal use, so a healthy session never reaches it. Over the budget a frame is dropped (logged).
+REALTIME_INPUT_QUEUE_MAX_BYTES = 16 * 1024 * 1024
+
+# Seconds between credential re-checks during a live session (token expiry and revocation).
+# A live session has no per-run boundary to hook into, so a timer bounds how long a token that
+# expired or was revoked keeps streaming. Each check is one local token verification plus one
+# revocation lookup (a single Redis GET when Redis is used), so 30 s costs ~2 lookups a minute per
+# session while keeping the exposure window short next to a session that can run for hours.
+REALTIME_RECHECK_INTERVAL = 30.0
+
 
 class WsFrameTooLarge(Exception):
     """A JSON text frame passed the size cap; the socket must be closed with 1009."""
@@ -95,6 +116,13 @@ def _ws_max_frame_chars() -> int:
     from tenxgraph_api.src.app.core.config.settings import get_settings
 
     return get_settings().MAX_REQUEST_SIZE
+
+
+def _is_production() -> bool:
+    """True in production, where request log lines that carry client thread ids are not emitted."""
+    from tenxgraph_api.src.app.core.config.settings import get_settings
+
+    return get_settings().MODE == "production"
 
 
 # Returned by _next_ws_input for a bad frame the socket survives (an error was sent).
@@ -186,12 +214,22 @@ async def invoke_graph(
     Invoke the graph with the provided input and return the final result.
     """
     logger.info(f"Graph invoke request received with {len(graph_input.messages)} messages")
+    service.check_media_urls(graph_input.messages)
 
-    async with run_slot(user, service.runs_policy()):
-        result: GraphInvokeOutputSchema = await service.invoke_graph(
-            graph_input,
-            user,
-        )
+    # One run at a time per thread; 409 when the thread stays busy.
+    thread_lock = await lock_requested_thread(
+        graph_input.config,
+        graph_input.on_busy,
+        lambda thread_id: service.stop_graph(thread_id, user),
+    )
+    try:
+        async with run_slot(user, service.runs_policy()):
+            result: GraphInvokeOutputSchema = await service.invoke_graph(
+                graph_input,
+                user,
+            )
+    finally:
+        thread_lock.release()
 
     logger.info("Graph invoke completed successfully")
 
@@ -217,10 +255,24 @@ async def stream_graph(
     Stream the graph execution with real-time output.
     """
     logger.info(f"Graph stream request received with {len(graph_input.messages)} messages")
+    # Before the response starts, so a blocked URL is a real 400 and not an error chunk.
+    service.check_media_urls(graph_input.messages)
 
-    # Taken before the response starts so an over-cap request still gets a 429.
-    slot = await acquire_run_slot(user, service.runs_policy())
-    result = release_when_done(service.stream_graph(graph_input, user), slot)
+    # Both taken before the response starts, so a busy thread still gets a real 409 and an
+    # over-cap request a 429.
+    thread_lock = await lock_requested_thread(
+        graph_input.config,
+        graph_input.on_busy,
+        lambda thread_id: service.stop_graph(thread_id, user),
+    )
+    try:
+        slot = await acquire_run_slot(user, service.runs_policy())
+    except BaseException:
+        thread_lock.release()
+        raise
+    result = release_when_done(
+        service.stream_graph(graph_input, user), combine_leases(slot, thread_lock)
+    )
 
     return StreamingResponse(
         result,
@@ -307,7 +359,8 @@ async def observability(
     user: dict[str, Any] = Depends(RequirePermission("graph", "read")),
 ):
     """Return the reconstructed observability trace for a thread."""
-    logger.info(f"Observability requested for thread {thread_id}")
+    if not _is_production():
+        logger.info("Observability requested for thread %s", log_safe(thread_id))
 
     result: ObservabilitySchema = await service.get_observability(thread_id, run_id)
 
@@ -366,11 +419,13 @@ async def stop_graph(
     Returns:
         Status information about the stop operation
     """
-    logger.info(f"Graph stop request received for thread: {stop_request.thread_id}")
+    if not _is_production():
+        logger.info("Graph stop request received for thread: %s", log_safe(stop_request.thread_id))
 
     result = await service.stop_graph(stop_request.thread_id, user, stop_request.config)
 
-    logger.info(f"Graph stop completed for thread {stop_request.thread_id}")
+    if not _is_production():
+        logger.info("Graph stop completed for thread %s", log_safe(stop_request.thread_id))
 
     return success_response(
         result,
@@ -419,7 +474,8 @@ async def fix_graph(
         HTTPException: If the fix operation fails or if no state is found
             for the given thread_id
     """
-    logger.info(f"Graph fix request received for thread: {fix_request.thread_id}")
+    if not _is_production():
+        logger.info("Graph fix request received for thread: %s", log_safe(fix_request.thread_id))
 
     result = await service.fix_graph(
         fix_request.thread_id,
@@ -427,7 +483,8 @@ async def fix_graph(
         fix_request.config,
     )
 
-    logger.info(f"Graph fix completed for thread {fix_request.thread_id}")
+    if not _is_production():
+        logger.info("Graph fix completed for thread %s", log_safe(fix_request.thread_id))
 
     return success_response(
         result,
@@ -510,8 +567,13 @@ async def _ws_thread_authorized(
     user: dict[str, Any],
     thread_id: str | None,
     action: str,
+    *,
+    client_thread_ids: bool = False,
 ) -> bool:
     """Owner-check ``thread_id`` for a WebSocket run.
+
+    ``client_thread_ids`` is for ``/v1/graph/live``, whose client makes its own thread ids: it
+    lets a new unknown id through under ``runs.thread_ids: "server"`` (the caller claims it).
 
     Returns ``True`` when the run may proceed. Ownership is only enforced when auth is
     configured (``GraphConfig.auth_config``); an unauthenticated dev graph and fresh
@@ -535,11 +597,40 @@ async def _ws_thread_authorized(
     if not has_auth:
         return True
 
+    if client_thread_ids:
+        return await authz.authorize(
+            user, "graph", action, resource_id=str(thread_id), client_thread_ids=True
+        )
     return await authz.authorize(user, "graph", action, resource_id=str(thread_id))
 
 
+async def _ws_media_urls_allowed(
+    websocket: WebSocket, service: GraphService, graph_input: GraphInputSchema
+) -> bool:
+    """Apply the media URL policy to a WebSocket run; a blocked URL is sent as an error chunk."""
+    try:
+        service.check_media_urls(graph_input.messages)
+    except HTTPException as exc:
+        await websocket.send_text(
+            StreamChunk(event=StreamEvent.ERROR, data={"reason": str(exc.detail)}).model_dump_json()
+        )
+        return False
+    return True
+
+
+async def _ws_thread_lock(
+    service: GraphService, user: dict[str, Any], thread_id: str | None, on_busy: Any
+) -> Lease:
+    """The run lock for a WebSocket run (a no-op lease for a thread that does not exist yet)."""
+    if thread_id is None:
+        return Lease(None)
+    return await acquire_thread_lock(
+        thread_id, on_busy=on_busy, stop=lambda: service.stop_graph(thread_id, user)
+    )
+
+
 @router.websocket("/v1/graph/ws")
-async def websocket_graph(
+async def websocket_graph(  # noqa: PLR0912, PLR0915
     websocket: WebSocket,
     _bind: None = Depends(_bind_ws_container),
     _guard: None = Depends(realtime_connection_guard),
@@ -640,8 +731,9 @@ async def websocket_graph(
             thread_id = _ws_run_thread_id(ws_input)
             if not await _ws_thread_authorized(authz, user, thread_id, "stream"):
                 logger.warning(
-                    f"WebSocket authorization failed for user {user.get('user_id')} "
-                    f"on thread {thread_id}"
+                    "WebSocket authorization failed for user %s on thread %s",
+                    log_safe(user.get("user_id")),
+                    log_safe(thread_id),
                 )
                 await websocket.send_text(
                     StreamChunk(
@@ -651,15 +743,30 @@ async def websocket_graph(
                 )
                 continue
 
-            logger.info(
-                "WebSocket graph run: invoke_type=%s, thread_id=%s",
-                ws_input.invoke_type,
-                thread_id,
-            )
+            if not _is_production():
+                logger.info(
+                    "WebSocket graph run: invoke_type=%s, thread_id=%s",
+                    ws_input.invoke_type,
+                    log_safe(thread_id),
+                )
 
             graph_input = ws_input.to_graph_input()
-            async for chunk_json in service.stream_graph(graph_input, user=user):
-                await websocket.send_text(chunk_json)
+            if not await _ws_media_urls_allowed(websocket, service, graph_input):
+                continue
+            try:
+                thread_lock = await _ws_thread_lock(service, user, thread_id, ws_input.on_busy)
+            except HTTPException:
+                await websocket.send_text(
+                    StreamChunk(
+                        event=StreamEvent.ERROR, data={"reason": THREAD_BUSY_DETAIL}
+                    ).model_dump_json()
+                )
+                continue
+            try:
+                async for chunk_json in service.stream_graph(graph_input, user=user):
+                    await websocket.send_text(chunk_json)
+            finally:
+                thread_lock.release()
 
             await websocket.send_text(
                 StreamChunk(
@@ -687,6 +794,68 @@ def _client_error(exc: Exception) -> str:
 
     is_production = get_settings().MODE == "production"
     return _sanitize_error_message(str(exc), "VALIDATION_ERROR", is_production)
+
+
+class _ByteBoundedLiveInputQueue(LiveInputQueue):
+    """``LiveInputQueue`` that also bounds the bytes it holds, not just the frame count.
+
+    A frame that would push the buffered payload over ``max_bytes`` is dropped (logged), like a
+    frame that does not fit the count bound. Bytes are released as the consumer takes frames.
+    """
+
+    def __init__(self, maxsize: int = 0, max_bytes: int = REALTIME_INPUT_QUEUE_MAX_BYTES) -> None:
+        super().__init__(maxsize=maxsize)
+        self._max_bytes = max_bytes
+        self._buffered = 0
+
+    @staticmethod
+    def _size(item: Any) -> int:
+        if item.data is not None:
+            return len(item.data)
+        return len(item.text.encode()) if item.text is not None else 0
+
+    def _put(self, item: Any) -> None:
+        size = self._size(item)
+        if self._buffered + size > self._max_bytes:
+            logger.warning(
+                "Realtime input queue over its byte budget (%d + %d > %d); dropping %s frame",
+                self._buffered,
+                size,
+                self._max_bytes,
+                item.kind,
+            )
+            return
+        before = self._queue.qsize()
+        super()._put(item)
+        if self._queue.qsize() > before:  # not dropped as full or closed
+            self._buffered += size
+
+    def _released(self, item: Any) -> Any:
+        self._buffered = max(0, self._buffered - self._size(item))
+        return item
+
+    async def get(self) -> Any:
+        return self._released(await super().get())
+
+    def get_nowait(self) -> Any:
+        return self._released(super().get_nowait())
+
+    async def __aiter__(self) -> Any:
+        while True:
+            item = self._released(await self._queue.get())
+            if item.kind == "close":
+                return
+            yield item
+
+
+async def _live_credential_error(websocket: WebSocket, user: dict[str, Any]) -> bool:
+    """Whether a live session's credential no longer holds (expired, revoked or backend down).
+
+    Same two checks as ``_ws_run_gate`` uses before each ``/v1/graph/ws`` run: the token is
+    re-verified (catches expiry) and the revocation backend is asked (an outage counts as
+    revoked, so it fails closed).
+    """
+    return not ws_identity_still_valid(websocket, user) or await _ws_token_revoked(user)
 
 
 def _dispatch_realtime_control(queue: Any, text: str) -> str | None:
@@ -729,7 +898,7 @@ def _realtime_event_json(event: Any) -> str:
 
 
 @router.websocket("/v1/graph/live")
-async def realtime_graph_ws(  # noqa: PLR0912, PLR0915
+async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
     websocket: WebSocket,
     _bind: None = Depends(_bind_ws_container),
     _guard: None = Depends(realtime_connection_guard),
@@ -806,10 +975,13 @@ async def realtime_graph_ws(  # noqa: PLR0912, PLR0915
     if isinstance(init, dict):
         # Same rules as /v1/graph/ws: "new" starts a fresh thread, never a shared one.
         thread_id = _resolve_ws_thread(init)
-        if not await _ws_thread_authorized(authz, user, thread_id, "stream"):
+        if not await _ws_thread_authorized(
+            authz, user, thread_id, "stream", client_thread_ids=True
+        ):
             logger.warning(
-                f"Realtime WebSocket authorization failed for user {user.get('user_id')} "
-                f"on thread {thread_id}"
+                "Realtime WebSocket authorization failed for user %s on thread %s",
+                log_safe(user.get("user_id")),
+                log_safe(thread_id),
             )
             with contextlib.suppress(Exception):
                 await websocket.send_text(
@@ -831,7 +1003,28 @@ async def realtime_graph_ws(  # noqa: PLR0912, PLR0915
             await websocket.close(code=1003)
         return
 
-    queue = LiveInputQueue(maxsize=REALTIME_INPUT_QUEUE_MAXSIZE)
+    async def close_session_expired() -> None:
+        logger.info("Realtime credential no longer valid; closing")
+        with contextlib.suppress(Exception):
+            await websocket.send_text(
+                _realtime_event_json(
+                    ErrorEvent(
+                        code="session_expired",
+                        message="Session expired. Reconnect with a valid token.",
+                        fatal=True,
+                    )
+                )
+            )
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1008, reason="Session expired")
+
+    # The handshake guard ran before the init frame; re-check before the session (the run)
+    # starts, then on a timer for as long as it lasts.
+    if await _live_credential_error(websocket, user):
+        await close_session_expired()
+        return
+
+    queue = _ByteBoundedLiveInputQueue(maxsize=REALTIME_INPUT_QUEUE_MAXSIZE)
 
     async def upstream() -> None:
         """Pump client frames into the input queue until close/disconnect."""
@@ -879,12 +1072,30 @@ async def realtime_graph_ws(  # noqa: PLR0912, PLR0915
                     )
                 )
 
+    async def credential_watchdog() -> None:
+        """End the session once its token expires or is revoked."""
+        while True:
+            await asyncio.sleep(REALTIME_RECHECK_INTERVAL)
+            if await _live_credential_error(websocket, user):
+                await close_session_expired()
+                return
+
     up_task = asyncio.create_task(upstream())
     down_task = asyncio.create_task(downstream())
+    watch_task = asyncio.create_task(credential_watchdog())
     try:
-        _done, pending = await asyncio.wait(
-            {up_task, down_task}, return_when=asyncio.FIRST_COMPLETED
+        done, pending = await asyncio.wait(
+            {up_task, down_task, watch_task}, return_when=asyncio.FIRST_COMPLETED
         )
+
+        # Credential gone: no grace period, stop at once.
+        if watch_task in done:
+            queue.close()
+            for task in (up_task, down_task):
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+            return
 
         # If the client side finished first (sent ``close`` or disconnected) while the
         # model is still responding, give downstream a bounded grace period to drain the
@@ -897,7 +1108,7 @@ async def realtime_graph_ws(  # noqa: PLR0912, PLR0915
 
         # Cancel whatever is still running: downstream that overran the grace window, or
         # upstream once the session ended.
-        for task in (up_task, down_task):
+        for task in (up_task, down_task, watch_task):
             if not task.done():
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):

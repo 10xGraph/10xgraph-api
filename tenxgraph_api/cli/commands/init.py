@@ -11,6 +11,11 @@ from typing import Any
 from tenxgraph_api.cli.commands import BaseCommand
 from tenxgraph_api.cli.core.prompts import Choice
 from tenxgraph_api.cli.exceptions import FileOperationError, ValidationError
+from tenxgraph_api.cli.templates.defaults import (
+    GITIGNORE_SECRET_PATTERNS,
+    generate_gitignore_content,
+    merge_ignore_patterns,
+)
 
 
 _TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
@@ -159,6 +164,7 @@ class InitCommand(BaseCommand):
                 ]
                 if "10xgraph.json" not in planned:
                     planned.append("10xgraph.json")
+                planned.append(".gitignore")
                 self.output.print_list(planned, title="Files that would be created", bullet="→")
                 self.output.info("Dry run complete; no files were written.", emoji=False)
                 return 0
@@ -186,6 +192,7 @@ class InitCommand(BaseCommand):
                         on_file=step.detail,
                     )
                     step.detail(f"{len(created)} files from the {template_dir.name} template")
+                    step.detail(self._write_gitignore(base_path))
 
                 with timeline.step("config") as step:
                     # Regenerate 10xgraph.json from the built config. Force is safe only
@@ -634,6 +641,29 @@ class InitCommand(BaseCommand):
                 on_file(str(rel).replace("\\", "/"))
             created.add(dest)
         return created
+
+    def _write_gitignore(self, base_path: Path) -> str:
+        """Write a .gitignore, or add the secret patterns an existing one lacks.
+
+        The next steps tell the developer to put API keys and JWT_SECRET_KEY in .env, so
+        .env must be ignored. An existing .gitignore is never replaced, even with --force.
+        """
+        path = base_path / ".gitignore"
+        try:
+            if not path.exists():
+                path.write_text(generate_gitignore_content(), encoding="utf-8")
+                return ".gitignore"
+            merged = merge_ignore_patterns(
+                path.read_text(encoding="utf-8"), GITIGNORE_SECRET_PATTERNS
+            )
+            if merged is None:
+                return ".gitignore already ignores .env and credentials"
+            path.write_text(merged, encoding="utf-8")
+            return ".gitignore: added missing secret patterns"
+        except OSError as e:
+            raise FileOperationError(
+                f"Failed to write file {path}: {e}", file_path=str(path)
+            ) from e
 
     def _write_file(self, path: Path, content: str, *, force: bool) -> None:
         try:

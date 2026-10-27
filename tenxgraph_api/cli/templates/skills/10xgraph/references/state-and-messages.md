@@ -31,7 +31,7 @@ Only returned dict keys are merged. Returning a `Message` appends to `context`; 
 - `content`: list of typed content blocks
 - `delta`: true for partial/streaming messages
 - `tools_calls`: provider-native tool call list
-- `reasoning`, `timestamp`, `metadata`, `usages`, `raw`
+- `reasoning`, `timestamp`, `metadata`, `usages`, `raw` (`raw` is not returned by the thread REST routes)
 
 Use `Message.text_message("...", role="user")` for plain text. Use `msg.text()` to concatenate `TextBlock` content.
 

@@ -336,8 +336,10 @@ def test_a_message_write_claims_the_thread_for_the_writer():
 
     client, checkpointer = _real_ownership_app()
     body = {"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]}
+    # Appending messages is the admin-only import route, so the writer holds that scope.
+    admin = {**user_headers("alice"), "X-Test-Scopes": "checkpointer:import"}
 
-    put = client.post("/v1/threads/t-msg/messages", json=body, headers=user_headers("alice"))
+    put = client.post("/v1/threads/t-msg/messages", json=body, headers=admin)
     assert put.status_code == HTTP_OK, put.text
     assert anyio.run(checkpointer.aget_thread_owner, "t-msg") == "alice"
     assert (

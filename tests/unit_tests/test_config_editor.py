@@ -162,6 +162,14 @@ def test_observability_checks() -> None:
     assert _levels(issues, "observability") == ["warning"]
 
 
+def test_observability_user_id_mode() -> None:
+    for mode in ("raw", "hash", "mask"):
+        ok = validate_config({"agent": "graph.react:app", "observability": {"user_id_mode": mode}})
+        assert _levels(ok, "observability.user_id_mode") == []
+    bad = validate_config({"agent": "graph.react:app", "observability": {"user_id_mode": "omit"}})
+    assert _levels(bad, "observability.user_id_mode") == ["error"]
+
+
 def test_remote_tools_duplicates_are_errors() -> None:
     tool = {"node": "MAIN", "name": "locate", "description": "Find the user"}
     issues = validate_config({"agent": "graph.react:app", "remote_tools": [tool, tool]})

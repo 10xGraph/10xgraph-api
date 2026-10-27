@@ -426,3 +426,61 @@ def test_validate_missing_path(cmd: SkillsCommand, out: _CapturingOutput, tmp_pa
 def test_validate_bundled_template(cmd: SkillsCommand, out: _CapturingOutput) -> None:
     assert cmd.execute(validate_paths=[str(_TEMPLATE_SKILL)]) == 0
     assert out.warnings == []
+
+
+# --- symlinks in the target project (B35) ---------------------------------
+
+
+def test_symlinked_directory_in_target_is_refused(
+    cmd: SkillsCommand, out: _CapturingOutput, tmp_path: Path
+) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir()
+    (project / ".claude").symlink_to(outside, target_is_directory=True)
+
+    exit_code = cmd.execute(agent="claude", path=str(project), force=True)
+
+    assert exit_code != 0
+    assert any("symlink" in e for e in out.errors)
+    assert list(outside.iterdir()) == []
+
+
+def test_symlinked_skill_folder_is_not_deleted_through(cmd: SkillsCommand, tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    (project / ".claude" / "skills").mkdir(parents=True)
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep", encoding="utf-8")
+    (project / ".claude" / "skills" / "10xgraph").symlink_to(outside, target_is_directory=True)
+
+    assert cmd.execute(agent="claude", path=str(project), force=True) != 0
+    assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
+    assert [p.name for p in outside.iterdir()] == ["keep.txt"]
+
+
+def test_symlinked_file_is_refused_even_when_dangling(
+    cmd: SkillsCommand, out: _CapturingOutput, tmp_path: Path
+) -> None:
+    project = tmp_path / "project"
+    (project / ".github" / "instructions").mkdir(parents=True)
+    target = tmp_path / "elsewhere.md"
+    (project / ".github" / "instructions" / "10xgraph.instructions.md").symlink_to(target)
+
+    exit_code = cmd.execute(agent="github", path=str(project), force=True)
+
+    assert exit_code != 0
+    assert any("symlink" in e for e in out.errors)
+    assert not target.exists()
+    assert not (project / ".github" / "skills").exists()
+
+
+def test_symlinked_project_path_itself_still_installs(cmd: SkillsCommand, tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+
+    assert cmd.execute(agent="claude", path=str(link)) == 0
+    assert (real / ".claude" / "skills" / "10xgraph" / "SKILL.md").is_file()

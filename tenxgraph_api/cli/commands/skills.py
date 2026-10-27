@@ -418,6 +418,8 @@ class SkillsCommand(BaseCommand):
             )
             for artifact in target.artifacts
         ]
+        for _artifact, _source, dest in installs:
+            self._ensure_inside_project(project_root, dest)
         for _artifact, source, _dest in installs:
             if not source.exists():
                 raise FileOperationError(
@@ -456,6 +458,34 @@ class SkillsCommand(BaseCommand):
             installed_paths.append(str(dest))
 
         return installed_paths
+
+    @staticmethod
+    def _ensure_inside_project(project_root: Path, dest: Path) -> None:
+        """Refuse a destination that is, or sits under, a symlink, or that leaves the project.
+
+        A repo can ship ``.claude`` as a symlink to another directory; installing through it
+        would delete and write files outside ``--path``. Every existing component between the
+        project root and ``dest`` is checked, then the resolved path is checked as well.
+        """
+        try:
+            parts = dest.relative_to(project_root).parts
+        except ValueError:
+            parts = None
+        if parts is not None:
+            current = project_root
+            for part in parts:
+                current = current / part
+                if current.is_symlink():
+                    raise FileOperationError(
+                        f"Refusing to install through a symlink: {current}. "
+                        "Replace it with a real directory or file, or pass a different --path.",
+                        file_path=str(current),
+                    )
+        if parts is None or not dest.resolve().is_relative_to(project_root.resolve()):
+            raise FileOperationError(
+                f"Refusing to install outside the project directory: {dest}",
+                file_path=str(dest),
+            )
 
     def _print_activation_hint(self, target: _AgentTarget) -> None:
         """Tell the user how to make the freshly installed skill take effect.

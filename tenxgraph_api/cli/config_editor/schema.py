@@ -48,9 +48,11 @@ DOCS_URL = "https://10xgraph.com/docs/reference/api-cli/configuration"
 # editor never imports the core framework just to render suggestions.
 AUTHORIZATION_SCOPES: tuple[str, ...] = (
     "checkpointer:delete",
+    "checkpointer:import",
     "checkpointer:read",
     "checkpointer:write",
     "config:read",
+    "files:delete",
     "files:read",
     "files:upload",
     "graph:fix",
@@ -79,6 +81,7 @@ KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
         "websocket",
         "runs",
         "ag_ui",
+        "media",
         "observability",
         "injectq",
         "store",
@@ -381,21 +384,22 @@ _SECTIONS: list[dict[str, Any]] = [
         "key": "runs",
         "optional": True,
         "off_summary": (
-            "Clients may name new threads, any non-reserved input key reaches the graph, "
+            "The server picks new thread ids, any non-reserved input key reaches the graph, "
             "each user may hold 10 HTTP runs at once, and runs have no time limit."
         ),
-        "default": {"thread_ids": "client", "max_concurrent_per_user": 10},
+        "default": {"thread_ids": "server", "max_concurrent_per_user": 10},
         "fields": [
             {
                 "path": ["runs", "thread_ids"],
                 "label": "New thread ids",
                 "type": "select",
                 "options": ["client", "server"],
-                "default": "client",
+                "default": "server",
                 "help": (
-                    "server: a request may only name a thread that exists, so nobody can claim "
-                    "an id before its owner. New threads are started without an id. Clients "
-                    "that pick their own ids (realtime, AG-UI) need client."
+                    "server (default): a request may only name a thread that exists, so nobody "
+                    "can claim an id before its owner. New threads are started without an id. "
+                    "AG-UI and realtime clients still pick their own ids. client: any request "
+                    "may start a thread under an id it picks."
                 ),
             },
             {
@@ -431,7 +435,23 @@ _SECTIONS: list[dict[str, Any]] = [
                 "type": "number",
                 "min": 0,
                 "step": 1,
-                "help": "A run that takes longer is cancelled. Empty means no limit.",
+                "help": (
+                    "A run that takes longer is cancelled. Empty uses the default: 300 in "
+                    "production (MODE=production), no limit in development. Set null in the "
+                    "file for no limit in production."
+                ),
+            },
+            {
+                "path": ["runs", "max_parallel_tool_calls"],
+                "label": "Max parallel tool calls",
+                "type": "number",
+                "min": 1,
+                "step": 1,
+                "placeholder": "10",
+                "help": (
+                    "Tool calls one model turn may run at once. Empty uses core's default, "
+                    "10, or the TENXGRAPH_MAX_PARALLEL_TOOL_CALLS environment variable."
+                ),
             },
         ],
     },
@@ -469,6 +489,29 @@ _SECTIONS: list[dict[str, Any]] = [
         ],
     },
     {
+        "id": "media",
+        "title": "Uploaded files",
+        "description": "What happens to uploaded files when the messages that use them go away.",
+        "key": "media",
+        "optional": True,
+        "off_summary": "Files are deleted together with the last thread that uses them.",
+        "default": {"delete_with_thread": True},
+        "fields": [
+            {
+                "path": ["media", "delete_with_thread"],
+                "default": True,
+                "label": "Delete files with their thread",
+                "type": "bool",
+                "help": (
+                    "When the last message or thread that references an uploaded file is "
+                    "deleted, delete the file too. Off: nothing is deleted automatically "
+                    "(use DELETE /v1/files/{file_id}). Files uploaded before this setting "
+                    "existed are never deleted automatically."
+                ),
+            },
+        ],
+    },
+    {
         "id": "observability",
         "title": "Observability",
         "description": "Trace graph runs to Logfire and/or LangSmith.",
@@ -489,6 +532,18 @@ _SECTIONS: list[dict[str, Any]] = [
                 "type": "select",
                 "options": ["spans", "standard", "full"],
                 "help": "full records prompts and tool I/O and may contain PII.",
+            },
+            {
+                "path": ["observability", "user_id_mode"],
+                "group": "Tracing",
+                "default": "raw",
+                "label": "User id in traces",
+                "type": "select",
+                "options": ["raw", "hash", "mask"],
+                "help": (
+                    "raw sends the user id as is; hash sends a SHA-256 of it (keyed when "
+                    "TENXGRAPH_TRACE_USER_ID_KEY is set); mask hides the middle of it."
+                ),
             },
             {
                 "path": ["observability", "logfire", "enabled"],

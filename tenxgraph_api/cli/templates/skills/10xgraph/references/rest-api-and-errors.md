@@ -19,7 +19,7 @@ Registered in https://github.com/10xGraph/10xgraph-api/blob/main/tenxgraph_api/s
 - `GET /v1/graph`
 - `GET /v1/graph:StateSchema`
 - `POST /v1/graph/stop`
-- `POST /v1/graph/fix`
+- `POST /v1/graph/fix` - repair a stuck thread: removes assistant tool calls with no result and tool results with no call; keeps calls a paused thread is waiting on
 - `WS /v1/graph/live` — realtime audio bridge, exposed only when the configured graph is rooted at a
   `LiveAgent`. First frame is a JSON control frame (`model`, `thread_id`, `voice`, ... override
   build-time config); upstream binary = PCM16 input audio, JSON control = text/activity/close;

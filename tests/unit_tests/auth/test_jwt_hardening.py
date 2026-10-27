@@ -19,7 +19,14 @@ SECRET = "s" * 48
 
 
 def _settings(**overrides) -> Settings:
-    values = {"JWT_SECRET_KEY": SECRET, "JWT_ALGORITHM": "HS256", "_env_file": None}
+    values = {
+        "JWT_SECRET_KEY": SECRET,
+        "JWT_ALGORITHM": "HS256",
+        # Production refuses wildcard hosts/origins; these tests are about the JWT secret.
+        "ALLOWED_HOST": "api.example.com",
+        "ORIGINS": "https://app.example.com",
+        "_env_file": None,
+    }
     values.update(overrides)
     return Settings(**values)
 

@@ -11,7 +11,10 @@ from tenxgraph.utils import ResponseGranularity
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.auth.request_config import tool_result_ids
-from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import GraphInputSchema
+from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
+    KEEP_MESSAGE_IDS,
+    GraphInputSchema,
+)
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
 
 from .converter import select_new_messages, to_tenxgraph_messages
@@ -168,26 +171,29 @@ def _graph_request(
 ) -> tuple[GraphInputSchema, dict[str, Any]]:
     """The graph input for one AG-UI run, and the server-owned run config that goes with it."""
     extra: dict[str, Any] = {} if resume is _NO_RESUME else {"resume": resume}
-    graph_input = GraphInputSchema(
-        messages=messages,
-        initial_state=initial_state,
-        config={
-            "thread_id": run_input.thread_id,
-            "run_id": run_input.run_id,
-            AG_UI_CONFIG_KEY: {
-                "context": [c.model_dump(mode="json") for c in run_input.context or []],
-                "tools": [t.model_dump(mode="json") for t in run_input.tools or []],
-                "forwarded_props": run_input.forwarded_props,
-            },
+    # AG-UI keeps the client's message ids: select_new_messages dedups on them.
+    graph_input = GraphInputSchema.model_validate(
+        {
+            "messages": messages,
+            "initial_state": initial_state,
+            "config": {"thread_id": run_input.thread_id, "run_id": run_input.run_id},
+            "response_granularity": ResponseGranularity.FULL,
+            **extra,
         },
-        response_granularity=ResponseGranularity.FULL,
-        **extra,
+        context={KEEP_MESSAGE_IDS: True},
     )
-    # The client's own tools, offered to the model for this run only.
+    # Server-owned keys go in after the client allow-list check (``runs.config_keys``), so that
+    # setting cannot reject them, and clients of the plain graph routes cannot set them.
     server_config = {
+        AG_UI_CONFIG_KEY: {
+            "context": [c.model_dump(mode="json") for c in run_input.context or []],
+            "tools": [t.model_dump(mode="json") for t in run_input.tools or []],
+            "forwarded_props": run_input.forwarded_props,
+        },
+        # The client's own tools, offered to the model for this run only.
         RUN_REMOTE_TOOLS_KEY: [
             {"name": t.name, "description": t.description, "parameters": t.parameters}
             for t in run_input.tools or []
-        ]
+        ],
     }
     return graph_input, server_config

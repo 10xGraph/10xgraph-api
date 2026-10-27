@@ -185,6 +185,9 @@ init_logger(settings.LOG_LEVEL)
 # init error handler
 init_errors_handler(app)
 
+# A malformed "media" section should stop the boot, not surface on the first delete.
+graph_config.media  # noqa: B018
+
 # init routes
 # The evals viewer reads local report files and has no auth, so it is a development tool only.
 # The AG-UI endpoint is opt-in through 10xgraph.json; the WebSocket routes can be turned off there.

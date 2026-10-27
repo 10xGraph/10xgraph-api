@@ -175,8 +175,10 @@ class ThreadOwnershipResolver:
 
     # ------------------------------------------------------------------ L2 (Redis)
 
+    # Owner entries and delete markers live under different fixed segments, so no thread id
+    # (not even one like "deleted:X") can make an owner key collide with a marker key.
     def _redis_key(self, key: str) -> str:
-        return f"{self._prefix}:{key}"
+        return f"{self._prefix}:id:{key}"
 
     async def _redis_get(self, key: str) -> str | None:
         if self._redis is None:
@@ -202,7 +204,7 @@ class ThreadOwnershipResolver:
             logger.debug("Ownership L2 set failed for %s: %s", key, exc)
 
     def _tombstone_key(self, key: str) -> str:
-        return f"{self._prefix}:deleted:{key}"
+        return f"{self._prefix}:tomb:{key}"
 
     async def _redis_tombstone(self, key: str, owner: str) -> None:
         if self._redis is None:

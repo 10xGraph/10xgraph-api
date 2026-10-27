@@ -25,6 +25,7 @@ Issue = dict[str, str]
 
 _IMPORT_PATH = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_][\w.]*$")
 _OBSERVABILITY_LEVELS = ("spans", "standard", "full")
+_USER_ID_MODES = ("raw", "hash", "mask")
 _MAX_PERCENT = 100
 
 
@@ -73,6 +74,7 @@ def validate_config(config: Any, base_dir: Path | None = None) -> list[Issue]:
     _check_websocket(config, out)
     _check_runs(config, out)
     _check_ag_ui(config, out)
+    _check_media(config, out)
     _check_observability(config, out)
     _check_plugins(config, out, base_dir)
     _check_remote_tools(config, out)
@@ -261,6 +263,15 @@ def _check_ag_ui(config: dict, out: _Collector) -> None:
     _quietly(lambda: AgUiConfig.from_dict(data), out, "ag_ui")
 
 
+def _check_media(config: dict, out: _Collector) -> None:
+    data = config.get("media")
+    if data is None:
+        return
+    from tenxgraph_api.src.app.core.config.graph_config import MediaConfig
+
+    _quietly(lambda: MediaConfig.from_dict(data), out, "media")
+
+
 def _check_observability(config: dict, out: _Collector) -> None:
     data = config.get("observability")
     if data is None:
@@ -272,6 +283,12 @@ def _check_observability(config: dict, out: _Collector) -> None:
     if level not in _OBSERVABILITY_LEVELS:
         out.error(
             "observability.level", f"level must be one of {', '.join(_OBSERVABILITY_LEVELS)}."
+        )
+    user_id_mode = data.get("user_id_mode", "raw")
+    if user_id_mode not in _USER_ID_MODES:
+        out.error(
+            "observability.user_id_mode",
+            f"user_id_mode must be one of {', '.join(_USER_ID_MODES)}.",
         )
     any_enabled = False
     for backend in ("logfire", "langsmith"):

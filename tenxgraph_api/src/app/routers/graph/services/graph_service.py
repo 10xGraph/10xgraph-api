@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import re
 from collections.abc import AsyncIterable, AsyncIterator
 from datetime import datetime
 from typing import Any
@@ -7,7 +8,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 from injectq import InjectQ, inject, singleton
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from tenxgraph.core.exceptions.media_exceptions import UnsupportedMediaInputError
 from tenxgraph.core.graph import CompiledGraph
 from tenxgraph.core.state import AgentState, Message, StreamChunk, StreamEvent
@@ -17,14 +18,19 @@ from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.auth.request_config import (
     ALWAYS_ALLOWED_CONFIG_KEYS,
     ClientInputError,
+    InterruptConflictError,
+    _field,
+    _tool_calls,
     client_config,
     client_error_detail,
     normalize_thread_id,
     owned_thread_info,
+    reject_builtin_state_keys,
     reject_unlisted_keys,
     tool_result_ids,
     unanswered_tool_calls,
 )
+from tenxgraph_api.src.app.core.concurrency import Lease
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RunsConfig
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe, sanitize_for_logging
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
@@ -41,8 +47,13 @@ from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     ToolSchema,
 )
 from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import (
+    MediaURLBlockedError,
+    check_external_media_urls,
+    internal_media_keys,
     preprocess_multimodal_messages,
+    resolve_media_policy,
 )
+from tenxgraph_api.src.app.routers.graph.thread_lock import acquire_thread_lock
 from tenxgraph_api.src.app.utils import DefaultThreadNameGenerator, ThreadNameGenerator
 from tenxgraph_api.src.app.utils.telemetry_store import TelemetryStore
 
@@ -56,6 +67,37 @@ def _run_tool_names(config: dict[str, Any]) -> set[str]:
             if isinstance(spec.get("name"), str):
                 names.add(spec["name"])
     return names
+
+
+def _core_error(name: str) -> tuple[type[Exception], ...]:
+    """The core exception class ``name`` as a tuple for ``isinstance``/``except``, or ``()``.
+
+    Looked up by name so an older core without it still works; imported lazily for the same
+    circular-import reason as in :func:`_reraise_framework_errors`.
+    """
+    from tenxgraph.core import exceptions
+
+    cls = getattr(exceptions, name, None)
+    return (cls,) if isinstance(cls, type) and issubclass(cls, Exception) else ()
+
+
+def _resume_error_types() -> tuple[type[Exception], ...]:
+    """Every error that means "this resume does not fit the open interrupt"."""
+    return (
+        InterruptConflictError,
+        *_core_error("InterruptMismatchError"),
+        *_core_error("ResumeValidationError"),
+    )
+
+
+def _resume_http_error(exc: Exception) -> HTTPException:
+    """409 for a resume aimed at the wrong (or no) interrupt, 422 for an answer that fails the
+    interrupt's schema. Both messages are written for the client, so production keeps them."""
+    conflict = (InterruptConflictError, *_core_error("InterruptMismatchError"))
+    return HTTPException(
+        status_code=409 if isinstance(exc, conflict) else 422,
+        detail=str(getattr(exc, "message", None) or exc),
+    )
 
 
 def _reraise_framework_errors(exc: Exception) -> None:
@@ -101,7 +143,10 @@ class RunTimeoutError(TimeoutError):
     """A graph run passed ``runs.timeout`` and was cancelled."""
 
     def __init__(self, timeout: float) -> None:
-        super().__init__(f"Graph run timed out after {timeout:g}s")
+        super().__init__(
+            f"Graph run passed the runs.timeout limit of {timeout:g}s and was cancelled. "
+            'Raise "runs.timeout" in 10xgraph.json to allow longer runs.'
+        )
         self.timeout = timeout
 
 
@@ -117,6 +162,8 @@ def _stream_error_reason(exc: Exception) -> str:
     """
     if isinstance(exc, RunTimeoutError):
         return str(exc)  # our own message, nothing internal to hide
+    if isinstance(exc, _resume_error_types()):
+        return str(getattr(exc, "message", None) or exc)  # written for the client
     # Imported lazily: a top-level import of handle_errors creates a circular import through
     # the shared utils/exceptions modules.
     from tenxgraph_api.src.app.core.config.settings import get_settings
@@ -124,6 +171,61 @@ def _stream_error_reason(exc: Exception) -> str:
 
     is_production = get_settings().MODE == "production"
     return _sanitize_error_message(str(exc), "GRAPH_STREAM_ERROR", is_production)
+
+
+# Chunk ``data`` fields that carry exception text. ``message`` is what a tool's own
+# ``emitter.error()`` sends.
+_ERROR_TEXT_FIELDS = ("reason", "error", "message")
+_ERROR_CODE = re.compile(r"^\[([A-Z][A-Z_]*_\d+)\]")
+# Core's own text for an unexpected tool failure: a tool name and a log reference, no detail.
+_SAFE_TOOL_FAILURE = re.compile(r"failed with an internal error \(reference [0-9a-f]{8}\)\.$")
+
+
+def generic_error_text(text: Any) -> Any:
+    """The production form of an error text: a generic message keeping only its error code.
+
+    Core's own safe tool-failure text (a tool name and a log reference) and non-strings pass
+    through unchanged.
+    """
+    from tenxgraph_api.src.app.core.exceptions.handle_errors import _sanitize_error_message
+
+    if not isinstance(text, str) or _SAFE_TOOL_FAILURE.search(text):
+        return text
+    code = _ERROR_CODE.match(text)
+    return _sanitize_error_message(text, code.group(1) if code else "GRAPH_STREAM_ERROR", True)
+
+
+def sanitize_error_chunk(chunk: StreamChunk) -> StreamChunk:
+    """In production, replace the exception text in an ``ERROR`` chunk with a generic message.
+
+    Core puts the raw exception in ``data.reason`` / ``data.error`` (and ``data.message`` for a
+    tool's own error), and in ``state.execution_meta.internal_data["error"]``. The plain HTTP
+    invoke path is already generic; this is the one step the stream, WebSocket and AG-UI
+    paths share (they all read ``stream_chunks``). Development, and every other chunk, passes
+    through unchanged. Returns a copy: the graph reuses and checkpoints its own objects.
+    """
+    if chunk.event != StreamEvent.ERROR:
+        return chunk
+    from tenxgraph_api.src.app.core.config.settings import get_settings
+
+    if get_settings().MODE != "production":
+        return chunk
+
+    generic = generic_error_text
+    update: dict[str, Any] = {}
+    if isinstance(chunk.data, dict):
+        update["data"] = {
+            key: generic(value) if key in _ERROR_TEXT_FIELDS else value
+            for key, value in chunk.data.items()
+        }
+    meta = getattr(chunk.state, "execution_meta", None)
+    internal = getattr(meta, "internal_data", None)
+    if isinstance(internal, dict) and "error" in internal:
+        safe_meta = meta.model_copy(
+            update={"internal_data": {**internal, "error": generic(internal["error"])}}
+        )
+        update["state"] = chunk.state.model_copy(update={"execution_meta": safe_meta})
+    return chunk.model_copy(update=update) if update else chunk
 
 
 async def _bounded_stream(stream: AsyncIterator[Any], timeout: float) -> AsyncIterator[Any]:
@@ -263,6 +365,15 @@ class GraphService:
                 self._media_service = None
         return self._media_service
 
+    @property
+    def media_policy(self) -> Any:
+        """The graph's media fetch policy (``None`` when the installed core has none)."""
+        return resolve_media_policy(self._graph)
+
+    def check_media_urls(self, messages: list[Any]) -> None:
+        """Reject external media URLs the graph's fetch policy blocks (400, no network)."""
+        check_external_media_urls(messages, self.media_policy)
+
     async def _save_thread_name(
         self,
         config: dict[str, Any],
@@ -306,7 +417,7 @@ class GraphService:
             try:
                 await self._save_thread_name(config, thread_id, messages)
             except Exception as exc:
-                logger.warning("Thread naming failed for thread %s: %s", thread_id, exc)
+                logger.warning("Thread naming failed for thread %s: %s", log_safe(thread_id), exc)
 
         from tenxgraph.utils.background_task_manager import BackgroundTaskManager
 
@@ -493,15 +604,41 @@ class GraphService:
         from tenxgraph.core.graph import ToolNode
 
         node_name = initial_state.get("current_node")
-        if not isinstance(node_name, str):
+        if node_name is None:
             return
+        if not isinstance(node_name, str):
+            raise ClientInputError("current_node must be a node name")
         state_graph = getattr(self._graph, "_state_graph", None)
         nodes = getattr(state_graph, "nodes", {}) if state_graph else {}
+        # START and END are nodes too; core also maps the legacy "start" / "end" spellings.
+        if nodes and node_name not in nodes and node_name not in ("start", "end"):
+            raise ClientInputError(f"unknown node '{node_name}'")
         node = nodes.get(node_name)
         if node is not None and isinstance(getattr(node, "func", None), ToolNode):
             raise ClientInputError(
                 f"current_node '{node_name}' is a tool node; runs cannot start there"
             )
+
+    def _validate_state_types(self, initial_state: dict[str, Any]) -> dict[str, Any]:
+        """Check client state values against the state model's field types.
+
+        Core stores a value on the state as given, so a wrong type (a string for an ``int``
+        field) is saved and crashes a later run. Fields the model does not declare are ignored
+        by core and pass. Returns the state with the validated (coerced) values.
+        """
+        state_graph = getattr(self._graph, "_state_graph", None)
+        fields = getattr(type(getattr(state_graph, "_state", None)), "model_fields", None) or {}
+        checked = dict(initial_state)
+        for name, value in initial_state.items():
+            field = fields.get(name)
+            if field is None or field.annotation is None:
+                continue
+            try:
+                checked[name] = TypeAdapter(field.annotation).validate_python(value)
+            except ValidationError as exc:
+                reason = exc.errors()[0]["msg"] if exc.errors() else "invalid value"
+                raise ClientInputError(f"initial_state.{name} is invalid: {reason}") from exc
+        return checked
 
     def _remote_tool_names(self) -> set[str]:
         """Names of the tools the client runs (remote tools), across every ToolNode."""
@@ -576,6 +713,38 @@ class GraphService:
             logger.warning("Generated thread id %s is already taken; generating another", thread_id)
         raise RuntimeError("Could not generate an unused thread id")
 
+    async def _check_resume_target(
+        self, graph_input: GraphInputSchema, config: dict[str, Any]
+    ) -> None:
+        """Refuse a resume that names an interrupt the thread is not paused at.
+
+        Only when the client sent ``interrupt_id``; without it the resume answers whatever the
+        thread is paused at, as before.
+
+        Raises:
+            InterruptConflictError: The thread is not paused, or is paused at another interrupt.
+        """
+        if not graph_input.is_resume or graph_input.interrupt_id is None:
+            return
+        state = await self.checkpointer.aget_state(config) if self.checkpointer else None
+        pending = None
+        if state is not None:
+            try:
+                from tenxgraph.utils.interrupt import pending_interrupt
+            except ImportError:  # core older than interrupt()
+                pass
+            else:
+                pending = pending_interrupt(state)
+        if pending is None:
+            raise InterruptConflictError(
+                "Nothing to resume: this thread is not paused at an interrupt"
+            )
+        if pending.id != graph_input.interrupt_id:
+            raise InterruptConflictError(
+                f"interrupt_id '{graph_input.interrupt_id}' does not match the open "
+                f"interrupt '{pending.id}'"
+            )
+
     async def _prepare_input(
         self,
         graph_input: GraphInputSchema,
@@ -586,6 +755,7 @@ class GraphService:
         config = client_config(graph_input.config)
         runs = self.runs_policy()
         reject_unlisted_keys(config, runs.config_keys, "config", ALWAYS_ALLOWED_CONFIG_KEYS)
+        reject_builtin_state_keys(graph_input.initial_state, "initial_state")
         reject_unlisted_keys(graph_input.initial_state, runs.state_keys, "initial_state")
         # Server-owned keys set by a trusted caller (a protocol adapter), after the client's
         # own config has been stripped of them.
@@ -602,21 +772,37 @@ class GraphService:
         # check recursion limit set or not
         config["recursion_limit"] = graph_input.recursion_limit or 25
 
+        # Server-owned cap on parallel tool calls per model turn (clients cannot set it)
+        if runs.max_parallel_tool_calls is not None:
+            config["max_parallel_tool_calls"] = runs.max_parallel_tool_calls
+
         # Prepare the input for the graph
+        # External media URLs first: the checks are cheap and need no network.
+        self.check_media_urls(graph_input.messages)
         # Preprocess multimodal messages (resolve file_id → cached text, etc.)
         preprocessed = await preprocess_multimodal_messages(
             graph_input.messages,
             self.media_service,
             user_id,
         )
+        # The accepted messages now use these files: record the thread on each (owned files
+        # only; the ownership check above already ran).
+        if user_id and self.media_service is not None:
+            keys = [k for m in preprocessed for k in internal_media_keys(m)]
+            if keys:
+                await self.media_service.link_threads(keys, str(thread_id), str(user_id))
         input_data: dict = {
             "messages": preprocessed,
         }
         if graph_input.is_resume:
             input_data["resume"] = graph_input.resume
+            if graph_input.interrupt_id is not None:
+                # Read by core 0.10.4+ (checks the id again and validates the answer); an older
+                # core ignores unknown input keys.
+                input_data["resume_interrupt_id"] = graph_input.interrupt_id
         if graph_input.initial_state:
             self._reject_tool_start_node(graph_input.initial_state)
-            input_data["state"] = graph_input.initial_state
+            input_data["state"] = self._validate_state_types(graph_input.initial_state)
 
         return (
             input_data,
@@ -627,7 +813,7 @@ class GraphService:
             },
         )
 
-    async def invoke_graph(
+    async def invoke_graph(  # noqa: PLR0915
         self,
         graph_input: GraphInputSchema,
         user: dict[str, Any],
@@ -644,15 +830,18 @@ class GraphService:
         Raises:
             HTTPException: If graph execution fails.
         """
+        thread_lock = Lease(None)
         try:
             logger.debug("Invoking graph with input: %s", log_safe(graph_input.messages))
 
             # Prepare the input
             input_data, config, meta = await self._prepare_input(graph_input, user.get("user_id"))
+            thread_lock = await self._lock_new_thread(meta)
             # add user inside config
             config["user"] = user
             config["user_id"] = user.get("user_id", "anonymous")
             await self._check_tool_results(input_data["messages"], config)
+            await self._check_resume_target(graph_input, config)
 
             # Try to save thread info in the db even for existing threads
             # this will help in updating last accessed time
@@ -716,12 +905,18 @@ class GraphService:
                 meta=meta,
             )
 
+        except _resume_error_types() as e:
+            logger.warning("Resume rejected: %s", log_safe(str(e)))
+            raise _resume_http_error(e)
         except UnsupportedMediaInputError as e:
             logger.warning("Unsupported media input: %s", e.message)
             raise HTTPException(status_code=422, detail=e.message)
         except RunTimeoutError as e:
             logger.warning("Graph invoke cancelled: %s", e)
             raise HTTPException(status_code=504, detail=str(e))
+        except MediaURLBlockedError as e:
+            logger.warning("Blocked external media URL: %s", log_safe(str(e)))
+            raise
         except ValueError as e:
             logger.warning(f"Graph input validation failed: {e}")
             raise HTTPException(status_code=422, detail=client_error_detail(e))
@@ -731,6 +926,19 @@ class GraphService:
             _reraise_framework_errors(e)
             logger.error(f"Graph execution failed: {e}")
             raise HTTPException(status_code=500, detail=f"Graph execution failed: {e!s}")
+        finally:
+            thread_lock.release()
+
+    @staticmethod
+    async def _lock_new_thread(meta: dict[str, Any]) -> Lease:
+        """Lock a thread this request just created. The router locks the ones a client names.
+
+        Nobody is running on a new thread yet, but the client learns its id from the first
+        chunk and could start a second run on it while this one is still going.
+        """
+        if not meta.get("is_new_thread"):
+            return Lease(None)
+        return await acquire_thread_lock(str(meta["thread_id"]))
 
     async def _ainvoke_bounded(
         self, input_data: dict, config: dict[str, Any], granularity: Any
@@ -781,7 +989,7 @@ class GraphService:
         async for chunk in self.stream_chunks(graph_input, user):
             yield chunk.model_dump_json(serialize_as_any=True) + "\n"
 
-    async def stream_chunks(
+    async def stream_chunks(  # noqa: PLR0915
         self,
         graph_input: GraphInputSchema,
         user: dict[str, Any],
@@ -803,6 +1011,7 @@ class GraphService:
         meta: dict[str, Any] = {}
         thread_id: str | None = None
         run_id: str | None = None
+        thread_lock = Lease(None)
         try:
             logger.debug("Streaming graph with input: %s", log_safe(graph_input.messages))
 
@@ -810,10 +1019,12 @@ class GraphService:
             input_data, config, meta = await self._prepare_input(
                 graph_input, user.get("user_id"), server_config
             )
+            thread_lock = await self._lock_new_thread(meta)
             # add user inside config
             config["user"] = user
             config["user_id"] = user.get("user_id", "anonymous")
             await self._check_tool_results(input_data["messages"], config)
+            await self._check_resume_target(graph_input, config)
 
             # Try to save thread info in the db even for existing threads
             # this will help in updating last accessed time
@@ -834,9 +1045,10 @@ class GraphService:
             run_status = "done"
 
             # Stream the graph execution
-            async for chunk in self._astream_bounded(
+            async for raw_chunk in self._astream_bounded(
                 input_data, config, graph_input.response_granularity
             ):
+                chunk = sanitize_error_chunk(raw_chunk)
                 mt = chunk.metadata or {}
                 mt.update(meta)
                 chunk.metadata = mt
@@ -894,6 +1106,8 @@ class GraphService:
                 data={"reason": _stream_error_reason(e)},
                 metadata=meta,
             )
+        finally:
+            thread_lock.release()
 
     async def realtime_graph(
         self,
@@ -1289,24 +1503,47 @@ class GraphService:
             logger.error(f"Failed to get state schema: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to get state schema: {e!s}")
 
-    def _has_empty_tool_call(self, msg: Message) -> bool:
-        """Return True if any tool call on the message has empty content.
+    def _protected_tool_calls(self, state: Any, messages: list[Any]) -> set[str]:
+        """Ids of the unanswered tool calls the thread is legitimately waiting on.
 
-        A tool call is considered empty if its ``content`` attribute/key is ``None`` or
-        an empty string. Tool calls may be dict-like or objects with a ``content`` attribute.
+        Only the latest assistant message can be waiting. Its unanswered calls are pending
+        work, not broken history, when the thread is paused (``interrupt()``, or HITL
+        ``interrupt_before`` / ``interrupt_after``: ``execution_meta`` reports an interrupted
+        status) or when a call belongs to a remote tool the client has yet to answer.
         """
-        tool_calls = getattr(msg, "tools_calls", None)
-        if not tool_calls:
-            return False
-        for tool_call in tool_calls:
-            content = (
-                tool_call.get("content")
-                if isinstance(tool_call, dict)
-                else getattr(tool_call, "content", None)
+        assistants = [m for m in messages if _field(m, "role") == "assistant"]
+        if not assistants:
+            return set()
+        waiting = unanswered_tool_calls(messages)
+        mine = {cid: name for cid, name in _tool_calls(assistants[-1]) if cid in waiting}
+        if not mine:
+            return set()
+        if state.is_interrupted() or any(
+            name in self._remote_tool_names() for name in mine.values()
+        ):
+            return set(mine)
+        return set()
+
+    def _drop_broken_tool_calls(self, state: Any, messages: list[Any]) -> list[Any]:
+        """``messages`` without unanswered assistant tool calls and orphaned tool results."""
+        keep_pending: set[str] = set()
+        broken = set(unanswered_tool_calls(messages))
+        if broken:
+            keep_pending = self._protected_tool_calls(state, messages)
+        kept = [
+            m
+            for m in messages
+            if not (
+                _field(m, "role") == "assistant"
+                and any(cid in broken and cid not in keep_pending for cid, _ in _tool_calls(m))
             )
-            if content in (None, ""):
-                return True
-        return False
+        ]
+        live = {cid for m in kept if _field(m, "role") == "assistant" for cid, _ in _tool_calls(m)}
+        return [
+            m
+            for m in kept
+            if not ((ids := tool_result_ids([m])) and not any(i in live for i in ids))
+        ]
 
     async def fix_graph(
         self,
@@ -1315,11 +1552,15 @@ class GraphService:
         config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
-        Fix graph state by removing messages with empty tool call content.
+        Repair a thread whose history has a tool call that never got its result.
 
-        This method retrieves the current state from the checkpointer, identifies messages
-        with tool calls that have empty content, removes those messages, and updates the
-        state.
+        A run that dies after the model asked for tools but before the results were saved
+        leaves an assistant message with an unanswered tool call, which providers reject.
+        This method removes every assistant message that has a tool call with no matching
+        tool result (matched by call id), then removes tool results whose call is gone, and
+        saves the state. Messages without tool calls are never removed. The unanswered calls
+        of the latest assistant message are kept while the thread is paused or waiting on a
+        client tool, because they are pending work.
 
         Args:
             thread_id (str): The thread ID to fix the graph state for
@@ -1367,7 +1608,7 @@ class GraphService:
                     "state": state.model_dump(serialize_as_any=True),
                 }
 
-            filtered = [m for m in messages if not self._has_empty_tool_call(m)]
+            filtered = self._drop_broken_tool_calls(state, messages)
             removed_count = len(messages) - len(filtered)
 
             if removed_count:
@@ -1375,7 +1616,7 @@ class GraphService:
                 await self.checkpointer.aput_state(fix_config, state)
                 message = f"Successfully removed {removed_count} message(s)"
             else:
-                message = "No messages with empty tool calls found"
+                message = "No unanswered tool calls or orphaned tool results found"
 
             return {
                 "success": True,

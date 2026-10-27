@@ -2,15 +2,20 @@ from typing import Any
 
 from fastapi import HTTPException
 from injectq import inject, singleton
+from pydantic import BaseModel, ValidationError
 from tenxgraph.core.state import AgentState, Message
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.auth.request_config import (
+    ClientInputError,
     client_config,
-    client_tool_call_error,
+    client_message_error,
     owned_thread_info,
+    reject_builtin_state_keys,
     reject_unlisted_keys,
+    tool_result_ids,
+    with_fresh_message_ids,
 )
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe, sanitize_for_logging
@@ -22,7 +27,10 @@ from tenxgraph_api.src.app.routers.checkpointer.schemas.checkpointer_schemas imp
     ThreadsListResponseSchema,
 )
 from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import (
+    check_external_media_urls,
     check_media_references,
+    internal_media_keys,
+    resolve_media_policy,
 )
 from tenxgraph_api.src.app.utils.parse_output import parse_state_output
 
@@ -34,6 +42,10 @@ class CheckpointerUnavailableError(HTTPException, ValueError):
         detail = "Checkpointer is not configured"
         HTTPException.__init__(self, status_code=503, detail=detail)
         ValueError.__init__(self, detail)
+
+
+# Messages read per page when collecting a thread's media references for cleanup.
+_CLEANUP_PAGE = 500
 
 
 @singleton
@@ -78,6 +90,87 @@ class CheckpointerService:
             return
         await check_media_references(messages, self._media_service(), str(user_id))
 
+    def _check_media_urls(self, messages: list[Any]) -> None:
+        """External media URLs in written messages get the same policy check as graph input
+        (400), since the next run on the thread may make the server fetch them."""
+        if not messages:
+            return
+        graph_service = self._graph_service()
+        policy = (
+            graph_service.media_policy if graph_service is not None else resolve_media_policy(None)
+        )
+        check_external_media_urls(messages, policy)
+
+    async def _link_media(self, messages: list[Any], cfg: dict[str, Any], user: dict) -> None:
+        """Record the thread on every owned file the written messages reference."""
+        user_id = user.get("user_id")
+        media = self._media_service()
+        thread_id = cfg.get("thread_id")
+        if not user_id or media is None or thread_id is None:
+            return
+        keys = [k for m in messages for k in internal_media_keys(m)]
+        if keys:
+            await media.link_threads(keys, str(thread_id), str(user_id))
+
+    def _link_tracking_media(self) -> Any:
+        """The media service when it can track thread links, else ``None``. Never raises."""
+        media = self._media_service()
+        try:
+            return media if media is not None and media.supports_links else None
+        except Exception as exc:
+            logger.debug("Media store unavailable for file cleanup: %s", exc)
+            return None
+
+    async def _thread_media_keys(
+        self, cfg: dict[str, Any], skip_message_id: Any = None
+    ) -> list[str]:
+        """Media keys referenced by the thread's messages (all pages), minus one message.
+
+        A read failure raises, so a partial list is never used: cleanup can only miss a file
+        (it stays), never delete one that is still referenced.
+        """
+        keys: list[str] = []
+        offset = 0
+        try:
+            while True:
+                page = await self.checkpointer.alist_messages(cfg, None, offset, _CLEANUP_PAGE)
+                for message in page:
+                    if skip_message_id is not None and str(message.message_id) == str(
+                        skip_message_id
+                    ):
+                        continue
+                    keys.extend(internal_media_keys(message))
+                if len(page) < _CLEANUP_PAGE:
+                    return keys
+                offset += len(page)
+        except Exception as exc:
+            logger.warning("Could not read thread messages for file cleanup: %s", exc)
+            raise
+
+    async def _check_context_tool_results(self, context: list[Any], cfg: dict[str, Any]) -> None:
+        """Hold tool results in client ``context`` to the rule invoke applies: only as the
+        answer to a pending remote tool call (``GraphService._check_tool_results``)."""
+        if not tool_result_ids(context):
+            return
+        graph_service = self._graph_service()
+        try:
+            if graph_service is None:
+                raise ClientInputError("tool results cannot be written to a thread directly")
+            await graph_service._check_tool_results(context, cfg)
+        except ClientInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @staticmethod
+    def _graph_service() -> Any:
+        try:
+            from injectq import InjectQ
+
+            from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
+
+            return InjectQ.get_instance().try_get(GraphService)
+        except Exception:
+            return None
+
     @staticmethod
     def _state_keys() -> frozenset[str] | None:
         """``runs.state_keys`` from 10xgraph.json, or ``None`` when unset or unavailable."""
@@ -110,6 +203,8 @@ class CheckpointerService:
         res = await self.checkpointer.aget_state(cfg)
         if not res:
             rs = await self.checkpointer.aget_state_cache(cfg)
+            if isinstance(rs, BaseModel):
+                rs = parse_state_output(self.settings, rs)
             return StateResponseSchema(state=rs)
 
         if res:
@@ -129,15 +224,29 @@ class CheckpointerService:
         state: dict[str, Any],
     ) -> StateResponseSchema:
         cfg = self._config(config, user)
-        # The thread's state is the next run's state, so the initial_state allow-list applies.
+        # The built-in fields are never client-writable; the thread's state is the next run's
+        # state, so the initial_state allow-list applies to the rest.
         try:
+            reject_builtin_state_keys(state, "state")
             reject_unlisted_keys(state, self._state_keys(), "state")
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        # context is appended, so every message here is new and client-authored. A tool call
-        # in it would run on the next resume without the model ever requesting it.
-        if error := client_tool_call_error(state.get("context")):
+        # context is appended, so every message here is new and client-authored: user messages
+        # only, and no tool call, which would run on the next resume without the model ever
+        # requesting it. A tool result is accepted only as the answer to a pending remote call.
+        context = state.get("context")
+        if context is not None and not (
+            isinstance(context, list) and all(isinstance(m, dict | Message) for m in context)
+        ):
+            raise HTTPException(
+                status_code=422, detail="Invalid state fields: context must be a list of messages"
+            )
+        if error := client_message_error(context):
             raise HTTPException(status_code=422, detail=error)
+        if context:
+            await self._check_context_tool_results(context, cfg)
+            state = {**state, "context": with_fresh_message_ids(context)}
+        self._check_media_urls(state.get("context") or [])
         await self._check_media_references(state.get("context") or [], user)
         await self._claim_thread(cfg, user)
         old_state: AgentState | None = await self.checkpointer.aget_state(cfg)
@@ -149,10 +258,16 @@ class CheckpointerService:
         # Merge incoming state dict into existing Pydantic state, then rebuild the model.
 
         merged = self._merge_states(old_state, state)
-        to_store = self._reconstruct_state(old_state, merged)
+        try:
+            to_store = self._reconstruct_state(old_state, merged)
+        except ValidationError as exc:
+            # Name the offending fields, never echo the values.
+            fields = ", ".join(sorted({".".join(str(p) for p in e["loc"]) for e in exc.errors()}))
+            raise HTTPException(status_code=422, detail=f"Invalid state fields: {fields}") from exc
         res = await self.checkpointer.aput_state(cfg, to_store)  # type: ignore[arg-type]
         # update cache as well
         await self.checkpointer.aput_state_cache(cfg, to_store)  # type: ignore
+        await self._link_media(state.get("context") or [], cfg, user)
 
         return StateResponseSchema(
             state=parse_state_output(
@@ -175,9 +290,11 @@ class CheckpointerService:
         metadata: dict[str, Any] | None = None,
     ) -> ResponseSchema:
         cfg = self._config(config, user)
+        self._check_media_urls(messages)
         await self._check_media_references(messages, user)
         await self._claim_thread(cfg, user)
         res = await self.checkpointer.aput_messages(cfg, messages, metadata)
+        await self._link_media(messages, cfg, user)
         return ResponseSchema(success=True, message="Messages put successfully", data=res)
 
     async def get_message(
@@ -187,7 +304,51 @@ class CheckpointerService:
         message_id: Any,
     ) -> Message:
         cfg = self._config(config, user)
-        return await self.checkpointer.aget_message(cfg, message_id)
+        return await self._read_message(cfg, message_id)
+
+    async def _read_message(self, cfg: dict[str, Any], message_id: Any) -> Message:
+        """The message, or a 404 when the thread has none with that id.
+
+        Checkpointers disagree on a missing message: in-memory and SQLite raise ``IndexError``,
+        Postgres raises ``ValueError("Message not found: ...")``. Any other error is not a
+        client mistake and passes through.
+        """
+        try:
+            message = await self.checkpointer.aget_message(cfg, message_id)
+        except IndexError as exc:
+            raise HTTPException(status_code=404, detail="Message not found") from exc
+        except ValueError as exc:
+            if str(exc).startswith("Message not found"):
+                raise HTTPException(status_code=404, detail="Message not found") from exc
+            raise
+        if message is None:
+            raise HTTPException(status_code=404, detail="Message not found")
+        return message
+
+    async def update_message_feedback(
+        self,
+        config: dict[str, Any],
+        user: dict,
+        message_id: Any,
+        feedback: dict[str, Any],
+    ) -> Message:
+        """Set ``metadata["feedback"]`` on a message; nothing else on the message changes.
+
+        Raises:
+            HTTPException: 501 when the checkpointer lacks ``aupdate_message_metadata`` (core
+                older than 0.10.4), 404 when the message is not in this thread.
+        """
+        cfg = self._config(config, user)
+        update = getattr(self.checkpointer, "aupdate_message_metadata", None)
+        if not callable(update):
+            raise HTTPException(
+                status_code=501,
+                detail="Updating message feedback needs 10xgraph >= 0.10.4",
+            )
+        message = await update(cfg, message_id, {"feedback": feedback})
+        if message is None:
+            raise HTTPException(status_code=404, detail="Message not found")
+        return message
 
     async def get_messages(
         self,
@@ -208,7 +369,29 @@ class CheckpointerService:
         message_id: Any,
     ) -> ResponseSchema:
         cfg = self._config(config, user)
+        # Read first: a missing message is a 404 on every checkpointer (Postgres alone would
+        # delete silently), and its files are needed for the cleanup below. Any other read
+        # failure just leaves the files in place.
+        message: Message | None = None
+        try:
+            message = await self._read_message(cfg, message_id)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.debug("File cleanup skipped for message %s: %s", log_safe(message_id), exc)
+        released: list[str] = []
+        media = self._link_tracking_media()
+        if media is not None and message is not None:
+            try:
+                gone = internal_media_keys(message)
+                if gone:
+                    kept = set(await self._thread_media_keys(cfg, skip_message_id=message_id))
+                    released = [k for k in dict.fromkeys(gone) if k not in kept]
+            except Exception as exc:
+                logger.debug("File cleanup skipped for message %s: %s", log_safe(message_id), exc)
         res = await self.checkpointer.adelete_message(cfg, message_id)
+        if released and media is not None and cfg.get("thread_id") is not None:
+            await media.unlink_threads(released, str(cfg["thread_id"]))
         return ResponseSchema(success=True, message="Message deleted successfully", data=res)
 
     # Threads
@@ -245,7 +428,17 @@ class CheckpointerService:
             log_safe(sanitize_for_logging(user)),
             log_safe(thread_id),
         )
+        # Collect the files the thread's messages reference before they are gone.
+        thread_keys: list[str] = []
+        media = self._link_tracking_media()
+        if media is not None:
+            try:
+                thread_keys = list(dict.fromkeys(await self._thread_media_keys(cfg)))
+            except Exception as exc:
+                logger.debug("File cleanup skipped for thread %s: %s", log_safe(thread_id), exc)
         res = await self.checkpointer.aclean_thread(cfg)
+        if thread_keys and media is not None:
+            await media.unlink_threads(thread_keys, str(thread_id))
 
         # Clean telemetry traces if TelemetryStore is bound in InjectQ
         try:

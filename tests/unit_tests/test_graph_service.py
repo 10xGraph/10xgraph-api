@@ -151,6 +151,28 @@ class TestGraphServiceMethods:
         assert "db crash" in exc.value.detail
 
     @pytest.mark.asyncio
+    async def test_prepare_input_sets_server_max_parallel_tool_calls(self, service):
+        from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+
+        gi = GraphInputSchema(
+            messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        )
+        # Unset: the key is left out so core's default applies
+        gi.config = {"thread_id": "t1"}
+        _, config, _ = await service._prepare_input(gi)
+        assert "max_parallel_tool_calls" not in config
+
+        service.config.runs = RunsConfig(max_parallel_tool_calls=3)
+        # A client value is dropped and the server value wins
+        gi.config = {"thread_id": "t1", "max_parallel_tool_calls": 999}
+        _, config, _ = await service._prepare_input(gi)
+        assert config["max_parallel_tool_calls"] == 3
+
+        # A trusted caller's server_config cannot raise it past the operator setting
+        _, config, _ = await service._prepare_input(gi, None, {"max_parallel_tool_calls": 50})
+        assert config["max_parallel_tool_calls"] == 3
+
+    @pytest.mark.asyncio
     async def test_prepare_input(self, service):
         gi = GraphInputSchema(
             messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
@@ -275,7 +297,12 @@ class TestGraphServiceMethods:
 
         # The reason is only generic in production; do not depend on which test cached
         # the settings first.
-        production = settings_module.Settings(MODE="production", _env_file=None)
+        production = settings_module.Settings(
+            MODE="production",
+            ALLOWED_HOST="api.example.com",
+            ORIGINS="https://app.example.com",
+            _env_file=None,
+        )
         monkeypatch.setattr(settings_module, "get_settings", lambda: production)
         gi = GraphInputSchema(
             messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],

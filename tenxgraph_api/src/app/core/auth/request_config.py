@@ -12,6 +12,16 @@ A small set of keys is owned by the server instead, and a client must never set 
 - ``remote_tools`` -- per-run client tool schemas the model may call; only protocol adapters
   whose clients legitimately bring tools (AG-UI) set it, from the protocol's own tool list
 - ``_*``      -- framework internals (``_skip_interrupt_at``, ``_node_name``, ...)
+- ``file_tool_root`` / ``workspace_root`` -- the directory the core prebuilt file tools may
+  read and write; a client must not be able to point them at the server's filesystem
+- ``tool_timeout`` / ``node_timeout`` -- core time limits, which ``0`` or ``None`` turns off
+- ``max_parallel_tool_calls`` -- core's cap on tool calls per model turn; the operator sets it
+  with ``runs.max_parallel_tool_calls``
+- ``collection`` -- the vector store collection; the developer picks it in code (store default,
+  memory scope config, ``RAGAgent`` store config), so a client cannot read another collection or
+  create collections without limit
+
+A server-owned key from the client is dropped, not refused, and the drop is logged at debug.
 
 Every route and service that forwards client config to the graph, checkpointer or store must
 pass it through :func:`client_config` first, then set the server-owned keys itself.
@@ -25,14 +35,48 @@ check approved, and both sides normalise it with :func:`normalize_thread_id`.
 Tool calls are server-controlled too: only the model may request a tool. Client messages
 are checked with :func:`client_tool_call_error`. A client may send a tool *result* only as the
 answer to a remote tool call that is still waiting for one (:func:`unanswered_tool_calls`).
+
+Client messages are user messages. :func:`client_message_error` refuses the ``assistant`` and
+``system`` roles (a forged assistant turn persists and the model reads it as its own words) and
+lets a ``tool`` message through only when it carries nothing but tool results. The built-in state
+fields ``context_summary`` and ``execution_meta`` are never client-writable
+(:func:`reject_builtin_state_keys`). The server also generates every message id itself
+(:func:`with_fresh_message_ids`); the AG-UI adapter alone keeps client ids, since its converter
+uses them to skip messages the thread already stores.
+
+A request is also bounded in size before anything heavy runs (:func:`request_size_error`): the
+body cap lets a few MB of messages or content blocks through, and core then copies and serialises
+them on the event loop. The limits are fixed module constants (``MAX_MESSAGES`` and friends).
+A resume that names the interrupt it answers is checked against the thread's open interrupt
+(:class:`InterruptConflictError`).
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from tenxgraph_api.src.app.core import logger
 
-RESERVED_CONFIG_KEYS: frozenset[str] = frozenset({"authz", "user", "user_id", "remote_tools"})
+
+RESERVED_CONFIG_KEYS: frozenset[str] = frozenset(
+    {
+        "authz",
+        "user",
+        "user_id",
+        "remote_tools",
+        # Set by the AG-UI endpoint from the AG-UI request; never from a plain graph request
+        "ag_ui",
+        # Read by core: the prebuilt file tools' root, the tool and node time limits and the
+        # parallel tool call cap
+        "file_tool_root",
+        "workspace_root",
+        "tool_timeout",
+        "node_timeout",
+        "max_parallel_tool_calls",
+        # Read by the store: which collection to read and write; set only by developer code
+        "collection",
+    }
+)
 INTERNAL_KEY_PREFIX = "_"
 
 
@@ -52,7 +96,11 @@ def client_config(config: Any) -> dict[str, Any]:
     """
     if not isinstance(config, dict):
         return {}
-    return {key: value for key, value in config.items() if _is_client_key(key)}
+    kept = {key: value for key, value in config.items() if _is_client_key(key)}
+    if len(kept) != len(config):
+        dropped = sorted(str(key) for key in config if key not in kept)
+        logger.debug("Ignored server-owned config keys from the client: %s", dropped)
+    return kept
 
 
 class ClientInputError(ValueError):
@@ -73,6 +121,24 @@ def client_error_detail(exc: Exception) -> str:
     if get_settings().MODE == "production":
         return "Invalid input provided."
     return str(exc)
+
+
+# State fields only developer code (nodes, context managers) writes. ``context`` is not listed:
+# core already ignores it in caller state, and ``PUT state`` appends to it (see the message rules).
+BUILTIN_STATE_KEYS: frozenset[str] = frozenset({"context_summary", "execution_meta"})
+
+
+def reject_builtin_state_keys(state: Any, field: str) -> None:
+    """Raise ``ClientInputError`` when client ``state`` sets a built-in state field.
+
+    ``context_summary`` is sent to the model as its own earlier words and ``execution_meta``
+    drives the run, so neither may come from a client.
+    """
+    if not isinstance(state, dict):
+        return
+    blocked = sorted(key for key in state if key in BUILTIN_STATE_KEYS)
+    if blocked:
+        raise ClientInputError(f"{field} keys cannot be set by clients: {', '.join(blocked)}")
 
 
 # Config keys the API itself reads; always accepted when ``runs.config_keys`` is set.
@@ -109,6 +175,64 @@ def _field(message: Any, name: str) -> Any:
     return getattr(message, name, None)
 
 
+# Request size limits, applied in schema validation to client messages (graph invoke and stream,
+# WebSocket, AG-UI, PUT state ``context``, POST messages). Fixed on purpose: no setting.
+MAX_MESSAGES = 500
+MAX_BLOCKS_PER_MESSAGE = 100
+# Characters (``len`` of the Python string, not UTF-8 bytes) of text summed over every text block
+# of the request; a plain string ``content`` (AG-UI) counts too.
+MAX_TEXT_CHARS = 1_000_000
+# AG-UI clients resend the whole conversation on every run. Only the trailing turn reaches the
+# graph and gets the limits above; the full history gets this looser message cap (plus the
+# per-message block cap) so a long chat keeps working.
+MAX_AG_UI_HISTORY_MESSAGES = 10_000
+
+
+class InterruptConflictError(Exception):
+    """A resume names an interrupt the thread is not paused at (HTTP 409, or an error chunk)."""
+
+
+def request_size_error(
+    messages: Any,
+    field: str = "messages",
+    *,
+    max_messages: int = MAX_MESSAGES,
+    max_text_chars: int | None = MAX_TEXT_CHARS,
+) -> str | None:
+    """Describe the first size limit ``messages`` breaks, or ``None``.
+
+    Cheap on purpose: counts are checked before anything is iterated, so a huge request is
+    rejected without walking it. Accepts ``Message`` objects, AG-UI messages or plain dicts, and
+    ignores anything that is not a list (schema validation reports that). ``max_text_chars=None``
+    skips the total text check.
+    """
+    if not isinstance(messages, list | tuple):
+        return None
+    if len(messages) > max_messages:
+        return f"{field}: at most {max_messages} messages per request (got {len(messages)})"
+    total = 0
+    for index, message in enumerate(messages):
+        content = _field(message, "content")
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list | tuple):
+            if len(content) > MAX_BLOCKS_PER_MESSAGE:
+                return (
+                    f"{field}[{index}]: at most {MAX_BLOCKS_PER_MESSAGE} content blocks per "
+                    f"message (got {len(content)})"
+                )
+            for block in content:
+                if _field(block, "type") == "text":
+                    text = _field(block, "text")
+                    total += len(text) if isinstance(text, str) else 0
+        if max_text_chars is not None and total > max_text_chars:
+            return (
+                f"{field}: at most {max_text_chars} characters of text in total across all "
+                "text blocks of a request"
+            )
+    return None
+
+
 def client_tool_call_error(messages: Any) -> str | None:
     """Describe the first client-supplied message that carries a tool call, or ``None``.
 
@@ -126,6 +250,51 @@ def client_tool_call_error(messages: Any) -> str | None:
         if carries_call:
             return f"messages[{index}] carries a tool call; only the model may request tools"
     return None
+
+
+def client_message_error(messages: Any, *, user_only: bool = True) -> str | None:
+    """Describe the first client message the API must refuse, or ``None``.
+
+    Always refuses tool calls (:func:`client_tool_call_error`). With ``user_only`` (every client
+    route except the admin import) it also refuses the ``assistant`` and ``system`` roles, and a
+    ``tool`` message that carries anything but tool results; whether a result answers a pending
+    call is checked separately (``GraphService._check_tool_results``).
+    """
+    if error := client_tool_call_error(messages):
+        return error
+    if not user_only or not isinstance(messages, list | tuple):
+        return None
+    for index, message in enumerate(messages):
+        role = _field(message, "role")
+        if role in ("assistant", "system"):
+            return f"messages[{index}] has role '{role}'; clients may only send user messages"
+        if role == "tool":
+            blocks = _field(message, "content") or []
+            if not blocks or any(_field(block, "type") != "tool_result" for block in blocks):
+                return f"messages[{index}] has role 'tool' but is not a tool result"
+    return None
+
+
+def with_fresh_message_ids(messages: Any) -> Any:
+    """Copy ``messages`` (``Message`` objects or dicts) with a newly generated ``message_id``.
+
+    Ids are predictable and some checkpointers key messages on the id, so a client must not
+    choose them. The id comes from ``Message``'s own default factory.
+    """
+    if not isinstance(messages, list | tuple):
+        return messages
+    from tenxgraph.core.state import Message
+
+    make_id: Any = Message.model_fields["message_id"].default_factory
+    fresh: list[Any] = []
+    for message in messages:
+        if isinstance(message, dict):
+            fresh.append({**message, "message_id": make_id()})
+        elif hasattr(message, "model_copy"):
+            fresh.append(message.model_copy(update={"message_id": make_id()}))
+        else:
+            fresh.append(message)
+    return fresh
 
 
 def tool_result_ids(messages: Any) -> list[str]:

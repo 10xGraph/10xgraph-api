@@ -26,7 +26,11 @@ from tenxgraph.core.state import (
 )
 from tenxgraph.core.state.message_block import MediaRef
 
-from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
+from tenxgraph_api.src.app.core.auth.request_config import (
+    MAX_AG_UI_HISTORY_MESSAGES,
+    ClientInputError,
+    request_size_error,
+)
 
 
 _MEDIA_BLOCKS = {
@@ -51,11 +55,30 @@ def parse_run_input(body: Any) -> RunAgentInput:
         ValueError: The body is not a valid ``RunAgentInput``.
     """
     if isinstance(body, dict) and isinstance(body.get("messages"), list):
+        # Size limits first, on the raw body: nothing is parsed or rewritten for a request that
+        # is over them. The client resends the whole conversation, so the history only gets a
+        # loose cap; the trailing turn, which is what reaches the graph, gets the normal limits.
+        history = body["messages"]
+        if error := request_size_error(
+            history, max_messages=MAX_AG_UI_HISTORY_MESSAGES, max_text_chars=None
+        ):
+            raise ClientInputError(error)
+        if error := request_size_error(_trailing_turn(history)):
+            raise ClientInputError(error)
         body = {**body, "messages": [_upgrade_message(m) for m in body["messages"]]}
     try:
         return RunAgentInput.model_validate(body)
     except ValidationError as exc:
         raise ClientInputError(f"Invalid AG-UI RunAgentInput: {exc}") from exc
+
+
+def _trailing_turn(messages: list[Any]) -> list[Any]:
+    """The raw messages after the last assistant message (what ``select_new_messages`` reads)."""
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            return messages[index + 1 :]
+    return messages
 
 
 # Limits on the tools an AG-UI client may bring to a run. The name rule matches what model

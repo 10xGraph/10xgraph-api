@@ -5,6 +5,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from tenxgraph_api.src.app.core.config import setup_middleware as setup_middleware_module
 from tenxgraph_api.src.app.core.config.setup_middleware import (
     SelectiveGZipMiddleware,
     setup_middleware,
@@ -163,6 +164,40 @@ def test_setup_otel_no_endpoint():
         mock_processor.ConsoleSpanExporter.assert_called_once()
         mock_processor.SimpleSpanProcessor.assert_called_once()
         mock_provider.add_span_processor.assert_called_once()
+
+
+def test_setup_otel_no_endpoint_in_production_skips_console():
+    settings = MagicMock()
+    settings.OTEL_ENABLED = True
+    settings.OTEL_SERVICE_NAME = "test-service"
+    settings.OTEL_EXPORTER_OTLP_ENDPOINT = None
+    settings.MODE = "production"
+
+    mock_trace = MagicMock()
+    mock_instrumentor = MagicMock()
+    mock_provider = MagicMock()
+    mock_processor = MagicMock()
+
+    modules = {
+        "opentelemetry": mock_trace,
+        "opentelemetry.trace": mock_trace,
+        "opentelemetry.instrumentation.fastapi": mock_instrumentor,
+        "opentelemetry.sdk.resources": MagicMock(),
+        "opentelemetry.sdk.trace": mock_provider,
+        "opentelemetry.sdk.trace.export": mock_processor,
+    }
+
+    with patch.dict("sys.modules", modules):
+        from tenxgraph_api.src.app.core.config import setup_middleware as module
+
+        with patch.object(module.logger, "warning") as warning:
+            module._setup_otel(MagicMock(), settings)
+
+        mock_processor.ConsoleSpanExporter.assert_not_called()
+        mock_provider.TracerProvider.return_value.add_span_processor.assert_not_called()
+        mock_trace.trace.set_tracer_provider.assert_not_called()
+        mock_instrumentor.FastAPIInstrumentor.instrument_app.assert_not_called()
+        assert "not exported" in warning.call_args.args[0]
 
 
 def test_setup_otel_grpc_exporter_import_error():
@@ -415,7 +450,7 @@ def test_setup_middleware_all():
         mock_build_backend.assert_called_once_with(rate_limit_config, container=container)
         assert app.state.rate_limit_backend == "mock_backend"
         mock_setup_otel.assert_called_once_with(app, settings)
-        mock_attach.assert_called_once_with(container, settings)
+        mock_attach.assert_called_once_with(container, settings, graph_config)
 
 
 # ── _setup_observability ──────────────────────────────────────────────────────
@@ -590,3 +625,33 @@ def test_setup_observability_invalid_level_falls_back():
 
     # Falls back to STANDARD and still binds.
     container.bind_instance.assert_called_once()
+
+
+def test_user_id_mode_reads_the_observability_block():
+    cfg = MagicMock()
+    cfg.observability = {"user_id_mode": "hash"}
+    assert setup_middleware_module._user_id_mode(cfg) == "hash"
+    cfg.observability = None
+    assert setup_middleware_module._user_id_mode(cfg) == "raw"
+    assert setup_middleware_module._user_id_mode(None) == "raw"
+
+
+def test_make_otel_publisher_passes_the_mode_only_when_set():
+    calls = []
+
+    class NewCorePublisher:
+        def __init__(self, level, user_id_mode="raw"):
+            calls.append((level, user_id_mode))
+
+    setup_middleware_module._make_otel_publisher(NewCorePublisher, "standard", "raw")
+    setup_middleware_module._make_otel_publisher(NewCorePublisher, "standard", "mask")
+    assert calls == [("standard", "raw"), ("standard", "mask")]
+
+
+def test_make_otel_publisher_falls_back_on_an_older_core():
+    class OldCorePublisher:
+        def __init__(self, level):
+            self.level = level
+
+    publisher = setup_middleware_module._make_otel_publisher(OldCorePublisher, "standard", "hash")
+    assert publisher.level == "standard"

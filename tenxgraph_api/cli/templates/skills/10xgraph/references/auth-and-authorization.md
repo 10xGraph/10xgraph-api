@@ -40,6 +40,7 @@ def authenticate(self, request, response, credential) -> dict | None: ...
   API-key/cookie schemes, ignore it and read headers directly.
 - Return a dict with at least `user_id` (keys flow into `config["user"]`); `{}`/`None` = anonymous;
   raise `UserAccountError`/`HTTPException` to reject (401 HTTP, 1008 close on WebSocket).
+- `user_id` must not start with `"__system__"` (`SYSTEM_USER_PREFIX` in core): `system_user_id(name)` = `"__system__:<name>"` owns shared data (each agent's memory, RAG knowledge bases). The API refuses any identity whose id starts with that prefix, from any auth backend, with 401 "This user id is reserved" (WebSocket close 1008) and a warning in the log. Auth-off development still uses `"anonymous"`.
 - Do NOT declare it `async def` — an un-awaited coroutine breaks auth silently.
 - Include `roles` / `scopes` in the returned dict to feed authorization.
 
@@ -69,7 +70,7 @@ class MyAuthz(AuthorizationBackend):
         resource_id: str | None = None, **context,
     ) -> bool: ...                     # required; False -> 403
 
-    def isolation_scope(self) -> str:  # optional; "owner" | "none" (default "none")
+    def isolation_scope(self) -> str:  # optional; "owner" | "none" (default "owner")
         return "owner"
 
     def scopes_for(self, user: dict) -> list[str] | None:  # optional; None = permissive
@@ -83,6 +84,8 @@ what you need.
 
 Each endpoint requires the scope `"<resource>:<action>"`. `RequirePermission` checks it against
 `authz.scopes_for(user)`; `None` = permissive (default, nothing breaks until scopes are issued).
+The default reads the token's `scope` claim (space-separated, OAuth style) and `scopes` (list or
+space-separated string) and matches exact names; a claim of the wrong type is a 401.
 
 - `graph`: `invoke`, `stream`, `stop`, `fix`, `setup`, `read`
 - `checkpointer`: `read`, `write`, `delete`
@@ -113,6 +116,8 @@ trusted policy. After a successful check, `RequirePermission` stamps
 `user["authz"] = {user_id, scope, scopes}` where `scope` = backend `isolation_scope()`. Services
 copy the trusted `user` into `config["user"]`, so the core library reads `config["user"]["authz"]`
 and scopes rows to the caller (`owner`) or not (`none`). Set server-side only — not client-forgeable.
+
+Server-owned config keys (`RESERVED_CONFIG_KEYS` in `core/auth/request_config.py`: `authz`, `user`, `user_id`, `remote_tools`, `file_tool_root`, `workspace_root`, `tool_timeout`, `node_timeout`, `max_parallel_tool_calls`, `collection`, plus any `_`-prefixed key) are dropped from client config by `client_config` on every route. They are ignored, not refused (debug log). A client never picks a Qdrant `collection`; see memory-and-store.md.
 
 ## Guarantees
 

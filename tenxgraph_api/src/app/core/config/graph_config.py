@@ -2,7 +2,7 @@ import ipaddress
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -399,6 +399,24 @@ DEFAULT_MAX_CONCURRENT_RUNS_PER_USER = 10
 THREAD_ID_MODES = ("client", "server")
 GRAPH_INTROSPECTION_MODES = ("open", "scoped")
 
+# Longest a graph run may take when MODE=production and ``runs.timeout`` is not set.
+DEFAULT_PRODUCTION_RUN_TIMEOUT_SECONDS = 300.0
+
+
+def default_run_timeout() -> float | None:
+    """``runs.timeout`` when the config leaves it unset: 300 s in production, else no limit.
+
+    MODE is read from the environment (as the settings validators do). An invalid MODE is
+    reported by ``Settings`` itself, so here it counts as development.
+    """
+    from tenxgraph_api.src.app.core.config.settings import normalize_mode_value
+
+    try:
+        mode = normalize_mode_value(os.environ.get("MODE"))
+    except ValueError:
+        return None
+    return DEFAULT_PRODUCTION_RUN_TIMEOUT_SECONDS if mode == "production" else None
+
 
 @dataclass
 class RunsConfig:
@@ -411,16 +429,19 @@ class RunsConfig:
             "config_keys": ["locale", "tenant_hint"],
             "state_keys": ["preferences"],
             "max_concurrent_per_user": 10,
-            "timeout": 600
+            "timeout": 600,
+            "max_parallel_tool_calls": 10
         }
 
-    ``thread_ids`` decides who may name a new thread. ``"client"`` (the default) lets a
-    request start a thread under any id it picks. ``"server"`` accepts only ids of threads
-    that already exist; a new thread is started by omitting the id (or sending ``"new"`` over
-    WebSocket), and the server picks it. Use ``"server"`` when ids could be guessed: under
-    owner-only authorization, the first writer of an id owns it, so a user who claims an id
-    first locks its intended owner out. Clients that generate their own ids (the realtime
-    client, AG-UI/CopilotKit) need ``"client"``.
+    ``thread_ids`` decides who may name a new thread. ``"server"`` (the default) accepts only
+    ids of threads that already exist; a new thread is started by omitting the id (or sending
+    ``"new"`` over WebSocket), and the server picks it. ``"client"`` lets a request start a
+    thread under any id it picks; under owner-only authorization the first writer of an id then
+    owns it, so a user who claims a guessable id (``"default"``) first locks its intended owner
+    out, and a request on an unknown id answers differently from one on someone else's. AG-UI
+    (``POST /v1/ag-ui``) and realtime (``/v1/graph/live``) always accept an id the frontend
+    made, even with ``"server"``, because CopilotKit and the realtime client create their own;
+    the caller owns a new one.
 
     ``config_keys`` and ``state_keys`` are allow-lists for client input. When set, a request
     whose ``config`` or ``initial_state`` carries any other key is rejected with 422.
@@ -433,14 +454,21 @@ class RunsConfig:
     Default 10; ``0`` or ``null`` means unlimited. Requests without a verified user (auth off)
     are not capped. ``timeout`` is the longest a single graph run may take, in seconds; a run
     that passes it is cancelled (invoke answers 504; a stream, ``/v1/graph/ws`` run or AG-UI
-    run ends with an error). Realtime sessions are not limited. Default ``null``: no limit.
+    run ends with an error). Realtime sessions are not limited. When the key is absent the
+    default is 300 seconds with MODE=production and no limit in development; an explicit
+    number overrides it, and an explicit ``null`` means no limit in either mode.
+
+    ``max_parallel_tool_calls`` caps the tool calls one model turn may run at once. The API
+    puts it into every run's config (clients cannot set it). Default ``null``: core decides,
+    from the ``TENXGRAPH_MAX_PARALLEL_TOOL_CALLS`` environment variable, else 10.
     """
 
-    thread_ids: str = "client"
+    thread_ids: str = "server"
     config_keys: frozenset[str] | None = None
     state_keys: frozenset[str] | None = None
     max_concurrent_per_user: int | None = DEFAULT_MAX_CONCURRENT_RUNS_PER_USER
-    timeout: float | None = None
+    timeout: float | None = field(default_factory=default_run_timeout)
+    max_parallel_tool_calls: int | None = None
 
     @property
     def server_thread_ids(self) -> bool:
@@ -450,7 +478,7 @@ class RunsConfig:
     def from_dict(cls, data: dict) -> "RunsConfig":
         if not isinstance(data, dict):
             raise ValueError("runs must be an object")
-        thread_ids = data.get("thread_ids", "client")
+        thread_ids = data.get("thread_ids", "server")
         if thread_ids not in THREAD_ID_MODES:
             raise ValueError(f"runs.thread_ids must be one of {list(THREAD_ID_MODES)}")
         return cls(
@@ -459,6 +487,7 @@ class RunsConfig:
             state_keys=_key_allow_list(data, "state_keys"),
             max_concurrent_per_user=_runs_limit(data),
             timeout=_runs_timeout(data),
+            max_parallel_tool_calls=_runs_max_parallel_tool_calls(data),
         )
 
 
@@ -484,12 +513,23 @@ def _runs_limit(data: dict) -> int | None:
 
 
 def _runs_timeout(data: dict) -> float | None:
-    raw = data.get("timeout")
+    if "timeout" not in data:
+        return default_run_timeout()  # unset: mode default. An explicit null is no limit.
+    raw = data["timeout"]
     if raw is None:
         return None
     if isinstance(raw, bool) or not isinstance(raw, int | float) or raw <= 0:
         raise ValueError("runs.timeout must be a positive number of seconds or null")
     return float(raw)
+
+
+def _runs_max_parallel_tool_calls(data: dict) -> int | None:
+    raw = data.get("max_parallel_tool_calls")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise ValueError("runs.max_parallel_tool_calls must be a positive integer or null")
+    return raw
 
 
 @dataclass
@@ -524,6 +564,34 @@ class AgUiConfig:
             enabled=_parse_bool(data.get("enabled", False), field="ag_ui.enabled"),
             allow_client_tools=_parse_bool(
                 data.get("allow_client_tools", True), field="ag_ui.allow_client_tools"
+            ),
+        )
+
+
+@dataclass
+class MediaConfig:
+    """Uploaded-file lifecycle settings parsed from 10xgraph.json.
+
+    Example::
+
+        "media": {"delete_with_thread": true}
+
+    The API records which threads use an uploaded file (``graph://media/`` references in
+    accepted messages). With ``delete_with_thread`` (default ``true``), deleting a message or a
+    thread drops that link, and a file with no thread left is deleted too. Set it to ``false``
+    to keep the links but never delete automatically. Files uploaded before link tracking
+    existed are never deleted automatically either way.
+    """
+
+    delete_with_thread: bool = True
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "MediaConfig":
+        if not isinstance(data, dict):
+            raise ValueError("media must be an object")
+        return cls(
+            delete_with_thread=_parse_bool(
+                data.get("delete_with_thread", True), field="media.delete_with_thread"
             ),
         )
 
@@ -745,3 +813,9 @@ class GraphConfig:
         """
         data = self.data.get("ag_ui", None)
         return AgUiConfig.from_dict({} if data is None else data)
+
+    @property
+    def media(self) -> MediaConfig:
+        """Uploaded-file lifecycle settings (``media`` key); defaults when absent."""
+        data = self.data.get("media", None)
+        return MediaConfig.from_dict({} if data is None else data)

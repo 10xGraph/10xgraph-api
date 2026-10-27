@@ -218,7 +218,8 @@ async def test_invoke_past_the_timeout_answers_504():
             GraphInputSchema(messages=_input().messages, config={"thread_id": "t1"}), ALICE
         )
     assert exc.value.status_code == 504
-    assert "timed out after 0.05s" in exc.value.detail
+    assert "runs.timeout limit of 0.05s" in exc.value.detail
+    assert "10xgraph.json" in exc.value.detail
 
 
 @pytest.mark.asyncio
@@ -260,7 +261,8 @@ async def test_stream_past_the_timeout_ends_with_an_error_chunk():
     ]
     assert chunks[0].data == {"step": 1}
     assert chunks[-1].event == StreamEvent.ERROR
-    assert chunks[-1].data["reason"] == "Graph run timed out after 0.05s"
+    assert "runs.timeout limit of 0.05s" in chunks[-1].data["reason"]
+    assert "10xgraph.json" in chunks[-1].data["reason"]
 
 
 class TestBoundedStream:

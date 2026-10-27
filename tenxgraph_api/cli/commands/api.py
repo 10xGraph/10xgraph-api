@@ -25,6 +25,7 @@ from tenxgraph_api.cli.constants import (
 from tenxgraph_api.cli.core.config import ConfigManager
 from tenxgraph_api.cli.core.validation import validate_cli_options
 from tenxgraph_api.cli.exceptions import ConfigurationError, ServerError
+from tenxgraph_api.src.app.core.config.settings import normalize_mode_value
 
 
 # Mirrors Settings.MAX_REQUEST_SIZE; read from the environment the command just loaded.
@@ -108,6 +109,12 @@ class APICommand(BaseCommand):
                     else:
                         load_dotenv()
                         step.detail("environment: process defaults")
+
+                    # Fail early with a clear message instead of a settings traceback.
+                    try:
+                        normalize_mode_value(os.environ.get("MODE"))
+                    except ValueError as e:
+                        raise ConfigurationError(str(e)) from e
 
                     os.environ["GRAPH_PATH"] = str(actual_config_path)
 

@@ -157,3 +157,27 @@ def test_websocket_on_adds_the_extra_and_enables_the_routes(tmp_path: Path) -> N
     assert _dependencies(target) == ["10xgraph[anthropic]", "10xgraph-api[jwt,websocket]"]
     config = json.loads((target / "10xgraph.json").read_text())
     assert config["websocket"] == {"enabled": True}
+
+
+def test_init_scaffolds_a_gitignore_that_keeps_env_out(tmp_path: Path) -> None:
+    target = tmp_path / "agent"
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+
+    result = command.execute(path=str(target), template="production", non_interactive=True)
+
+    assert result == 0
+    lines = (target / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert {".env", ".env.*", "!.env.example", "uploads/", "eval_reports/"} <= set(lines)
+    assert lines.index("!.env.example") > lines.index(".env.*")
+
+
+def test_init_adds_secret_patterns_to_an_existing_gitignore(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+
+    result = command.execute(path=str(tmp_path), template="quick-start", non_interactive=True)
+
+    assert result == 0
+    content = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert content.startswith("node_modules/\n")
+    assert ".env\n" in content

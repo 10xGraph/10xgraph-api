@@ -466,7 +466,7 @@ class TestJwtAuth:
         mock_response: Response,
         jwt_env_vars,
     ):
-        """Test that numeric user_id in token works correctly."""
+        """A whole-number user_id is accepted and stored in its string form."""
         payload = {
             "user_id": 12345,
             "exp": datetime.now(UTC) + timedelta(hours=1),
@@ -477,7 +477,7 @@ class TestJwtAuth:
         result = jwt_auth.authenticate(None, mock_response, credentials)
 
         assert result is not None
-        assert result["user_id"] == 12345
+        assert result["user_id"] == "12345"
 
     def test_authenticate_with_uuid_user_id(
         self,

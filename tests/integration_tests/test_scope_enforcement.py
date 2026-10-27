@@ -143,3 +143,68 @@ def test_authz_block_drives_core_isolation_via_api():
     other = client.get("/v1/threads/t1/state", headers=_headers("mallory", "checkpointer:read"))
     assert other.status_code == HTTP_OK
     assert other.json()["data"]["state"] is None
+
+
+# ---------------------------------------------------------------------------
+# Isolation default for a custom backend that implements only authorize()
+# ---------------------------------------------------------------------------
+
+
+def _two_user_app(authz):
+    import anyio
+    from tenxgraph.utils.thread_info import ThreadInfo
+
+    cp = InMemoryCheckpointer()
+    for thread_id, user_id in (("t-alice", "alice"), ("t-bob", "bob")):
+        anyio.run(
+            cp.aput_thread,
+            {"thread_id": thread_id, "user_id": user_id},
+            ThreadInfo(thread_id=thread_id, user_id=user_id),
+        )
+    return make_client(build_app(routers=[checkpointer_router], authz=authz, checkpointer=cp))
+
+
+def _listed_ids(client, user_id: str) -> set[str]:
+    resp = client.get("/v1/threads", headers=_headers(user_id, None))
+    assert resp.status_code == HTTP_OK
+    return {t["thread_id"] for t in resp.json()["data"]["threads"]}
+
+
+def test_custom_backend_with_only_authorize_isolates_users_by_default():
+    from tenxgraph_api.src.app.core.auth.authorization import AuthorizationBackend
+
+    class _OnlyAuthorize(AuthorizationBackend):
+        async def authorize(self, user, resource, action, resource_id=None, **ctx):
+            return True
+
+    assert _OnlyAuthorize().isolation_scope() == "owner"
+    client = _two_user_app(_OnlyAuthorize())
+    assert _listed_ids(client, "alice") == {"t-alice"}
+    assert _listed_ids(client, "bob") == {"t-bob"}
+
+
+def test_custom_backend_returning_none_shares_data_on_purpose():
+    from tenxgraph_api.src.app.core.auth.authorization import AuthorizationBackend
+
+    class _Shared(AuthorizationBackend):
+        async def authorize(self, user, resource, action, resource_id=None, **ctx):
+            return True
+
+        def isolation_scope(self) -> str:
+            return "none"
+
+    client = _two_user_app(_Shared())
+    assert _listed_ids(client, "alice") == {"t-alice", "t-bob"}
+
+
+def test_builtin_backends_keep_their_isolation_scope():
+    from tenxgraph_api.src.app.core.auth.authorization import (
+        DefaultAuthorizationBackend,
+        OwnershipAuthorizationBackend,
+        RoleBasedAuthorizationBackend,
+    )
+
+    assert DefaultAuthorizationBackend().isolation_scope() == "none"
+    assert OwnershipAuthorizationBackend().isolation_scope() == "owner"
+    assert RoleBasedAuthorizationBackend().isolation_scope() == "owner"
+    assert RoleBasedAuthorizationBackend(isolation="none").isolation_scope() == "none"

@@ -217,18 +217,26 @@ SwarmMemberConfig(
 
 ### RAGAgent
 
-Retrieves relevant documents from a vector store before each LLM call and injects them into context. Supports rerankers.
+Retrieves relevant documents from a store, optionally reranks them, then calls a wrapped agent to answer. Supports rerankers.
 
 ```python
 from tenxgraph.prebuilt.agent import RAGAgent
-from tenxgraph.storage.store import create_local_qdrant_store, OpenAIEmbedding
+from tenxgraph.core.graph import Agent
+from tenxgraph.storage import create_local_qdrant_store
+from tenxgraph.storage.store.embedding import OpenAIEmbedding
 
-store = create_local_qdrant_store("./qdrant_data", OpenAIEmbedding())
+store = create_local_qdrant_store(
+    path="./qdrant_data",
+    embedding=OpenAIEmbedding(model="text-embedding-3-small"),
+)
 
 agent = RAGAgent(
-    model="gpt-4o",
     store=store,
-    system_prompt=[{"role": "system", "content": "Answer using the provided document context."}],
+    agent=Agent(
+        model="gpt-4o",
+        system_prompt=[{"role": "system", "content": "Answer using the provided documents."}],
+    ),
+    top_k=5,
 )
 app = agent.compile()
 ```
@@ -238,8 +246,15 @@ With reranker:
 ```python
 from tenxgraph.prebuilt.agent import RAGAgent, CohereReranker
 
-agent = RAGAgent(model="gpt-4o", store=store, reranker=CohereReranker(api_key="..."))
+agent = RAGAgent(store=store, agent=Agent(model="gpt-4o"), reranker=CohereReranker(api_key="..."))
 ```
+
+Constructor options: `store`, `agent`, `reranker`, `top_k`, `top_n`, `retrieval_strategy`, `score_threshold`, `store_config`, `store_config_builder`, plus `state`, `context_manager`, `publisher`, `id_generator`, `container`.
+
+- `store_config` is a fixed dict passed to every `store.asearch()` call (shared knowledge base).
+- `store_config_builder(run_config) -> dict` builds the store config per run instead, for example `store_config_builder=lambda cfg: {"user_id": cfg["user_id"]}`. `QdrantStore` reads `user_id`, `thread_id` and `collection`. Identity must come from the authenticated run config, never from state.
+
+The retrieved documents are numbered and fenced in a `<retrieved_documents_...>` block that is added to the latest user message of the model request only, before the user's text. The saved user message is not changed and the documents are not saved in state. The wrapped `agent` must accept `execute(state, config, *, request_blocks=None)` (the built-in `Agent` does), otherwise `RAGAgent` raises `TypeError` when there are documents.
 
 ### AudioAgent
 
@@ -298,7 +313,6 @@ Import from `tenxgraph.prebuilt.tools`:
 | `file_search` | Search files by glob pattern. | `["file", "search"]` |
 | `google_web_search` | Call Google Custom Search API. Needs `GOOGLE_API_KEY` + `GOOGLE_CSE_ID`. | `["search", "web", "google"]` |
 | `vertex_ai_search` | Call Google Vertex AI Search. Needs GCP credentials + `VERTEX_AI_DATA_STORE_ID`. | `["search", "vertex", "google"]` |
-| `memory_tool` | General-purpose memory search/write tool (without `MemoryConfig`). | — |
 | `make_user_memory_tool` | Factory for per-user memory tools (used by `MemoryConfig`). | — |
 | `make_agent_memory_tool` | Factory for agent-scoped memory tools (used by `MemoryConfig`). | — |
 | `create_handoff_tool` | Creates a tool that transfers control to a named agent node. | — |
@@ -328,7 +342,7 @@ All three enforce paths are within the working directory or an explicit allowed 
 
 ### Memory tools
 
-The typical pattern is `Agent(..., memory=MemoryConfig(...))` — this injects memory tools automatically. Add `memory_tool`, `make_user_memory_tool`, or `make_agent_memory_tool` manually only when you need explicit control.
+The typical pattern is `Agent(..., memory=MemoryConfig(...))` — in `postload` mode this registers `user_memory_tool` and `agent_memory_tool` on the Agent's `ToolNode` automatically. Call `make_user_memory_tool` or `make_agent_memory_tool` yourself only when you need explicit control. There is no general-purpose `memory_tool`.
 
 ### create_handoff_tool
 

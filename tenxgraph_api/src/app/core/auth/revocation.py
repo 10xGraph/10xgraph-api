@@ -57,6 +57,18 @@ def _number(value: Any) -> float | None:
     return float(value)
 
 
+def _user_key_of(identity: dict[str, Any]) -> str | None:
+    """The identity's ``user_id`` as a string, or None when it is missing or not usable."""
+    user_id = identity.get("user_id")
+    if isinstance(user_id, bool):
+        return None
+    if isinstance(user_id, int):
+        return str(user_id)
+    if isinstance(user_id, str) and user_id.strip():
+        return user_id
+    return None
+
+
 def _revoked_by_user_cutoff(identity: dict[str, Any], cutoff: float | None) -> bool:
     if cutoff is None:
         return False
@@ -85,8 +97,8 @@ class InMemoryTokenRevocation(TokenRevocationBackend):
         jti = identity.get("jti")
         if jti is not None and str(jti) in self._tokens:
             return True
-        user_id = identity.get("user_id")
-        cutoff = self._users.get(str(user_id)) if user_id is not None else None
+        user_id = _user_key_of(identity)
+        cutoff = self._users.get(user_id) if user_id is not None else None
         return _revoked_by_user_cutoff(identity, cutoff)
 
 
@@ -140,7 +152,7 @@ class RedisTokenRevocation(TokenRevocationBackend):
         await self._client.set(self._user_key(user_id), str(cutoff).encode(), ex=ttl)
 
     async def is_revoked(self, identity: dict[str, Any]) -> bool:
-        jti, user_id = identity.get("jti"), identity.get("user_id")
+        jti, user_id = identity.get("jti"), _user_key_of(identity)
         keys = []
         if jti is not None:
             keys.append(self._jti_key(jti))
@@ -204,10 +216,12 @@ async def token_revoked(
 ) -> bool:
     """Whether ``identity``'s credential has been revoked.
 
-    False when no backend is configured or the identity is not authenticated. Raises
-    :class:`TokenRevocationUnavailableError` when the backend fails (fail closed).
+    False when no backend is configured or the identity is not a mapping. The ``jti`` is
+    checked even when ``user_id`` is missing or odd; per-user revocation applies when
+    ``user_id`` is a valid string. Raises :class:`TokenRevocationUnavailableError` when the
+    backend fails (fail closed).
     """
-    if not isinstance(identity, dict) or not identity.get("user_id"):
+    if not isinstance(identity, dict):
         return False
     backend = backend or _bound_backend()
     if backend is None:

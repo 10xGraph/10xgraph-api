@@ -50,6 +50,19 @@ MAX_COMPRESSION_RATIO = 100
 MAX_ARCHIVE_ENTRIES = 10_000
 
 EXTRACTION_TIMEOUT_SECONDS = 30.0
+
+# textxtract parses in a worker thread that cannot be cancelled, so a timeout only stops the
+# wait. Two limits keep the damage bounded: a size cap before parsing, and a small number of
+# extraction slots that stay taken until the thread really finishes.
+#
+# Markup and text parsers expand their input: a 12 MB ``text/html`` file used about 1.2 GB RSS
+# (roughly 100x) and a 20 MB one took 32.8 s of CPU. 5 MB keeps one parse near 500 MB and
+# inside the timeout. PDF and DOCX are not capped here: they are bounded by the upload cap and,
+# for DOCX, by the archive checks above.
+MAX_TEXT_DOCUMENT_BYTES = 5 * 1024 * 1024
+_SIZE_CAPPED_EXTENSIONS = frozenset({".html", ".xml", ".csv", ".md", ".json", ".txt"})
+# At most this many extractions run (or are still running after a timeout) at once.
+MAX_CONCURRENT_EXTRACTIONS = 2
 MAX_EXTRACTED_CHARS = 1_000_000
 
 
@@ -115,6 +128,38 @@ class DocumentExtractor:
 
         self.extractor = AsyncTextExtractor()
 
+    def _slots(self) -> asyncio.Semaphore:
+        slots = getattr(self, "_slot_semaphore", None)
+        if slots is None:
+            slots = self._slot_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EXTRACTIONS)
+        return slots
+
+    async def _extract_bounded(self, data: bytes, filename: str) -> Any:
+        """Run one extraction under the timeout without ever exceeding the slot limit.
+
+        The slot is released when the extraction task finishes, not when the wait times
+        out, so a stuck parse keeps its slot and cannot be outnumbered by new ones.
+        """
+        slots = self._slots()
+        try:
+            await asyncio.wait_for(slots.acquire(), timeout=EXTRACTION_TIMEOUT_SECONDS)
+        except TimeoutError as exc:
+            raise TimeoutError("no extraction slot free") from exc
+        try:
+            task = asyncio.ensure_future(self.extractor.extract(data, filename))
+        except BaseException:
+            slots.release()
+            raise
+        task.add_done_callback(lambda _t: slots.release())
+        # shield: cancelling the wait must not cancel the task, or the slot would be freed
+        # while the worker thread is still running.
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout=EXTRACTION_TIMEOUT_SECONDS)
+        except BaseException:
+            # Nobody will read the result of a task we stopped waiting for.
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            raise
+
     async def extract(
         self,
         data: bytes | str,
@@ -153,10 +198,16 @@ class DocumentExtractor:
                     return None
                 if extension == ".docx":
                     _check_zip_container(data)
-                result = await asyncio.wait_for(
-                    self.extractor.extract(data, f"upload{extension}"),
-                    timeout=EXTRACTION_TIMEOUT_SECONDS,
-                )
+                if extension in _SIZE_CAPPED_EXTENSIONS and len(data) > MAX_TEXT_DOCUMENT_BYTES:
+                    logger.warning(
+                        "Not extracting %s: %d bytes exceeds the %d byte limit for %s files",
+                        filename,
+                        len(data),
+                        MAX_TEXT_DOCUMENT_BYTES,
+                        extension,
+                    )
+                    return None
+                result = await self._extract_bounded(data, f"upload{extension}")
                 return _as_text(result)
             return _as_text(await self.extractor.extract(data))
 

@@ -16,6 +16,7 @@ from tenxgraph.storage.media.config import DocumentHandling
 from tenxgraph.storage.media.storage.base import BaseMediaStore
 
 from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
+from tenxgraph_api.src.app.core.config.graph_config import MediaConfig
 from tenxgraph_api.src.app.core.config.media_settings import MediaSettings, MediaStorageType
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.utils.media.extractor import DocumentExtractor
@@ -27,6 +28,10 @@ logger = logging.getLogger("tenxgraph_api.media")
 
 _SIGNED_URL_NAMESPACE = "media:signed-url"
 _EXTRACTION_NAMESPACE = "media:extraction"
+
+# Metadata key listing the threads whose messages reference a file. Written empty at upload
+# (so a file without the key is known to predate link tracking and is never auto-deleted).
+THREADS_KEY = "threads"
 
 # In-process caches in front of the shared checkpointer cache. Bounded so a stream of new
 # uploads cannot grow a worker's memory without limit.
@@ -194,6 +199,7 @@ class MediaService:
         self._checkpointer = checkpointer
         self._store: BaseMediaStore | None = None
         self._pipeline: DocumentPipeline | None = None
+        self._links_notice_logged = False
         # file_id -> extracted text
         self._extraction_cache = _BoundedCache(MAX_EXTRACTION_ENTRIES, MAX_EXTRACTION_CHARS)
         # file_id -> signed URL payload
@@ -297,6 +303,8 @@ class MediaService:
         file_metadata: dict[str, Any] = {"filename": filename}
         if user_id:
             file_metadata["owner_id"] = str(user_id)
+            if self.supports_links:
+                file_metadata[THREADS_KEY] = []
 
         storage_key = await self.store.store(
             data,
@@ -336,6 +344,87 @@ class MediaService:
             result["direct_url_expires_at"] = direct_url_info["expires_at"]
 
         return result
+
+    # ------------------------------------------------------------------
+    # Thread links and deletion
+    # ------------------------------------------------------------------
+
+    @property
+    def supports_links(self) -> bool:
+        """Whether the media store can update metadata in place (core with ``update_metadata``)."""
+        return callable(getattr(self.store, "update_metadata", None))
+
+    async def _update_metadata(self, key: str, updates: dict[str, Any]) -> bool:
+        """``store.update_metadata`` (newer core only; callers check ``supports_links``)."""
+        store: Any = self.store
+        return bool(await store.update_metadata(key, updates))
+
+    def delete_with_thread(self) -> bool:
+        """``media.delete_with_thread`` from 10xgraph.json (default true)."""
+        try:
+            from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
+
+            graph_config = InjectQ.get_instance().try_get(GraphConfig)
+            media = getattr(graph_config, "media", None)
+        except Exception:
+            return True
+        return bool(media.delete_with_thread) if isinstance(media, MediaConfig) else True
+
+    async def link_threads(self, keys: list[str], thread_id: str, user_id: str) -> None:
+        """Record ``thread_id`` on each file the caller owns that an accepted message references.
+
+        Never raises: a failure only means the file is not tracked, so it is never auto-deleted.
+        Files without a ``threads`` list (uploaded before link tracking) are left alone.
+        """
+        if not keys:
+            return
+        if not self.supports_links:
+            if not self._links_notice_logged:
+                self._links_notice_logged = True
+                logger.info(
+                    "The installed core has no BaseMediaStore.update_metadata; uploaded files "
+                    "are not linked to threads and never deleted automatically."
+                )
+            return
+        for key in dict.fromkeys(keys):
+            try:
+                metadata = await self.store.get_metadata(key)
+                if not metadata or str(metadata.get("owner_id")) != str(user_id):
+                    continue
+                threads = metadata.get(THREADS_KEY)
+                if not isinstance(threads, list) or thread_id in threads:
+                    continue
+                await self._update_metadata(key, {THREADS_KEY: [*threads, thread_id]})
+            except Exception as exc:
+                logger.warning("Could not link file %s to a thread: %s", log_safe(key), exc)
+
+    async def unlink_threads(self, keys: list[str], thread_id: str) -> None:
+        """Drop ``thread_id`` from each file's links; delete a file left with none.
+
+        The delete only happens with ``media.delete_with_thread`` on. Never raises.
+        """
+        if not keys or not self.supports_links:
+            return
+        delete = self.delete_with_thread()
+        for key in dict.fromkeys(keys):
+            try:
+                metadata = await self.store.get_metadata(key)
+                threads = metadata.get(THREADS_KEY) if metadata else None
+                if not isinstance(threads, list) or thread_id not in threads:
+                    continue
+                remaining = [t for t in threads if t != thread_id]
+                if remaining or not delete:
+                    await self._update_metadata(key, {THREADS_KEY: remaining})
+                else:
+                    await self.delete_file(key)
+            except Exception as exc:
+                logger.warning("Could not release file %s from a thread: %s", log_safe(key), exc)
+
+    async def delete_file(self, file_id: str) -> bool:
+        """Delete a file's bytes and metadata; False when it does not exist."""
+        deleted = bool(await self.store.delete(file_id))
+        self._extraction_cache.pop(file_id, None)
+        return deleted
 
     async def get_file(self, file_id: str, user_id: str | None = None) -> tuple[bytes, str]:
         """Retrieve file bytes and MIME type."""

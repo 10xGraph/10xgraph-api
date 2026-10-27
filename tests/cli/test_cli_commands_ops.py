@@ -315,7 +315,9 @@ def test_build_command_compose_force_overwrite(tmp_path, monkeypatch, silent_out
     cmd = BuildCommand(output=silent_output)
     code = cmd.execute(output_file="Dockerfile", force=True, docker_compose=True)
     assert code == 0
-    assert (tmp_path / "docker-compose.yml").read_text(encoding="utf-8").startswith("services:")
+    content = (tmp_path / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "\nservices:\n" in content
+    assert "old: {}" not in content
 
 
 @pytest.mark.parametrize(

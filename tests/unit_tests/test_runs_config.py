@@ -21,15 +21,49 @@ from tenxgraph_api.src.app.core.config.graph_config import (
 # ---------------------------------------------------------------------------
 
 
-def test_defaults():
+def test_defaults(monkeypatch):
+    monkeypatch.delenv("MODE", raising=False)
     runs = RunsConfig.from_dict({})
     assert runs == RunsConfig()
-    assert runs.thread_ids == "client"
-    assert runs.server_thread_ids is False
+    assert runs.thread_ids == "server"
+    assert runs.server_thread_ids is True
     assert runs.config_keys is None
     assert runs.state_keys is None
     assert runs.max_concurrent_per_user == DEFAULT_MAX_CONCURRENT_RUNS_PER_USER
     assert runs.timeout is None
+    assert runs.max_parallel_tool_calls is None
+
+
+def test_timeout_defaults_to_300_seconds_in_production(monkeypatch):
+    monkeypatch.setenv("MODE", "production")
+    assert RunsConfig().timeout == 300.0
+    assert RunsConfig.from_dict({}).timeout == 300.0
+    assert RunsConfig.from_dict({"thread_ids": "server"}).timeout == 300.0
+
+
+@pytest.mark.parametrize("mode", ["development", "dev", "", "bogus"])
+def test_timeout_is_unlimited_in_development(monkeypatch, mode):
+    monkeypatch.setenv("MODE", mode)
+    assert RunsConfig().timeout is None
+    assert RunsConfig.from_dict({}).timeout is None
+
+
+def test_explicit_timeout_wins_in_production(monkeypatch):
+    monkeypatch.setenv("MODE", "production")
+    assert RunsConfig.from_dict({"timeout": 90}).timeout == 90.0
+    assert RunsConfig.from_dict({"timeout": 1200}).timeout == 1200.0
+
+
+def test_explicit_null_timeout_means_no_limit_in_production(monkeypatch):
+    monkeypatch.setenv("MODE", "production")
+    assert RunsConfig.from_dict({"timeout": None}).timeout is None
+
+
+def test_graph_config_without_runs_key_gets_the_production_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("MODE", "production")
+    path = tmp_path / "10xgraph.json"
+    path.write_text('{"agent": "graph.react:app"}')
+    assert GraphConfig(str(path)).runs.timeout == 300.0
 
 
 def test_full_config():
@@ -40,6 +74,7 @@ def test_full_config():
             "state_keys": [],
             "max_concurrent_per_user": 3,
             "timeout": 90,
+            "max_parallel_tool_calls": 4,
         }
     )
     assert runs.server_thread_ids is True
@@ -47,6 +82,7 @@ def test_full_config():
     assert runs.state_keys == frozenset()
     assert runs.max_concurrent_per_user == 3
     assert runs.timeout == 90.0
+    assert runs.max_parallel_tool_calls == 4
 
 
 @pytest.mark.parametrize("value", [0, None])
@@ -67,6 +103,11 @@ def test_zero_or_null_concurrency_means_unlimited(value):
         ({"timeout": 0}, "timeout"),
         ({"timeout": -5}, "timeout"),
         ({"timeout": "60"}, "timeout"),
+        ({"max_parallel_tool_calls": 0}, "max_parallel_tool_calls"),
+        ({"max_parallel_tool_calls": -2}, "max_parallel_tool_calls"),
+        ({"max_parallel_tool_calls": 2.5}, "max_parallel_tool_calls"),
+        ({"max_parallel_tool_calls": "5"}, "max_parallel_tool_calls"),
+        ({"max_parallel_tool_calls": True}, "max_parallel_tool_calls"),
     ],
 )
 def test_invalid_values_are_rejected(data, match):
@@ -122,6 +163,27 @@ async def test_server_mode_refuses_client_named_new_threads(backend_cls):
     assert await backend.authorize(ALICE, "graph", "invoke", resource_id=None) is True
 
 
+def test_client_is_an_explicit_opt_in():
+    runs = RunsConfig.from_dict({"thread_ids": "client"})
+    assert runs.thread_ids == "client"
+    assert runs.server_thread_ids is False
+
+
+@pytest.mark.asyncio
+async def test_client_thread_ids_context_lets_ag_ui_and_live_name_a_new_thread():
+    backend = OwnershipAuthorizationBackend(
+        checkpointer=_Owners({"t1": "bob"}), server_thread_ids=True
+    )
+    kw = {"resource_id": "frontend-id", "client_thread_ids": True}
+    assert await backend.authorize(ALICE, "graph", "stream", **kw) is True
+    # An existing thread of someone else is still refused, and so is a non-create action.
+    assert (
+        await backend.authorize(ALICE, "graph", "stream", resource_id="t1", client_thread_ids=True)
+        is False
+    )
+    assert await backend.authorize(ALICE, "graph", "read", **kw) is False
+
+
 @pytest.mark.asyncio
 async def test_client_mode_lets_a_client_name_a_new_thread():
     backend = OwnershipAuthorizationBackend(checkpointer=_Owners({}))
@@ -151,28 +213,13 @@ def test_loader_logs_when_the_mode_cannot_apply(caplog):
 
     from tenxgraph_api.src.app import loader
 
-    with caplog.at_level("INFO", logger="tenxgraph_api.loader"):
+    with caplog.at_level("DEBUG", logger="tenxgraph_api.loader"):
         loader.load_and_bind_authorization(InjectQ(), "allow_all", None, server_thread_ids=True)
     assert "does not check thread ownership" in caplog.text
 
 
-@pytest.mark.parametrize(
-    ("ag_ui", "server", "refused"), [(True, True, True), (True, False, False), (False, True, False)]
-)
-def test_ag_ui_with_server_thread_ids_is_refused_at_boot(ag_ui, server, refused):
-    from types import SimpleNamespace
-
-    from tenxgraph_api.src.app.core.auth.authorization import DefaultAuthorizationBackend
-    from tenxgraph_api.src.app.loader import _refuse_ag_ui_with_server_thread_ids
-
-    config = SimpleNamespace(
-        ag_ui=SimpleNamespace(enabled=ag_ui),
-        runs=RunsConfig(thread_ids="server" if server else "client"),
-    )
-    if refused:
-        with pytest.raises(ValueError, match="ag_ui"):
-            _refuse_ag_ui_with_server_thread_ids(config, OwnershipAuthorizationBackend())
-    else:
-        _refuse_ag_ui_with_server_thread_ids(config, OwnershipAuthorizationBackend())
-    # Backends that do not refuse client ids are unaffected.
-    _refuse_ag_ui_with_server_thread_ids(config, DefaultAuthorizationBackend())
+def test_config_editor_validates_max_parallel_tool_calls():
+    base = {"agent": "graph:app"}
+    assert validate({**base, "runs": {"max_parallel_tool_calls": 5}}) == []
+    issues = validate({**base, "runs": {"max_parallel_tool_calls": 0}})
+    assert [i["path"] for i in issues if i["level"] == "error"] == ["runs"]

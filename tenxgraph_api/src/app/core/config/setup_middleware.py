@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.gzip import GZipMiddleware
@@ -196,7 +197,33 @@ class RequestIDMiddleware:
         logger.debug(f"Response: Request ID: {request_id}, Timestamp: {timestamp}")
 
 
-def _attach_otel_publisher(container: InjectQ, settings) -> None:
+def _user_id_mode(graph_config: GraphConfig | None) -> str:
+    """``observability.user_id_mode`` from ``10xgraph.json``: how traces carry the user id."""
+    obs_cfg = graph_config.observability if graph_config is not None else None
+    return str((obs_cfg or {}).get("user_id_mode") or "raw")
+
+
+def _make_otel_publisher(publisher_cls: Any, level: Any, user_id_mode: str) -> Any:
+    """Build an ``OtelPublisher``, passing ``user_id_mode`` only when it is not the default.
+
+    Cores older than the release that added ``user_id_mode`` do not accept it; they keep the raw
+    id, which is logged so the operator knows the setting had no effect.
+    """
+    if user_id_mode == "raw":
+        return publisher_cls(level=level)
+    try:
+        return publisher_cls(level=level, user_id_mode=user_id_mode)
+    except TypeError:
+        logger.warning(
+            "observability.user_id_mode=%r needs a newer 10xgraph core; traces keep the raw id.",
+            user_id_mode,
+        )
+        return publisher_cls(level=level)
+
+
+def _attach_otel_publisher(
+    container: InjectQ, settings, graph_config: GraphConfig | None = None
+) -> None:
     """Wire OtelPublisher into the container when OTEL_ENABLED=true.
 
     Merges with any publisher already bound in the container:
@@ -224,7 +251,7 @@ def _attach_otel_publisher(container: InjectQ, settings) -> None:
         )
         level = ObservabilityLevel.STANDARD
 
-    otel_publisher = OtelPublisher(level=level)
+    otel_publisher = _make_otel_publisher(OtelPublisher, level, _user_id_mode(graph_config))
     existing = container.try_get(BasePublisher)
 
     if existing is None:
@@ -298,7 +325,7 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
         )
         level = ObservabilityLevel.STANDARD
 
-    otel_publisher = OtelPublisher(level=level)
+    otel_publisher = _make_otel_publisher(OtelPublisher, level, _user_id_mode(graph_config))
     existing = container.try_get(BasePublisher)
 
     if existing is None:
@@ -323,7 +350,8 @@ def _setup_otel(app: FastAPI, settings) -> None:
     the standard OTEL_EXPORTER_OTLP_ENDPOINT env var (honoured automatically
     by the OTLP exporter). A ConsoleSpanExporter is used when no endpoint is
     configured and the app is not in production, so traces are visible locally
-    without any collector.
+    without any collector. In production with no endpoint nothing is set up and a warning
+    is logged.
     """
     try:
         from opentelemetry import trace
@@ -354,6 +382,14 @@ def _setup_otel(app: FastAPI, settings) -> None:
                 "is not installed. Install with: pip install '10xgraph-api[otel]'"
             )
             return
+    elif settings.MODE == "production":
+        # Printing spans to stdout would put request URLs and, at OTEL_LEVEL=full, message
+        # content in the container logs, so production exports nowhere instead.
+        logger.warning(
+            "OTEL_ENABLED=true but OTEL_EXPORTER_OTLP_ENDPOINT is not set; traces are not "
+            "exported. Console span output is development-only. Set the endpoint to export."
+        )
+        return
     else:
         from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
 
@@ -393,7 +429,7 @@ def setup_middleware(
     if settings.OTEL_ENABLED:
         _setup_otel(app, settings)
         if container is not None:
-            _attach_otel_publisher(container, settings)
+            _attach_otel_publisher(container, settings, graph_config)
 
     # Declarative Logfire/LangSmith wiring from 10xgraph.json (before compile).
     _setup_observability(container, graph_config)

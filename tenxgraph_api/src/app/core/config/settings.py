@@ -11,6 +11,41 @@ LOGGER_NAME = os.getenv("LOGGER_NAME", "10xgraph-api")
 
 logger = logging.getLogger(LOGGER_NAME)
 
+# Accepted spellings of MODE (after strip and lowercase) mapped to the canonical value that
+# the rest of the package compares against.
+MODE_ALIASES = {
+    "production": "production",
+    "prod": "production",
+    "development": "development",
+    "dev": "development",
+    "local": "development",
+}
+
+
+def normalize_mode_value(value: str | None) -> str:
+    """Return the canonical MODE for ``value``; unset or blank means ``development``.
+
+    Raises:
+        ValueError: If the value is not one of the accepted spellings.
+    """
+    text = (value or "").strip().lower()
+    if not text:
+        return "development"
+    try:
+        return MODE_ALIASES[text]
+    except KeyError:
+        accepted = ", ".join(sorted(MODE_ALIASES))
+        raise ValueError(
+            f"Invalid MODE {value!r}. Accepted values (case-insensitive): {accepted}. "
+            "Refusing to start: an unknown MODE would silently run with the development "
+            "security posture."
+        ) from None
+
+
+def _csv_tokens(value: str) -> list[str]:
+    """Split a comma-separated setting into stripped, non-empty tokens."""
+    return [token.strip() for token in value.split(",") if token.strip()]
+
 
 class Settings(BaseSettings):
     """
@@ -48,8 +83,9 @@ class Settings(BaseSettings):
     # Forced off when MODE=production, whatever the environment says.
     IS_DEBUG: bool = True
     # When true, MODE=production refuses to start on the settings it otherwise only warns
-    # about: wildcard ALLOWED_HOST, wildcard ORIGINS, and enabled API docs.
-    STRICT_PRODUCTION_CHECKS: bool = False
+    # about: wildcard ALLOWED_HOST, wildcard ORIGINS, and enabled API docs. Unset means on in
+    # production and off in development; STRICT_PRODUCTION_CHECKS=false opts out.
+    STRICT_PRODUCTION_CHECKS: bool | None = None
 
     #################################
     ###### Request Limits ###########
@@ -140,14 +176,18 @@ class Settings(BaseSettings):
     @field_validator("MODE", mode="before")
     @classmethod
     def normalize_mode(cls, v: str | None) -> str:
-        """Normalize MODE to lowercase."""
-        return v.lower() if v else "development"
+        """Normalize MODE to ``production`` or ``development``; reject anything else."""
+        return normalize_mode_value(v)
 
     @field_validator("ORIGINS")
     @classmethod
     def warn_cors_wildcard(cls, v: str) -> str:
         """Warn if CORS is set to wildcard in production."""
-        mode = os.environ.get("MODE", "development").lower()
+        try:
+            mode = normalize_mode_value(os.environ.get("MODE"))
+        except ValueError:
+            # The MODE field itself reports the invalid value.
+            return v
         if v == "*" and mode == "production":
             logger.warning(
                 "⚠️  SECURITY WARNING: CORS ORIGINS='*' in production.\n"
@@ -159,6 +199,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def check_production_security(self):
         """Check for insecure configurations in production mode."""
+        if self.STRICT_PRODUCTION_CHECKS is None:
+            self.STRICT_PRODUCTION_CHECKS = self.MODE == "production"
         if self.MODE == "production":
             # Docs (and the OpenAPI schema behind them) are off in production unless a path
             # was set explicitly.
@@ -179,22 +221,24 @@ class Settings(BaseSettings):
                     "Consider disabling DOCS_PATH and REDOCS_PATH."
                 )
 
-            if self.ALLOWED_HOST == "*":
+            if "*" in _csv_tokens(self.ALLOWED_HOST):
                 warnings.append(
                     "⚠️  ALLOWED_HOST='*' in production. "
                     "Set to specific hostnames for better security."
                 )
 
-            if self.STRICT_PRODUCTION_CHECKS and "*" in self.ORIGINS.split(","):
+            if self.STRICT_PRODUCTION_CHECKS and "*" in _csv_tokens(self.ORIGINS):
                 warnings.append("⚠️  ORIGINS='*' in production. Set the exact allowed origins.")
 
             if warnings and self.STRICT_PRODUCTION_CHECKS:
                 raise ValueError(
                     "\n".join(
                         [
-                            "Refusing to start: STRICT_PRODUCTION_CHECKS=true and MODE=production "
-                            "with insecure settings:",
+                            "Refusing to start: MODE=production with insecure settings "
+                            "(STRICT_PRODUCTION_CHECKS is on by default in production):",
                             *warnings,
+                            "Fix these settings, or set STRICT_PRODUCTION_CHECKS=false to "
+                            "start anyway with only warnings.",
                         ]
                     )
                 )

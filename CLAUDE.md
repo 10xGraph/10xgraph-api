@@ -96,8 +96,9 @@ Parsed by `tenxgraph_api/src/app/core/config/graph_config.py`. Supported keys:
 | `rate_limit` | Object (see below) |
 | `ag_ui` | `{"enabled": bool}`, default off. Mounts `POST /v1/ag-ui` (AG-UI protocol, for CopilotKit and other AG-UI clients). Needs the `ag-ui` extra |
 | `websocket` | `enabled` (`false` leaves out `/v1/graph/ws` and `/v1/graph/live`; `true` without `websockets`/`wsproto` refuses to boot; unset keeps them and warns if no library; `routers/setup_router.py::_graph_router`), `max_connections` (1000), `max_connections_per_user` (10), `realtime_models` (models a `/v1/graph/live` client may pick), `realtime_client_overrides` (init options a client may set; default `voice`, `modalities`, `vad`; add `system_prompt` only for trusted callers) |
-| `runs` | `RunsConfig`: `thread_ids` (`client` default, `server` = only existing ids may be named, enforced by the ownership/rbac backends), `config_keys` / `state_keys` (allow-lists for request config and `initial_state`/PUT state; 422 on other keys; `thread_id`, `run_id` always allowed), `max_concurrent_per_user` (HTTP invoke/stream/AG-UI runs in flight, default 10, 429 over it; `routers/graph/run_limits.py`), `timeout` (seconds; invoke 504, streams end with an error chunk) |
-| `token_revocation` | `"redis"` / `"memory"` / `"module:attr"` -> `core/auth/revocation.py::TokenRevocationBackend`, checked by `RequirePermission` (401) and before every WS run; backend errors fail closed (503) |
+| `runs` | `RunsConfig`: `thread_ids` (`server` default = only existing ids may be named on REST invoke/stream, `/v1/graph/ws` and checkpointer writes, a new thread is started by omitting the id; enforced by the ownership/rbac backends via `OwnershipAuthorizationBackend(server_thread_ids=...)`. AG-UI and `/v1/graph/live` are exempt: they pass `client_thread_ids=True` to `authorize` because their frontends make their own ids, and the caller owns a new one. `client` = any request may name a new thread, explicit opt-in), `config_keys` / `state_keys` (allow-lists for request config and `initial_state`/PUT state; 422 on other keys; `thread_id`, `run_id` always allowed), `max_concurrent_per_user` (HTTP invoke/stream/AG-UI runs in flight, default 10, 429 over it; `routers/graph/run_limits.py`), `timeout` (seconds; invoke 504, streams end with an error chunk), `max_parallel_tool_calls` (positive int, default unset = core's default 10 or env `TENXGRAPH_MAX_PARALLEL_TOOL_CALLS`; set into every run's config in `_prepare_input`, reserved from clients) |
+| `token_revocation` | `"redis"` / `"memory"` / `"module:attr"` -> `core/auth/revocation.py::TokenRevocationBackend`, checked by `RequirePermission` (401), before every `/v1/graph/ws` run, and before and every 30 s during a `/v1/graph/live` session (`REALTIME_RECHECK_INTERVAL`, close 1008); backend errors fail closed (503) |
+| `media` | `delete_with_thread` (default true): delete an uploaded file when the last message or thread that references it is deleted. Links are recorded in the file's `threads` metadata (`MediaService.link_threads` / `unlink_threads`); files without a `threads` key (uploaded before link tracking) and stores without `update_metadata` (core older than the release that added it) are never auto-deleted. `false` still records links. Parsed by `graph_config.MediaConfig` |
 | `graph_introspection` | `"open"` or `"scoped"` (default scoped in production): `GET /v1/graph`, `/v1/graph/tools`, `/v1/graph:StateSchema` need an explicit `graph:read` scope (`RequirePermission(..., introspection=True)`) |
 
 `rate_limit` object: `enabled`, `requests` (default 100), `window` secs (60), `by` (`ip` |
@@ -122,10 +123,18 @@ and for redis backend a `redis` sub-object `{ "url", "prefix" }` (or shorthand U
   `allow_all` only with auth off in development (no identity, so nothing to authorize).
   Selection lives in `loader._resolve_authorization_backend`; `RequirePermission` passes
   `resource_id` (thread_id from path or body) to `authorize`.
+- **Isolation defaults to owner.** `AuthorizationBackend.isolation_scope()` returns `"owner"`, so a
+  custom backend with only `authorize()` still scopes threads and memories per user; return
+  `"none"` on purpose to share (`DefaultAuthorizationBackend` / `allow_all` does).
+- **Token claims are validated.** `JwtAuth` requires `user_id` to be a non-empty string or an int
+  (stored as a string), else 401. `token_revoked` checks `jti` even with an odd `user_id`.
+  Scopes come from `authorization.scopes_from_claims`: the `scope` claim (space-separated) and
+  `scopes` (list or space-separated string) merge into exact names, checked with `in` (no
+  substrings); a wrong-typed claim is a 401 (`ScopeClaimError`), no claim means unrestricted.
 - **Ownership fails closed.** No checkpointer, or one whose `aget_thread_owner` raises
   `NotImplementedError`, denies thread requests; with auth on the loader refuses to boot in that
   setup (`authorization.assert_ownership_supported`). A thread with no owner allows only
-  `CREATE_ACTIONS` (`graph:invoke`, `graph:stream`, `checkpointer:write`); checkpointer state and
+  `CREATE_ACTIONS` (`graph:invoke`, `graph:stream`, `checkpointer:write`, `checkpointer:import`); checkpointer state and
   message writes claim the thread first (`CheckpointerService._claim_thread`). Every saved
   thread carries its owner via `request_config.owned_thread_info` (the in-memory and SQLite
   checkpointers read the owner from `ThreadInfo.user_id`).
@@ -154,12 +163,51 @@ and for redis backend a `redis` sub-object `{ "url", "prefix" }` (or shorthand U
   `POST /v1/graph/stop`, `POST /v1/graph/fix`, `GET /v1/graph`,
   `WS /v1/graph/ws`.
 - **Checkpointer / threads**: `GET/POST /v1/threads`, `GET/DELETE /v1/threads/{thread_id}`,
-  `GET /v1/threads/{thread_id}/state`, `GET /v1/threads/{thread_id}/messages`,
-  `... /messages/{message_id}`.
+  `GET/PUT/DELETE /v1/threads/{thread_id}/state`, `GET /v1/threads/{thread_id}/messages`,
+  `GET/DELETE ... /messages/{message_id}`. `POST /v1/threads/{thread_id}/messages` (import
+  history, any role) is admin-only: `RequirePermission("checkpointer", "import",
+  explicit_scope=True)`, so the caller must hold `checkpointer:import` explicitly (no scopes
+  means 403; `"*"` roles get it, `authorization.CHECKPOINTER_ADMIN_SCOPES`). Tool calls, media
+  ownership and size limits still apply. `PUT ... /messages/{message_id}` sets
+  `metadata["feedback"]` only (body `{"feedback": {...}}`, 8 KB, depth 10, `checkpointer:write`;
+  calls `aupdate_message_metadata`, 501 on cores older than 0.10.4, 404 for a missing message).
+- **Client input rules** (`core/auth/request_config.py`): `context_summary` and `execution_meta`
+  are never client-writable (`reject_builtin_state_keys`, 422); client messages are user-only
+  (`client_message_error`: no `assistant`/`system`; a `tool` message only as tool results, which
+  must answer a pending remote call, `GraphService._check_tool_results`, also for PUT state
+  `context`); the server replaces client `message_id`s (`with_fresh_message_ids`, in the schema
+  validators; AG-UI validates with `context={KEEP_MESSAGE_IDS: True}` to keep its ids);
+  `current_node` must be a real node and state values must match the state model's types (422).
+  Every external media URL in client input (`media.kind="url"`, not `graph://media/` or
+  `data:`; `gs://` included) is run through the graph's `media_policy.check_url` before the run
+  (`multimodal_preprocessor.check_external_media_urls`, via `GraphService.check_media_urls`,
+  also called by `CheckpointerService` for `POST messages` and `PUT state`): 400 with the policy
+  message, `MediaURLBlockedError`. `resolve_media_policy` uses `compiled_graph.media_policy`,
+  else a default `MediaFetchPolicy`, else skips (core without it). The policy lives in core;
+  the API has no config for it.
+- **Per-thread run lock** (`routers/graph/thread_lock.py`): invoke, stream, each WS run and
+  AG-UI take a one-slot lease `runs:thread:<thread id>` from `core/concurrency.py` (Redis when
+  configured, else per process; 60 s lease renewed while alive) before the graph starts, and
+  release it in `finally` (error, cancel, disconnect via `release_when_done`). Routers lock when
+  the request names a thread (streaming routes before the response headers, so the 409 is
+  real); `GraphService` locks a thread it creates (`_lock_new_thread`). Busy: wait up to
+  `THREAD_BUSY_WAIT_SECONDS` (30), then 409 "thread is busy" in the standard error envelope (WS: error chunk
+  `data.reason = "thread is busy"`, socket stays open). Request option `on_busy`
+  (`"wait"` | `"cancel"`, top level next to `recursion_limit`; not on AG-UI): `cancel` calls
+  `GraphService.stop_graph` while waiting. `/v1/graph/live` is not locked.
+- **Production error chunks:** `graph_service.sanitize_error_chunk` (called in
+  `stream_chunks`, so stream, WS and AG-UI share it) replaces `data.reason` / `data.error` /
+  `data.message` and `state.execution_meta.internal_data["error"]` of `ERROR` chunks with the
+  generic `_sanitize_error_message` text when `MODE=production`. Core's
+  `... internal error (reference <id>).` tool text is kept.
 - **Store (memory)**: `POST /v1/store/memories`, `/v1/store/memories/list`,
   `/v1/store/memories/forget`, `/v1/store/memories/{memory_id}`, `POST /v1/store/search`.
-- **Media / files** (`tags=["Files"]`): `POST /v1/files/upload`, `GET /v1/files/{file_id}`,
-  `/{file_id}/info`, `/{file_id}/url`, `GET /v1/config/multimodal`.
+- **Media / files** (`tags=["Files"]`): `POST /v1/files/upload` (first bytes must match the
+  declared type for formats with a signature, else 415; table in `utils/media/signatures.py`),
+  `GET /v1/files/{file_id}`, `/{file_id}/info`, `/{file_id}/url`, `DELETE /v1/files/{file_id}`
+  (owner only, 404 otherwise, scope `files:delete`, added in `authorization.FILES_DELETE_SCOPES`
+  until core lists it), `GET /v1/config/multimodal`. Deleting a message or thread also releases
+  the files it referenced (`CheckpointerService.delete_message` / `delete_thread`).
 - **AG-UI** (`tags=["AG-UI"]`, only when `ag_ui.enabled`): `POST /v1/ag-ui`. `routers/ag_ui/`:
   `converter.py` (RunAgentInput -> new user/tool messages only; the checkpoint is the record),
   `event_mapper.py` (StreamChunk -> AG-UI events), `service.py` (runs `GraphService.stream_chunks`).
@@ -177,8 +225,9 @@ were removed in the 0.5.0 readiness pass; they were fully commented out and neve
 ## Settings / environment
 
 `core/config/settings.py` is a `pydantic-settings` `Settings` (with `extra="allow"`, so unknown
-env vars are tolerated). Notable vars: `APP_NAME`, `APP_VERSION`, `MODE` (`development` |
-`production`), `LOG_LEVEL`, `IS_DEBUG`, `MAX_REQUEST_SIZE` (10MB default), security headers
+env vars are tolerated). Notable vars: `APP_NAME`, `APP_VERSION`, `MODE` (`production` | `prod` |
+`development` | `dev` | `local`, case-insensitive, normalised to `production` or `development`;
+anything else refuses to start, unset is `development`), `LOG_LEVEL`, `IS_DEBUG`, `MAX_REQUEST_SIZE` (10MB default), security headers
 (`SECURITY_HEADERS_ENABLED`, `HSTS_*`, `FRAME_OPTIONS`, `CSP_POLICY`, ...), `ORIGINS` (CORS,
 default `*` with a wildcard warning), `ALLOWED_HOST`, `ROOT_PATH`/`DOCS_PATH`/`REDOCS_PATH`,
 `REDIS_URL`, `SENTRY_DSN`, `SNOWFLAKE_*` (epoch/node/worker/bit layout), `JWT_SECRET_KEY`/

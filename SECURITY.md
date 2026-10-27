@@ -75,8 +75,8 @@ CORS combined with credentials in production. For anything else, in production s
   it to `allow_all`)
 - `STRICT_PRODUCTION_CHECKS=true` to refuse to start on wildcard `ALLOWED_HOST` or `ORIGINS`
   or enabled API docs
-- `runs.thread_ids: "server"` if thread ids could be guessed, so nobody can claim an id
-  before the user it was meant for
+- `runs.thread_ids` at its default `"server"`, so nobody can claim an id before the user it
+  was meant for (AG-UI and `/v1/graph/live` still accept frontend-made ids; `"client"` opts out)
 - `runs.config_keys` / `runs.state_keys` if a tool or node trusts a value such as `role` or
   `plan` from request config or state; without them a client can send any non-reserved key
 - `runs.timeout` and `runs.max_concurrent_per_user` to bound what one account can hold open

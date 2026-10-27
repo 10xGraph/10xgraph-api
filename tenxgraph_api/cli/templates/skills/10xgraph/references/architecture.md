@@ -23,7 +23,7 @@ Use this when deciding where a change belongs or explaining how 10xGraph package
 | `tenxgraph.core` | `StateGraph`, `Agent`, `ToolNode`, `AgentState`, `Message`, `StreamChunk` |
 | `tenxgraph.prebuilt.agent` | `ReactAgent`, `PlanActReflectAgent`, `StructuredOutputAgent`, `SupervisorTeamAgent`, `SwarmAgent`, `RAGAgent`, `AudioAgent` (realtime voice) |
 | `tenxgraph.core.realtime` | `LiveInputQueue`, `RealtimeConfig`, `RealtimeEvent` (Gemini Live audio-to-audio) |
-| `tenxgraph.prebuilt.tools` | `fetch_url`, `safe_calculator`, `file_read`, `file_write`, `file_search`, `google_web_search`, `vertex_ai_search`, `memory_tool`, `create_handoff_tool` |
+| `tenxgraph.prebuilt.tools` | `fetch_url`, `safe_calculator`, `file_read`, `file_write`, `file_search`, `google_web_search`, `vertex_ai_search`, `make_user_memory_tool`, `make_agent_memory_tool`, `create_handoff_tool` |
 | `tenxgraph.storage.checkpointer` | `InMemoryCheckpointer`, `PgCheckpointer` |
 | `tenxgraph.storage.store` | `QdrantStore`, `Mem0Store` |
 | `tenxgraph.storage.media` | `InMemoryMediaStore`, `LocalFileMediaStore`, `CloudMediaStore` |

@@ -37,13 +37,11 @@ SYSTEM_METADATA_KEYS = frozenset(
     {"content", "user_id", "thread_id", "memory_type", "category", "timestamp", "memory_id"}
 )
 
-# Store keyword options only the server sets. ``astore`` upserts, so a client-chosen
-# memory_id could replace an existing memory; the store always generates the id instead.
-SERVER_OPTION_KEYS = frozenset({"memory_id"})
-
-# Config keys that route storage. A client-chosen collection could read another application's
-# collection or create collections without limit.
-SERVER_CONFIG_KEYS = frozenset({"collection"})
+# Store keyword options a client may set. The built-in stores read only these (``infer`` in
+# Mem0Store.astore, ``replace_metadata`` in QdrantStore.aupdate). Anything else is dropped so a
+# client cannot pass arbitrary keyword arguments to the store; ``memory_id`` is never allowed
+# because ``astore`` upserts, so a client-chosen id could replace an existing memory.
+CLIENT_OPTION_KEYS = frozenset({"infer", "replace_metadata"})
 
 
 def _client_metadata(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -53,7 +51,7 @@ def _client_metadata(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 def _client_options(options: dict[str, Any] | None) -> dict[str, Any]:
-    return {k: v for k, v in (options or {}).items() if k not in SERVER_OPTION_KEYS}
+    return {k: v for k, v in (options or {}).items() if k in CLIENT_OPTION_KEYS}
 
 
 @singleton
@@ -70,11 +68,9 @@ class StoreService:
         return self.store
 
     def _config(self, config: dict[str, Any] | None, user: dict[str, Any]) -> dict[str, Any]:
-        # Client keys pass through; server-owned keys (authz, user, internals) never do.
-        # The trusted user object carries the authz policy the store enforces.
-        cfg: dict[str, Any] = {
-            k: v for k, v in client_config(config).items() if k not in SERVER_CONFIG_KEYS
-        }
+        # Client keys pass through; server-owned keys (authz, user, collection, internals)
+        # never do. The trusted user object carries the authz policy the store enforces.
+        cfg: dict[str, Any] = client_config(config)
         cfg["user"] = user
         cfg["user_id"] = user.get("user_id", "anonymous")
         return cfg

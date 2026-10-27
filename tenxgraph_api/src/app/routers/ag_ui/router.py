@@ -13,10 +13,16 @@ from tenxgraph_api.src.app.core.auth.request_config import (
     normalize_thread_id,
 )
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
+from tenxgraph_api.src.app.core.config.settings import get_settings
+from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.routers.graph.run_limits import acquire_run_slot, release_when_done
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
+from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import (
+    MediaURLBlockedError,
+)
+from tenxgraph_api.src.app.routers.graph.thread_lock import acquire_thread_lock, combine_leases
 
-from .converter import check_client_tools, parse_run_input
+from .converter import check_client_tools, parse_run_input, to_tenxgraph_messages
 from .service import stream_ag_ui
 
 
@@ -69,14 +75,35 @@ async def run_ag_ui(
     if thread_id is None:
         raise HTTPException(status_code=422, detail="threadId is required")
     run_input.thread_id = thread_id
+    # AG-UI clients make their own thread ids, so a new one is allowed even under
+    # runs.thread_ids "server" (client_thread_ids); an existing thread is still owner-checked.
     if config.auth_config() and not await authz.authorize(
-        user, "graph", "stream", resource_id=thread_id
+        user, "graph", "stream", resource_id=thread_id, client_thread_ids=True
     ):
         raise HTTPException(status_code=403, detail="Not allowed to access this thread")
 
-    logger.info("AG-UI run %s received for thread %s", run_input.run_id, thread_id)
+    # External media URLs in the request, checked before the response starts so a blocked
+    # one is a 400. Anything the converter rejects is left to the run, which reports it.
+    try:
+        service.check_media_urls(to_tenxgraph_messages(run_input.messages))
+    except MediaURLBlockedError:
+        raise
+    except ValueError:
+        pass
+
+    if get_settings().MODE != "production":
+        logger.info(
+            "AG-UI run %s received for thread %s", log_safe(run_input.run_id), log_safe(thread_id)
+        )
     encoder = EventEncoder(accept=request.headers.get("accept") or "")
-    slot = await acquire_run_slot(user, service.runs_policy())
+    # One run at a time per thread (AG-UI always waits); taken before the response starts so a
+    # busy thread is a real 409.
+    thread_lock = await acquire_thread_lock(thread_id)
+    try:
+        slot = await acquire_run_slot(user, service.runs_policy())
+    except BaseException:
+        thread_lock.release()
+        raise
     return StreamingResponse(
         release_when_done(
             stream_ag_ui(
@@ -86,7 +113,7 @@ async def run_ag_ui(
                 encoder,
                 allow_client_tools=config.ag_ui.allow_client_tools,
             ),
-            slot,
+            combine_leases(slot, thread_lock),
         ),
         media_type=encoder.get_content_type(),
         headers={

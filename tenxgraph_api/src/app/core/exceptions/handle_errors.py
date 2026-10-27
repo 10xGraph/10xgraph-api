@@ -16,7 +16,9 @@ from tenxgraph.core.exceptions import (
 from tenxgraph.utils.validators import ValidationError
 
 from tenxgraph_api.src.app.core import logger
+from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
 from tenxgraph_api.src.app.core.config.settings import get_settings
+from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.utils import error_response
 from tenxgraph_api.src.app.utils.schemas import ErrorSchemas
 
@@ -62,6 +64,39 @@ def _sanitize_error_message(message: str, error_code: str, is_production: bool) 
     return "An unexpected error occurred. Please contact support."
 
 
+def _context_details(exc: Exception) -> list[ErrorSchemas]:
+    """Turn an exception's ``context`` dict into the list shape ``details`` expects.
+
+    Each key becomes one entry: ``loc`` is the key, ``msg`` the value as text.
+    """
+    context = getattr(exc, "context", None) or {}
+    return [
+        ErrorSchemas(loc=[str(key)], msg=str(value), type="context")
+        for key, value in context.items()
+    ]
+
+
+def _log_handled(
+    request: Request, exc: Exception, status_code: int, error_code: str, label: str
+) -> None:
+    """Log a handled exception at the level of the status the handler returns.
+
+    A 4xx is the client's mistake: one WARNING line (method, path, status, code), no traceback
+    and no body. A 5xx is a server fault: ERROR with the traceback.
+    """
+    if status_code < 500:  # noqa: PLR2004
+        logger.warning(
+            "%s: %s %s -> %s %s",
+            label,
+            request.method,
+            log_safe(request.url.path),
+            status_code,
+            error_code,
+        )
+    else:
+        logger.error(f"{label}: url: {request.base_url}", exc_info=exc)
+
+
 def init_errors_handler(app: FastAPI):  # noqa: PLR0915
     """
     Initialize error handlers for the FastAPI application.
@@ -82,7 +117,7 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request: Request, exc: HTTPException):
-        logger.error(f"HTTP exception: url: {request.base_url}", exc_info=exc)
+        _log_handled(request, exc, exc.status_code, "HTTPException", "HTTP exception")
 
         # Get request ID for tracking
         request_id = getattr(request.state, "request_id", "unknown")
@@ -122,7 +157,18 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
         )
 
         if is_production:
-            message = "The request data is invalid. Please check your input."
+            # A ClientInputError raised in a validator (for example a request size limit) is
+            # written for the client, so its message survives production.
+            client_messages = [
+                str(error["ctx"]["error"])
+                for error in exc.errors()
+                if isinstance((error.get("ctx") or {}).get("error"), ClientInputError)
+            ]
+            message = (
+                client_messages[0]
+                if client_messages
+                else "The request data is invalid. Please check your input."
+            )
         else:
             message = str(exc.body) if exc.body else "Validation error"
 
@@ -136,13 +182,13 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
 
     @app.exception_handler(ValueError)
     async def value_exception_handler(request: Request, exc: ValueError):
-        logger.error(f"Value error exception: url: {request.base_url}", exc_info=exc)
+        _log_handled(request, exc, 422, "VALIDATION_ERROR", "Value error exception")
 
         request_id = getattr(request.state, "request_id", "unknown")
 
         message = str(exc)
         if is_production:
-            logger.error(f"Request {request_id} - ValueError details: {message}")
+            logger.warning("Request %s - ValueError details: %s", request_id, log_safe(message))
             message = "Invalid input provided."
 
         return error_response(
@@ -170,7 +216,7 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
 
     @app.exception_handler(UserPermissionError)
     async def user_write_exception_handler(request: Request, exc: UserPermissionError):
-        logger.error(f"UserPermissionError: url: {request.base_url}", exc_info=exc)
+        _log_handled(request, exc, exc.status_code, exc.error_code, "UserPermissionError")
         return error_response(
             request,
             error_code=exc.error_code,
@@ -180,7 +226,7 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
 
     @app.exception_handler(APIResourceNotFoundError)
     async def resource_not_found_exception_handler(request: Request, exc: APIResourceNotFoundError):
-        logger.error(f"ResourceNotFoundError: url: {request.base_url}", exc_info=exc)
+        _log_handled(request, exc, exc.status_code, exc.error_code, "ResourceNotFoundError")
         return error_response(
             request,
             error_code=exc.error_code,
@@ -191,13 +237,13 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
     ## Need to handle 10xGraph specific exceptions here
     @app.exception_handler(ValidationError)
     async def graph_validation_exception_handler(request: Request, exc: ValidationError):
-        logger.error(f"10xGraph ValidationError: url: {request.base_url}", exc_info=exc)
+        _log_handled(request, exc, 422, "AGENTFLOW_VALIDATION_ERROR", "10xGraph ValidationError")
 
         request_id = getattr(request.state, "request_id", "unknown")
         message = _sanitize_error_message(str(exc), "AGENTFLOW_VALIDATION_ERROR", is_production)
 
         if is_production:
-            logger.error(f"Request {request_id} - 10xGraph ValidationError: {exc}")
+            logger.warning("Request %s - 10xGraph ValidationError: %s", request_id, log_safe(exc))
 
         return error_response(
             request,
@@ -222,7 +268,7 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
             request,
             error_code=error_code,
             message=message,
-            details=getattr(exc, "context", None) if not is_production else None,
+            details=_context_details(exc) if not is_production else None,
             status_code=500,
         )
 
@@ -242,7 +288,7 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
             request,
             error_code=error_code,
             message=message,
-            details=getattr(exc, "context", None) if not is_production else None,
+            details=_context_details(exc) if not is_production else None,
             status_code=500,
         )
 
@@ -262,7 +308,7 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
             request,
             error_code=error_code,
             message=message,
-            details=getattr(exc, "context", None) if not is_production else None,
+            details=_context_details(exc) if not is_production else None,
             status_code=500,
         )
 
@@ -282,7 +328,7 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
             request,
             error_code=error_code,
             message=message,
-            details=getattr(exc, "context", None) if not is_production else None,
+            details=_context_details(exc) if not is_production else None,
             status_code=500,
         )
 
@@ -304,7 +350,7 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
             request,
             error_code=error_code,
             message=message,
-            details=getattr(exc, "context", None) if not is_production else None,
+            details=_context_details(exc) if not is_production else None,
             status_code=503,
         )
 
@@ -324,27 +370,28 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
             request,
             error_code=error_code,
             message=message,
-            details=getattr(exc, "context", None) if not is_production else None,
+            details=_context_details(exc) if not is_production else None,
             status_code=500,
         )
 
     @app.exception_handler(SchemaVersionError)
     async def schema_version_error_exception_handler(request: Request, exc: SchemaVersionError):
-        logger.error(f"SchemaVersionError: url: {request.base_url}", exc_info=exc)
-
         request_id = getattr(request.state, "request_id", "unknown")
         error_code = getattr(exc, "error_code", "SCHEMA_VERSION_000")
+        _log_handled(request, exc, 422, error_code, "SchemaVersionError")
         original_message = getattr(exc, "message", str(exc))
         message = _sanitize_error_message(original_message, error_code, is_production)
 
         if is_production:
-            logger.error(f"Request {request_id} - SchemaVersionError: {original_message}")
+            logger.warning(
+                "Request %s - SchemaVersionError: %s", request_id, log_safe(original_message)
+            )
 
         return error_response(
             request,
             error_code=error_code,
             message=message,
-            details=getattr(exc, "context", None) if not is_production else None,
+            details=_context_details(exc) if not is_production else None,
             status_code=422,
         )
 
@@ -364,6 +411,6 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
             request,
             error_code=error_code,
             message=message,
-            details=getattr(exc, "context", None) if not is_production else None,
+            details=_context_details(exc) if not is_production else None,
             status_code=500,
         )
