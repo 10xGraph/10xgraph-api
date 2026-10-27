@@ -24,6 +24,25 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **A client can no longer pick the vector store collection on a graph run.** `collection` is now
+  a server-owned config key: invoke, stream, `/v1/graph/ws` and AG-UI drop it from client config,
+  as the store routes already did, so the memory tools cannot be pointed at another
+  application's collection or made to create new ones. The value is ignored, not refused (the
+  drop is logged at debug), like every other server-owned key. The developer picks collections
+  in code: the store default, `UserMemoryConfig(collection=...)` /
+  `AgentMemoryConfig(collection=...)`, or `RAGAgent` store config.
+
+- **Nobody can authenticate as a reserved owner of shared data.** Core keeps shared, ownerless
+  data (agent/app memory, RAG knowledge bases) under `system_user_id(name)` (`"__system__:<name>"`,
+  one owner per agent). An identity with such a `user_id` would read and write that data through
+  the store routes, so the API now refuses any `user_id` starting with `__system__`
+  with 401 `This user id is reserved` (WebSocket close 1008) and a warning in the log, for the
+  built-in JWT backend and any custom `BaseAuth`. The check sits in `RequirePermission` and
+  `verify_current_user`, so it covers HTTP, `/v1/graph/ws`, `/v1/graph/live` (handshake and the
+  30 s re-check) and AG-UI. A reserved identity is never stored in or served from the per-request
+  identity cache, and the rate limiter does not key on it (it falls back to the address). Auth-off
+  development still uses `"anonymous"`. Whitespace around the name is ignored; ints are never equal
+  to it. If your identity provider issues this id, rename that user.
 - **Thread ids are server-made by default (`runs.thread_ids: "server"`).** The default was
   `"client"`, where the first user to name an id owned it (squatting `"default"` locked out its
   intended owner) and a run on an unknown id answered 200 while a taken one answered 403 (an

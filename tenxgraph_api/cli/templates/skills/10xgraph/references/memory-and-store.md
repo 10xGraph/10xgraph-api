@@ -14,7 +14,7 @@ The memory store is cross-thread, cross-user long-term knowledge. It is not the 
 Memory is configured on the Agent: `Agent(..., memory=MemoryConfig(...))`. In `postload` mode the Agent registers two tools on its `ToolNode`:
 
 - `user_memory_tool(action, text)`: `action="search"` (default) recalls user facts, `action="remember"` saves one. User memory is enabled by default. The model never passes memory ids.
-- `agent_memory_tool(query)`: search only. Agent memory is off by default (`AgentMemoryConfig(enabled=True, agent_id=...)`), and the model cannot write it.
+- `agent_memory_tool(query)`: search only. Agent memory is off by default (`AgentMemoryConfig(enabled=True, agent_id=...)`), and the model cannot write it. Each agent's shared memory lives under its own reserved owner `system_user_id(agent_id)` (`"__system__:<agent_id>"`, or the `app_id` when no `agent_id` is set); a `RAGAgent` knowledge base defaults to `system_user_id("knowledge_base")`. The API refuses any caller whose `user_id` starts with `__system__`, so no request can read or write shared data as its owner.
 
 Writes run in the background. A near-identical memory (similarity score 0.95 or higher) is skipped instead of stored twice.
 

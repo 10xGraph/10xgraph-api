@@ -40,6 +40,7 @@ def authenticate(self, request, response, credential) -> dict | None: ...
   API-key/cookie schemes, ignore it and read headers directly.
 - Return a dict with at least `user_id` (keys flow into `config["user"]`); `{}`/`None` = anonymous;
   raise `UserAccountError`/`HTTPException` to reject (401 HTTP, 1008 close on WebSocket).
+- `user_id` must not start with `"__system__"` (`SYSTEM_USER_PREFIX` in core): `system_user_id(name)` = `"__system__:<name>"` owns shared data (each agent's memory, RAG knowledge bases). The API refuses any identity whose id starts with that prefix, from any auth backend, with 401 "This user id is reserved" (WebSocket close 1008) and a warning in the log. Auth-off development still uses `"anonymous"`.
 - Do NOT declare it `async def` — an un-awaited coroutine breaks auth silently.
 - Include `roles` / `scopes` in the returned dict to feed authorization.
 

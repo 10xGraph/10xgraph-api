@@ -17,6 +17,11 @@ A small set of keys is owned by the server instead, and a client must never set 
 - ``tool_timeout`` / ``node_timeout`` -- core time limits, which ``0`` or ``None`` turns off
 - ``max_parallel_tool_calls`` -- core's cap on tool calls per model turn; the operator sets it
   with ``runs.max_parallel_tool_calls``
+- ``collection`` -- the vector store collection; the developer picks it in code (store default,
+  memory scope config, ``RAGAgent`` store config), so a client cannot read another collection or
+  create collections without limit
+
+A server-owned key from the client is dropped, not refused, and the drop is logged at debug.
 
 Every route and service that forwards client config to the graph, checkpointer or store must
 pass it through :func:`client_config` first, then set the server-owned keys itself.
@@ -50,6 +55,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from tenxgraph_api.src.app.core import logger
+
 
 RESERVED_CONFIG_KEYS: frozenset[str] = frozenset(
     {
@@ -64,6 +71,8 @@ RESERVED_CONFIG_KEYS: frozenset[str] = frozenset(
         "tool_timeout",
         "node_timeout",
         "max_parallel_tool_calls",
+        # Read by the store: which collection to read and write; set only by developer code
+        "collection",
     }
 )
 INTERNAL_KEY_PREFIX = "_"
@@ -85,7 +94,11 @@ def client_config(config: Any) -> dict[str, Any]:
     """
     if not isinstance(config, dict):
         return {}
-    return {key: value for key, value in config.items() if _is_client_key(key)}
+    kept = {key: value for key, value in config.items() if _is_client_key(key)}
+    if len(kept) != len(config):
+        dropped = sorted(str(key) for key in config if key not in kept)
+        logger.debug("Ignored server-owned config keys from the client: %s", dropped)
+    return kept
 
 
 class ClientInputError(ValueError):

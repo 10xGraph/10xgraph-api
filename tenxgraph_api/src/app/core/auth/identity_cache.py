@@ -17,6 +17,8 @@ from typing import Any
 
 from starlette.requests import HTTPConnection
 
+from tenxgraph_api.src.app.core.auth.reserved_identity import identity_is_reserved
+
 
 _STATE_KEY = "tenxgraph_verified_identity"
 
@@ -46,7 +48,12 @@ def remember_identity(
 ) -> None:
     """Keep a successfully verified identity for the rest of this request."""
     state = _state(connection)
-    if state is None or not _reusable(backend) or not isinstance(identity, dict):
+    if (
+        state is None
+        or not _reusable(backend)
+        or not isinstance(identity, dict)
+        or identity_is_reserved(identity)
+    ):
         return
     state[_STATE_KEY] = (id(backend), token, copy.deepcopy(identity))
 
@@ -64,5 +71,7 @@ def recall_identity(connection: HTTPConnection, backend: Any, token: str) -> dic
         return None
     backend_id, cached_token, identity = cached
     if backend_id != id(backend) or cached_token != token:
+        return None
+    if identity_is_reserved(identity):
         return None
     return copy.deepcopy(identity)

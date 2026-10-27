@@ -23,6 +23,11 @@ from tenxgraph_api.src.app.core.auth.authorization import (
 )
 from tenxgraph_api.src.app.core.auth.identity_cache import recall_identity
 from tenxgraph_api.src.app.core.auth.request_config import normalize_thread_id
+from tenxgraph_api.src.app.core.auth.reserved_identity import (
+    RESERVED_USER_ID_MESSAGE,
+    identity_is_reserved,
+    log_reserved_rejection,
+)
 from tenxgraph_api.src.app.core.auth.revocation import (
     TokenRevocationUnavailableError,
     token_revoked,
@@ -308,6 +313,10 @@ class RequirePermission:
             if user_result and "user_id" not in user_result:
                 logger.error("Authentication failed: 'user_id' not found in user info")
             user = user_result or {}
+            if identity_is_reserved(user):
+                # Any backend, any transport, cached or fresh: nobody acts as the shared owner.
+                log_reserved_rejection()
+                _reject(connection, 401, RESERVED_USER_ID_MESSAGE)
 
         # Step 2b: a verified credential may still have been revoked before it expires.
         await _reject_if_revoked(connection, user)

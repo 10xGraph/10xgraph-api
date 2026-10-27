@@ -41,10 +41,6 @@ SYSTEM_METADATA_KEYS = frozenset(
 # memory_id could replace an existing memory; the store always generates the id instead.
 SERVER_OPTION_KEYS = frozenset({"memory_id"})
 
-# Config keys that route storage. A client-chosen collection could read another application's
-# collection or create collections without limit.
-SERVER_CONFIG_KEYS = frozenset({"collection"})
-
 
 def _client_metadata(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
     if metadata is None:
@@ -70,11 +66,9 @@ class StoreService:
         return self.store
 
     def _config(self, config: dict[str, Any] | None, user: dict[str, Any]) -> dict[str, Any]:
-        # Client keys pass through; server-owned keys (authz, user, internals) never do.
-        # The trusted user object carries the authz policy the store enforces.
-        cfg: dict[str, Any] = {
-            k: v for k, v in client_config(config).items() if k not in SERVER_CONFIG_KEYS
-        }
+        # Client keys pass through; server-owned keys (authz, user, collection, internals)
+        # never do. The trusted user object carries the authz policy the store enforces.
+        cfg: dict[str, Any] = client_config(config)
         cfg["user"] = user
         cfg["user_id"] = user.get("user_id", "anonymous")
         return cfg

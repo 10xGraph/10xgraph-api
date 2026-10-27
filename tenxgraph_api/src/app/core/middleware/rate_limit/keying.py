@@ -95,6 +95,7 @@ def verified_user_id(connection: HTTPConnection) -> str | None:
     from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
     from tenxgraph_api.src.app.core.auth.identity_cache import remember_identity
     from tenxgraph_api.src.app.core.auth.permissions import _extract_credential
+    from tenxgraph_api.src.app.core.auth.reserved_identity import identity_is_reserved
     from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 
     credential = _extract_credential(connection)
@@ -112,6 +113,8 @@ def verified_user_id(connection: HTTPConnection) -> str | None:
         # authentication in RequirePermission, which runs again for the route unless the
         # backend allows reusing this result (identity_cache).
         user = auth_backend.authenticate(connection, Response(), credential)
+        if identity_is_reserved(user):  # not a valid key; RequirePermission rejects it
+            return None
         remember_identity(connection, auth_backend, credential.credentials, user)
     except Exception as exc:  # invalid token, backend error: fall back to the address
         logger.debug("Rate limit could not verify caller identity: %s", exc)
