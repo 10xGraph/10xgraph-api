@@ -29,6 +29,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`10xgraph config` editor redesign.** A sidebar layout with a "Get running" page first, a
+  collapsible sidebar (Ctrl/Cmd+B), search across every setting, defaults shown as values with a
+  per-field reset, and a read-only reference of the related `.env` variables per section plus a
+  server environment page. Schema fixes: `graph_introspection`, `websocket.enabled` and
+  `observability.logfire.console` no longer show a misleading default and offer an explicit
+  "server default" choice; the websocket section no longer seeds `enabled: true`;
+  `runs.timeout` must be greater than 0 and can be set to no limit (`null`); the limit fields
+  offer "Unlimited"; `rate_limit.exclude_paths` is described as extra paths (`/ping` and
+  `/health/ready` are always skipped) and is no longer seeded; `observability.logfire.console: true`
+  is now an error, because Logfire accepts only `false` or a `ConsoleOptions` object.
+
 ## [1.0.0rc1] - 2026-10-28
 
 This is the 1.0 release candidate. It requires `10xgraph` 1.0 (`10xgraph>=1.0.0rc1`), and its

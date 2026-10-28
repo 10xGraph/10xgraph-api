@@ -1,9 +1,12 @@
 import { render } from "preact";
 import { useEffect, useReducer } from "preact/hooks";
-import { closeInspector, dismissToast, load, save } from "./actions.js";
-import { Inspector } from "./inspector.jsx";
+import {
+  applyRoute, dismissToast, focusSearch, load, save, setQuery, setSidebar, validate,
+} from "./actions.js";
+import { Drawer } from "./inspector.jsx";
 import { Header, Page } from "./page.jsx";
-import { isDirty, store, subscribe } from "./store.js";
+import { Sidebar } from "./sidebar.jsx";
+import { isDirty, snapshot, store, subscribe } from "./store.js";
 import { Icon } from "./ui.jsx";
 
 const TOAST_LOOK = {
@@ -39,40 +42,60 @@ function Toasts() {
   );
 }
 
+const typing = () => /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName) || document.activeElement?.isContentEditable;
+
 function App() {
   const [, rerender] = useReducer((n) => n + 1, 0);
 
   useEffect(() => {
     subscribe(rerender);
+    try { if (localStorage.getItem("tg-sidebar") === "hidden") setSidebar(false, { instant: true }); } catch { /* storage blocked */ }
     const onKey = (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); save(); }
-      else if (e.key === "Escape" && store.inspectorOpen) closeInspector();
+      const mod = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
+      if (mod && key === "s") { e.preventDefault(); save(); }
+      else if (mod && key === "b") { e.preventDefault(); setSidebar(!store.sideOpen); }
+      else if (mod && key === "k") { e.preventDefault(); focusSearch(); }
+      else if (e.key === "/" && !mod && !e.altKey && !typing() && !store.drawerOpen) { e.preventDefault(); focusSearch(); }
+      else if (e.key === "Escape" && store.query && !store.drawerOpen) setQuery("");
     };
     const onUnload = (e) => { if (store.schema && isDirty()) e.preventDefault(); };
+    const onHash = () => applyRoute();
     document.addEventListener("keydown", onKey);
     window.addEventListener("beforeunload", onUnload);
+    window.addEventListener("hashchange", onHash);
     load();
     return () => {
       document.removeEventListener("keydown", onKey);
       window.removeEventListener("beforeunload", onUnload);
+      window.removeEventListener("hashchange", onHash);
     };
   }, []);
 
+  // Validate ~400 ms after the last edit.
+  useEffect(() => {
+    if (!store.schema || store.validated === snapshot()) return undefined;
+    const timer = setTimeout(validate, 400);
+    return () => clearTimeout(timer);
+  });
+
+  const withSide = store.sideRender;
   return (
     <>
       <a href="#main" class="sr-only z-50 rounded-md bg-brand-solid px-3 py-2 text-white focus:not-sr-only focus:fixed focus:top-3 focus:left-3">
         Skip to content
       </a>
       <Header />
-      <div class="flex">
-        <main id="main" tabindex={-1} class="min-w-0 flex-1 focus:outline-none">
-          <div class="mx-auto w-full max-w-4xl px-4 pb-24 sm:px-8">
+      <div class={withSide ? "lg:grid lg:grid-cols-[260px_minmax(0,1fr)] lg:items-start" : ""}>
+        <Sidebar />
+        <main id="main" tabindex={-1} class="min-w-0 px-4 pt-6 pb-24 focus:outline-none sm:px-8 sm:pt-8">
+          <div class="mx-auto w-full max-w-[760px]">
             <Page />
           </div>
         </main>
-        <Inspector />
       </div>
-      {store.inspectorOpen ? <div class="fixed inset-0 z-30 bg-black/50 xl:hidden" onClick={closeInspector} /> : null}
+      <Drawer />
+      <div class="sr-only" role="status" aria-live="polite">{store.copied ? "Copied" : ""}</div>
       <Toasts />
     </>
   );

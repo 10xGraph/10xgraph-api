@@ -302,6 +302,13 @@ def _check_observability(config: dict, out: _Collector) -> None:
         if not isinstance(enabled, bool):
             out.error(f"observability.{backend}.enabled", "enabled must be true or false.")
         any_enabled = any_enabled or enabled is True
+        console = block.get("console")
+        if backend == "logfire" and console is not None and console is not False:
+            out.error(
+                "observability.logfire.console",
+                "console must be false or left out. Logfire takes False or a ConsoleOptions "
+                "object, which JSON cannot express.",
+            )
     if not any_enabled:
         out.warning(
             "observability", "Neither Logfire nor LangSmith is enabled, so nothing is traced."

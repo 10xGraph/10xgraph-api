@@ -1,0 +1,16 @@
+{
+  "agent": "graph.react:app",
+  "thread_name_generator": "graph.thread_name_generator:MyNameGenerator",
+  "store": "graph.dummy_store:store",
+  "env": ".env",
+  "auth": null,
+  "rate_limit": {
+    "enabled": true,
+    "backend": "memory",
+    "requests": 100,
+    "window": 60,
+    "by": "ip",
+    "trusted_proxy_headers": false,
+    "exclude_paths": ["/health", "/docs", "/redoc", "/openapi.json"]
+  }
+}

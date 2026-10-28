@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -45,6 +46,119 @@ def test_schema_scopes_match_api_scopes() -> None:
     from tenxgraph_api.src.app.core.auth.authorization import all_scopes
 
     assert set(AUTHORIZATION_SCOPES) == set(all_scopes())
+
+
+def _fields() -> dict[str, dict]:
+    return {
+        ".".join(field["path"]): field
+        for section in build_schema()["sections"]
+        for field in section["fields"]
+    }
+
+
+def _env_entries() -> list[dict]:
+    schema = build_schema()
+    entries = [e for section in schema["sections"] for e in section.get("env", [])]
+    entries += [v for group in schema["environment"] for v in group["vars"]]
+    return entries
+
+
+def test_env_entries_have_the_documented_shape() -> None:
+    schema = build_schema()
+    assert schema["environment"]
+    for group in schema["environment"]:
+        assert set(group) <= {"title", "vars", "note"}
+        assert {"title", "vars"} <= set(group)
+        assert group["title"] and group["vars"]
+        if "note" in group:
+            assert isinstance(group["note"], str) and group["note"].strip()
+            assert "\u2014" not in group["note"]
+    snowflake = next(g for g in schema["environment"] if "Snowflake" in g["title"])
+    assert snowflake["note"]
+    entries = _env_entries()
+    assert entries
+    for entry in entries:
+        assert set(entry) == {"name", "purpose"}
+        assert re.fullmatch(r"[A-Z][A-Z0-9_]*", entry["name"])
+        assert entry["purpose"].strip()
+        assert "\u2014" not in entry["purpose"]
+
+
+def test_every_env_name_exists_in_the_source_tree() -> None:
+    root = Path(main_mod.__file__).resolve().parents[1]
+    sources = [
+        p for p in root.rglob("*.py") if p.name != "schema.py" or "config_editor" not in str(p)
+    ]
+    core = Path(__file__).resolve().parents[3] / "agentflow" / "tenxgraph"
+    if core.is_dir():
+        sources += list(core.rglob("*.py"))
+    text = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in sources)
+    missing = sorted({e["name"] for e in _env_entries() if e["name"] not in text})
+    assert not missing
+
+
+def test_tri_state_fields_have_no_default() -> None:
+    fields = _fields()
+    for path in (
+        "graph_introspection",
+        "websocket.enabled",
+        "observability.logfire.console",
+    ):
+        assert fields[path]["unset_label"]
+        assert "default" not in fields[path]
+
+
+def test_logfire_console_does_not_offer_true() -> None:
+    assert _fields()["observability.logfire.console"]["allow_true"] is False
+
+
+def test_websocket_seed_does_not_force_enabled() -> None:
+    section = next(s for s in build_schema()["sections"] if s["id"] == "websocket")
+    assert "enabled" not in section["default"]
+    assert not validate_config({"agent": "a:b", "websocket": section["default"]})
+
+
+def test_number_field_extensions() -> None:
+    fields = _fields()
+    timeout = fields["runs.timeout"]
+    assert timeout["exclusive_min"] == 0
+    assert timeout["null_label"] == "No limit"
+    assert "min" not in timeout
+    for path in (
+        "runs.max_concurrent_per_user",
+        "websocket.max_connections",
+        "websocket.max_connections_per_user",
+    ):
+        assert fields[path]["unlimited_value"] == 0
+
+
+def test_rate_limit_seed_does_not_claim_a_server_default_for_excluded_paths() -> None:
+    section = next(s for s in build_schema()["sections"] if s["id"] == "rate_limit")
+    assert "exclude_paths" not in section["default"]
+    assert _fields()["rate_limit.exclude_paths"]["label"] == "Extra paths to skip"
+
+
+def test_unlimited_values_are_accepted_by_the_server() -> None:
+    for value in (0, None):
+        config = {
+            "agent": "a:b",
+            "runs": {"max_concurrent_per_user": value},
+            "websocket": {"max_connections": value, "max_connections_per_user": value},
+        }
+        assert not [i for i in validate_config(config) if i["level"] == "error"]
+
+
+@pytest.mark.parametrize(("timeout", "ok"), [(0, False), (-1, False), (1.5, True), (None, True)])
+def test_runs_timeout_validation(timeout: object, ok: bool) -> None:
+    issues = validate_config({"agent": "a:b", "runs": {"timeout": timeout}})
+    assert (not _levels(issues, "runs")) is ok
+
+
+@pytest.mark.parametrize(("console", "ok"), [(False, True), (None, True), (True, False)])
+def test_logfire_console_only_accepts_false(console: object, ok: bool) -> None:
+    config = {"agent": "a:b", "observability": {"logfire": {"enabled": True, "console": console}}}
+    issues = validate_config(config)
+    assert (not _levels(issues, "observability.logfire.console")) is ok
 
 
 def test_build_schema_returns_independent_copies() -> None:
