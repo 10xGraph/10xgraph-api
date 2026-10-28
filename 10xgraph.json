@@ -6,29 +6,11 @@
   "auth": null,
   "rate_limit": {
     "enabled": true,
-    "backend": "redis",
+    "backend": "memory",
     "requests": 100,
     "window": 60,
     "by": "ip",
     "trusted_proxy_headers": false,
-    "exclude_paths": [
-      "/health",
-      "/docs",
-      "/redoc",
-      "/openapi.json"
-    ]
-  },
-  "test": {
-    "path": "tests",
-    "coverage": true,
-    "coverage_threshold": 60
-  },
-  "runs": {
-    "thread_ids": "server",
-    "max_concurrent_per_user": 10
-  },
-  "ag_ui": {
-    "enabled": false,
-    "allow_client_tools": false
+    "exclude_paths": ["/health", "/docs", "/redoc", "/openapi.json"]
   }
 }
