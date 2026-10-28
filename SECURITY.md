@@ -4,12 +4,13 @@
 
 | Version | Supported |
 |---|---|
-| `0.7.x` (`10xgraph-api`) | Yes |
-| `< 0.7` (`10xscale-agentflow-cli`) | No |
+| `1.0.x` (`10xgraph-api`) | Yes |
+| `< 1.0` | No |
 
-Only the latest minor release receives security fixes. `10xgraph-api` is
-pre-1.0; there are no long-term support branches yet. `10xscale-agentflow-cli` is no
-longer published; upgrade to `10xgraph-api` to receive fixes.
+`10xgraph-api` is at 1.0 (release candidate `1.0.0rc1`). Security fixes are applied to the
+latest published release only; there are no long-term support branches. The old
+`10xscale-agentflow-cli` package is no longer published; upgrade to `10xgraph-api` to receive
+fixes.
 
 ## Reporting a vulnerability
 

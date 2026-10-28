@@ -15,6 +15,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   least one minor release. Import paths do not break silently.
 - **Breaking changes are documented under a `### Breaking` heading** in the release's
   section, with the migration step spelled out.
+- **From 1.0, `major.minor` is identical across `10xgraph`, `10xgraph-api` and
+  `10xgraph-client`.** Patch numbers move independently. A patch release is only a bug or
+  security fix; any new feature means all three packages release the next `X.Y.0` together, and
+  a package with no changes ships it as "version alignment, no changes".
+- **Breaking changes need a major release (2.0)**, after a deprecation that lasted at least one
+  minor release. The deprecated `agentflow` command, `agentflow_cli` import, `agentflow.json`
+  fallback and `AGENTFLOW_*` environment variable fallbacks are removed in 2.0.
 - Anything under `tenxgraph_api.cli.templates/` is emitted scaffolding, not API; template
   content can change in any release.
 
@@ -22,8 +29,67 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0rc1] - 2026-10-28
+
+This is the 1.0 release candidate. It requires `10xgraph` 1.0 (`10xgraph>=1.0.0rc1`), and its
+`major.minor` is aligned with core `10xgraph` and `10xgraph-client`. Install it with
+`pip install -U --pre "10xgraph-api==1.0.0rc1"`.
+
+### Breaking
+
+- **`runs.thread_ids` defaults to `"server"`** (was `"client"`). REST and WebSocket clients that
+  invent a thread id for a new thread now get 403 on `/v1/graph/invoke`, `/v1/graph/stream`,
+  `/v1/graph/ws` and the checkpointer write routes (`PUT /v1/threads/{id}/state`, message
+  writes). Migrate by omitting the id on the first request and using the `meta.thread_id` the
+  server returns from then on (`"new"` over `/v1/graph/ws`), or set
+  `"runs": {"thread_ids": "client"}` in `10xgraph.json`. AG-UI and `/v1/graph/live` need no change. Only the built-in ownership and
+  rbac backends refuse; `allow_all` and custom backends do not unless they read
+  `server_thread_ids` themselves.
+- **Production deployments with the default or wildcard `ALLOWED_HOST` or `ORIGINS` refuse to
+  start.** Set explicit values, or `STRICT_PRODUCTION_CHECKS=false`. A public, token-less API
+  that runs in production with `ORIGINS=*` and `CORS_ALLOW_CREDENTIALS=false` also needs the
+  opt-out.
+- **Production runs longer than 300 s are cancelled** (invoke 504, stream and AG-UI error). Raise
+  `runs.timeout`, or set it to `null`.
+- **An unknown `MODE` now refuses to start.** Accepted values (case-insensitive):
+  `production`, `prod`, `development`, `dev`, `local`. Anything else, such as `staging` or
+  `test`, fails at startup (and in `10xgraph dev`) with an error listing them. Set `MODE` to
+  one of these values.
+- **Requests over the size limits get 422** (500 messages, 100 blocks per message, 1,000,000
+  characters of text; on AG-UI, for the trailing turn, with a 10,000-message cap on history).
+- **`POST /v1/threads/{thread_id}/messages` is now admin-only.** It needs the
+  `checkpointer:import` scope held explicitly: an identity with no scopes gets 403, and a `"*"`
+  role has it. It still takes any role, since it imports history, but tool calls, media
+  ownership and size limits are still enforced. Normal clients should send messages through
+  invoke or stream, and use the new `PUT .../messages/{message_id}` for feedback.
+- Assistant and system messages, and `context_summary` / `execution_meta`, are rejected with 422
+  on the client routes listed under Security.
+- **Custom authorization backends are isolated by default.** A backend that implements only
+  `authorize()` now gets per-owner storage isolation (`isolation_scope()` returns `"owner"`),
+  where it used to share all threads and memories. If you relied on sharing, add
+  `def isolation_scope(self) -> str: return "none"`.
+- **JWTs with an invalid `user_id` or scope claim are refused with 401.** `user_id` must be a
+  non-empty string or an integer; null, empty, boolean, float, list and dict are rejected, and an
+  integer becomes a string. A `scope` / `scopes` claim that is not a string or a list of strings
+  is rejected. Fix the issuer. A string `scopes` is now split on spaces instead of matched by
+  substring, so tokens that depended on that stop matching.
+
 ### Security
 
+- **Handled client errors no longer log at ERROR, and Sentry no longer sends request bodies.**
+  The error handlers now log at the level of the status they return: a 4xx (401, 403, 404, 413,
+  422, 429 and so on) is one WARNING line with method, path, status and error code, no
+  traceback and no body; a 5xx stays ERROR with the traceback. Before, every 404 or bad token
+  wrote an ERROR with a full traceback, and Sentry's logging integration turned each into an
+  event despite the 5xx-only setting. Sentry now also starts with `max_request_body_size="never"`,
+  `include_local_variables=False` and `send_default_pii=False`, and only ERROR logs become
+  events (WARNING and INFO stay breadcrumbs). Responses are unchanged. Alerts that matched ERROR
+  for 4xx must match WARNING instead.
+- **AG-UI data is server config, and `ag_ui` is a reserved key.** The AG-UI endpoint now puts
+  `context`, `tools` and `forwarded_props` into the server-owned run config, which is merged after
+  the client checks. A `runs.config_keys` allow-list no longer rejects AG-UI runs, and nodes
+  still read `config["ag_ui"]` as before. Invoke, stream and `/v1/graph/ws` drop a client-sent
+  `config.ag_ui`, so a plain graph request cannot pose as AG-UI context or tools.
 - **The memory rate limiter evicts in constant time at its key cap.** Keys are kept in
   least-recently-used order, so a new key at the 50,000-key cap drops the oldest entry from the
   front instead of sweeping and scanning every key (about 2.5 ms of blocked event loop per new
@@ -125,7 +191,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **New `runs.max_parallel_tool_calls` in 10xgraph.json** (positive integer, editable in
   `10xgraph config`). The server sets it as the run's `max_parallel_tool_calls` on every run
   path, capping how many tool calls one model turn runs at once. Clients cannot set it. Unset,
-  core's default (10, or `TENXGRAPH_MAX_PARALLEL_TOOL_CALLS`) applies. Needs `10xgraph` 0.10.4
+  core's default (10, or `TENXGRAPH_MAX_PARALLEL_TOOL_CALLS`) applies. Needs `10xgraph` 1.0
   or later.
 - **Built-in state fields are never client-writable.** `context_summary` and `execution_meta`
   in `initial_state` (invoke, stream, WebSocket) or in `PUT /v1/threads/{id}/state` now get 422.
@@ -264,7 +330,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `{"feedback": {...}}` (any JSON object, at most 8 KB serialized and 10 levels deep, else 422).
   It is stored in the message metadata under `feedback` and nothing else on the message can
   change. Needs `checkpointer:write` and thread ownership; 404 when the thread has no such
-  message; 501 until `10xgraph` 0.10.4 (`aupdate_message_metadata`) is installed.
+  message; 501 until `10xgraph` 1.0 (`aupdate_message_metadata`) is installed.
 - `RequirePermission(..., explicit_scope=True)`: the scope must be granted explicitly, even for
   an identity that declares no scopes.
 - Scope `checkpointer:import`, granted to `"*"` roles.
@@ -304,45 +370,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The unanswered calls of the latest assistant message are kept while the thread is paused
   (`interrupt()`, HITL `interrupt_before` / `interrupt_after`) or waiting on a client tool.
   A thread with nothing to repair returns `removed_count` 0 and is not written.
-
-### Breaking
-
-- **`runs.thread_ids` defaults to `"server"`** (was `"client"`). REST and WebSocket clients that
-  invent a thread id for a new thread now get 403 on `/v1/graph/invoke`, `/v1/graph/stream`,
-  `/v1/graph/ws` and the checkpointer write routes (`PUT /v1/threads/{id}/state`, message
-  writes). Migrate by omitting the id on the first request and using the `meta.thread_id` the
-  server returns from then on (`"new"` over `/v1/graph/ws`), or set
-  `"runs": {"thread_ids": "client"}` in `10xgraph.json`. AG-UI and `/v1/graph/live` need no change. Only the built-in ownership and
-  rbac backends refuse; `allow_all` and custom backends do not unless they read
-  `server_thread_ids` themselves.
-- **Production deployments with the default or wildcard `ALLOWED_HOST` or `ORIGINS` refuse to
-  start.** Set explicit values, or `STRICT_PRODUCTION_CHECKS=false`. A public, token-less API
-  that runs in production with `ORIGINS=*` and `CORS_ALLOW_CREDENTIALS=false` also needs the
-  opt-out.
-- **Production runs longer than 300 s are cancelled** (invoke 504, stream and AG-UI error). Raise
-  `runs.timeout`, or set it to `null`.
-- **An unknown `MODE` now refuses to start.** Accepted values (case-insensitive):
-  `production`, `prod`, `development`, `dev`, `local`. Anything else, such as `staging` or
-  `test`, fails at startup (and in `10xgraph dev`) with an error listing them. Set `MODE` to
-  one of these values.
-- **Requests over the size limits get 422** (500 messages, 100 blocks per message, 1,000,000
-  characters of text; on AG-UI, for the trailing turn, with a 10,000-message cap on history).
-- **`POST /v1/threads/{thread_id}/messages` is now admin-only.** It needs the
-  `checkpointer:import` scope held explicitly: an identity with no scopes gets 403, and a `"*"`
-  role has it. It still takes any role, since it imports history, but tool calls, media
-  ownership and size limits are still enforced. Normal clients should send messages through
-  invoke or stream, and use the new `PUT .../messages/{message_id}` for feedback.
-- Assistant and system messages, and `context_summary` / `execution_meta`, are rejected with 422
-  on the client routes listed under Security.
-- **Custom authorization backends are isolated by default.** A backend that implements only
-  `authorize()` now gets per-owner storage isolation (`isolation_scope()` returns `"owner"`),
-  where it used to share all threads and memories. If you relied on sharing, add
-  `def isolation_scope(self) -> str: return "none"`.
-- **JWTs with an invalid `user_id` or scope claim are refused with 401.** `user_id` must be a
-  non-empty string or an integer; null, empty, boolean, float, list and dict are rejected, and an
-  integer becomes a string. A `scope` / `scopes` claim that is not a string or a list of strings
-  is rejected. Fix the issuer. A string `scopes` is now split on spaces instead of matched by
-  substring, so tokens that depended on that stop matching.
 
 ## [0.9.0] - 2026-10-22
 

@@ -49,6 +49,30 @@ agentflow = tenxgraph_api.cli.main:legacy_main   # deprecated alias, removed in 
 - `--validate PATH` (repeatable) checks a skill directory, or a folder of skill directories, against the Agent Skills specification (https://agentskills.io/specification) and exits non-zero on errors. Nothing is installed.
 - Source templates: https://github.com/10xGraph/10xgraph-api/tree/main/tenxgraph_api/cli/templates/skills
 
+`10xgraph eval [TARGET]`
+
+- Runs agent evaluations: discovers `*_eval.py` and `eval_*.py` files in `TARGET` (default `evals/`) and runs their cases.
+- Options include `--output/-o` (default `eval_reports`), `--no-report`, `--threshold/-t` (fail below this pass rate), `--open`, `--parallel/-p`, `--max-concurrency/-c` (default 4), `--verbose/-v`, and `--quiet/-q`.
+
+`10xgraph test [PATH]`
+
+- Runs the project tests with pytest and returns the pytest exit code. Arguments after `--` are forwarded to pytest.
+- Options include `--coverage/-C`, `--html` (needs `--coverage`), `-k`, `--verbose/-v`, and `--quiet/-q`.
+
+`10xgraph audit`
+
+- Read-only environment check: Python version, installed packages, core evaluation API, `10xgraph.json` validity and whether the default port is free. Exits non-zero if a check fails, so it works as a CI gate.
+- Options include `--config/-c`, `--verbose/-v`, and `--quiet/-q`.
+
+`10xgraph config`
+
+- Opens a browser UI to edit and validate `10xgraph.json` (created on first save).
+- Options include `--config/-c`, `--port/-p` (default: any free port), and `--open/--no-open`.
+
+`10xgraph demo`
+
+- Previews terminal animations without touching the project. Option: `--style` (`all`, `typing`, `network`, `init`, `build`, `eval`).
+
 `10xgraph version`
 
 - Prints CLI and library version information.

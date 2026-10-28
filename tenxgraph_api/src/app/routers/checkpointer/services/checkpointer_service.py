@@ -335,15 +335,18 @@ class CheckpointerService:
         """Set ``metadata["feedback"]`` on a message; nothing else on the message changes.
 
         Raises:
-            HTTPException: 501 when the checkpointer lacks ``aupdate_message_metadata`` (core
-                older than 0.10.4), 404 when the message is not in this thread.
+            HTTPException: 501 when the checkpointer lacks ``aupdate_message_metadata``,
+                404 when the message is not in this thread.
         """
         cfg = self._config(config, user)
         update = getattr(self.checkpointer, "aupdate_message_metadata", None)
         if not callable(update):
             raise HTTPException(
                 status_code=501,
-                detail="Updating message feedback needs 10xgraph >= 0.10.4",
+                detail=(
+                    "This checkpointer does not support message feedback "
+                    "(needs aupdate_message_metadata, added in 10xgraph 1.0)"
+                ),
             )
         message = await update(cfg, message_id, {"feedback": feedback})
         if message is None:

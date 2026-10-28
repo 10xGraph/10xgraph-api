@@ -410,7 +410,8 @@ async def test_put_state_links_the_thread(checkpointer_service, monkeypatch):
 @pytest.mark.asyncio
 async def test_old_core_store_tracks_nothing_and_logs_once(caplog):
     class OldStore(InMemoryMediaStore):
-        pass
+        # Stands in for a store without update_metadata (core before 1.0, or a custom store).
+        update_metadata = None
 
     media = _media(OldStore())
     assert not media.supports_links

@@ -48,7 +48,8 @@ def _lazy_command(module_name: str, class_name: str) -> type:
                     f"The {feature} command could not load its required dependencies: {exc}",
                     hints=(
                         "Run `10xgraph audit` to inspect installed package compatibility.",
-                        "Upgrade with `python -m pip install --upgrade " '"10xgraph>=0.9,<2"`.',
+                        "Upgrade with `python -m pip install --upgrade "
+                        '"10xgraph>=1.0.0rc1,<2"`.',
                     ),
                 ) from exc
             implementation = getattr(module, class_name)

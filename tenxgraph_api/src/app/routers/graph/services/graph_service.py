@@ -797,7 +797,7 @@ class GraphService:
         if graph_input.is_resume:
             input_data["resume"] = graph_input.resume
             if graph_input.interrupt_id is not None:
-                # Read by core 0.10.4+ (checks the id again and validates the answer); an older
+                # Read by core 1.0+ (checks the id again and validates the answer); an older
                 # core ignores unknown input keys.
                 input_data["resume_interrupt_id"] = graph_input.interrupt_id
         if graph_input.initial_state:

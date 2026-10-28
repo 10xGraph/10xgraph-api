@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from starlette.exceptions import HTTPException
 from tenxgraph.core.exceptions import GraphError, SchemaVersionError
 
+from tenxgraph_api.src.app.core.config.setup_middleware import setup_middleware
 from tenxgraph_api.src.app.core.exceptions.handle_errors import init_errors_handler
 from tenxgraph_api.src.app.core.exceptions.resources_exceptions import ResourceNotFoundError
 from tenxgraph_api.src.app.core.exceptions.user_exception import (
@@ -25,7 +26,15 @@ def _client(raiser, mode: str = "development") -> TestClient:
     from tenxgraph_api.src.app.core.config.settings import get_settings
 
     get_settings.cache_clear()
+    if mode == "production":
+        os.environ["ORIGINS"] = "https://example.com"
+        os.environ["ALLOWED_HOST"] = "testserver"
+    else:
+        os.environ.pop("ORIGINS", None)
+        os.environ.pop("ALLOWED_HOST", None)
+    get_settings.cache_clear()
     app = FastAPI()
+    setup_middleware(app)
     init_errors_handler(app)
 
     @app.get("/boom/{item}")

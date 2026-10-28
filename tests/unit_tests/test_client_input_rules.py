@@ -451,7 +451,7 @@ async def test_feedback_is_501_when_core_lacks_the_method(checkpointer_service):
             {"thread_id": "t1"}, {"user_id": "u1"}, "m1", {"rating": "up"}
         )
     assert exc.value.status_code == 501
-    assert "0.10.4" in exc.value.detail
+    assert "aupdate_message_metadata" in exc.value.detail
 
 
 # ---------------------------------------------------------------------------

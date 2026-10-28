@@ -5,13 +5,13 @@ core framework see `agentflow/CLAUDE.md`; for the TS client, docs, or playground
 for the monorepo overview see the workspace-root `CLAUDE.md`.
 
 - Package name (PyPI): `10xgraph-api` (formerly `10xscale-agentflow-cli`, last release 0.6.x)
-- Version: `0.9.0` (`pyproject.toml`; 0.7.0 was the first release under the 10xGraph name). `CLI_VERSION`
+- Version: `1.0.0rc1` (`pyproject.toml`; 0.7.0 was the first release under the 10xGraph name). `CLI_VERSION`
   and `tenxgraph_api.__version__` are single-sourced from the installed distribution metadata
   (falling back to `pyproject.toml` only for a non-installed source checkout).
-- Requires: Python >= 3.12 · Status: `4 - Beta`
+- Requires: Python >= 3.12 · Status: `5 - Production/Stable`
 - Console entry points: `10xgraph = tenxgraph_api.cli.main:main`, plus the deprecated alias
   `agentflow = tenxgraph_api.cli.main:legacy_main` (prints a notice to stderr; removed in 2.0)
-- Depends on the core framework: `10xgraph>=0.10.0,<2.0` (import `tenxgraph`). Must not be
+- Depends on the core framework: `10xgraph>=1.0.0rc1,<2.0` (import `tenxgraph`). Must not be
   installed alongside the old `10xscale-agentflow`: both provide an `agentflow` module.
 
 ## Rename compatibility (kept until 2.0)
@@ -170,7 +170,7 @@ and for redis backend a `redis` sub-object `{ "url", "prefix" }` (or shorthand U
   means 403; `"*"` roles get it, `authorization.CHECKPOINTER_ADMIN_SCOPES`). Tool calls, media
   ownership and size limits still apply. `PUT ... /messages/{message_id}` sets
   `metadata["feedback"]` only (body `{"feedback": {...}}`, 8 KB, depth 10, `checkpointer:write`;
-  calls `aupdate_message_metadata`, 501 on cores older than 0.10.4, 404 for a missing message).
+  calls `aupdate_message_metadata`, 501 when the checkpointer lacks it, 404 for a missing message).
 - **Client input rules** (`core/auth/request_config.py`): `context_summary` and `execution_meta`
   are never client-writable (`reject_builtin_state_keys`, 422); client messages are user-only
   (`client_message_error`: no `assistant`/`system`; a `tool` message only as tool results, which

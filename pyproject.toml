@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "10xgraph-api"
-version = "0.9.0"
+version = "1.0.0rc1"
 description = "Production server for 10xGraph agents (formerly 10xscale-agentflow-cli). Serves a compiled graph over REST, SSE, WebSocket, realtime audio and AG-UI with JWT or custom auth, scoped authorization on every endpoint, owner-only threads and rate limiting, and generates Docker Compose and Kubernetes files. Includes the 10xgraph CLI. MIT licensed, self-hosted."
 readme = "README.md"
 license = "MIT"
@@ -46,7 +46,7 @@ keywords = [
     "cli",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
@@ -58,10 +58,9 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
 ]
 dependencies = [
-    # 0.10.0 is the first core release under the 10xgraph name (import `tenxgraph`).
-    # It ships `interrupt()`, per-run `remote_tools` and `validate_skill`, which
-    # AG-UI, `resume` and `10xgraph skills --validate` use.
-    "10xgraph>=0.10.0,<2.0",
+    # This release needs core 1.0 (import `tenxgraph`). The explicit rc in the
+    # specifier lets pip and uv pick the core pre-release until 1.0.0 is out.
+    "10xgraph>=1.0.0rc1,<2.0",
     # Pre-1.0 and major-version-risky deps are capped; floors are the versions
     # the suite is verified against.
     "fastapi>=0.116,<1.0",
@@ -105,7 +104,7 @@ media = [
 # Pillow for image resize / EXIF / format conversion in core's media processor.
 # Without it, uploaded images pass through unchanged.
 images = [
-    "10xgraph[images]>=0.10.0,<2.0",
+    "10xgraph[images]>=1.0.0rc1,<2.0",
 ]
 gcloud = [
     "google-cloud-logging",
@@ -373,7 +372,7 @@ ENVIRONMENT = "pytest"
 
 [dependency-groups]
 dev = [
-    "10xgraph>=0.10.0",
+    "10xgraph>=1.0.0rc1",
     "snowflakekit",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
