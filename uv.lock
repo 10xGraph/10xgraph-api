@@ -10,18 +10,17 @@ resolution-markers = [
 
 [[package]]
 name = "10xgraph"
-version = "0.10.0"
+version = "1.0.0rc1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "injectq" },
-    { name = "pillow" },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f3/81/4b99d090a084bbdea371563959b01b80df6fc0ae7fbf43bfede45f32b926/10xgraph-0.10.0.tar.gz", hash = "sha256:b3e8fbe546b302932eeccc7c721bf892a2f704943733b33c0ab13a912a62571f", size = 559952, upload-time = "2026-10-10T14:33:54.215Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/75/79/481682c7bbb18a109f71fe1417d55685470a35f2b8b28130c4c906144a8a/10xgraph-1.0.0rc1.tar.gz", hash = "sha256:7c8ed7c56f163f25f692f428647a8b7102c4791609a19beddf17c93f8b89eb9e", size = 592179, upload-time = "2026-10-28T07:37:57.755Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5a/55/71fe096c2cd2efe1744835e923a319d615a102a068b4f41f938bea3ed853/10xgraph-0.10.0-py3-none-any.whl", hash = "sha256:2eb417c2d527be2f3478f4915f390518ebb61a15a12631b35b10f58b0b0cf095", size = 611400, upload-time = "2026-10-10T14:33:51.574Z" },
+    { url = "https://files.pythonhosted.org/packages/70/e4/e1dcd822ff4a97273f63d840b7e150359c7ef2c2fa84499b787a744193d8/10xgraph-1.0.0rc1-py3-none-any.whl", hash = "sha256:65ede5bec44abc9af46b19e7d43eb8bde83d6111f7f59279120cc8892d099615", size = 645183, upload-time = "2026-10-28T07:37:55.589Z" },
 ]
 
 [package.optional-dependencies]
@@ -31,7 +30,7 @@ images = [
 
 [[package]]
 name = "10xgraph-api"
-version = "0.9.0"
+version = "1.0.0rc1"
 source = { editable = "." }
 dependencies = [
     { name = "10xgraph" },
@@ -107,8 +106,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "10xgraph", specifier = ">=0.10.0,<2.0" },
-    { name = "10xgraph", extras = ["images"], marker = "extra == 'images'", specifier = ">=0.10.0,<2.0" },
+    { name = "10xgraph", specifier = ">=1.0.0rc1,<2.0" },
+    { name = "10xgraph", extras = ["images"], marker = "extra == 'images'", specifier = ">=1.0.0rc1,<2.0" },
     { name = "ag-ui-protocol", marker = "extra == 'ag-ui'", specifier = ">=1.0,<2" },
     { name = "fastapi", specifier = ">=0.116,<1.0" },
     { name = "firebase-admin", marker = "extra == 'firebase'", specifier = ">=6.5.0" },
@@ -137,7 +136,7 @@ provides-extras = ["sentry", "firebase", "snowflakekit", "redis", "jwt", "media"
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "10xgraph", specifier = ">=0.10.0" },
+    { name = "10xgraph", specifier = ">=1.0.0rc1" },
     { name = "ag-ui-protocol", specifier = ">=1.0,<2" },
     { name = "httpx", specifier = "==0.27.0" },
     { name = "mypy", specifier = ">=1.11.0" },
