@@ -1,4 +1,4 @@
-"""Eval command — discover and run 10xGraph evaluations, always generating reports."""
+"""Eval command — discover and run 10xGraph evaluations, always writing a JSON report."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import importlib.util
 import inspect
 import sys
 import typing
-import webbrowser
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,7 +82,7 @@ DEFAULT_CONCURRENCY = 4
 
 
 class EvalCommand(BaseCommand):
-    """Discover and run agent evaluations; always write HTML + JSON reports."""
+    """Discover and run agent evaluations; always write a JSON report."""
 
     # ------------------------------------------------------------------
     # Discovery
@@ -724,7 +723,6 @@ class EvalCommand(BaseCommand):
         output_dir: str = "eval_reports",
         no_report: bool = False,
         threshold: float | None = None,
-        open_report: bool = False,
         parallel: bool = False,
         max_concurrency: int = 4,
         verbose: bool = False,
@@ -872,7 +870,7 @@ class EvalCommand(BaseCommand):
             manager = ReporterManager(
                 ReporterConfig(
                     output_dir=output_dir,
-                    html=True,
+                    html=False,
                     json_report=True,
                     console=False,
                     timestamp_files=True,
@@ -880,16 +878,14 @@ class EvalCommand(BaseCommand):
             )
             report_result = manager.run_all(merged)
 
-            if report_result.html_path:
-                self.output.success(f"HTML report: {report_result.html_path}")
             if report_result.json_path:
                 self.output.info(f"JSON report: {report_result.json_path}", emoji=False)
+                self.output.info(
+                    "Open it in the playground: Evals > Open report file.", emoji=False
+                )
             if report_result.has_errors:
                 for name, err in report_result.errors:
                     self.output.warning(f"Reporter error [{name}]: {err}")
-
-            if open_report and report_result.html_path:
-                webbrowser.open(Path(report_result.html_path).resolve().as_uri())
 
         summary = merged.summary
         self.output.info(

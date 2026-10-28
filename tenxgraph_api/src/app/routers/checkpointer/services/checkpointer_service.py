@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import HTTPException
@@ -46,6 +47,19 @@ class CheckpointerUnavailableError(HTTPException, ValueError):
 
 # Messages read per page when collecting a thread's media references for cleanup.
 _CLEANUP_PAGE = 500
+
+
+async def _has_more(
+    count: int, offset: int | None, limit: int | None, probe: Callable[[int], Awaitable[list]]
+) -> bool:
+    """Whether a row exists past this page.
+
+    No checkpointer exposes a total, so a full page triggers a one-row read at the next
+    offset. A short page (or an unlimited read) is the end.
+    """
+    if not limit or count < limit:
+        return False
+    return bool(await probe((offset or 0) + limit))
 
 
 @singleton
@@ -363,7 +377,12 @@ class CheckpointerService:
     ) -> MessagesListResponseSchema:
         cfg = self._config(config, user)
         res = await self.checkpointer.alist_messages(cfg, search, offset, limit)
-        return MessagesListResponseSchema(messages=res)
+        has_more = await _has_more(
+            len(res), offset, limit, lambda o: self.checkpointer.alist_messages(cfg, search, o, 1)
+        )
+        return MessagesListResponseSchema(
+            messages=res, has_more=has_more, offset=offset or 0, limit=limit
+        )
 
     async def delete_message(
         self,
@@ -417,7 +436,15 @@ class CheckpointerService:
     ) -> ThreadsListResponseSchema:
         cfg = self._config({}, user)
         res = await self.checkpointer.alist_threads(cfg, search, offset, limit)
-        return ThreadsListResponseSchema(threads=[t.model_dump() for t in res])
+        has_more = await _has_more(
+            len(res), offset, limit, lambda o: self.checkpointer.alist_threads(cfg, search, o, 1)
+        )
+        return ThreadsListResponseSchema(
+            threads=[t.model_dump() for t in res],
+            has_more=has_more,
+            offset=offset or 0,
+            limit=limit,
+        )
 
     async def delete_thread(
         self,

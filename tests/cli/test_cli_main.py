@@ -163,7 +163,6 @@ def test_eval_command(monkeypatch):
             "--no-report",
             "-t",
             "0.8",
-            "--open",
             "--parallel",
             "-c",
             "8",
@@ -174,7 +173,6 @@ def test_eval_command(monkeypatch):
     assert called["output_dir"] == "out_dir"
     assert called["no_report"] is True
     assert called["threshold"] == 0.8
-    assert called["open_report"] is True
     assert called["parallel"] is True
     assert called["max_concurrency"] == 8
 

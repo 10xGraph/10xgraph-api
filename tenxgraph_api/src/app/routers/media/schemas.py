@@ -42,3 +42,21 @@ class MultimodalConfigResponse(BaseModel):
     media_storage_type: str
     media_max_size_mb: float
     document_handling: str
+
+
+class FileListItem(BaseModel):
+    file_id: str
+    filename: str | None = None
+    mime_type: str | None = None
+    size_bytes: int | None = None
+    url: str = Field(..., description="Relative retrieval URL")
+    created_at: int | None = Field(
+        None, description="Upload time, unix seconds; null for files uploaded before it was kept"
+    )
+
+
+class FileListResponse(BaseModel):
+    files: list[FileListItem]
+    has_more: bool = Field(..., description="Whether another page follows")
+    offset: int
+    limit: int

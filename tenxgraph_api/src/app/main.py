@@ -189,11 +189,9 @@ init_errors_handler(app)
 graph_config.media  # noqa: B018
 
 # init routes
-# The evals viewer reads local report files and has no auth, so it is a development tool only.
 # The AG-UI endpoint is opt-in through 10xgraph.json; the WebSocket routes can be turned off there.
 init_routes(
     app,
-    evals=settings.MODE != "production",
     ag_ui=graph_config.ag_ui.enabled,
     websocket=graph_config.websocket.enabled,
 )

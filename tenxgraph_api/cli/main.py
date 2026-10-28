@@ -754,11 +754,6 @@ def eval_cmd(
         "-t",
         help="Fail if overall pass rate is below this value (0.0-1.0)",
     ),
-    open_report: bool = typer.Option(
-        False,
-        "--open",
-        help="Open the HTML report in the default browser after the run",
-    ),
     parallel: bool = typer.Option(
         False,
         "--parallel",
@@ -778,7 +773,7 @@ def eval_cmd(
 
     Discovers *_eval.py / eval_*.py files in the target directory (default: evals/).
     Collects all cases from all files into a flat pool, then runs them under a single
-    event loop throttled by --max-concurrency.  Always generates HTML + JSON reports
+    event loop throttled by --max-concurrency.  Always writes a JSON report
     in eval_reports/ unless --no-report is set.
 
     Each eval file must expose one of:
@@ -795,7 +790,6 @@ def eval_cmd(
             output_dir=output_dir,
             no_report=no_report,
             threshold=threshold,
-            open_report=open_report,
             parallel=parallel,
             max_concurrency=max_concurrency,
             verbose=verbose,

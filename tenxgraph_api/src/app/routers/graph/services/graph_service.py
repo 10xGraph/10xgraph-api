@@ -13,6 +13,7 @@ from tenxgraph.core.exceptions.media_exceptions import UnsupportedMediaInputErro
 from tenxgraph.core.graph import CompiledGraph
 from tenxgraph.core.state import AgentState, Message, StreamChunk, StreamEvent
 from tenxgraph.storage.checkpointer import BaseCheckpointer
+from tenxgraph.utils import ResponseGranularity
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.auth.request_config import (
@@ -39,10 +40,7 @@ from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     GraphSchema,
     GraphToolsSchema,
     ObservabilitySchema,
-    ObsEventSchema,
     ObsRunSchema,
-    ObsSpanSchema,
-    ObsTokenUsageSchema,
     ToolNodeSchema,
     ToolSchema,
 )
@@ -55,6 +53,11 @@ from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import
 )
 from tenxgraph_api.src.app.routers.graph.thread_lock import acquire_thread_lock
 from tenxgraph_api.src.app.utils import DefaultThreadNameGenerator, ThreadNameGenerator
+from tenxgraph_api.src.app.utils.run_trace import (
+    event_summary,
+    reconstruct_run,
+    telemetry_record,
+)
 from tenxgraph_api.src.app.utils.telemetry_store import TelemetryStore
 
 
@@ -193,6 +196,22 @@ def generic_error_text(text: Any) -> Any:
         return text
     code = _ERROR_CODE.match(text)
     return _sanitize_error_message(text, code.group(1) if code else "GRAPH_STREAM_ERROR", True)
+
+
+_PAUSE_KINDS = ("interrupt", "before", "after", "remote_tool")
+
+
+def _is_pause_update(chunk: StreamChunk) -> bool:
+    data = chunk.data
+    return (
+        chunk.event == StreamEvent.UPDATES
+        and isinstance(data, dict)
+        and (
+            data.get("status") == "interrupted"
+            or "interrupt" in data
+            or data.get("pause") in _PAUSE_KINDS
+        )
+    )
 
 
 def sanitize_error_chunk(chunk: StreamChunk) -> StreamChunk:
@@ -482,59 +501,18 @@ class GraphService:
         return self._telemetry
 
     @staticmethod
-    def _telemetry_record(chunk: Any) -> dict[str, Any]:
+    def _telemetry_record(chunk: Any, ts: float | None = None) -> dict[str, Any]:
         """Flatten a StreamChunk into a compact record for the telemetry store."""
-        md = getattr(chunk, "metadata", None) or {}
-        node = md.get("node") or md.get("current_node") or getattr(chunk, "node_name", "") or ""
+        return telemetry_record(chunk, ts)
 
-        usages = None
-        message = getattr(chunk, "message", None)
-        if message is not None:
-            u = getattr(message, "usages", None)
-            if u is not None:
-                try:
-                    usages = u.model_dump() if hasattr(u, "model_dump") else dict(u)
-                except Exception:
-                    usages = None
-
-        # Tool call / tool result hints for span reconstruction.
-        content_kinds: list[str] = []
-        tool_names: list[str] = []
-        if message is not None:
-            content = getattr(message, "content", None)
-            if isinstance(content, list):
-                for block in content:
-                    btype = getattr(block, "type", None) or (
-                        block.get("type") if isinstance(block, dict) else None
-                    )
-                    if btype:
-                        content_kinds.append(btype)
-                    if btype in ("tool_call", "tool_result"):
-                        bname = getattr(block, "name", None) or (
-                            block.get("name") if isinstance(block, dict) else None
-                        )
-                        if bname:
-                            tool_names.append(bname)
-
-        event = getattr(chunk, "event", None)
-        return {
-            "event": str(event.value) if hasattr(event, "value") else str(event or ""),
-            "node": node,
-            "timestamp": getattr(chunk, "timestamp", None),
-            "is_delta": bool(getattr(message, "delta", False)) if message else False,
-            "role": getattr(message, "role", None) if message else None,
-            "usages": usages,
-            "content_kinds": content_kinds,
-            "tool_names": tool_names,
-            "is_error": bool(getattr(chunk, "is_error", False)),
-        }
-
-    def _record_chunk(self, thread_id: str, run_id: str, chunk: Any) -> None:
+    def _record_chunk(
+        self, thread_id: str, run_id: str, chunk: Any, ts: float | None = None
+    ) -> None:
         store = self.telemetry
         if not store:
             return
         try:
-            store.record(thread_id, run_id, self._telemetry_record(chunk))
+            store.record(thread_id, run_id, self._telemetry_record(chunk, ts))
         except Exception as e:  # - telemetry must never break a run
             logger.debug("Telemetry record failed: %s", e)
 
@@ -745,6 +723,25 @@ class GraphService:
                 f"interrupt '{pending.id}'"
             )
 
+    async def _is_static_pause(self, config: dict[str, Any]) -> bool:
+        """Whether the thread is paused by ``interrupt_before`` / ``interrupt_after``.
+
+        Such a pause has nothing to answer: core continues it from any input that carries no
+        ``resume`` key, so an empty resume must not reach core (it would fail with "Nothing to
+        resume"). A pause on an ``interrupt()`` or on a client-side tool call is not static.
+        """
+        state = await self.checkpointer.aget_state(config) if self.checkpointer else None
+        if state is None or not state.is_interrupted():
+            return False
+        try:
+            from tenxgraph.utils.interrupt import pending_interrupt
+        except ImportError:  # core older than interrupt(): every pause is static
+            pending = None
+        else:
+            pending = pending_interrupt(state)
+        reason = getattr(state.execution_meta, "interrupt_reason", None)
+        return pending is None and reason != "remote_tool_call"
+
     async def _prepare_input(
         self,
         graph_input: GraphInputSchema,
@@ -794,7 +791,7 @@ class GraphService:
         input_data: dict = {
             "messages": preprocessed,
         }
-        if graph_input.is_resume:
+        if graph_input.is_resume and not await self._is_static_pause(config):
             input_data["resume"] = graph_input.resume
             if graph_input.interrupt_id is not None:
                 # Read by core 1.0+ (checks the id again and validates the answer); an older
@@ -813,7 +810,7 @@ class GraphService:
             },
         )
 
-    async def invoke_graph(  # noqa: PLR0915
+    async def invoke_graph(  # noqa: PLR0912, PLR0915
         self,
         graph_input: GraphInputSchema,
         user: dict[str, Any],
@@ -871,7 +868,11 @@ class GraphService:
 
             # Record final messages into telemetry, then close the run.
             if self.telemetry:
+                inv_now = datetime.now().timestamp()
                 for msg in messages:
+                    msg_ts = getattr(msg, "timestamp", None)
+                    if not isinstance(msg_ts, int | float) or not inv_started <= msg_ts <= inv_now:
+                        msg_ts = inv_now
                     self._record_chunk(
                         inv_thread_id,
                         inv_run_id,
@@ -879,8 +880,9 @@ class GraphService:
                             event=StreamEvent.MESSAGE,
                             message=msg,
                             metadata={"node": getattr(msg, "node", "") or ""},
-                            timestamp=datetime.now().timestamp(),
+                            timestamp=msg_ts,
                         ),
+                        msg_ts,
                     )
                 self.telemetry.finish_run(
                     inv_thread_id, inv_run_id, datetime.now().timestamp(), "done"
@@ -989,7 +991,7 @@ class GraphService:
         async for chunk in self.stream_chunks(graph_input, user):
             yield chunk.model_dump_json(serialize_as_any=True) + "\n"
 
-    async def stream_chunks(  # noqa: PLR0915
+    async def stream_chunks(  # noqa: PLR0912, PLR0915
         self,
         graph_input: GraphInputSchema,
         user: dict[str, Any],
@@ -1045,6 +1047,7 @@ class GraphService:
             run_status = "done"
 
             # Stream the graph execution
+            saw_pause = False
             async for raw_chunk in self._astream_bounded(
                 input_data, config, graph_input.response_granularity
             ):
@@ -1052,7 +1055,9 @@ class GraphService:
                 mt = chunk.metadata or {}
                 mt.update(meta)
                 chunk.metadata = mt
-                self._record_chunk(thread_id, run_id, chunk)
+                self._record_chunk(thread_id, run_id, chunk, datetime.now().timestamp())
+                if _is_pause_update(chunk):
+                    saw_pause = True
                 if getattr(chunk, "is_error", False) or getattr(chunk, "event", None) in (
                     "error",
                     StreamEvent.ERROR,
@@ -1067,6 +1072,12 @@ class GraphService:
                     and not chunk.message.delta
                 ):
                     messages_str.append(chunk.message.text())
+
+            if not saw_pause and graph_input.response_granularity != ResponseGranularity.FULL:
+                pause = await self._missing_pause_chunk(config, meta)
+                if pause is not None:
+                    self._record_chunk(thread_id, run_id, pause, datetime.now().timestamp())
+                    yield pause
 
             logger.info("Graph streaming completed successfully")
 
@@ -1108,6 +1119,74 @@ class GraphService:
             )
         finally:
             thread_lock.release()
+
+    async def _missing_pause_chunk(
+        self, config: dict[str, Any], meta: dict[str, Any]
+    ) -> StreamChunk | None:
+        """The pause update, rebuilt from the checkpoint, when core did not send it.
+
+        Core older than the fix drops it at ``low`` and ``partial`` granularity. A thread that
+        is paused after the run (``interrupt()``, interrupt_before/after, remote-tool wait) is
+        the signal; nothing is sent otherwise.
+        """
+        if not self.checkpointer:
+            return None
+        try:
+            state = await self.checkpointer.aget_state(config)
+        except Exception as e:  # the store is unavailable
+            logger.debug("Pause lookup failed: %s", e)
+            return None
+        if state is None:
+            return None
+        try:
+            from tenxgraph.utils.interrupt import pending_interrupt
+
+            pending = pending_interrupt(state)
+        except Exception:  # core older than interrupt()
+            pending = None
+        step = getattr(getattr(state, "execution_meta", None), "step", None)
+        if pending is not None:
+            data: dict[str, Any] = {
+                "status": "interrupted",
+                "node": pending.node,
+                "step": step,
+                "reason": "Graph execution paused by interrupt()",
+                "pause": "interrupt",
+                "interrupt": pending.model_dump(mode="json"),
+            }
+        else:
+            data = self._static_pause_data(state, step)
+            if data is None:
+                return None
+        return StreamChunk(
+            event=StreamEvent.UPDATES,
+            data=data,
+            thread_id=config.get("thread_id"),
+            run_id=config.get("run_id"),
+            metadata=dict(meta),
+        )
+
+    @staticmethod
+    def _static_pause_data(state: Any, step: int | None) -> dict[str, Any] | None:
+        """Pause data for interrupt_before / interrupt_after / remote-tool waits, from the state."""
+        meta = getattr(state, "execution_meta", None)
+        status = str(getattr(getattr(meta, "status", None), "value", getattr(meta, "status", "")))
+        node = getattr(meta, "interrupted_node", None)
+        if status not in ("interrupted_before", "interrupted_after") or not node:
+            return None
+        if getattr(meta, "interrupt_reason", None) == "remote_tool_call":
+            pause, name, reason = (
+                "remote_tool",
+                "node_invoked",
+                "Remote tool call - graph interrupted",
+            )
+        elif status == "interrupted_before":
+            pause, name = "before", "invoking_node"
+            reason = "Graph execution interrupted before node execution"
+        else:
+            pause, name = "after", "node_invoked"
+            reason = "Graph execution interrupted after node execution"
+        return {"status": name, "node": node, "step": step, "reason": reason, "pause": pause}
 
     async def realtime_graph(
         self,
@@ -1207,6 +1286,16 @@ class GraphService:
                 restricted["tools_tags"] = tags
         return restricted
 
+    def _realtime_options(self) -> dict[str, Any]:
+        """The /v1/graph/live init options this server applies (see ``_realtime_overrides``)."""
+        ws = self.config.websocket
+        return {
+            "client_overrides": list(ws.realtime_client_overrides),
+            "models": list(ws.realtime_models),
+            "model_selectable": bool(ws.realtime_models),
+            "tools_tags": True,
+        }
+
     async def graph_details(self) -> GraphSchema:
         try:
             logger.info("Getting graph details")
@@ -1216,6 +1305,7 @@ class GraphService:
             info = res.get("info")
             if isinstance(info, dict):
                 info["is_realtime"] = self.is_live_agent
+                info["realtime_options"] = self._realtime_options() if self.is_live_agent else None
             return GraphSchema(**res)
         except ValueError as e:
             logger.warning(f"Graph details validation failed: {e}")
@@ -1311,7 +1401,16 @@ class GraphService:
         """
         store = self.telemetry
         if not store:
-            return ObservabilitySchema(thread_id=str(thread_id), run_count=0)
+            from tenxgraph_api.src.app.core.config.settings import get_settings
+
+            reason = (
+                "disabled_in_production"
+                if get_settings().MODE == "production"
+                else "store_unavailable"
+            )
+            return ObservabilitySchema(
+                thread_id=str(thread_id), enabled=False, reason=reason, run_count=0
+            )
 
         runs = store.get_runs(thread_id)
         run_ids = [r.run_id for r in runs]
@@ -1328,6 +1427,7 @@ class GraphService:
                 run_count=len(runs),
                 run_ids=run_ids,
                 run=None,
+                reason="no_runs",
             )
 
         run_schema = self._reconstruct_run(trace)
@@ -1340,156 +1440,11 @@ class GraphService:
 
     def _reconstruct_run(self, trace: Any) -> "ObsRunSchema":
         """Turn a captured RunTrace into spans + events + usage."""
-        records = list(trace.records)
-        started = trace.started_at
-        # Fall back to the first record's timestamp if start wasn't stamped.
-        first_ts = next((r.get("timestamp") for r in records if r.get("timestamp")), started)
-        base = started or first_ts or 0.0
-        last_ts = max([r.get("timestamp") or base for r in records] + [trace.finished_at or base])
-        total_ms = max(0.0, (last_ts - base) * 1000.0)
-
-        def off_ms(ts: float | None) -> float:
-            return max(0.0, ((ts or base) - base) * 1000.0)
-
-        usage = ObsTokenUsageSchema()
-        events: list[ObsEventSchema] = []
-        spans: list[ObsSpanSchema] = []
-
-        # Root span spans the whole run.
-        spans.append(
-            ObsSpanSchema(
-                id="root",
-                name="graph",
-                kind="root",
-                parent=None,
-                start_ms=0.0,
-                duration_ms=total_ms,
-            )
-        )
-
-        # Walk records to build node spans (by node transitions) + llm/tool spans.
-        node_spans: dict[str, ObsSpanSchema] = {}
-        node_order: list[str] = []
-        llm_calls = 0
-        tool_calls = 0
-        span_seq = 0
-
-        def new_span_id() -> str:
-            nonlocal span_seq
-            span_seq += 1
-            return f"s{span_seq}"
-
-        for idx, rec in enumerate(records):
-            node = rec.get("node") or "—"
-            ts = rec.get("timestamp")
-            ev_type = rec.get("event") or "message"
-
-            # Node span: open on first sight of a node, extend its end as records arrive.
-            if node and node != "—":
-                span = node_spans.get(node)
-                if span is None:
-                    span = ObsSpanSchema(
-                        id=new_span_id(),
-                        name=f"node: {node}",
-                        kind="node",
-                        parent="root",
-                        start_ms=off_ms(ts),
-                        duration_ms=0.0,
-                    )
-                    node_spans[node] = span
-                    node_order.append(node)
-                    spans.append(span)
-                else:
-                    span.duration_ms = max(span.duration_ms, off_ms(ts) - span.start_ms)
-
-            # LLM span: a non-delta assistant message with usages under this node.
-            u = rec.get("usages")
-            if u:
-                usage.prompt_tokens += int(u.get("prompt_tokens", 0) or 0)
-                usage.completion_tokens += int(u.get("completion_tokens", 0) or 0)
-                usage.reasoning_tokens += int(u.get("reasoning_tokens", 0) or 0)
-                usage.total_tokens += int(
-                    u.get("total_tokens", 0)
-                    or (u.get("prompt_tokens", 0) or 0) + (u.get("completion_tokens", 0) or 0)
-                )
-                llm_calls += 1
-                parent = node_spans.get(node)
-                spans.append(
-                    ObsSpanSchema(
-                        id=new_span_id(),
-                        name="llm.generate",
-                        kind="llm",
-                        parent=parent.id if parent else "root",
-                        start_ms=off_ms(ts),
-                        duration_ms=0.0,
-                        model=(rec.get("model") or None),
-                        input_tokens=int(u.get("prompt_tokens", 0) or 0),
-                        output_tokens=int(u.get("completion_tokens", 0) or 0),
-                    )
-                )
-
-            # Tool spans: from tool_call / tool_result content blocks.
-            for tname in rec.get("tool_names", []) or []:
-                if "tool_call" in (rec.get("content_kinds") or []):
-                    tool_calls += 1
-                    parent = node_spans.get(node)
-                    spans.append(
-                        ObsSpanSchema(
-                            id=new_span_id(),
-                            name=f"tool: {tname}",
-                            kind="tool",
-                            parent=parent.id if parent else "root",
-                            start_ms=off_ms(ts),
-                            duration_ms=0.0,
-                        )
-                    )
-
-            # Event row.
-            events.append(
-                ObsEventSchema(
-                    id=f"e{idx}",
-                    type=ev_type,
-                    node=node if node != "—" else "",
-                    offset_ms=off_ms(ts),
-                    summary=self._event_summary(rec),
-                )
-            )
-
-        # Newest-first events for the pane.
-        events.reverse()
-
-        return ObsRunSchema(
-            run_id=trace.run_id,
-            thread_id=trace.thread_id,
-            status=trace.status,
-            started_at=trace.started_at,
-            finished_at=trace.finished_at,
-            duration_ms=total_ms,
-            spans=spans,
-            events=events,
-            usage=usage,
-            llm_calls=llm_calls,
-            tool_calls=tool_calls,
-            iterations=len(node_order),
-        )
+        return reconstruct_run(trace)
 
     @staticmethod
     def _event_summary(rec: dict[str, Any]) -> str:
-        kinds = rec.get("content_kinds") or []
-        tools = rec.get("tool_names") or []
-        if rec.get("is_error"):
-            return "error"
-        if tools and ("tool_call" in kinds or "tool_result" in kinds):
-            label = "tool_call" if "tool_call" in kinds else "tool_result"
-            return f"{label} {', '.join(tools)}"
-        if rec.get("usages"):
-            u = rec["usages"]
-            return f"llm.generate · {u.get('total_tokens', 0)} tokens"
-        if rec.get("is_delta"):
-            return "delta"
-        if kinds:
-            return f"{rec.get('role') or 'message'}: {', '.join(kinds)}"
-        return rec.get("event") or "chunk"
+        return event_summary(rec)
 
     async def get_state_schema(self) -> dict:
         try:

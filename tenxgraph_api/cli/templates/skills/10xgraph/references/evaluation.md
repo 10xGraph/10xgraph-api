@@ -320,13 +320,12 @@ JUnit XML — for CI test summary tabs (GitHub Actions, Jenkins).
 
 ## 10xgraph eval CLI
 
-Auto-discovers `*_eval.py` / `eval_*.py` in `evals/` (or configured directory). Each file must expose `get_eval_set()`, optionally `get_eval_config()` or `EVAL_CONFIG`, or a full `run()` function.
+Auto-discovers `*_eval.py` / `eval_*.py` in `evals/` (or configured directory). Each file must expose `get_eval_set()`, optionally `get_eval_config()` or `EVAL_CONFIG`, or a full `run()` function. The CLI writes a JSON report only (no HTML, no browser); open it in the playground with Evals > Open report file.
 
 ```bash
-10xgraph eval                          # scan evals/, write to eval_reports/
+10xgraph eval                          # scan evals/, write a JSON report to eval_reports/
 10xgraph eval evals/my_eval.py         # single file
 10xgraph eval evals/regression/        # subdirectory
-10xgraph eval --open                   # open HTML report in browser after run
 10xgraph eval --threshold 0.8          # exit non-zero if pass rate < 0.8
 10xgraph eval --output ci/reports      # custom output directory
 10xgraph eval --no-report              # console only, no files

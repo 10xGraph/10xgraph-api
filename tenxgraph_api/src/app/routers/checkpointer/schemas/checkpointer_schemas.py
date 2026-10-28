@@ -163,6 +163,9 @@ class MessagesListResponseSchema(BaseModel):
     """Response schema for message list operations."""
 
     messages: list[Message] | None = Field(None, description="List of messages")
+    has_more: bool | None = Field(None, description="Whether another page follows")
+    offset: int | None = Field(None, description="Offset applied to this page")
+    limit: int | None = Field(None, description="Page size applied to this page")
 
 
 class ThreadResponseSchema(BaseModel):
@@ -175,3 +178,6 @@ class ThreadsListResponseSchema(BaseModel):
     """Response schema for thread list operations."""
 
     threads: list[dict[str, Any]] | None = Field(None, description="List of threads")
+    has_more: bool | None = Field(None, description="Whether another page follows")
+    offset: int | None = Field(None, description="Offset applied to this page")
+    limit: int | None = Field(None, description="Page size applied to this page")

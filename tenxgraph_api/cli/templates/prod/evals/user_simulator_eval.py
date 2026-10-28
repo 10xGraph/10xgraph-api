@@ -4,7 +4,7 @@ User simulator evaluation example.
 The CLI detects get_scenarios() and handles everything:
   - runs each scenario through UserSimulator
   - scores goal achievement with an LLM judge
-  - produces the same HTML + JSON report as regular eval cases
+  - produces the same JSON report as regular eval cases
 
 You only need to define your scenarios. No asyncio, no EvalSetBuilder, no boilerplate.
 

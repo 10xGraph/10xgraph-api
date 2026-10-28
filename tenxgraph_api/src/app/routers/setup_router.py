@@ -5,7 +5,6 @@ from fastapi import APIRouter, FastAPI
 from fastapi.routing import APIWebSocketRoute
 
 from .checkpointer.router import router as checkpointer_router
-from .evals import router as evals_router
 from .graph import router as graph_router
 from .media.router import router as media_router
 from .ping.router import router as ping_router
@@ -72,9 +71,7 @@ def _graph_router(websocket: bool | None) -> APIRouter:
     return graph_router
 
 
-def init_routes(
-    app: FastAPI, *, evals: bool = True, ag_ui: bool = False, websocket: bool | None = None
-):
+def init_routes(app: FastAPI, *, ag_ui: bool = False, websocket: bool | None = None):
     """
     Initialize the routes for the FastAPI application.
 
@@ -84,8 +81,6 @@ def init_routes(
     Args:
         app (FastAPI): The FastAPI application instance to which the routes
         will be added.
-        evals (bool): Mount the evals report viewer. It has no auth, so production
-        leaves it out.
         ag_ui (bool): Mount the AG-UI endpoint (``POST /v1/ag-ui``). Off unless
         ``ag_ui.enabled`` is set in 10xgraph.json.
         websocket (bool | None): ``websocket.enabled`` from 10xgraph.json. ``False`` leaves
@@ -94,8 +89,6 @@ def init_routes(
     app.include_router(_graph_router(websocket))
     app.include_router(checkpointer_router)
     app.include_router(store_router)
-    if evals:
-        app.include_router(evals_router)
     if ag_ui:
         app.include_router(_ag_ui_router())
     app.include_router(ping_router)

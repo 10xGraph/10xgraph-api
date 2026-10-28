@@ -300,7 +300,7 @@ class MediaService:
         # Store binary in the configured MediaStore. The owner is written into the
         # file's own metadata, so ownership survives as long as the file does --
         # unlike a cache entry, which would expire and silently un-own it.
-        file_metadata: dict[str, Any] = {"filename": filename}
+        file_metadata: dict[str, Any] = {"filename": filename, "created_at": int(time.time())}
         if user_id:
             file_metadata["owner_id"] = str(user_id)
             if self.supports_links:
@@ -425,6 +425,48 @@ class MediaService:
         deleted = bool(await self.store.delete(file_id))
         self._extraction_cache.pop(file_id, None)
         return deleted
+
+    async def list_files(
+        self, user_id: str | None, offset: int = 0, limit: int = 50
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """One page of the files ``user_id`` owns, newest first, and whether more follow.
+
+        Files with no recorded owner are not listed for an identified user. With no ``user_id``
+        (authentication off) every file is listed, matching ``ensure_can_access``. Reads each
+        stored file's metadata, so the cost grows with the number of files in the store.
+
+        Raises:
+            NotImplementedError: The media store cannot enumerate its files.
+        """
+        list_keys = getattr(self.store, "list_keys", None)  # absent in core older than 1.0
+        if not callable(list_keys):
+            raise NotImplementedError(f"{type(self.store).__name__} cannot list files")
+        keys = await list_keys()
+        owned: list[dict[str, Any]] = []
+        for key in keys:
+            try:
+                meta = await self.store.get_metadata(key)
+            except Exception as exc:
+                logger.debug("Skipping unreadable file %s while listing: %s", log_safe(key), exc)
+                continue
+            if not meta:
+                continue
+            if user_id and str(meta.get("owner_id")) != str(user_id):
+                continue
+            owned.append(
+                {
+                    "file_id": key,
+                    "filename": meta.get("filename"),
+                    "mime_type": meta.get("mime_type"),
+                    "size_bytes": meta.get("size_bytes"),
+                    "url": f"/v1/files/{key}",
+                    "created_at": meta.get("created_at"),
+                }
+            )
+        owned.sort(key=lambda f: f["file_id"])
+        owned.sort(key=lambda f: f["created_at"] or 0, reverse=True)
+        page = owned[offset : offset + limit]
+        return page, offset + limit < len(owned)
 
     async def get_file(self, file_id: str, user_id: str | None = None) -> tuple[bytes, str]:
         """Retrieve file bytes and MIME type."""

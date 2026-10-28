@@ -5,7 +5,7 @@ from __future__ import annotations
 import mimetypes
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
 from fastapi.logger import logger
 from fastapi.responses import FileResponse, Response
 from injectq.integrations import InjectAPI
@@ -19,6 +19,8 @@ from tenxgraph_api.src.app.routers.media.schemas import (
     FileAccessUrlResponse,
     FileDeleteResponse,
     FileInfoResponse,
+    FileListItem,
+    FileListResponse,
     FileUploadResponse,
     MultimodalConfigResponse,
 )
@@ -46,6 +48,7 @@ _INLINE_TYPES = frozenset(
         "text/plain",
     }
 )
+MAX_FILE_LIST_LIMIT = 200
 _INLINE_PREFIXES = ("audio/", "video/")
 
 
@@ -180,6 +183,41 @@ async def upload_file(
         raise HTTPException(status_code=413, detail=client_error_detail(exc))
 
     return success_response(FileUploadResponse(**result), request)
+
+
+# ------------------------------------------------------------------
+# GET /v1/files  — the caller's own files, paged (declared before /{file_id})
+# ------------------------------------------------------------------
+@router.get(
+    "/v1/files",
+    summary="List the caller's files",
+    response_model=FileListResponse,
+    description=(
+        "Lists the files the authenticated user uploaded (files without a recorded owner are "
+        "not listed), newest first. With authentication off there is no user, so, like the "
+        "download route, every file is listed. Returns 501 when the configured media store cannot "
+        "enumerate its files."
+    ),
+)
+async def list_files(
+    request: Request,
+    limit: int = Query(50, ge=1, le=MAX_FILE_LIST_LIMIT),
+    offset: int = Query(0, ge=0),
+    service: MediaService = InjectAPI(MediaService),
+    user: dict[str, Any] = Depends(RequirePermission("files", "read")),
+):
+    user_id = user.get("user_id")
+    try:
+        items, has_more = await service.list_files(user_id, offset, limit)
+    except NotImplementedError:
+        raise HTTPException(status_code=501, detail="The configured media store cannot list files")
+    payload = FileListResponse(
+        files=[FileListItem(**item) for item in items],
+        has_more=has_more,
+        offset=offset,
+        limit=limit,
+    )
+    return success_response(payload, request)
 
 
 # ------------------------------------------------------------------

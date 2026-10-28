@@ -217,7 +217,7 @@ Generate production Docker files.
 
 ### `10xgraph eval` / `10xgraph test`
 
-Run agent evaluations (discovers `*_eval.py` / `eval_*.py`, writes HTML + JSON to `eval_reports/`) and project tests (pytest).
+Run agent evaluations (discovers `*_eval.py` / `eval_*.py`, writes a JSON report to `eval_reports/`) and project tests (pytest).
 
 ```bash
 10xgraph eval --parallel --threshold 0.8

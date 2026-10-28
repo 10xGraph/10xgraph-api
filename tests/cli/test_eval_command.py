@@ -297,7 +297,6 @@ def test_execute_success(cmd, tmp_path):
     mock_report.summary.total_token_usage = TokenUsage(input_tokens=100, output_tokens=50)
 
     mock_rep_mgr_res = MagicMock()
-    mock_rep_mgr_res.html_path = "/absolute/path/to/report.html"
     mock_rep_mgr_res.json_path = "path/to/report.json"
     mock_rep_mgr_res.has_errors = False
 
@@ -323,12 +322,10 @@ def test_execute_success(cmd, tmp_path):
         patch.object(cmd, "_run_flat_pool", return_value=quads),
         patch.object(cmd, "_merge_reports", return_value=mock_report),
         patch("tenxgraph_api.cli.commands.eval.ReporterManager", return_value=mock_rep_mgr),
-        patch("webbrowser.open") as mock_web_open,
     ):
-        code = cmd.execute(target=str(tmp_path), open_report=True)
+        code = cmd.execute(target=str(tmp_path))
         assert code == 0
-        mock_web_open.assert_called_once()
-        assert len(cmd.output.successes) > 0
+        assert any("Open it in the playground" in m for m in cmd.output.infos)
 
 
 def test_execute_below_threshold(cmd, tmp_path):

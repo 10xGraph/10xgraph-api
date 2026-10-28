@@ -193,6 +193,7 @@ async def test_prepare_input_passes_the_id_to_core():
     srv._graph = MagicMock()
     srv.checkpointer = MagicMock()
     srv.checkpointer.aget_thread_owner = AsyncMock(return_value=None)
+    srv.checkpointer.aget_state = AsyncMock(return_value=None)
     srv.config = MagicMock()
     srv._media_service = None
     srv.check_media_urls = MagicMock()

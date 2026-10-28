@@ -29,6 +29,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- Removed the `/v1/evals/runs` endpoints; eval reports are JSON files opened in the playground.
+  `10xgraph eval` now writes only the JSON report and no longer has `--open`.
+
 ### Changed
 
 - **`10xgraph config` editor redesign.** A sidebar layout with a "Get running" page first, a
