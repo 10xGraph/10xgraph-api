@@ -963,6 +963,13 @@ class EvalCommand(BaseCommand):
         if isinstance(getattr(merged, "metadata", None), dict):
             merged.metadata["criteria_by_file"] = self._criteria_by_file(pending)
 
+        # Record the pass-rate gate the exit code uses so the reports can state it.
+        if isinstance(getattr(merged, "metadata", None), dict):
+            merged.metadata["pass_rate_threshold"] = 1.0 if threshold is None else threshold
+            merged.metadata["pass_rate_threshold_source"] = (
+                "default" if threshold is None else "threshold"
+            )
+
         # 9. Determine exit code
         return_code = self._exit_code(merged.summary.pass_rate, threshold)
         if threshold is not None and return_code:

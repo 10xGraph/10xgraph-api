@@ -199,6 +199,12 @@ The stable 1.0 release of `10xgraph-api`. It requires `10xgraph` 1.0 and is alig
 
 ### Changed
 
+- **`10xgraph eval` records the pass-rate gate in the report.** The merged report's metadata
+  carries `pass_rate_threshold` (the `--threshold` value, or 1.0 without one, which is what the
+  exit code uses) and `pass_rate_threshold_source` (`"threshold"` or `"default"`). The JSON
+  report includes both, and the new HTML scorecard (a `10xgraph` core change) uses them for its
+  verdict.
+
 - **The local media store no longer creates `./uploads` at server startup.** The folder is
   created on the first upload (a `10xgraph` core change).
 - **`10xgraph init --template production` scaffolds the recommended production setup.** Auth

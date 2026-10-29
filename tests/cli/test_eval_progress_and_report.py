@@ -213,6 +213,7 @@ def _execute(tmp_path: Path, *, caps: dict | None = None, env_ci: bool = False, 
     mock_cm.auto_discover_config.return_value = "10xgraph.json"
     mock_cm.get_evaluation_config.return_value = kwargs.pop("eval_cfg", {})
     report = MagicMock()
+    report.metadata = {}
     report.summary.pass_rate = 1.0
     report.summary.passed_cases = 1
     report.summary.total_cases = 1
@@ -247,6 +248,24 @@ def test_html_and_json_requested_and_listed(tmp_path: Path) -> None:
     assert cfg.html is True and cfg.json_report is True and cfg.timestamp_files is True
     assert f"HTML report: {tmp_path / 'r.html'}" in out.infos
     assert f"JSON report: {tmp_path / 'r.json'}" in out.infos
+
+
+def _recorded_metadata(rm) -> dict:
+    return rm.return_value.run_all.call_args.args[0].metadata
+
+
+def test_report_metadata_records_explicit_gate(tmp_path: Path) -> None:
+    _, _, _, rm = _execute(tmp_path, threshold=0.62)
+    meta = _recorded_metadata(rm)
+    assert meta["pass_rate_threshold"] == 0.62
+    assert meta["pass_rate_threshold_source"] == "threshold"
+
+
+def test_report_metadata_records_default_gate(tmp_path: Path) -> None:
+    _, _, _, rm = _execute(tmp_path)
+    meta = _recorded_metadata(rm)
+    assert meta["pass_rate_threshold"] == 1.0
+    assert meta["pass_rate_threshold_source"] == "default"
 
 
 def test_opens_html_once_by_default(tmp_path: Path) -> None:
