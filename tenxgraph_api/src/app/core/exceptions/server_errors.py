@@ -121,11 +121,12 @@ def report(request: Request, exc: BaseException) -> None:
         log_safe(request.url.path),
         exc_info=exc,
     )
+    # Sentry is optional and must never break the error path
     try:
         import sentry_sdk
 
         sentry_sdk.capture_exception(exc)
-    except Exception:  # noqa: S110 - Sentry is optional and must never break the error path
+    except Exception:  # noqa: S110  # nosec B110
         pass
 
 

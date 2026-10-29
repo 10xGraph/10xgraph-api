@@ -608,7 +608,7 @@ class InitCommand(BaseCommand):
                 if auth in ("jwt", "custom"):
                     # Redis is configured, so a leaked or logged-out token can be revoked
                     # for every worker. See `10xgraph revoke` and the token_revocation docs.
-                    config["token_revocation"] = "redis"  # noqa: S105
+                    config["token_revocation"] = "redis"  # noqa: S105 - a backend name, not a secret  # nosec B105
 
         return config
 
