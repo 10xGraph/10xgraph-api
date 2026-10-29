@@ -1,12 +1,20 @@
 """Build command implementation."""
 
+import json
 import re
 import tomllib
 from pathlib import Path
 from typing import Any
 
 from tenxgraph_api.cli.commands import BaseCommand
-from tenxgraph_api.cli.constants import DEFAULT_PORT, DEFAULT_PYTHON_VERSION, DEFAULT_SERVICE_NAME
+from tenxgraph_api.cli.config_editor.validation import production_readiness_warnings
+from tenxgraph_api.cli.constants import (
+    DEFAULT_CONFIG_FILE,
+    DEFAULT_PORT,
+    DEFAULT_PYTHON_VERSION,
+    DEFAULT_SERVICE_NAME,
+)
+from tenxgraph_api.cli.core.config import resolve_default_config
 from tenxgraph_api.cli.core.validation import Validator
 from tenxgraph_api.cli.exceptions import DockerError, FileOperationError, ValidationError
 from tenxgraph_api.cli.templates.defaults import (
@@ -22,6 +30,19 @@ from tenxgraph_api.cli.templates.defaults import (
 
 class BuildCommand(BaseCommand):
     """Command to generate Dockerfile and docker-compose.yml for the application."""
+
+    def _warn_not_production_ready(self) -> None:
+        """Warn about settings in the project config that are risky in production."""
+        config_path = resolve_default_config(DEFAULT_CONFIG_FILE)
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            self.logger.debug("Skipping the production-readiness check: %s", exc)
+            return
+        if not isinstance(config, dict):
+            return
+        for issue in production_readiness_warnings(config):
+            self.output.warning(f"{issue['path']}: {issue['message']}")
 
     def execute(  # noqa: PLR0912, PLR0915
         self,
@@ -107,6 +128,8 @@ class BuildCommand(BaseCommand):
                             "only the dependencies you list, so add it or the container "
                             "cannot start the server."
                         )
+
+                    self._warn_not_production_ready()
 
                 with timeline.step("dockerfile") as step:
                     dockerfile_content = generate_dockerfile_content(

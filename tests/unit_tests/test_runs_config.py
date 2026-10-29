@@ -125,7 +125,11 @@ def test_graph_config_property(tmp_path):
 
 def test_config_editor_knows_and_validates_runs():
     base = {"agent": "graph:app"}
-    assert validate({**base, "runs": {"thread_ids": "server"}}) == []
+    assert not [
+        i
+        for i in validate({**base, "runs": {"thread_ids": "server"}})
+        if i["path"].startswith("runs")
+    ]
     issues = validate({**base, "runs": {"thread_ids": "nobody"}})
     assert [i["path"] for i in issues if i["level"] == "error"] == ["runs"]
 
@@ -220,6 +224,7 @@ def test_loader_logs_when_the_mode_cannot_apply(caplog):
 
 def test_config_editor_validates_max_parallel_tool_calls():
     base = {"agent": "graph:app"}
-    assert validate({**base, "runs": {"max_parallel_tool_calls": 5}}) == []
+    issues = validate({**base, "runs": {"max_parallel_tool_calls": 5}})
+    assert not [i for i in issues if i["path"].startswith("runs")]
     issues = validate({**base, "runs": {"max_parallel_tool_calls": 0}})
     assert [i["path"] for i in issues if i["level"] == "error"] == ["runs"]

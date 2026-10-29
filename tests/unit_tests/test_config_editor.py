@@ -115,7 +115,8 @@ def test_logfire_console_does_not_offer_true() -> None:
 def test_websocket_seed_does_not_force_enabled() -> None:
     section = next(s for s in build_schema()["sections"] if s["id"] == "websocket")
     assert "enabled" not in section["default"]
-    assert not validate_config({"agent": "a:b", "websocket": section["default"]})
+    issues = validate_config({"agent": "a:b", "websocket": section["default"]})
+    assert not [i for i in issues if i["path"].startswith("websocket")]
 
 
 def test_number_field_extensions() -> None:

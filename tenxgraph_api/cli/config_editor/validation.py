@@ -27,6 +27,8 @@ _IMPORT_PATH = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_][\w.]*$")
 _OBSERVABILITY_LEVELS = ("spans", "standard", "full")
 _USER_ID_MODES = ("raw", "hash", "mask")
 _MAX_PERCENT = 100
+# Built-in authorization names that skip the per-thread ownership check.
+_OPEN_AUTHORIZATION = tuple(name for name in BUILTIN_AUTHORIZATION if name != "ownership")
 
 
 class _Collector:
@@ -80,10 +82,44 @@ def validate_config(config: Any, base_dir: Path | None = None) -> list[Issue]:
     _check_remote_tools(config, out)
     _check_test(config, out)
     _check_evaluation(config, out)
+    out.issues.extend(production_readiness_warnings(config))
 
     for key in config:
         if key not in KNOWN_TOP_LEVEL_KEYS:
             out.warning(key, f"'{key}' is not read by 10xGraph. It is kept as-is.")
+    return out.issues
+
+
+def production_readiness_warnings(config: dict) -> list[Issue]:
+    """Return warnings for settings that are fine locally but risky in production.
+
+    Reads only the JSON, never ``.env`` or the environment. Auth stays the developer's
+    choice, so these are warnings, never errors.
+    """
+    out = _Collector()
+    auth = config.get("auth")
+    if not auth:
+        out.warning(
+            "auth",
+            "Auth is off, so any caller can use every endpoint. Fine for local development; "
+            'set "jwt" or a custom BaseAuth before production.',
+        )
+    else:
+        authorization = config.get("authorization")
+        if isinstance(authorization, str) and authorization.strip().lower() in _OPEN_AUTHORIZATION:
+            out.warning(
+                "authorization",
+                f"'{authorization}' lets any authenticated user read and delete any thread. "
+                'Use "ownership" or a custom backend in production.',
+            )
+
+    rate_limit = config.get("rate_limit")
+    if rate_limit is None or (isinstance(rate_limit, dict) and rate_limit.get("enabled") is False):
+        out.warning(
+            "rate_limit",
+            "Rate limiting is off, so one caller can exhaust the service. Enable it, with the "
+            "redis backend for more than one worker, before production.",
+        )
     return out.issues
 
 

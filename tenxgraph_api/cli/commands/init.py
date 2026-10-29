@@ -80,15 +80,21 @@ def _template_vars(context: dict[str, Any]) -> dict[str, Any]:
     """Derive the template variables that depend on the user's answers.
 
     The production pyproject.toml lists only what the answers need: the provider SDK
-    through the core extra, PyJWT for JWT auth, redis for the Redis rate limiter, and
-    websockets for WebSocket streaming / realtime. The generated Dockerfile installs
-    exactly this list.
+    and the Postgres + Redis checkpointer (``pg_checkpoint``) through the core extras,
+    PyJWT for JWT auth, redis (always, the checkpointer and the default rate limiter use
+    it), and websockets for WebSocket streaming / realtime. The generated Dockerfile
+    installs exactly this list. Quick-start has no Postgres or Redis, so its core
+    requirement is the provider extra alone.
     """
     provider = _PROVIDERS[context.get("provider", _DEFAULT_PROVIDER)]
+    is_prod = context.get("setup_type") == "production"
+    core_extras = [provider["extra"]]
+    if is_prod:
+        core_extras.append("pg_checkpoint")
     api_extras = []
     if context.get("auth") == "jwt":
         api_extras.append("jwt")
-    if context.get("rate_limit") == "redis":
+    if is_prod or context.get("rate_limit") == "redis":
         api_extras.append("redis")
     if context.get("websocket"):
         api_extras.append("websocket")
@@ -97,7 +103,7 @@ def _template_vars(context: dict[str, Any]) -> dict[str, Any]:
         "llm_model": provider["model"],
         "llm_sim_model": provider["sim_model"],
         "llm_api_key_env": provider["api_key_env"],
-        "core_requirement": f"10xgraph[{provider['extra']}]",
+        "core_requirement": f"10xgraph[{','.join(core_extras)}]",
         "api_requirement": (
             f"10xgraph-api[{','.join(api_extras)}]" if api_extras else "10xgraph-api"
         ),
@@ -216,6 +222,17 @@ class InitCommand(BaseCommand):
                 else [f'pip install "{_template_vars(context)["core_requirement"]}"']
                 + (['pip install "10xgraph-api[websocket]"'] if context.get("websocket") else [])
             )
+            prod_steps = (
+                [
+                    "Set DATABASE_URL (Postgres) and REDIS_URL (Redis) in .env.",
+                    "graph/agent.py keeps a commented InMemoryCheckpointer for local testing "
+                    "without Postgres and Redis.",
+                    "10xgraph config to review auth, rate limiting and the other settings.",
+                    "10xgraph build to generate the Dockerfile for deployment.",
+                ]
+                if is_prod
+                else ["10xgraph config to review the settings in your browser."]
+            )
             self.output.completion_screen(
                 "Project ready",
                 f'"{agent_name}" was created successfully',
@@ -230,6 +247,7 @@ class InitCommand(BaseCommand):
                     f"cd {base_path}",
                     *install_step,
                     f"Copy .env.example to .env and set {provider_info['api_key_env']}.",
+                    *prod_steps,
                     "10xgraph dev",
                 ],
             )
@@ -269,14 +287,17 @@ class InitCommand(BaseCommand):
                 field="name",
             )
 
-        resolved_auth = (auth or "none").strip().lower()
+        is_prod_template = resolved_template == "production"
+        resolved_auth = (auth or ("jwt" if is_prod_template else "none")).strip().lower()
         if resolved_auth not in {"none", "jwt", "custom"}:
             raise ValidationError(
                 f"Invalid auth mode '{resolved_auth}'. Choose none, jwt, or custom.",
                 field="auth",
             )
 
-        resolved_rate_limit = (rate_limit or "none").strip().lower()
+        resolved_rate_limit = (
+            (rate_limit or ("redis" if is_prod_template else "none")).strip().lower()
+        )
         if resolved_rate_limit not in {"none", "memory", "redis"}:
             raise ValidationError(
                 f"Invalid rate-limit mode '{resolved_rate_limit}'. "
@@ -317,7 +338,7 @@ class InitCommand(BaseCommand):
     # Prompts
     # ------------------------------------------------------------------
 
-    def _prompt_user(self) -> dict | None:  # noqa: PLR0911, PLR0912
+    def _prompt_user(self) -> dict | None:  # noqa: PLR0911
         prompts = self.output.prompts()
         prompts.require_interactive(
             field="template",
@@ -342,7 +363,7 @@ class InitCommand(BaseCommand):
                 Choice(
                     "production",
                     "Production",
-                    "Auth, rate limiting, evals, and tests scaffolded in",
+                    "JWT auth, Postgres + Redis, rate limiting, evals, and tests scaffolded in",
                 ),
             ],
             default="quick_start",
@@ -393,14 +414,11 @@ class InitCommand(BaseCommand):
                 Choice("jwt", "JWT", "Requires JWT_SECRET_KEY and JWT_ALGORITHM"),
                 Choice("custom", "Custom", "Scaffolds a BaseAuth subclass under auth/"),
             ],
-            default="none",
+            default="jwt",
         )
         if auth is None:
             return None
         context["auth"] = auth
-
-        if auth == "none":
-            return context
 
         rate_limit = prompts.select(
             "Rate limiting backend?",
@@ -409,7 +427,7 @@ class InitCommand(BaseCommand):
                 Choice("memory", "Memory", "Per-process counters — single instance only"),
                 Choice("redis", "Redis", "Shared counters — requires REDIS_URL"),
             ],
-            default="none",
+            default="redis",
         )
         if rate_limit is None:
             return None
@@ -497,41 +515,6 @@ class InitCommand(BaseCommand):
             title="Project summary",
         )
 
-    def _print_next_steps(self, context: dict, is_prod: bool) -> None:
-        steps: list[tuple[str, str]] = []
-
-        steps.append(("10xgraph skills", "Install coding agent skills"))
-
-        if is_prod:
-            steps.append(("pre-commit install", "Set up Git hooks (ruff, bandit, etc.)"))
-
-        provider = _PROVIDERS[context.get("provider", _DEFAULT_PROVIDER)]
-        if not is_prod:
-            # Production lists the provider SDK in pyproject.toml already.
-            steps.append(
-                (f'pip install "10xgraph[{provider["extra"]}]"', "Add the AI provider library")
-            )
-        steps.append(
-            ("cp .env.example .env", f"Copy env template, then set {provider['api_key_env']}")
-        )
-
-        if context["auth"] == "jwt":
-            steps.append(("# Set JWT_SECRET_KEY in .env", "Required for JWT auth to work"))
-
-        if context["rate_limit"] == "redis":
-            steps.append(("# Set REDIS_URL in .env", "Required for Redis rate limiting"))
-
-        steps.append(("10xgraph dev", "Launch your agent"))
-
-        self.output.print_table(
-            ["#", "Command", "Purpose"],
-            [
-                [str(index), command, description]
-                for index, (command, description) in enumerate(steps, 1)
-            ],
-            title="Next steps",
-        )
-
     # ------------------------------------------------------------------
     # Config generation
     # ------------------------------------------------------------------
@@ -608,7 +591,7 @@ class InitCommand(BaseCommand):
         if src.name == ".env.example" and is_prod:
             content = _strip_env_blocks(
                 content,
-                keep_redis=context["rate_limit"] == "redis",
+                keep_redis=True,
                 keep_jwt=context["auth"] == "jwt",
             )
 

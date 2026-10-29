@@ -36,6 +36,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`10xgraph init --template production` scaffolds the recommended production setup.** Auth
+  defaults to JWT (with ownership authorization) and the rate limiter to Redis, in both the
+  prompts and `--non-interactive` (the rate-limit question is now asked whatever the auth
+  answer). `graph/agent.py` builds a `PgCheckpointer` from `DATABASE_URL` and `REDIS_URL`, with
+  the in-memory checkpointer left as commented-out code for local testing. `.env.example` always
+  has the Postgres and Redis blocks, and `pyproject.toml` depends on `10xgraph[<provider>,pg_checkpoint]`
+  and `10xgraph-api[...redis...]`. Quick-start is unchanged.
+- **Production-readiness warnings.** `10xgraph config` (the editor and the terminal on start-up)
+  and `10xgraph build` now warn, from the JSON alone, when `auth` is off, when `authorization`
+  is `allow_all`, `default` or `none` with auth on, and when `rate_limit` is missing or
+  disabled. They are warnings only: auth off stays allowed and `build` still exits 0. The
+  checks live in `production_readiness_warnings` (`cli/config_editor/validation.py`). The
+  `10xgraph init` next steps now point to `10xgraph config` (both templates) and
+  `10xgraph build` (production); the unused `InitCommand._print_next_steps` was removed.
 - **`10xgraph config` editor redesign.** A sidebar layout with a "Get running" page first, a
   collapsible sidebar (Ctrl/Cmd+B), search across every setting, defaults shown as values with a
   per-field reset, and a read-only reference of the related `.env` variables per section plus a

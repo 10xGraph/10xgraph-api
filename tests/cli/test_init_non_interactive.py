@@ -77,7 +77,7 @@ def test_production_dependencies_follow_the_answers(tmp_path: Path) -> None:
         non_interactive=True,
     )
     assert result == 0
-    assert _dependencies(target) == ["10xgraph[openai]", "10xgraph-api[jwt,redis]"]
+    assert _dependencies(target) == ["10xgraph[openai,pg_checkpoint]", "10xgraph-api[jwt,redis]"]
 
     import json
 
@@ -93,7 +93,7 @@ def test_production_dependencies_follow_the_answers(tmp_path: Path) -> None:
     assert "$api_requirement" not in (target / "pyproject.toml").read_text()
 
 
-def test_production_without_jwt_or_redis_installs_neither(tmp_path: Path) -> None:
+def test_production_without_jwt_installs_redis_but_not_jwt(tmp_path: Path) -> None:
     target = tmp_path / "open-agent"
     command = InitCommand(OutputFormatter(stream=io.StringIO()))
     result = command.execute(
@@ -106,7 +106,7 @@ def test_production_without_jwt_or_redis_installs_neither(tmp_path: Path) -> Non
         non_interactive=True,
     )
     assert result == 0
-    assert _dependencies(target) == ["10xgraph[anthropic]", "10xgraph-api"]
+    assert _dependencies(target) == ["10xgraph[anthropic,pg_checkpoint]", "10xgraph-api[redis]"]
     assert 'model="claude-sonnet-5-5"' in (target / "graph" / "agent.py").read_text()
 
 
@@ -135,7 +135,7 @@ def test_websocket_off_by_default_and_not_installed(tmp_path: Path) -> None:
         path=str(target), template="production", provider="openai", non_interactive=True
     )
     assert result == 0
-    assert _dependencies(target) == ["10xgraph[openai]", "10xgraph-api"]
+    assert _dependencies(target) == ["10xgraph[openai,pg_checkpoint]", "10xgraph-api[jwt,redis]"]
     config = json.loads((target / "10xgraph.json").read_text())
     assert config["websocket"] == {"enabled": False}
 
@@ -154,7 +154,10 @@ def test_websocket_on_adds_the_extra_and_enables_the_routes(tmp_path: Path) -> N
         non_interactive=True,
     )
     assert result == 0
-    assert _dependencies(target) == ["10xgraph[anthropic]", "10xgraph-api[jwt,websocket]"]
+    assert _dependencies(target) == [
+        "10xgraph[anthropic,pg_checkpoint]",
+        "10xgraph-api[jwt,redis,websocket]",
+    ]
     config = json.loads((target / "10xgraph.json").read_text())
     assert config["websocket"] == {"enabled": True}
 

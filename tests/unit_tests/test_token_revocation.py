@@ -242,7 +242,8 @@ def test_config_editor_validates_token_revocation():
     from tenxgraph_api.cli.config_editor import validate_config
 
     base = {"agent": "graph:app", "auth": "jwt"}
-    assert validate_config({**base, "token_revocation": "memory"}) == []
+    issues = validate_config({**base, "token_revocation": "memory"})
+    assert not [i for i in issues if i["path"].startswith("token_revocation")]
     assert any(
         i["level"] == "error" for i in validate_config({**base, "token_revocation": "bad path"})
     )
