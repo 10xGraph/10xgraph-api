@@ -18,9 +18,7 @@ class MessageModel(BaseModel):
 def test_parse_state_output_debug_true(monkeypatch):
     monkeypatch.setenv("JWT_SECRET_KEY", "test")
     monkeypatch.setenv("JWT_ALGORITHM", "HS256")
-    settings = Settings(
-        IS_DEBUG=True,
-    )
+    settings = Settings()
     model = StateModel(a=1, b=2, execution_meta="meta")
     out = parse_state_output(settings, model)
     assert out == {"a": 1, "b": 2, "execution_meta": "meta"}
@@ -29,9 +27,7 @@ def test_parse_state_output_debug_true(monkeypatch):
 def test_parse_state_output_debug_false(monkeypatch):
     monkeypatch.setenv("JWT_SECRET_KEY", "test")
     monkeypatch.setenv("JWT_ALGORITHM", "HS256")
-    settings = Settings(
-        IS_DEBUG=False,
-    )
+    settings = Settings()
     model = StateModel(a=1, b=2, execution_meta="meta")
     out = parse_state_output(settings, model)
     assert out == {"a": 1, "b": 2, "execution_meta": "meta"}
@@ -40,9 +36,7 @@ def test_parse_state_output_debug_false(monkeypatch):
 def test_parse_message_output_debug_true(monkeypatch):
     monkeypatch.setenv("JWT_SECRET_KEY", "test")
     monkeypatch.setenv("JWT_ALGORITHM", "HS256")
-    settings = Settings(
-        IS_DEBUG=True,
-    )
+    settings = Settings()
     model = MessageModel(text="hello", raw={"tokens": 3})
     out = parse_message_output(settings, model)
     assert out == {"text": "hello"}
@@ -51,9 +45,7 @@ def test_parse_message_output_debug_true(monkeypatch):
 def test_parse_message_output_debug_false(monkeypatch):
     monkeypatch.setenv("JWT_SECRET_KEY", "test")
     monkeypatch.setenv("JWT_ALGORITHM", "HS256")
-    settings = Settings(
-        IS_DEBUG=False,
-    )
+    settings = Settings()
     model = MessageModel(text="hello", raw={"tokens": 3})
     out = parse_message_output(settings, model)
     assert out == {"text": "hello"}

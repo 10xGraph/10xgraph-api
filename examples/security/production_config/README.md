@@ -118,7 +118,6 @@ Before going to production, verify:
 ### Required Configuration
 - [ ] `MODE=production` in .env.production
 - [ ] Strong `JWT_SECRET_KEY` (32+ chars, random)
-- [ ] `IS_DEBUG=false`
 - [ ] Specific `ORIGINS` (not `*`)
 - [ ] Specific `ALLOWED_HOST` (not `*`)
 - [ ] `DOCS_PATH` and `REDOCS_PATH` are empty

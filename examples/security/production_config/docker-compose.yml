@@ -14,7 +14,6 @@ services:
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
       - ORIGINS=${ORIGINS}
       - ALLOWED_HOST=${ALLOWED_HOST}
-      - IS_DEBUG=false
       - DOCS_PATH=
       - REDOCS_PATH=
       - MAX_REQUEST_SIZE=10485760

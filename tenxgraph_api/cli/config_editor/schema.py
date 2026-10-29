@@ -933,10 +933,6 @@ _ENVIRONMENT: list[dict[str, Any]] = [
                     "including the API docs being off."
                 ),
             },
-            {
-                "name": "IS_DEBUG",
-                "purpose": "Debug output. Always forced off when MODE is production.",
-            },
             {"name": "LOG_LEVEL", "purpose": "Python log level such as INFO or DEBUG."},
             {
                 "name": "STRICT_PRODUCTION_CHECKS",

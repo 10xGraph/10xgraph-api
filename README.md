@@ -447,7 +447,6 @@ Security features of the server:
 ```bash
 MODE=production                  # production mode
 JWT_SECRET_KEY=<32+ chars>       # strong secret (secrets.token_urlsafe(32))
-IS_DEBUG=false                   # disable debug
 ORIGINS=https://yourdomain.com   # specific CORS origins (never *)
 ALLOWED_HOST=yourdomain.com      # specific allowed hosts (never *)
 DOCS_PATH=                       # recommended: disable API docs

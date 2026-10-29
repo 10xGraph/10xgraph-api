@@ -6,7 +6,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydantic_settings import BaseSettings
 
 
-IS_PRODUCTION = False
 LOGGER_NAME = os.getenv("LOGGER_NAME", "10xgraph-api")
 
 logger = logging.getLogger(LOGGER_NAME)
@@ -92,8 +91,6 @@ class Settings(BaseSettings):
     # DEBUG = 10
     # NOTSET = 0
     LOG_LEVEL: str = "INFO"
-    # Forced off when MODE=production, whatever the environment says.
-    IS_DEBUG: bool = True
     # When true, MODE=production refuses to start on the settings it otherwise only warns
     # about: wildcard ALLOWED_HOST, wildcard ORIGINS, and enabled API docs. Unset means on in
     # production and off in development; STRICT_PRODUCTION_CHECKS=false opts out.
@@ -257,17 +254,18 @@ class Settings(BaseSettings):
         """Check for insecure configurations in production mode."""
         if self.STRICT_PRODUCTION_CHECKS is None:
             self.STRICT_PRODUCTION_CHECKS = self.MODE == "production"
+        # IS_DEBUG used to switch debug on or off; debug now follows MODE. Never fail on it.
+        if any(key.upper() == "IS_DEBUG" for key in (*os.environ, *(self.model_extra or {}))):
+            logger.warning(
+                "IS_DEBUG is no longer read; debug follows MODE "
+                "(on in development, off in production)."
+            )
         if self.MODE == "production":
             # Docs (and the OpenAPI schema behind them) are off in production unless a path
             # was set explicitly.
             for field in ("DOCS_PATH", "REDOCS_PATH"):
                 if field not in self.model_fields_set:
                     setattr(self, field, "")
-
-            # Debug output is never allowed in production: enforce it rather than warn.
-            if self.IS_DEBUG:
-                self.IS_DEBUG = False
-                logger.warning("IS_DEBUG=true is ignored in production; debug is forced off.")
 
             warnings = []
 

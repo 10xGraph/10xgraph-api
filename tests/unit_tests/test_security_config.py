@@ -41,17 +41,21 @@ def test_cors_wildcard_no_warning_in_development(caplog):
         assert "CORS ORIGINS" not in caplog.text or "production" not in caplog.text
 
 
-def test_debug_mode_is_forced_off_in_production(caplog):
-    """IS_DEBUG=true is overridden in production, not just warned about."""
-    with patch.dict(os.environ, {"MODE": "production", "IS_DEBUG": "true", **SAFE_HOSTS}):
-        settings = Settings()
-        assert settings.IS_DEBUG is False
-        assert "IS_DEBUG=true is ignored in production" in caplog.text
+def test_leftover_is_debug_warns_and_is_ignored(caplog):
+    """A stale IS_DEBUG warns once and never stops startup."""
+    for mode in ("development", "production"):
+        caplog.clear()
+        with patch.dict(os.environ, {"MODE": mode, "IS_DEBUG": "true", **SAFE_HOSTS}):
+            settings = Settings()
+        assert mode == settings.MODE
+        assert caplog.text.count("IS_DEBUG is no longer read") == 1
 
 
-def test_debug_mode_kept_in_development():
-    with patch.dict(os.environ, {"MODE": "development", "IS_DEBUG": "true"}):
-        assert Settings().IS_DEBUG is True
+def test_no_is_debug_warning_when_unset(caplog):
+    with patch.dict(os.environ, {"MODE": "development"}):
+        os.environ.pop("IS_DEBUG", None)
+        Settings()
+    assert "IS_DEBUG" not in caplog.text
 
 
 def test_docs_enabled_warning_in_production(caplog):
@@ -93,7 +97,6 @@ def test_multiple_warnings_in_production(caplog):
         {
             "MODE": "production",
             "ORIGINS": "*",
-            "IS_DEBUG": "true",
             "ALLOWED_HOST": "*",
             "STRICT_PRODUCTION_CHECKS": "false",
         },
@@ -102,7 +105,6 @@ def test_multiple_warnings_in_production(caplog):
 
         log_text = caplog.text
         assert "CORS ORIGINS='*'" in log_text
-        assert "IS_DEBUG=true is ignored" in log_text
         assert "ALLOWED_HOST='*'" in log_text
 
 

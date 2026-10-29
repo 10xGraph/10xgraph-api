@@ -376,7 +376,6 @@ def generate_dockerfile_content(
             "# In production the local in-memory telemetry store stays disabled",
             "# (use OTEL / a publisher for observability instead).",
             "ENV MODE=production",
-            "ENV IS_DEBUG=false",
             "# Gunicorn worker count. Gunicorn reads WEB_CONCURRENCY natively; a sane default",
             "# here beats gunicorn's built-in default of 1 worker. Tune to your CPU/memory",
             "# at deploy time, e.g. `docker run -e WEB_CONCURRENCY=8 ...`.",
@@ -527,8 +526,6 @@ def generate_k8s_manifest_content(service_name: str, port: int) -> str:
             "          env:",
             "            - name: MODE",
             '              value: "production"',
-            "            - name: IS_DEBUG",
-            '              value: "false"',
             # ORIGINS and ALLOWED_HOST come from the Secret (an env entry here would
             # override it). Production refuses to start while either is missing or a wildcard.
             "          lifecycle:",
@@ -610,7 +607,6 @@ def generate_docker_compose_content(service_name: str, port: int) -> str:
             "      - PYTHONDONTWRITEBYTECODE=1",
             # Default to production; local in-memory telemetry stays disabled.
             "      - MODE=production",
-            "      - IS_DEBUG=false",
             "      # ORIGINS and ALLOWED_HOST come from .env (a value here would override it).",
             "      # Production refuses to start while either is missing or a wildcard.",
             "    # Loopback only: put a TLS reverse proxy (Caddy, nginx, a cloud load",

@@ -227,13 +227,13 @@ were removed in the 0.5.0 readiness pass; they were fully commented out and neve
 `core/config/settings.py` is a `pydantic-settings` `Settings` (with `extra="allow"`, so unknown
 env vars are tolerated). Notable vars: `APP_NAME`, `APP_VERSION`, `MODE` (`production` | `prod` |
 `development` | `dev` | `local`, case-insensitive, normalised to `production` or `development`;
-anything else refuses to start, unset is `development`), `LOG_LEVEL`, `IS_DEBUG`, `MAX_REQUEST_SIZE` (10MB default), security headers
+anything else refuses to start, unset is `development`), `LOG_LEVEL`, `MAX_REQUEST_SIZE` (10MB default), security headers
 (`SECURITY_HEADERS_ENABLED`, `HSTS_*`, `FRAME_OPTIONS`, `CSP_POLICY`, ...), `ORIGINS` (CORS,
 default `*` with a wildcard warning), `ALLOWED_HOST`, `ROOT_PATH`/`DOCS_PATH`/`REDOCS_PATH`,
 `REDIS_URL`, `SENTRY_DSN`, `SNOWFLAKE_*` (epoch/node/worker/bit layout), `JWT_SECRET_KEY`/
 `JWT_ALGORITHM`, `OTEL_ENABLED`/`OTEL_SERVICE_NAME`/`OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_LEVEL`,
 `STRICT_PRODUCTION_CHECKS` (production refuses wildcard `ALLOWED_HOST`/`ORIGINS` or enabled
-docs). `IS_DEBUG` is forced off in production. Media: `MEDIA_REQUIRE_OWNER` defaults on in
+docs). Debug follows `MODE` (on in development, off in production); a leftover `IS_DEBUG` is ignored with a warning. Media: `MEDIA_REQUIRE_OWNER` defaults on in
 production. In production: set `MODE=production`, a non-`*` `ORIGINS`, and a strong
 `JWT_SECRET_KEY`; see `SECURITY.md` for the full checklist.
 

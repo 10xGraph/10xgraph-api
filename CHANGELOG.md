@@ -187,6 +187,8 @@ The stable 1.0 release of `10xgraph-api`. It requires `10xgraph` 1.0 and is alig
 
 ### Changed
 
+- **The local media store no longer creates `./uploads` at server startup.** The folder is
+  created on the first upload (a `10xgraph` core change).
 - **`10xgraph init --template production` scaffolds the recommended production setup.** Auth
   defaults to JWT (with ownership authorization) and the rate limiter to Redis, in both the
   prompts and `--non-interactive` (the rate-limit question is now asked whatever the auth
@@ -233,8 +235,7 @@ The stable 1.0 release of `10xgraph-api`. It requires `10xgraph` 1.0 and is alig
   redacts `sk-` and `AIza` secrets as well as Bearer and JWT values, keeps UUID ids readable,
   redacts keys by whole name, and replaces CR and LF. Validation errors on WebSocket and AG-UI
   no longer echo pydantic `input_value` text, and the access log does not print `?token=`.
-- **`ALLOWED_HOST` is stripped** before the middleware compares it, `IS_DEBUG=true` is reported
-  as ignored in production, and `10xgraph dev --host 0.0.0.0` and `--reload` in production log
+- **`ALLOWED_HOST` is stripped** before the middleware compares it, and `10xgraph dev --host 0.0.0.0` and `--reload` in production log
   a warning.
 - **Token revocation.** A `revoke_user` cutoff is never replaced by an older one, entries
   expire (30 days by default), and a token without `iat` is dated from its `exp` when you give
@@ -272,6 +273,9 @@ The stable 1.0 release of `10xgraph-api`. It requires `10xgraph` 1.0 and is alig
 
 ### Removed
 
+- **`IS_DEBUG` is removed.** Debug now follows `MODE`: on in development, off in production. A
+  leftover `IS_DEBUG` in the environment is ignored and logs one WARNING at startup; delete it.
+  The unused `IS_PRODUCTION` constant in `settings.py` is gone too.
 - Removed the `/v1/evals/runs` endpoints; eval reports are JSON files opened in the playground.
   `10xgraph eval` now writes only the JSON report and no longer has `--open`.
 - The `graph:setup` scope is removed from the config editor and the docs (see Breaking).

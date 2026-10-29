@@ -69,7 +69,7 @@ Out of scope:
 The API refuses to start on some misconfigurations rather than warning - notably wildcard
 CORS combined with credentials in production. For anything else, in production set:
 
-- `MODE=production` and `IS_DEBUG=false`
+- `MODE=production` (debug is off in production)
 - `ORIGINS` to an explicit comma-separated list, never `*`
 - `JWT_SECRET_KEY` to a random value of 32 characters or more
 - An `authorization` backend (it defaults to `ownership` whenever auth is on; do not weaken

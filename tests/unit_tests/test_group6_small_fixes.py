@@ -67,12 +67,13 @@ def test_allowed_host_list_is_stripped_for_the_middleware(monkeypatch):
     assert TestClient(app, base_url="http://example.com").get("/x").status_code == 200
 
 
-def test_is_debug_reaches_the_app():
+def test_mode_sets_app_debug():
     import inspect
 
     from tenxgraph_api.src.app import main
 
-    assert "debug=settings.IS_DEBUG" in inspect.getsource(main)
+    assert 'debug=settings.MODE != "production"' in inspect.getsource(main)
+    assert main.app.debug is (main.settings.MODE != "production")
 
 
 def test_production_warns_about_debug_logging_and_full_otel(caplog):
