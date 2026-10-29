@@ -120,6 +120,26 @@ def production_readiness_warnings(config: dict) -> list[Issue]:
             "Rate limiting is off, so one caller can exhaust the service. Enable it, with the "
             "redis backend for more than one worker, before production.",
         )
+    elif isinstance(rate_limit, dict) and rate_limit.get("enabled") is not False:
+        if auth and rate_limit.get("by", "ip") == "ip":
+            out.warning(
+                "rate_limit.by",
+                "Counting requests per IP with auth on shares one budget between users behind a "
+                'proxy. Use "by": "user", or set trusted_proxy_headers behind your proxy.',
+            )
+        exclude = rate_limit.get("exclude_paths")
+        if isinstance(exclude, list) and "/redoc" in exclude and "/redocs" not in exclude:
+            out.warning(
+                "rate_limit.exclude_paths",
+                'The ReDoc page is served at /redocs, not /redoc; "/redoc" excludes nothing.',
+            )
+
+    if auth and not config.get("token_revocation"):
+        out.warning(
+            "token_revocation",
+            "Token revocation is off, so a leaked or logged-out token works until it expires. "
+            'Set "token_revocation": "redis" and revoke with `10xgraph revoke`.',
+        )
     return out.issues
 
 

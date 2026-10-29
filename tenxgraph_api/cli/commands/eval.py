@@ -198,9 +198,12 @@ class EvalCommand(BaseCommand):
             return [evals_dir]
 
         dirs: list[Path] = []
+        # Walk up only inside the project: a target outside the working directory must not
+        # pick up a confeval.py (it is imported and run) from an unrelated parent folder.
+        inside_project = cur == cwd or cwd in cur.parents
         while True:
             dirs.append(cur)
-            if cur in (cwd, cur.parent):
+            if not inside_project or cur in (cwd, cur.parent):
                 break
             cur = cur.parent
 
@@ -713,6 +716,12 @@ class EvalCommand(BaseCommand):
                 )
         return Path.cwd() / directory
 
+    @staticmethod
+    def _exit_code(pass_rate: float, threshold: float | None) -> int:
+        """0 when the pass rate meets ``threshold``; without one, only a clean run passes."""
+        required = 1.0 if threshold is None else threshold
+        return 0 if pass_rate >= required else 1
+
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
@@ -857,13 +866,11 @@ class EvalCommand(BaseCommand):
             merged.metadata["criteria_by_file"] = self._criteria_by_file(pending)
 
         # 9. Determine exit code
-        if threshold is not None and merged.summary.pass_rate < threshold:
+        return_code = self._exit_code(merged.summary.pass_rate, threshold)
+        if threshold is not None and return_code:
             self.output.error(
                 f"Pass rate {merged.summary.pass_rate:.1%} is below threshold {threshold:.1%}"
             )
-            return_code = 1
-        else:
-            return_code = 0 if merged.summary.pass_rate == 1.0 else 1
 
         # 10. Generate reports
         if not no_report:

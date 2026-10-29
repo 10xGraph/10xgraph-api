@@ -19,10 +19,30 @@ GRACEFUL_TIMEOUT_SECONDS: Final[int] = 600
 # Gunicorn kills a worker it considers hung. Long LLM calls must not look hung.
 WORKER_TIMEOUT_SECONDS: Final[int] = 660
 
+# Uvicorn stops waiting for open responses after this many seconds and cancels them, so the
+# lifespan shutdown (30 s drain, graph.aclose) runs before gunicorn's --graceful-timeout
+# SIGKILLs the worker. Open NDJSON streams get a final "interrupted" chunk just before it.
+# Keep in step with ``uvicorn_worker.DEFAULT_GRACEFUL_SHUTDOWN_SECONDS``.
+UVICORN_GRACEFUL_SHUTDOWN_SECONDS: Final[int] = GRACEFUL_TIMEOUT_SECONDS - 60
+
+# The container runtime's own kill timer must be longer than gunicorn's, or SIGKILL lands
+# while workers are still draining and the lifespan shutdown never runs.
+SHUTDOWN_KILL_MARGIN_SECONDS: Final[int] = 60
+
+# `docker compose down` waits this long before SIGKILL.
+COMPOSE_STOP_GRACE_SECONDS: Final[int] = GRACEFUL_TIMEOUT_SECONDS + SHUTDOWN_KILL_MARGIN_SECONDS
+
 # terminationGracePeriodSeconds must exceed the app's graceful timeout, plus the
-# preStop sleep that lets the load balancer stop sending new traffic first.
-K8S_TERMINATION_GRACE_SECONDS: Final[int] = GRACEFUL_TIMEOUT_SECONDS + 60
+# preStop sleep that lets the load balancer stop sending new traffic first (it runs
+# inside the same period).
 K8S_PRESTOP_SLEEP_SECONDS: Final[int] = 15
+K8S_TERMINATION_GRACE_SECONDS: Final[int] = (
+    GRACEFUL_TIMEOUT_SECONDS + K8S_PRESTOP_SLEEP_SECONDS + SHUTDOWN_KILL_MARGIN_SECONDS
+)
+
+# Gunicorn worker class: uvicorn worker with timeout_graceful_shutdown, a draining flag for
+# /health/ready and a final chunk for open streams.
+GUNICORN_WORKER_CLASS: Final[str] = "tenxgraph_api.src.app.uvicorn_worker.TenxGraphUvicornWorker"
 
 # Fixed, numeric uid/gid for the image user. Kubernetes can only verify
 # ``runAsNonRoot`` against a numeric USER, and a fixed id keeps volume ownership
@@ -401,7 +421,7 @@ def generate_dockerfile_content(
                 "# hard-kill runs that were still mid-flight, truncating them. Give",
                 "# in-flight runs time to finish draining instead.",
                 (
-                    'CMD ["gunicorn", "-k", "uvicorn_worker.UvicornWorker", '
+                    f'CMD ["gunicorn", "-k", "{GUNICORN_WORKER_CLASS}", '
                     f'"-b", "0.0.0.0:{port}", '
                     f'"--graceful-timeout", "{GRACEFUL_TIMEOUT_SECONDS}", '
                     f'"--timeout", "{WORKER_TIMEOUT_SECONDS}", '
@@ -446,8 +466,11 @@ def generate_k8s_manifest_content(service_name: str, port: int) -> str:
             "#      one --from-literal per value (--from-env-file keeps quotes as part",
             "#      of the value), or sync it from your secret manager:",
             f"#        kubectl create secret generic {secret_name} \\",
-            "#          --from-literal=JWT_SECRET_KEY=... --from-literal=GOOGLE_API_KEY=...",
-            "#   3. Replace the ORIGINS and ALLOWED_HOST placeholders.",
+            "#          --from-literal=JWT_SECRET_KEY=... --from-literal=GOOGLE_API_KEY=... \\",
+            "#          --from-literal=ORIGINS=https://your-frontend.example.com \\",
+            "#          --from-literal=ALLOWED_HOST=your-app.example.com",
+            "#   3. ORIGINS (CORS origins, never *) and ALLOWED_HOST (your public hostname) are",
+            "#      required in production and are read from the same Secret.",
             "#   4. Expose it through an Ingress or Gateway that terminates TLS.",
             "# The root filesystem is read-only: only /tmp and /app/uploads are writable.",
             "# If your graph writes anywhere else (a SQLite checkpointer under",
@@ -505,12 +528,8 @@ def generate_k8s_manifest_content(service_name: str, port: int) -> str:
             '              value: "production"',
             "            - name: IS_DEBUG",
             '              value: "false"',
-            "            # CORS: production refuses wildcard origins with credentials.",
-            "            - name: ORIGINS",
-            '              value: "https://your-frontend.example.com"',
-            "            # Production refuses a wildcard host; set your public hostname.",
-            "            - name: ALLOWED_HOST",
-            '              value: "your-app.example.com"',
+            # ORIGINS and ALLOWED_HOST come from the Secret (an env entry here would
+            # override it). Production refuses to start while either is missing or a wildcard.
             "          lifecycle:",
             "            preStop:",
             "              exec:",
@@ -599,7 +618,7 @@ def generate_docker_compose_content(service_name: str, port: int) -> str:
             "    ports:",
             f"      - '127.0.0.1:{port}:{port}'",
             (
-                f"    command: [ 'gunicorn', '-k', 'uvicorn_worker.UvicornWorker', "
+                f"    command: [ 'gunicorn', '-k', '{GUNICORN_WORKER_CLASS}', "
                 f"'-b', '0.0.0.0:{port}', "
                 f"'--graceful-timeout', '{GRACEFUL_TIMEOUT_SECONDS}', "
                 f"'--timeout', '{WORKER_TIMEOUT_SECONDS}', "
@@ -607,7 +626,8 @@ def generate_docker_compose_content(service_name: str, port: int) -> str:
             ),
             # Give in-flight agent runs time to drain on `docker compose down`
             # instead of being killed after the default 10s.
-            f"    stop_grace_period: {GRACEFUL_TIMEOUT_SECONDS}s",
+            # Longer than gunicorn's --graceful-timeout, or SIGKILL lands mid-drain.
+            f"    stop_grace_period: {COMPOSE_STOP_GRACE_SECONDS}s",
             "    restart: unless-stopped",
             "    # Locked down: read-only filesystem, no Linux capabilities, no setuid",
             "    # escalation. Only /tmp and the uploads folder are writable.",

@@ -325,7 +325,7 @@ def _build_ownership_redis(redis_url: str | None) -> object | None:
     if not redis_url:
         return None
     try:
-        from redis.asyncio import Redis as AsyncRedis  # type: ignore[import]
+        import redis.asyncio  # type: ignore[import]  # noqa: F401
     except ImportError:
         logger.warning(
             "REDIS configured but the 'redis' package is not installed; ownership cache "
@@ -333,7 +333,9 @@ def _build_ownership_redis(redis_url: str | None) -> object | None:
         )
         return None
     try:
-        client = AsyncRedis.from_url(redis_url, decode_responses=False)
+        from tenxgraph_api.src.app.core.redis_client import create_redis
+
+        client = create_redis(redis_url)
         logger.info("Ownership authorization L2 cache enabled (shared Redis).")
         return client
     except Exception as exc:  # pragma: no cover - defensive
@@ -524,6 +526,13 @@ async def attach_all_modules(
         logger.info("Attached %d configured remote tools", len(remote_tools))
 
     logger.info("All modules attached successfully")
+
+    if config.checkpointer_path:
+        logger.warning(
+            'The "checkpointer" key in 10xgraph.json is not applied by the server and is '
+            "ignored. Pass the checkpointer to graph.compile(checkpointer=...) in your agent "
+            "module instead."
+        )
 
     # This binding we have done already in the library
     # # Bind checkpointer instance if configured

@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import WebSocketDisconnect
 
+from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
 from tenxgraph_api.src.app.routers.graph.router import realtime_graph_ws
 
 
@@ -54,6 +55,7 @@ def _make_websocket(receive_side_effects: list, init: dict):
 def _make_service(events: list):
     service = MagicMock()
     service.is_live_agent = True  # live graph: allowed on /v1/graph/live
+    service.runs_policy.return_value = RunsConfig()
     captured = {}
 
     async def _gen(input_queue, init, user):
@@ -157,6 +159,7 @@ class TestRealtimeWebSocket:
     async def test_downstream_error_closes_with_1011(self):
         ws = _make_websocket([WebSocketDisconnect()], init={"model": "gemini-2.5-flash-live"})
         service = MagicMock()
+        service.runs_policy.return_value = RunsConfig()
 
         async def _boom(input_queue, init, user):
             raise RuntimeError("graph has no LiveAgent")
@@ -230,6 +233,7 @@ class TestRealtimeWebSocket:
                 yield e
 
         service = MagicMock()
+        service.runs_policy.return_value = RunsConfig()
         service.realtime_graph = _slow_gen
 
         ws = _make_websocket(
@@ -254,6 +258,7 @@ class TestRealtimeWebSocket:
             yield  # make it an async generator
 
         service = MagicMock()
+        service.runs_policy.return_value = RunsConfig()
         service.realtime_graph = _boom
 
         ws = _make_websocket([WebSocketDisconnect()], init={"model": "gemini-x"})

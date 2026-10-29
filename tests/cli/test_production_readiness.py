@@ -19,8 +19,18 @@ from tenxgraph_api.cli.config_editor.validation import (
 from tenxgraph_api.cli.core.output import OutputFormatter
 
 
-REDIS_RATE_LIMIT = {"enabled": True, "backend": "redis", "redis": {"url": "redis://x"}}
-READY = {"agent": "graph.react:app", "auth": "jwt", "rate_limit": REDIS_RATE_LIMIT}
+REDIS_RATE_LIMIT = {
+    "enabled": True,
+    "backend": "redis",
+    "redis": {"url": "redis://x"},
+    "by": "user",
+}
+READY = {
+    "agent": "graph.react:app",
+    "auth": "jwt",
+    "rate_limit": REDIS_RATE_LIMIT,
+    "token_revocation": "redis",
+}
 AUTH_OFF_TEXT = "Auth is off"
 
 
@@ -54,6 +64,36 @@ def test_safe_authorization_does_not_warn(value: str | None) -> None:
 def test_disabled_rate_limit_warns() -> None:
     config = {**READY, "rate_limit": {"enabled": False}}
     assert _paths(production_readiness_warnings(config)) == ["rate_limit"]
+
+
+def test_auth_without_token_revocation_warns() -> None:
+    config = {key: value for key, value in READY.items() if key != "token_revocation"}
+    assert _paths(production_readiness_warnings(config)) == ["token_revocation"]
+
+
+def test_per_ip_rate_limit_with_auth_warns() -> None:
+    config = {**READY, "rate_limit": {**REDIS_RATE_LIMIT, "by": "ip"}}
+    assert _paths(production_readiness_warnings(config)) == ["rate_limit.by"]
+
+
+def test_redoc_exclusion_with_the_wrong_path_warns() -> None:
+    limit = {**REDIS_RATE_LIMIT, "exclude_paths": ["/ping", "/redoc"]}
+    issues = production_readiness_warnings({**READY, "rate_limit": limit})
+    assert _paths(issues) == ["rate_limit.exclude_paths"]
+
+
+def test_audit_reports_the_security_posture(tmp_path: Path, monkeypatch) -> None:
+    from tenxgraph_api.cli.commands.audit import AuditCommand
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "10xgraph.json").write_text(
+        json.dumps({"agent": "graph.react:app", "auth": None}), encoding="utf-8"
+    )
+    weak = AuditCommand._security_check()
+    assert weak.status == "warn"
+    assert "auth" in weak.detail
+    (tmp_path / "10xgraph.json").write_text(json.dumps(READY), encoding="utf-8")
+    assert AuditCommand._security_check().status == "pass"
 
 
 # ---------------------------------------------------------------------------

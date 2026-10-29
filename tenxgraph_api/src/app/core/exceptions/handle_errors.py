@@ -18,6 +18,11 @@ from tenxgraph.utils.validators import ValidationError
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
 from tenxgraph_api.src.app.core.config.settings import get_settings
+from tenxgraph_api.src.app.core.exceptions.server_errors import (
+    RETRY_AFTER_SECONDS,
+    classify,
+    unexpected_error_response,
+)
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.utils import error_response
 from tenxgraph_api.src.app.utils.schemas import ErrorSchemas
@@ -134,12 +139,17 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
         if is_production and is_server_error:
             logger.error(f"Request {request_id} - HTTPException details: {exc.detail}")
 
-        return error_response(
+        response = error_response(
             request,
             error_code="HTTPException",
             message=message,
             status_code=exc.status_code,
         )
+        # Headers the route set on the exception (Retry-After, WWW-Authenticate) must reach
+        # the client.
+        for name, value in (exc.headers or {}).items():
+            response.headers[name] = value
+        return response
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -237,17 +247,17 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
     ## Need to handle 10xGraph specific exceptions here
     @app.exception_handler(ValidationError)
     async def graph_validation_exception_handler(request: Request, exc: ValidationError):
-        _log_handled(request, exc, 422, "AGENTFLOW_VALIDATION_ERROR", "10xGraph ValidationError")
+        _log_handled(request, exc, 422, "VALIDATION_ERROR", "10xGraph ValidationError")
 
         request_id = getattr(request.state, "request_id", "unknown")
-        message = _sanitize_error_message(str(exc), "AGENTFLOW_VALIDATION_ERROR", is_production)
+        message = _sanitize_error_message(str(exc), "VALIDATION_ERROR", is_production)
 
         if is_production:
             logger.warning("Request %s - 10xGraph ValidationError: %s", request_id, log_safe(exc))
 
         return error_response(
             request,
-            error_code="AGENTFLOW_VALIDATION_ERROR",
+            error_code="VALIDATION_ERROR",
             message=message,
             status_code=422,
         )
@@ -294,7 +304,9 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
 
     @app.exception_handler(GraphRecursionError)
     async def graph_recursion_error_exception_handler(request: Request, exc: GraphRecursionError):
-        logger.error(f"GraphRecursionError: url: {request.base_url}", exc_info=exc)
+        # The run hit its recursion limit: not a server fault, and the client can raise the
+        # limit, so it is a 422 and not a 500.
+        _log_handled(request, exc, 422, "RECURSION", "GraphRecursionError")
 
         request_id = getattr(request.state, "request_id", "unknown")
         error_code = getattr(exc, "error_code", "GRAPH_RECURSION_000")
@@ -302,19 +314,26 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
         message = _sanitize_error_message(original_message, error_code, is_production)
 
         if is_production:
-            logger.error(f"Request {request_id} - GraphRecursionError: {original_message}")
+            logger.warning(
+                "Request %s - GraphRecursionError: %s", request_id, log_safe(original_message)
+            )
 
         return error_response(
             request,
             error_code=error_code,
             message=message,
             details=_context_details(exc) if not is_production else None,
-            status_code=500,
+            status_code=422,
         )
 
     @app.exception_handler(StorageError)
     async def storage_error_exception_handler(request: Request, exc: StorageError):
         logger.error(f"StorageError: url: {request.base_url}", exc_info=exc)
+
+        kind = classify(exc)
+        if kind is not None and kind.status_code == 503:  # noqa: PLR2004
+            # The database or cache could not be reached: retryable, not a bug.
+            return unexpected_error_response(request, exc)
 
         request_id = getattr(request.state, "request_id", "unknown")
         error_code = getattr(exc, "error_code", "STORAGE_000")
@@ -346,13 +365,15 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
         if is_production:
             logger.error(f"Request {request_id} - TransientStorageError: {original_message}")
 
-        return error_response(
+        response = error_response(
             request,
             error_code=error_code,
             message=message,
             details=_context_details(exc) if not is_production else None,
             status_code=503,
         )
+        response.headers["Retry-After"] = str(RETRY_AFTER_SECONDS)
+        return response
 
     @app.exception_handler(MetricsError)
     async def metrics_error_exception_handler(request: Request, exc: MetricsError):

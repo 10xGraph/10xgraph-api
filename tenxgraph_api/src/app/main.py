@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 
@@ -30,6 +31,10 @@ logger = logging.getLogger("tenxgraph_api")
 # hold the pod open until the kubelet SIGKILLs it, which would lose more than
 # draining for a fixed window and then moving on.
 SHUTDOWN_DRAIN_TIMEOUT_SECONDS = 30.0
+
+# Boot-time temp media cleanup is best effort. It must not hold the app (and so the first
+# readiness probe) behind a slow or wedged checkpointer or media store.
+BOOT_CLEANUP_TIMEOUT_SECONDS = 15.0
 
 # GraphConfig loads the ``env`` file named in 10xgraph.json, so it must run before Settings
 # is first built. `10xgraph dev` loads that file itself, but plain `gunicorn ...main:app`
@@ -78,13 +83,21 @@ async def lifespan(app: FastAPI):
     )
 
     # Clean up expired temporary media cache on startup
-    await _cleanup_temp_media_cache()
+    try:
+        await asyncio.wait_for(_cleanup_temp_media_cache(), BOOT_CLEANUP_TIMEOUT_SECONDS)
+    except TimeoutError:
+        logger.warning(
+            "Temporary media cache cleanup timed out after %ss; continuing startup",
+            BOOT_CLEANUP_TIMEOUT_SECONDS,
+        )
 
     # load Store
     # store = load_store(graph_config.store_path)
     # injector.binder.bind(BaseStore, store)
 
     yield
+
+    app.state.draining = True  # readiness answers 503 from here on
 
     # Shutdown. Order matters: drain in-flight work BEFORE tearing down the
     # resources that work depends on.
@@ -165,7 +178,7 @@ async def _drain_background_tasks(timeout: float = SHUTDOWN_DRAIN_TIMEOUT_SECOND
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    debug=settings.MODE == "DEVELOPMENT",
+    debug=settings.IS_DEBUG,
     summary=settings.SUMMARY,
     docs_url=settings.DOCS_PATH if settings.DOCS_PATH else None,
     redoc_url=settings.REDOCS_PATH if settings.REDOCS_PATH else None,

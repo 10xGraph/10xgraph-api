@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -434,30 +435,44 @@ class SkillsCommand(BaseCommand):
                 file_path=str(existing[0]),
             )
 
-        for _artifact, _source, dest in installs:
-            if dest.exists():
-                if dest.is_dir():
-                    shutil.rmtree(dest)
+        # Build every artifact next to its destination first, then swap it in. Removing the
+        # old install before the copy would leave no skill folder if the copy failed.
+        staged: list[tuple[Path, Path]] = []
+        try:
+            for artifact, source, dest in installs:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                temp = dest.parent / f".{dest.name}.installing-{os.getpid()}"
+                self._remove(temp)
+                staged.append((temp, dest))
+                if artifact.kind == "folder":
+                    shutil.copytree(
+                        source,
+                        temp,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"),
+                    )
+                    if artifact.manifest:
+                        self._write_manifest(temp, target.name)
                 else:
-                    dest.unlink()
+                    shutil.copyfile(source, temp)
+        except BaseException:
+            for temp, _dest in staged:
+                self._remove(temp)
+            raise
 
         installed_paths: list[str] = []
-        for artifact, source, dest in installs:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-
-            if artifact.kind == "folder":
-                shutil.copytree(
-                    source,
-                    dest,
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"),
-                )
-                if artifact.manifest:
-                    self._write_manifest(dest, target.name)
-            else:
-                shutil.copyfile(source, dest)
+        for temp, dest in staged:
+            self._remove(dest)
+            temp.rename(dest)
             installed_paths.append(str(dest))
 
         return installed_paths
+
+    @staticmethod
+    def _remove(path: Path) -> None:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        elif path.exists() or path.is_symlink():
+            path.unlink()
 
     @staticmethod
     def _ensure_inside_project(project_root: Path, dest: Path) -> None:

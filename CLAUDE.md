@@ -194,7 +194,7 @@ and for redis backend a `redis` sub-object `{ "url", "prefix" }` (or shorthand U
   `THREAD_BUSY_WAIT_SECONDS` (30), then 409 "thread is busy" in the standard error envelope (WS: error chunk
   `data.reason = "thread is busy"`, socket stays open). Request option `on_busy`
   (`"wait"` | `"cancel"`, top level next to `recursion_limit`; not on AG-UI): `cancel` calls
-  `GraphService.stop_graph` while waiting. `/v1/graph/live` is not locked.
+  `GraphService.stop_graph` while waiting. `/v1/graph/live` takes the lock for the session (and a run slot) too, refused with a fatal `thread_busy` / `too_many_runs` error event and close 1013. Every entry point takes lock + run slot through `routers/graph/run_guard.py::acquire_run_guard`. A Redis error falls back to a per-process count; a refresh that finds its lease gone sets `Lease.lost` and takes it again.
 - **Production error chunks:** `graph_service.sanitize_error_chunk` (called in
   `stream_chunks`, so stream, WS and AG-UI share it) replaces `data.reason` / `data.error` /
   `data.message` and `state.execution_meta.internal_data["error"]` of `ERROR` chunks with the

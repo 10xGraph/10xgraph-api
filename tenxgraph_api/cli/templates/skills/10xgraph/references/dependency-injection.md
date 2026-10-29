@@ -36,13 +36,12 @@ In `10xgraph.json`, use import paths to wire dependencies into the server runtim
 ```json
 {
   "agent": "graph.react:app",
-  "checkpointer": "graph.dependencies:checkpointer",
   "store": "graph.dependencies:store",
   "injectq": "graph.dependencies:container"
 }
 ```
 
-The API loader imports these and binds them for graph execution.
+The API loader imports these and binds them for graph execution. The checkpointer is not set here: pass it to `graph.compile(checkpointer=...)` in your agent module (a `checkpointer` key in `10xgraph.json` is ignored and logs a warning).
 
 ## Rules
 

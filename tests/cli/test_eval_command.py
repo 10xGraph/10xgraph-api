@@ -620,3 +620,14 @@ def test_execute_load_config_error(cmd, tmp_path):
     ):
         code = cmd.execute(target=str(tmp_path))
         assert code == 1
+
+
+def test_threshold_decides_the_exit_code():
+    """A pass rate at or above --threshold exits 0 even when it is below 100 percent."""
+    from tenxgraph_api.cli.commands.eval import EvalCommand
+
+    assert EvalCommand._exit_code(0.8, 0.75) == 0
+    assert EvalCommand._exit_code(0.75, 0.75) == 0
+    assert EvalCommand._exit_code(0.7, 0.75) == 1
+    assert EvalCommand._exit_code(0.9, None) == 1
+    assert EvalCommand._exit_code(1.0, None) == 0

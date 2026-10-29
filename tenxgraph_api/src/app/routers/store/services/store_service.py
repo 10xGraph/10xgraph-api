@@ -50,6 +50,29 @@ def _client_metadata(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
     return {k: v for k, v in metadata.items() if k not in SYSTEM_METADATA_KEYS}
 
 
+# Keys that choose whose memories a store call touches. The server sets them from the
+# authenticated user, so a client ``filters`` dict may never carry them (J-4).
+RESERVED_FILTER_KEYS = frozenset({"user_id", "agent_id", "app_id", "run_id"})
+_LOGICAL_KEYS = frozenset({"AND", "OR", "NOT"})
+
+
+def _client_filters(filters: Any) -> Any:
+    """Copy of ``filters`` without reserved owner keys, also inside AND / OR / NOT groups."""
+    if not isinstance(filters, dict):
+        return filters
+    clean: dict[str, Any] = {}
+    for key, value in filters.items():
+        if key in RESERVED_FILTER_KEYS:
+            continue
+        if key in _LOGICAL_KEYS and isinstance(value, list):
+            groups = [g for g in (_client_filters(v) for v in value) if g not in ({}, None)]
+            if groups:
+                clean[key] = groups
+            continue
+        clean[key] = value
+    return clean
+
+
 def _client_options(options: dict[str, Any] | None) -> dict[str, Any]:
     return {k: v for k, v in (options or {}).items() if k in CLIENT_OPTION_KEYS}
 
@@ -116,7 +139,7 @@ class StoreService:
             category=payload.category,
             limit=payload.limit,
             score_threshold=payload.score_threshold,
-            filters=payload.filters,
+            filters=_client_filters(payload.filters),
             retrieval_strategy=payload.retrieval_strategy,
             distance_metric=payload.distance_metric,
             max_tokens=payload.max_tokens,
@@ -190,7 +213,7 @@ class StoreService:
         forget_kwargs: dict[str, Any] = {
             "memory_type": payload.memory_type,
             "category": payload.category,
-            "filters": payload.filters,
+            "filters": _client_filters(payload.filters),
         }
         # Remove None values before forwarding to the store
         forget_kwargs = {k: v for k, v in forget_kwargs.items() if v is not None}

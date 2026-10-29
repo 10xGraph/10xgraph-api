@@ -1,6 +1,5 @@
 """Init command implementation."""
 
-import contextlib
 import json
 import re
 from collections.abc import Callable
@@ -50,6 +49,33 @@ _PROVIDERS: dict[str, dict[str, str]] = {
     },
 }
 _DEFAULT_PROVIDER = "google"
+
+
+def _escape_agent_name(name: str, filename: str) -> str:
+    """Make ``name`` safe inside the quoted value of the file it is substituted into."""
+    if filename.endswith(".toml"):
+        return name.replace("\\", "\\\\").replace('"', '\\"')
+    if filename.startswith(".env"):
+        escaped = name.replace("\\", "\\\\").replace('"', '\\"')
+        return escaped.replace("$", "\\$").replace("`", "\\`")
+    return name
+
+
+def _agent_name_problem(value: str) -> bool | str:
+    """Prompt validator: True when the name is usable, else the message to show."""
+    if not value.strip() or not _slugify(value):
+        return "Use at least one letter or number"
+    try:
+        _check_agent_name(value)
+    except ValidationError as exc:
+        return exc.message
+    return True
+
+
+def _check_agent_name(name: str) -> None:
+    """Refuse a name with control characters (a newline would add lines to pyproject.toml)."""
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in name):  # noqa: PLR2004
+        raise ValidationError("Agent name cannot contain control characters.", field="name")
 
 
 def _slugify(name: str) -> str:
@@ -280,6 +306,7 @@ class InitCommand(BaseCommand):
 
         inferred_name = Path(path).resolve().name if path not in {"", "."} else "MyAgent"
         resolved_name = (agent_name or inferred_name).strip()
+        _check_agent_name(resolved_name)
         slug = _slugify(resolved_name)
         if not resolved_name or not slug:
             raise ValidationError(
@@ -330,7 +357,8 @@ class InitCommand(BaseCommand):
             "rate_limit": resolved_rate_limit,
             "rl_requests": 100,
             "rl_window": 60,
-            "rl_by": "ip",
+            # With auth on, one budget per user; "ip" would share one budget behind a proxy.
+            "rl_by": "user" if resolved_auth in {"jwt", "custom"} else "ip",
             "rl_trusted_proxy": False,
         }
 
@@ -348,7 +376,11 @@ class InitCommand(BaseCommand):
             ),
         )
 
-        agent_name = prompts.text("What is your agent name?", default="MyAgent")
+        agent_name = prompts.text(
+            "What is your agent name?",
+            default="MyAgent",
+            validate=_agent_name_problem,
+        )
         if agent_name is None:
             return None
 
@@ -454,13 +486,19 @@ class InitCommand(BaseCommand):
             return None
         context["rl_window"] = int(rl_window)
 
+        auth_on = context.get("auth") in ("jwt", "custom")
         rl_by = prompts.select(
             "Count requests per?",
             [
-                Choice("ip", "Per IP", "Recommended — each client gets its own budget"),
+                Choice(
+                    "user",
+                    "Per user",
+                    "Recommended with auth — each signed-in user gets their own budget",
+                ),
+                Choice("ip", "Per IP", "Each client address gets its own budget"),
                 Choice("global", "Global", "One shared budget across all clients"),
             ],
-            default="ip",
+            default="user" if auth_on else "ip",
         )
         if rl_by is None:
             return None
@@ -499,7 +537,7 @@ class InitCommand(BaseCommand):
             if rl == "none":
                 rows.append(("Rate limit", "None"))
             else:
-                rl_by = "Global" if context.get("rl_by") == "global" else "Per IP"
+                rl_by = {"global": "Global", "user": "Per user"}.get(context.get("rl_by"), "Per IP")
                 proxy = " · proxy headers on" if context.get("rl_trusted_proxy") else ""
                 rows.append(
                     (
@@ -559,14 +597,18 @@ class InitCommand(BaseCommand):
                 "backend": rate_limit,
                 "requests": context.get("rl_requests", 100),
                 "window": context.get("rl_window", 60),
-                "by": context.get("rl_by", "ip"),
+                "by": context.get("rl_by", "user" if auth in ("jwt", "custom") else "ip"),
                 "trusted_proxy_headers": context.get("rl_trusted_proxy", False),
-                "exclude_paths": ["/ping", "/docs", "/redoc", "/openapi.json"],
+                "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"],
             }
             if rate_limit == "redis":
                 # Resolved from REDIS_URL in .env; the redis backend refuses to start
                 # without a URL or a Redis client bound in InjectQ.
                 config["rate_limit"]["redis"] = {"url": "${REDIS_URL}"}
+                if auth in ("jwt", "custom"):
+                    # Redis is configured, so a leaked or logged-out token can be revoked
+                    # for every worker. See `10xgraph revoke` and the token_revocation docs.
+                    config["token_revocation"] = "redis"  # noqa: S105
 
         return config
 
@@ -595,8 +637,15 @@ class InitCommand(BaseCommand):
                 keep_jwt=context["auth"] == "jwt",
             )
 
-        with contextlib.suppress(Exception):
-            content = Template(content).safe_substitute({**context, **_template_vars(context)})
+        try:
+            values = {**context, **_template_vars(context)}
+            if "agent_name" in values:
+                values["agent_name"] = _escape_agent_name(str(values["agent_name"]), src.name)
+            content = Template(content).safe_substitute(values)
+        except Exception as exc:
+            raise FileOperationError(
+                f"Could not fill in the template {src.name}: {exc}", file_path=str(src)
+            ) from exc
 
         return content
 

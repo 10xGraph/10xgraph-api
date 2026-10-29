@@ -9,6 +9,13 @@ are left out, and the reason for a failure is logged, never returned, because th
 public. Results are cached for ``CACHE_SECONDS`` with one check in flight at a time, so a flood
 of probe requests cannot turn into a flood of database and Redis round trips.
 
+Redis is the one dependency the server survives losing: the run lock, run cap, WebSocket caps
+and (by default) the rate limiter fail open, and ownership falls back to the database. A Redis
+outage therefore must not take every pod out of rotation. Its result is still reported, but only
+counts against readiness when a configured feature fails closed without it (see
+:func:`redis_required`). While the app is shutting down readiness answers 503 (``draining``) so
+the load balancer stops sending new requests.
+
 A component that knows best how to check itself can expose
 ``async def readiness_check() -> None`` (raise when not ready), which is used before the
 built-in probes.
@@ -83,11 +90,11 @@ async def check_store(store: Any) -> None:
 async def check_redis(url: str | None) -> None:
     if not url:
         raise _Skip
-    from redis.asyncio import Redis  # type: ignore[import]
+    from tenxgraph_api.src.app.core.redis_client import create_redis
 
     # A fresh connection per probe: probes are seconds apart, and a cached client would be
     # tied to the event loop that created it.
-    client = Redis.from_url(url)
+    client = create_redis(url)
     try:
         await client.ping()
     finally:
@@ -106,6 +113,33 @@ async def run_check(name: str, check: Callable[[], Awaitable[None]]) -> str:
         logger.warning("Readiness check %s failed: %s", name, exc)
         return FAIL
     return OK
+
+
+def redis_required(graph_config: Any) -> bool:
+    """True when a configured feature fails closed without Redis.
+
+    Token revocation on Redis answers 503 when Redis is down, and a Redis rate limiter with
+    ``fail_open`` off denies requests. Every other Redis use fails open.
+    """
+    try:
+        if getattr(graph_config, "token_revocation", None) == "redis":
+            return True
+        limit = getattr(graph_config, "rate_limit", None)
+        return bool(
+            limit is not None
+            and getattr(limit, "backend", None) == "redis"
+            and getattr(limit, "fail_open", True) is False
+        )
+    except Exception:
+        return False
+
+
+def is_ready(checks: dict[str, str], *, redis_is_required: bool) -> bool:
+    """Whether ``checks`` allow traffic; a failed optional Redis does not count."""
+    return all(
+        result != FAIL or (name == "redis" and not redis_is_required)
+        for name, result in checks.items()
+    )
 
 
 async def readiness(checkpointer: Any, store: Any, redis_url: str | None) -> dict[str, str]:

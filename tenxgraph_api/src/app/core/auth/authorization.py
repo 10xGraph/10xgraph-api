@@ -21,6 +21,9 @@ CHECKPOINTER_ADMIN_SCOPES = frozenset({"checkpointer:import"})
 # DELETE /v1/files/{file_id}. Core lists only files:read and files:upload, so it is added here.
 FILES_DELETE_SCOPES = frozenset({"files:delete"})
 LEGACY_MEMORY_SCOPES = frozenset({"memory:read", "memory:write", "memory:delete"})
+# Core still lists it, but the setup endpoint was removed: no route checks it, so a role rule
+# for it would guard nothing.
+REMOVED_SCOPES = frozenset({"graph:setup"})
 
 
 def all_scopes() -> frozenset[str]:
@@ -28,7 +31,7 @@ def all_scopes() -> frozenset[str]:
     from tenxgraph.core.authz import ALL_SCOPES
 
     return (
-        (frozenset(ALL_SCOPES) - LEGACY_MEMORY_SCOPES)
+        (frozenset(ALL_SCOPES) - LEGACY_MEMORY_SCOPES - REMOVED_SCOPES)
         | STORE_SCOPES
         | CHECKPOINTER_ADMIN_SCOPES
         | FILES_DELETE_SCOPES

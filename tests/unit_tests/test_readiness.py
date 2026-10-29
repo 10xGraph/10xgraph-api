@@ -131,9 +131,9 @@ async def test_redis_is_pinged_and_closed(monkeypatch):
         async def aclose(self):
             calls.append("closed")
 
-    import redis.asyncio
-
-    monkeypatch.setattr(redis.asyncio.Redis, "from_url", classmethod(lambda cls, url: _Client()))
+    monkeypatch.setattr(
+        "tenxgraph_api.src.app.core.redis_client.create_redis", lambda url, **kw: _Client()
+    )
     assert (await readiness.readiness(None, None, "redis://cache"))["redis"] == "ok"
     assert calls == ["ping", "closed"]
 

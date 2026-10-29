@@ -141,33 +141,35 @@ class TestValidatorPythonVersion:
 
     def test_validate_python_version_valid_two_parts(self):
         """Test validating valid Python versions with two parts."""
-        assert Validator.validate_python_version("3.8") == "3.8"
-        assert Validator.validate_python_version("3.9") == "3.9"
         assert Validator.validate_python_version("3.12") == "3.12"
         assert Validator.validate_python_version("3.13") == "3.13"
 
     def test_validate_python_version_valid_three_parts(self):
         """Test validating valid Python versions with three parts."""
-        assert Validator.validate_python_version("3.8.10") == "3.8.10"
-        assert Validator.validate_python_version("3.9.5") == "3.9.5"
         assert Validator.validate_python_version("3.12.0") == "3.12.0"
 
     def test_validate_python_version_too_old(self):
         """Test validating Python version that's too old."""
         with pytest.raises(ValidationError) as exc_info:
-            Validator.validate_python_version("3.7.0")
-        assert "3.8 or higher" in str(exc_info.value)
+            Validator.validate_python_version("3.11.9")
+        assert "3.12 or higher" in str(exc_info.value)
+
+    @pytest.mark.parametrize("version", ["3.8", "3.9", "3.10", "3.11", "3.8.10"])
+    def test_validate_python_version_below_the_framework_minimum(self, version):
+        """The framework needs Python 3.12; an older image would fail at install time."""
+        with pytest.raises(ValidationError):
+            Validator.validate_python_version(version)
 
     def test_validate_python_version_very_old(self):
         """Test validating very old Python version."""
         with pytest.raises(ValidationError) as exc_info:
             Validator.validate_python_version("2.7.18")
-        assert "3.8 or higher" in str(exc_info.value)
+        assert "3.12 or higher" in str(exc_info.value)
 
     def test_validate_python_version_invalid_format(self):
         """Test validating Python version with invalid format."""
         with pytest.raises(ValidationError) as exc_info:
-            Validator.validate_python_version("3.8.10.1")
+            Validator.validate_python_version("3.12.0.1")
         assert "format" in str(exc_info.value)
 
     def test_validate_python_version_not_string(self):
@@ -344,19 +346,19 @@ class TestValidateCliOptions:
 
     def test_validate_cli_options_with_python_version(self):
         """Test validating CLI options with Python version."""
-        result = validate_cli_options(host="localhost", port=8000, python_version="3.9")
-        assert result["python_version"] == "3.9"
+        result = validate_cli_options(host="localhost", port=8000, python_version="3.13")
+        assert result["python_version"] == "3.13"
 
     def test_validate_cli_options_all_options(self):
         """Test validating CLI options with all options."""
         with tempfile.NamedTemporaryFile(suffix=".json") as f:
             result = validate_cli_options(
-                host="localhost", port=8000, config=f.name, python_version="3.11"
+                host="localhost", port=8000, config=f.name, python_version="3.12"
             )
             assert result["host"] == "localhost"
             assert result["port"] == 8000
             assert "config" in result
-            assert result["python_version"] == "3.11"
+            assert result["python_version"] == "3.12"
 
     def test_validate_cli_options_invalid_host(self):
         """Test validating CLI options with invalid host."""

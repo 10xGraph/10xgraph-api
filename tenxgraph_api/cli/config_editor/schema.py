@@ -69,7 +69,6 @@ AUTHORIZATION_SCOPES: tuple[str, ...] = (
     "graph:fix",
     "graph:invoke",
     "graph:read",
-    "graph:setup",
     "graph:stop",
     "graph:stream",
     "store:delete",
@@ -343,7 +342,7 @@ _SECTIONS: list[dict[str, Any]] = [
                 "placeholder": "/docs",
                 "help": (
                     "Paths that are never rate limited. /ping and /health/ready are always "
-                    "skipped. API docs paths (/docs, /redoc, /openapi.json) are limited unless "
+                    "skipped. API docs paths (/docs, /redocs, /openapi.json) are limited unless "
                     "listed here. The server default is an empty list."
                 ),
             },

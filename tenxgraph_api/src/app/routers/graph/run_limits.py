@@ -28,6 +28,8 @@ from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 
 
 HTTP_TOO_MANY_REQUESTS = 429
+# Seconds a client is told to wait before it starts another run.
+RUN_CAP_RETRY_AFTER_SECONDS = 5
 
 # A slot that was never counted (no identity, or no cap).
 RunSlot = Lease
@@ -58,6 +60,7 @@ async def acquire_run_slot(user: dict[str, Any], runs: RunsConfig) -> Lease:
                 f"Too many runs in progress for this user (limit {limit}). "
                 "Wait for one to finish and retry."
             ),
+            headers={"Retry-After": str(RUN_CAP_RETRY_AFTER_SECONDS)},
         )
     return lease
 

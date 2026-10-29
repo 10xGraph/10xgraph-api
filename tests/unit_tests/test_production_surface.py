@@ -180,7 +180,7 @@ def test_dockerfile_installs_only_what_the_dependency_file_lists():
 
 def test_dockerfile_uses_the_uvicorn_worker_package():
     content = _dockerfile(has_requirements=False, has_pyproject=True)
-    assert '"uvicorn_worker.UvicornWorker"' in content
+    assert '"tenxgraph_api.src.app.uvicorn_worker.TenxGraphUvicornWorker"' in content
     assert "uvicorn.workers" not in content
 
 

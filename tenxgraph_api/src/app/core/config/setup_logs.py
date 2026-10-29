@@ -4,12 +4,25 @@ import sys
 from fastapi.logger import logger as fastapi_logger
 
 from tenxgraph_api.src.app.core.config.settings import LOGGER_NAME
-from tenxgraph_api.src.app.core.utils.log_sanitizer import SanitizingFormatter
+from tenxgraph_api.src.app.core.utils.log_sanitizer import SanitizingFormatter, redact_text
 
 
 # Top-level names of the loggers the API server writes to; children ("tenxgraph_api.media",
 # "tenxgraph_api.rate_limit", ...) reach these handlers through propagation.
-APP_LOGGER_NAMES = (LOGGER_NAME, "10xgraph-api", "tenxgraph_api", "tenxgraph_api")
+# "tenxgraph" is the core framework: its records (checkpoint failures, provider retries,
+# publisher errors) used to be dropped because the library only installs a NullHandler.
+APP_LOGGER_NAMES = (LOGGER_NAME, "10xgraph-api", "tenxgraph_api", "tenxgraph")
+
+
+class AccessLogTokenFilter(logging.Filter):
+    """Redact credentials in the request line of uvicorn's access log."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                redact_text(arg) if isinstance(arg, str) else arg for arg in record.args
+            )
+        return True
 
 
 def init_logger(level: int | str = logging.INFO) -> None:
@@ -34,6 +47,9 @@ def init_logger(level: int | str = logging.INFO) -> None:
     # gunicorn_logger = logging.getLogger("gunicorn")
     uvicorn_access_logger = logging.getLogger("uvicorn.access")
     uvicorn_access_logger.handlers = gunicorn_error_logger.handlers
+    # The request line is logged as written, query string included (``?token=...``).
+    if not any(isinstance(f, AccessLogTokenFilter) for f in uvicorn_access_logger.filters):
+        uvicorn_access_logger.addFilter(AccessLogTokenFilter())
     fastapi_logger.handlers = gunicorn_error_logger.handlers
     fastapi_logger.setLevel(level)
 

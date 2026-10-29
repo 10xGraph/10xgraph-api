@@ -67,6 +67,7 @@ ConfigCommand = _lazy_command("tenxgraph_api.cli.commands.config", "ConfigComman
 DemoCommand = _lazy_command("tenxgraph_api.cli.commands.demo", "DemoCommand")
 EvalCommand = _lazy_command("tenxgraph_api.cli.commands.eval", "EvalCommand")
 InitCommand = _lazy_command("tenxgraph_api.cli.commands.init", "InitCommand")
+RevokeCommand = _lazy_command("tenxgraph_api.cli.commands.revoke", "RevokeCommand")
 SkillsCommand = _lazy_command("tenxgraph_api.cli.commands.skills", "SkillsCommand")
 TestCommand = _lazy_command("tenxgraph_api.cli.commands.test", "TestCommand")
 VersionCommand = _lazy_command("tenxgraph_api.cli.commands.version", "VersionCommand")
@@ -358,7 +359,7 @@ def audit(
 ) -> None:
     """Audit package compatibility and the current project environment.
 
-    Runs six read-only checks and prints them as a table: the Python
+    Runs seven read-only checks and prints them as a table: the Python
     interpreter, the installed CLI and core packages, whether the core exposes
     the evaluation API this CLI expects, whether `10xgraph.json` declares a
     valid `agent` key and remote-tool schemas, and whether the default port is free.
@@ -413,6 +414,41 @@ def version(
         command = VersionCommand(output)
         exit_code = command.execute()
         sys.exit(exit_code)
+    except Exception as e:
+        sys.exit(handle_exception(e))
+
+
+@app.command(rich_help_panel="Manage")
+def revoke(
+    user: str | None = typer.Option(
+        None, "--user", help="Revoke all tokens of this user_id issued so far (log out everywhere)."
+    ),
+    jti: str | None = typer.Option(None, "--jti", help="Revoke the one token with this jti claim."),
+    before: float | None = typer.Option(
+        None, "--before", help="With --user: revoke tokens issued at or before this epoch time."
+    ),
+    expires_at: float | None = typer.Option(
+        None, "--expires-at", help="With --jti: the token's exp (epoch seconds), to drop the entry."
+    ),
+    redis_url: str | None = typer.Option(
+        None, "--redis-url", help="Redis URL (default: REDIS_URL, then `redis` in 10xgraph.json)."
+    ),
+    config_file: str = typer.Option(
+        DEFAULT_CONFIG_FILE, "--config", "-c", help="Project configuration file."
+    ),
+) -> None:
+    """Revoke a token or all of a user's tokens (needs "token_revocation": "redis")."""
+    try:
+        sys.exit(
+            RevokeCommand(output).execute(
+                user=user,
+                jti=jti,
+                before=before,
+                expires_at=expires_at,
+                redis_url=redis_url,
+                config=config_file,
+            )
+        )
     except Exception as e:
         sys.exit(handle_exception(e))
 

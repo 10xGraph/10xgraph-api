@@ -173,6 +173,7 @@ async def test_stream_route_refuses_before_streaming(fresh_slots):
 
     service = MagicMock()
     service.runs_policy.return_value = RunsConfig(max_concurrent_per_user=1)
+    service.check_resume_target = AsyncMock()
     service.stream_graph = MagicMock(return_value=_items("a"))
 
     response = await stream_graph(graph_input=_input(), service=service, user=ALICE)

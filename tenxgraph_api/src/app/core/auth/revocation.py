@@ -11,7 +11,12 @@ Two kinds of revocation are supported by the built-in backends:
   expired anyway;
 - **every token of a user issued before a moment** (``revoke_user``), compared against the
   token's ``iat`` claim. Use it for "log out everywhere" or after a password change. A token
-  without ``iat`` cannot be dated, so it counts as revoked once its user has been revoked.
+  without ``iat`` cannot be dated, so it counts as revoked while the user entry exists; give the
+  backend your ``token_lifetime`` and such a token is dated from its ``exp`` instead, so one
+  minted after the revoke is accepted. Tokens should carry ``iat``.
+
+To revoke from your own code use :func:`revoke_token` and :func:`revoke_user`; from a shell
+use ``10xgraph revoke``. A newer ``revoke_user`` cutoff is never replaced by an older one.
 
 Enable it in ``10xgraph.json`` with ``"token_revocation": "redis"`` (shared by every worker;
 uses the ``redis`` key or ``REDIS_URL``), ``"token_revocation": "memory"`` (one process; tests
@@ -24,6 +29,7 @@ that might have been revoked.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import inspect
 import logging
@@ -69,17 +75,59 @@ def _user_key_of(identity: dict[str, Any]) -> str | None:
     return None
 
 
-def _revoked_by_user_cutoff(identity: dict[str, Any], cutoff: float | None) -> bool:
+# A revoke_user entry is kept this long unless told otherwise. It has to outlive the longest
+# token you issue, or an old token comes back to life when the entry goes.
+DEFAULT_USER_REVOCATION_TTL = 30 * 24 * 3600
+
+
+def _revoked_by_user_cutoff(
+    identity: dict[str, Any], cutoff: float | None, token_lifetime: float | None = None
+) -> bool:
     if cutoff is None:
         return False
     issued_at = _number(identity.get("iat"))
+    if issued_at is None and token_lifetime is not None:
+        expires_at = _number(identity.get("exp"))
+        if expires_at is not None:
+            issued_at = expires_at - token_lifetime
     return issued_at is None or issued_at <= cutoff
+
+
+async def _redis_now(client: Any) -> float:
+    """The Redis server's clock, so every pod agrees; this process's clock without ``TIME``."""
+    server_time = getattr(client, "time", None)
+    if not callable(server_time):
+        return time.time()
+    seconds, microseconds = await server_time()
+    return float(seconds) + float(microseconds) / 1_000_000
+
+
+# Keeps the newest cutoff: an older ``revoke_user(before=...)`` must not un-revoke tokens a
+# newer call already revoked. An empty cutoff means "now" on the Redis clock.
+_REVOKE_USER_LUA = """
+local cutoff = tonumber(ARGV[1])
+if cutoff == nil then
+  local t = redis.call('TIME')
+  cutoff = tonumber(t[1]) + tonumber(t[2]) / 1000000
+end
+local current = tonumber(redis.call('GET', KEYS[1]) or '')
+if current ~= nil and current >= cutoff then
+  return 0
+end
+redis.call('SET', KEYS[1], string.format('%.6f', cutoff))
+local ttl = tonumber(ARGV[2])
+if ttl ~= nil and ttl > 0 then
+  redis.call('EXPIRE', KEYS[1], ttl)
+end
+return 1
+"""
 
 
 class InMemoryTokenRevocation(TokenRevocationBackend):
     """Revocation list held in this process. Fine for tests and single-worker servers."""
 
-    def __init__(self) -> None:
+    def __init__(self, token_lifetime: float | None = None) -> None:
+        self._token_lifetime = token_lifetime
         self._tokens: dict[str, float] = {}  # jti -> expiry (epoch seconds)
         self._users: dict[str, float] = {}  # user_id -> revoke tokens issued at or before
 
@@ -89,7 +137,9 @@ class InMemoryTokenRevocation(TokenRevocationBackend):
 
     def revoke_user(self, user_id: str, before: float | None = None) -> None:
         """Revoke every token of ``user_id`` issued at or before ``before`` (default: now)."""
-        self._users[str(user_id)] = time.time() if before is None else float(before)
+        cutoff = time.time() if before is None else float(before)
+        key = str(user_id)
+        self._users[key] = max(cutoff, self._users.get(key, cutoff))
 
     async def is_revoked(self, identity: dict[str, Any]) -> bool:
         now = time.time()
@@ -99,14 +149,20 @@ class InMemoryTokenRevocation(TokenRevocationBackend):
             return True
         user_id = _user_key_of(identity)
         cutoff = self._users.get(user_id) if user_id is not None else None
-        return _revoked_by_user_cutoff(identity, cutoff)
+        return _revoked_by_user_cutoff(identity, cutoff, self._token_lifetime)
 
 
 class RedisTokenRevocation(TokenRevocationBackend):
     """Revocation list in Redis, shared by every worker and instance.
 
     Keys: ``<prefix>:jti:<jti>`` (expires with the token) and ``<prefix>:user:<user_id>``
-    (holds the cutoff timestamp). One ``MGET`` per check.
+    (holds the cutoff timestamp). A check reads both keys with two parallel ``GET`` calls (a
+    single ``MGET`` over two keys fails with CROSSSLOT on Redis Cluster). Times come from the
+    Redis clock, so pods with skewed clocks agree.
+
+    ``token_lifetime`` is the longest lifetime of the tokens you issue, in seconds. It dates
+    a token that has no ``iat`` from its ``exp``. ``user_ttl`` is how long a ``revoke_user``
+    entry is kept when the call gives no ``ttl`` (``None`` keeps it forever).
     """
 
     def __init__(
@@ -115,18 +171,23 @@ class RedisTokenRevocation(TokenRevocationBackend):
         *,
         client: Any | None = None,
         prefix: str = "10xgraph:revoked",
+        token_lifetime: float | None = None,
+        user_ttl: int | None = DEFAULT_USER_REVOCATION_TTL,
     ) -> None:
+        self._token_lifetime = token_lifetime
+        self._user_ttl = user_ttl
         if client is None:
             if not url:
                 raise ValueError("RedisTokenRevocation needs a Redis url or client")
+            from tenxgraph_api.src.app.core.redis_client import create_redis
+
             try:
-                from redis.asyncio import Redis  # type: ignore[import]
+                client = create_redis(url)
             except ImportError as exc:  # pragma: no cover - depends on installed extras
                 raise ImportError(
                     'token_revocation "redis" needs the redis package: '
                     'pip install "10xgraph-api[redis]"'
                 ) from exc
-            client = Redis.from_url(url, decode_responses=False)
         self._client = client
         self._prefix = prefix
 
@@ -137,7 +198,9 @@ class RedisTokenRevocation(TokenRevocationBackend):
         return f"{self._prefix}:user:{user_id}"
 
     async def revoke_token(self, jti: str, expires_at: float | None = None) -> None:
-        ttl = None if expires_at is None else max(1, int(expires_at - time.time()))
+        ttl = None
+        if expires_at is not None:
+            ttl = max(1, int(expires_at - await _redis_now(self._client)))
         await self._client.set(self._jti_key(jti), b"1", ex=ttl)
 
     async def revoke_user(
@@ -145,35 +208,39 @@ class RedisTokenRevocation(TokenRevocationBackend):
     ) -> None:
         """Revoke tokens of ``user_id`` issued at or before ``before`` (default: now).
 
-        ``ttl`` (seconds) can expire the entry once every older token has expired; pass your
-        longest token lifetime.
+        ``ttl`` (seconds) expires the entry once every older token has expired; it defaults to
+        ``user_ttl``. An older ``before`` than the one already stored changes nothing.
         """
-        cutoff = time.time() if before is None else float(before)
-        await self._client.set(self._user_key(user_id), str(cutoff).encode(), ex=ttl)
+        cutoff = "" if before is None else repr(float(before))
+        keep_for = self._user_ttl if ttl is None else ttl
+        await self._client.eval(
+            _REVOKE_USER_LUA, 1, self._user_key(user_id), cutoff, str(keep_for or 0)
+        )
 
     async def is_revoked(self, identity: dict[str, Any]) -> bool:
         jti, user_id = identity.get("jti"), _user_key_of(identity)
-        keys = []
-        if jti is not None:
-            keys.append(self._jti_key(jti))
-        if user_id is not None:
-            keys.append(self._user_key(user_id))
-        if not keys:
+        if jti is None and user_id is None:
             return False
-        values = await self._client.mget(keys)
-        values = dict(zip(keys, values, strict=True))
-        if jti is not None and values.get(self._jti_key(jti)) is not None:
+        # Two plain GETs, not one MGET: the keys hash to different slots on Redis Cluster.
+        jti_value, raw = await asyncio.gather(
+            self._client.get(self._jti_key(jti)) if jti is not None else _none(),
+            self._client.get(self._user_key(user_id)) if user_id is not None else _none(),
+        )
+        if jti_value is not None:
             return True
-        raw = values.get(self._user_key(user_id)) if user_id is not None else None
         if raw is None:
             return False
         cutoff = float(raw.decode() if isinstance(raw, bytes | bytearray) else raw)
-        return _revoked_by_user_cutoff(identity, cutoff)
+        return _revoked_by_user_cutoff(identity, cutoff, self._token_lifetime)
 
     async def aclose(self) -> None:
         close = getattr(self._client, "aclose", None)
         if callable(close):
             await close()
+
+
+async def _none() -> None:
+    return None
 
 
 def build_token_revocation(spec: Any, redis_url: str | None = None) -> TokenRevocationBackend:
@@ -231,3 +298,34 @@ async def token_revoked(
     except Exception as exc:
         logger.error("Token revocation check failed: %s", exc)
         raise TokenRevocationUnavailableError("Token revocation check unavailable") from exc
+
+
+async def _call(method: Any, *args: Any, **kwargs: Any) -> None:
+    """Call a backend method that may be sync (in-memory) or async (Redis)."""
+    result = method(*args, **kwargs)
+    if inspect.isawaitable(result):
+        await result
+
+
+def _backend_or_raise(backend: TokenRevocationBackend | None) -> Any:
+    backend = backend or _bound_backend()
+    if backend is None:
+        raise RuntimeError(
+            'No token revocation backend is configured. Set "token_revocation": "redis" in '
+            "10xgraph.json (with Redis configured), or bind a TokenRevocationBackend."
+        )
+    return backend
+
+
+async def revoke_token(
+    jti: str, expires_at: float | None = None, *, backend: TokenRevocationBackend | None = None
+) -> None:
+    """Revoke one token by its ``jti`` claim. ``expires_at`` is its ``exp`` (epoch seconds)."""
+    await _call(_backend_or_raise(backend).revoke_token, jti, expires_at)
+
+
+async def revoke_user(
+    user_id: str, before: float | None = None, *, backend: TokenRevocationBackend | None = None
+) -> None:
+    """Revoke every token of ``user_id`` issued at or before ``before`` (default: now)."""
+    await _call(_backend_or_raise(backend).revoke_user, user_id, before)

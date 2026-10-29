@@ -44,7 +44,9 @@ class TelemetryStore:
         self._lock = threading.Lock()
         # thread_id -> ordered dict-like: run_id -> RunTrace (kept insertion order)
         self._threads: dict[str, dict[str, RunTrace]] = {}
-        self._thread_order: deque[str] = deque(maxlen=MAX_THREADS)
+        # No maxlen: a deque that drops its oldest id on append would leave that thread in the
+        # dict for good. The eviction loop in start_run is the only bound.
+        self._thread_order: deque[str] = deque()
 
     def start_run(self, thread_id: str, run_id: str, started_at: float) -> RunTrace:
         thread_id = str(thread_id)
@@ -96,6 +98,16 @@ class TelemetryStore:
                 return
             trace = runs.get(run_id)
             if trace:
+                trace.finished_at = finished_at
+                trace.status = status
+
+    def close_run(self, thread_id: str, run_id: str, finished_at: float, status: str) -> None:
+        """Finish a run only if it is still open (a cancelled run, an unhandled error)."""
+        thread_id = str(thread_id)
+        run_id = str(run_id)
+        with self._lock:
+            trace = (self._threads.get(thread_id) or {}).get(run_id)
+            if trace and trace.finished_at is None:
                 trace.finished_at = finished_at
                 trace.status = status
 

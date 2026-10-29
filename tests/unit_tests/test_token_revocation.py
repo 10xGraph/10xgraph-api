@@ -71,8 +71,18 @@ class _FakeRedis:
         self.data[key] = value
         self.ttl[key] = ex
 
-    async def mget(self, keys):
-        return [self.data.get(k) for k in keys]
+    async def get(self, key):
+        return self.data.get(key)
+
+    async def eval(self, script, numkeys, key, cutoff, ttl):
+        """Python stand-in for the revoke_user script (keeps the newest cutoff)."""
+        new = float(cutoff) if cutoff else time.time()
+        current = self.data.get(key)
+        if current is not None and float(current) >= new:
+            return 0
+        self.data[key] = repr(new).encode()
+        self.ttl[key] = int(ttl) or None
+        return 1
 
     async def aclose(self):
         self.closed = True

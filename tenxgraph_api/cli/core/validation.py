@@ -108,9 +108,10 @@ class Validator:
         parts = version.split(".")
         major, minor = int(parts[0]), int(parts[1])
 
-        # Validate Python version range (3.8+)
-        if major < 3 or (major == 3 and minor < 8):  # noqa: PLR2004
-            raise ValidationError("Python version must be 3.8 or higher", field="python_version")
+        # The framework requires Python 3.12 (pyproject ``requires-python``); an older image
+        # would build and then fail at pip install.
+        if (major, minor) < (3, 12):
+            raise ValidationError("Python version must be 3.12 or higher", field="python_version")
 
         return version
 

@@ -19,7 +19,7 @@ from .test_handle_errors import cleanup_env, setup_app
 CASES = [
     (GraphError, "GRAPH_000", 500),
     (NodeError, "NODE_000", 500),
-    (GraphRecursionError, "RECURSION_000", 500),
+    (GraphRecursionError, "RECURSION_000", 422),
     (StorageError, "STORAGE_000", 500),
     (TransientStorageError, "STORAGE_TRANSIENT_000", 503),
     (MetricsError, "METRICS_000", 500),

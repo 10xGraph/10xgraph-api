@@ -205,3 +205,43 @@ class TestSnowFlakeIdGeneratorConfigEnvValues:
         assert call_args[1]["node_id"] == 5
         assert call_args[1]["worker_id"] == 10
         assert call_args[1]["worker_bits"] == 8
+
+
+class TestSnowFlakeIdGeneratorConfig:
+    """G-103: complete config from partial input, and distinct ids per process."""
+
+    @staticmethod
+    def _env(**overrides):
+        keep = {k: v for k, v in os.environ.items() if not k.startswith("SNOWFLAKE_")}
+        return patch.dict(os.environ, {**keep, **overrides}, clear=True)
+
+    def test_partial_params_build_a_complete_config(self, mock_snowflake_kit):
+        from tenxgraph_api.src.app.utils.snowflake_id_generator import SnowFlakeIdGenerator
+
+        with self._env():
+            SnowFlakeIdGenerator(snowflake_node_id=3, snowflake_worker_id=4)
+
+        kwargs = mock_snowflake_kit["config_class"].call_args.kwargs
+        assert kwargs["node_id"] == 3
+        assert kwargs["worker_id"] == 4
+        assert kwargs["epoch"] == 1723323246031
+        assert mock_snowflake_kit["generator_class"].call_args.kwargs["config"] is not None
+
+    def test_worker_id_differs_between_processes_when_unset(self, mock_snowflake_kit):
+        from tenxgraph_api.src.app.utils import snowflake_id_generator as module
+
+        ids = []
+        with self._env():
+            for pid in (1001, 1002):
+                with patch.object(module.os, "getpid", return_value=pid):
+                    module.SnowFlakeIdGenerator()
+                ids.append(mock_snowflake_kit["config_class"].call_args.kwargs["worker_id"])
+        assert ids[0] != ids[1]
+
+    def test_explicit_env_ids_are_used_as_given(self, mock_snowflake_kit):
+        from tenxgraph_api.src.app.utils.snowflake_id_generator import SnowFlakeIdGenerator
+
+        with self._env(SNOWFLAKE_NODE_ID="5", SNOWFLAKE_WORKER_ID="6"):
+            SnowFlakeIdGenerator()
+        kwargs = mock_snowflake_kit["config_class"].call_args.kwargs
+        assert (kwargs["node_id"], kwargs["worker_id"]) == (5, 6)

@@ -85,7 +85,9 @@ class RedisRateLimitBackend(BaseRateLimitBackend):
                 "Redis backend requires the 'redis' package. "
                 f"Install the optional Redis extra with: {_REDIS_EXTRA_INSTALL}"
             )
-        redis = AsyncRedis.from_url(redis_url, decode_responses=False)
+        from tenxgraph_api.src.app.core.redis_client import create_redis
+
+        redis = create_redis(redis_url)
         return cls(redis=redis, prefix=prefix, fail_open=fail_open, close_redis=True)
 
     async def check(self, key: str, *, limit: int, window: int) -> RateLimitDecision:

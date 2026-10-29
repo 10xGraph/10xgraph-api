@@ -12,6 +12,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from tenxgraph_api.src.app.core.exceptions.server_errors import UnhandledErrorMiddleware
 from tenxgraph_api.src.app.core.middleware.rate_limit import RateLimitMiddleware, build_backend
 from tenxgraph_api.src.app.core.middleware.request_limits import RequestSizeLimitMiddleware
 from tenxgraph_api.src.app.core.middleware.security_headers import SecurityHeadersMiddleware
@@ -438,12 +439,16 @@ def setup_middleware(
     # resulting order, outermost first:
     #
     #   CORS -> request id -> security headers -> trusted host -> rate limit -> size limit
-    #   -> gzip -> app
+    #   -> gzip -> unhandled-error catch -> app
     #
     # Anything an inner layer answers on its own (429, 413, a bad Host) still passes back out
     # through CORS, request id and security headers. With CORS innermost, as before, a browser
     # could not read those responses at all.
     origins, allow_credentials = _resolve_cors_policy(settings)
+
+    # Innermost: an exception nobody handled becomes the standard JSON error here, so it still
+    # passes out through the layers below (request id, security headers, CORS).
+    app.add_middleware(UnhandledErrorMiddleware)
 
     # Exclude streaming endpoints from compression: they must send data as it is produced.
     app.add_middleware(SelectiveGZipMiddleware, minimum_size=1000)
@@ -481,7 +486,7 @@ def setup_middleware(
 
     app.add_middleware(
         HealthCheckAwareTrustedHostMiddleware,
-        allowed_hosts=settings.ALLOWED_HOST.split(","),
+        allowed_hosts=[h.strip() for h in settings.ALLOWED_HOST.split(",") if h.strip()],
     )
 
     if settings.SECURITY_HEADERS_ENABLED:

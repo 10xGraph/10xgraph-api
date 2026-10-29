@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import re
+import sys
 from collections.abc import AsyncIterable, AsyncIterator
 from datetime import datetime
 from typing import Any
@@ -33,6 +34,7 @@ from tenxgraph_api.src.app.core.auth.request_config import (
 )
 from tenxgraph_api.src.app.core.concurrency import Lease
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RunsConfig
+from tenxgraph_api.src.app.core.shutdown import KEEPALIVE_SECONDS, end_on_shutdown
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe, sanitize_for_logging
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     GraphInputSchema,
@@ -312,6 +314,10 @@ REALTIME_INIT_FIELDS = {
 # Longest a background thread-naming call may run (it is a model call).
 THREAD_NAME_TIMEOUT_SECONDS = 60.0
 
+# Naming tasks kept by the service itself (no core task manager bound) are capped; over it the
+# thread simply stays unnamed, as the core manager does with its own limit.
+MAX_PENDING_THREAD_NAMES = 100
+
 # A taken generated id is retried with a fresh one; each retry is another prediction the
 # claimer would have had to get right.
 MAX_THREAD_ID_ATTEMPTS = 5
@@ -451,10 +457,27 @@ class GraphService:
                 name_thread(), name="thread_name", timeout=THREAD_NAME_TIMEOUT_SECONDS
             )
             return
-        task = asyncio.create_task(name_thread())
         tasks: set[asyncio.Task[None]] = self.__dict__.setdefault("_naming_tasks", set())
+        if len(tasks) >= MAX_PENDING_THREAD_NAMES:
+            logger.warning(
+                "Too many thread names pending (%d); leaving thread %s unnamed",
+                len(tasks),
+                log_safe(thread_id),
+            )
+            return
+        task = asyncio.create_task(name_thread())
         tasks.add(task)
         task.add_done_callback(tasks.discard)
+
+    async def drain_naming_tasks(self) -> None:
+        """Wait for the naming tasks this service holds itself (call at shutdown).
+
+        Tasks on the core ``BackgroundTaskManager`` are drained with that manager. There is
+        no timeout: a naming model call is the developer's own.
+        """
+        tasks = list(self.__dict__.get("_naming_tasks", ()))
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _save_thread(self, config: dict[str, Any], thread_id: str):
         """
@@ -499,6 +522,20 @@ class GraphService:
             except Exception:
                 self._telemetry = None
         return self._telemetry
+
+    def _close_run_trace(self, thread_id: str | None, run_id: str | None) -> None:
+        """Close a run's trace that nothing else closed: cancelled, disconnected or failed."""
+        store = self.telemetry
+        if not store or not thread_id or not run_id:
+            return
+        exc = sys.exc_info()[1]
+        status = "stopped" if isinstance(exc, asyncio.CancelledError | GeneratorExit) else "error"
+        if exc is None:
+            status = "stopped"
+        try:
+            store.close_run(thread_id, run_id, datetime.now().timestamp(), status)
+        except Exception as e:  # - telemetry must never break a run
+            logger.debug("Telemetry close_run failed: %s", e)
 
     @staticmethod
     def _telemetry_record(chunk: Any, ts: float | None = None) -> dict[str, Any]:
@@ -723,6 +760,33 @@ class GraphService:
                 f"interrupt '{pending.id}'"
             )
 
+    async def check_resume_target(
+        self, graph_input: GraphInputSchema, user: dict[str, Any]
+    ) -> None:
+        """409 for a resume aimed at the wrong interrupt, before a stream response starts.
+
+        A stream answers 200 as soon as it starts, so the router asks this first, as invoke
+        gets the same check inside its run. Nothing happens unless the request is a resume
+        that names an ``interrupt_id``.
+
+        Raises:
+            HTTPException: 409 when the thread is not paused at that interrupt.
+        """
+        if not graph_input.is_resume or graph_input.interrupt_id is None:
+            return
+        thread_id = normalize_thread_id((graph_input.config or {}).get("thread_id"))
+        user_id = user.get("user_id")
+        config = {"thread_id": thread_id, "user_id": user_id if user_id else "anonymous"}
+        config["user"] = user
+        try:
+            if thread_id is None:  # a new thread has nothing to resume
+                raise InterruptConflictError(
+                    "Nothing to resume: this thread is not paused at an interrupt"
+                )
+            await self._check_resume_target(graph_input, config)
+        except _resume_error_types() as exc:
+            raise _resume_http_error(exc) from exc
+
     async def _is_static_pause(self, config: dict[str, Any]) -> bool:
         """Whether the thread is paused by ``interrupt_before`` / ``interrupt_after``.
 
@@ -765,6 +829,10 @@ class GraphService:
 
         # update thread id
         config["thread_id"] = str(thread_id)
+
+        # The authenticated user, before any checkpointer read below: PgCheckpointer refuses a
+        # config without ``user_id``. Never taken from the request (``client_config`` strips it).
+        config["user_id"] = user_id if user_id else "anonymous"
 
         # check recursion limit set or not
         config["recursion_limit"] = graph_input.recursion_limit or 25
@@ -828,6 +896,8 @@ class GraphService:
             HTTPException: If graph execution fails.
         """
         thread_lock = Lease(None)
+        inv_thread_id: str | None = None
+        inv_run_id: str | None = None
         try:
             logger.debug("Invoking graph with input: %s", log_safe(graph_input.messages))
 
@@ -929,6 +999,7 @@ class GraphService:
             logger.error(f"Graph execution failed: {e}")
             raise HTTPException(status_code=500, detail=f"Graph execution failed: {e!s}")
         finally:
+            self._close_run_trace(inv_thread_id, inv_run_id)
             thread_lock.release()
 
     @staticmethod
@@ -988,8 +1059,33 @@ class GraphService:
         Yields:
             str: Individual JSON chunks from graph execution with newline delimiters.
         """
-        async for chunk in self.stream_chunks(graph_input, user):
-            yield chunk.model_dump_json(serialize_as_any=True) + "\n"
+
+        async def lines() -> AsyncIterable[str]:
+            last: StreamChunk | None = None
+            errored = False
+            async for chunk in self.stream_chunks(graph_input, user):
+                errored = errored or chunk.event == StreamEvent.ERROR
+                yield chunk.model_dump_json(serialize_as_any=True) + "\n"
+                # The graph reuses one chunk object, so keep only the ids, not the object.
+                last = StreamChunk(
+                    event=StreamEvent.UPDATES,
+                    thread_id=chunk.thread_id,
+                    run_id=chunk.run_id,
+                )
+            if not errored:
+                # The documented terminal chunk: a client that waits for it can tell a
+                # finished stream from a cut one. WebSocket runs send the same chunk.
+                done = StreamChunk(
+                    event=StreamEvent.UPDATES,
+                    data={"status": "done"},
+                    thread_id=last.thread_id if last else None,
+                    run_id=last.run_id if last else None,
+                )
+                yield done.model_dump_json(serialize_as_any=True) + "\n"
+
+        # On server shutdown the stream ends with a clear final chunk, not a cut connection.
+        async for line in end_on_shutdown(lines(), keepalive_seconds=KEEPALIVE_SECONDS):
+            yield line
 
     async def stream_chunks(  # noqa: PLR0912, PLR0915
         self,
@@ -1013,6 +1109,7 @@ class GraphService:
         meta: dict[str, Any] = {}
         thread_id: str | None = None
         run_id: str | None = None
+        naming: tuple[dict[str, Any], Any, list[str]] | None = None
         thread_lock = Lease(None)
         try:
             logger.debug("Streaming graph with input: %s", log_safe(graph_input.messages))
@@ -1085,16 +1182,7 @@ class GraphService:
                 self.telemetry.finish_run(thread_id, run_id, datetime.now().timestamp(), run_status)
 
             if meta["is_new_thread"] and self.config.thread_name_generator_path:
-                thread_name = await self._save_thread_name(
-                    config, config["thread_id"], messages_str
-                )
-                meta["thread_name"] = thread_name
-
-                yield StreamChunk(
-                    event=StreamEvent.UPDATES,
-                    data={"status": "completed"},
-                    metadata=meta,
-                )
+                naming = (dict(config), config["thread_id"], messages_str)
 
         except Exception as e:
             # Never raise HTTPException from inside an async generator that is
@@ -1118,7 +1206,11 @@ class GraphService:
                 metadata=meta,
             )
         finally:
+            self._close_run_trace(thread_id, run_id)
             thread_lock.release()
+            if naming is not None:
+                # An extra model call: started once the thread is free, never awaited here.
+                self._name_thread_in_background(*naming)
 
     async def _missing_pause_chunk(
         self, config: dict[str, Any], meta: dict[str, Any]

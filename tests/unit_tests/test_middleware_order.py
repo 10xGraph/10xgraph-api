@@ -62,6 +62,7 @@ def test_cors_is_outermost():
         "RateLimitMiddleware",
         "RequestSizeLimitMiddleware",
         "SelectiveGZipMiddleware",
+        "UnhandledErrorMiddleware",
     ]
 
 
@@ -95,3 +96,77 @@ def test_preflight_is_answered_before_the_rate_limiter(path):
     for _ in range(3):  # CORS answers preflights itself; they never reach the limiter
         assert client.options(path, headers=headers).status_code == 200
     assert client.get(path, headers={"Origin": ORIGIN}).status_code == 200
+
+
+def test_unhandled_exception_is_a_json_500_with_request_id_and_headers():
+    app = _app()
+
+    @app.get("/boom")
+    async def boom():
+        raise RuntimeError("secret internal detail")
+
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.get("/boom", headers={"Origin": ORIGIN})
+    assert response.status_code == 500
+    assert response.headers["content-type"].startswith("application/json")
+    _assert_decorated(response)
+    assert response.headers["cache-control"] == "no-store"
+    body = response.json()
+    assert body["error"]["code"] == "INTERNAL_SERVER_ERROR"
+    assert body["metadata"]["request_id"] == response.headers["x-request-id"]
+
+
+@pytest.mark.parametrize(
+    ("make", "status", "retry"),
+    [
+        (lambda: __import__("redis").exceptions.ConnectionError("down"), 503, True),
+        (
+            lambda: type("RateLimitError", (Exception,), {})("slow down"),
+            429,
+            True,
+        ),
+        (lambda: RuntimeError("bug"), 500, False),
+    ],
+)
+def test_retryable_failures_are_not_plain_500s(make, status, retry):
+    app = _app()
+
+    @app.get("/boom")
+    async def boom():
+        raise make()
+
+    response = TestClient(app, raise_server_exceptions=False).get("/boom")
+    assert response.status_code == status
+    assert ("retry-after" in response.headers) is retry
+
+
+def test_a_wrapped_driver_error_is_still_a_503():
+    app = _app()
+
+    @app.get("/boom")
+    async def boom():
+        try:
+            raise __import__("redis").exceptions.TimeoutError("slow")
+        except Exception as exc:
+            raise RuntimeError("checkpoint failed") from exc
+
+    response = TestClient(app, raise_server_exceptions=False).get("/boom")
+    assert response.status_code == 503
+    assert response.headers["retry-after"]
+
+
+def test_http_exception_headers_reach_the_client():
+    from fastapi import HTTPException
+
+    from tenxgraph_api.src.app.core.exceptions.handle_errors import init_errors_handler
+
+    app = _app()
+    init_errors_handler(app)
+
+    @app.get("/busy")
+    async def busy():
+        raise HTTPException(409, "busy", headers={"Retry-After": "3"})
+
+    response = TestClient(app).get("/busy")
+    assert response.status_code == 409
+    assert response.headers["retry-after"] == "3"

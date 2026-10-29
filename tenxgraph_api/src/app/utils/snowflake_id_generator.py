@@ -1,4 +1,7 @@
+import logging
 import os
+import socket
+import zlib
 from importlib.util import find_spec
 
 from tenxgraph.utils.id_generator import BaseIDGenerator, IDType
@@ -6,6 +9,16 @@ from tenxgraph.utils.id_generator import BaseIDGenerator, IDType
 
 # Check if snowflakekit is available
 HAS_SNOWFLAKE = find_spec("snowflakekit") is not None
+
+logger = logging.getLogger("tenxgraph_api.snowflake")
+
+
+def _setting(value: int | None, env_name: str, default: int | None) -> int | None:
+    """``value`` when given, else the environment variable, else ``default``."""
+    if value is not None:
+        return value
+    raw = os.environ.get(env_name)
+    return int(raw) if raw not in (None, "") else default
 
 
 class SnowFlakeIdGenerator(BaseIDGenerator):
@@ -19,8 +32,6 @@ class SnowFlakeIdGenerator(BaseIDGenerator):
         snowflake_worker_id: int | None = None,
         snowflake_worker_bits: int | None = None,
     ):
-        # IF all these are None then try to read from env
-        config = None
         if not HAS_SNOWFLAKE:
             raise ImportError(
                 "snowflakekit is not installed. Please install it to use SnowFlakeIdGenerator."
@@ -28,53 +39,43 @@ class SnowFlakeIdGenerator(BaseIDGenerator):
 
         from snowflakekit import SnowflakeConfig, SnowflakeGenerator
 
-        if (
-            snowflake_epoch is None
-            and total_bits is None
-            and snowflake_time_bits is None
-            and snowflake_node_bits is None
-            and snowflake_node_id is None
-            and snowflake_worker_id is None
-            and snowflake_worker_bits is None
-        ):
-            snowflake_epoch = int(os.environ.get("SNOWFLAKE_EPOCH", "1723323246031"))
-            total_bits = int(os.environ.get("SNOWFLAKE_TOTAL_BITS", "64"))
-            snowflake_time_bits = int(os.environ.get("SNOWFLAKE_TIME_BITS", "39"))
-            snowflake_node_bits = int(os.environ.get("SNOWFLAKE_NODE_BITS", "7"))
-            snowflake_node_id = int(os.environ.get("SNOWFLAKE_NODE_ID", "0"))
-            snowflake_worker_id = int(os.environ.get("SNOWFLAKE_WORKER_ID", "0"))
-            snowflake_worker_bits = int(os.environ.get("SNOWFLAKE_WORKER_BITS", "5"))
+        # Each value is, in order: the argument, its SNOWFLAKE_* environment variable, a default.
+        # A partly given configuration therefore still builds a complete config.
+        epoch = _setting(snowflake_epoch, "SNOWFLAKE_EPOCH", 1723323246031)
+        total = _setting(total_bits, "SNOWFLAKE_TOTAL_BITS", 64)
+        time_bits = _setting(snowflake_time_bits, "SNOWFLAKE_TIME_BITS", 39)
+        node_bits = _setting(snowflake_node_bits, "SNOWFLAKE_NODE_BITS", 7)
+        worker_bits = _setting(snowflake_worker_bits, "SNOWFLAKE_WORKER_BITS", 5)
 
-            config = SnowflakeConfig(
-                epoch=snowflake_epoch,
-                total_bits=total_bits,
-                time_bits=snowflake_time_bits,
-                node_bits=snowflake_node_bits,
-                node_id=snowflake_node_id,
-                worker_id=snowflake_worker_id,
-                worker_bits=snowflake_worker_bits,
+        # Two processes with the same node and worker id mint the same ids. When the ids are
+        # not set, derive them from this process (worker id from the pid, node id from the
+        # host name) instead of giving every gunicorn worker the same 0/0.
+        node_id = _setting(snowflake_node_id, "SNOWFLAKE_NODE_ID", None)
+        if node_id is None:
+            node_id = zlib.crc32(socket.gethostname().encode()) % (1 << node_bits)
+            logger.warning(
+                "SNOWFLAKE_NODE_ID is not set; using %d derived from the host name. "
+                "Set it explicitly to keep ids unique across hosts.",
+                node_id,
+            )
+        worker_id = _setting(snowflake_worker_id, "SNOWFLAKE_WORKER_ID", None)
+        if worker_id is None:
+            worker_id = os.getpid() % (1 << worker_bits)
+            logger.warning(
+                "SNOWFLAKE_WORKER_ID is not set; using %d derived from the process id. "
+                "Set it per worker to rule out collisions.",
+                worker_id,
             )
 
-        elif (
-            snowflake_epoch is not None
-            and total_bits is not None
-            and snowflake_time_bits is not None
-            and snowflake_node_bits is not None
-            and snowflake_node_id is not None
-            and snowflake_worker_id is not None
-            and snowflake_worker_bits is not None
-        ):
-            config = SnowflakeConfig(
-                epoch=snowflake_epoch,
-                total_bits=total_bits,
-                time_bits=snowflake_time_bits,
-                node_bits=snowflake_node_bits,
-                node_id=snowflake_node_id,
-                worker_id=snowflake_worker_id,
-                worker_bits=snowflake_worker_bits,
-            )
-
-        # Now create generator
+        config = SnowflakeConfig(
+            epoch=epoch,
+            total_bits=total,
+            time_bits=time_bits,
+            node_bits=node_bits,
+            node_id=node_id,
+            worker_id=worker_id,
+            worker_bits=worker_bits,
+        )
         self.generator = SnowflakeGenerator(config=config)
 
     @property

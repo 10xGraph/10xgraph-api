@@ -135,6 +135,16 @@ class Settings(BaseSettings):
     ###### REDIS Config ##########
     #################################
     REDIS_URL: str | None = None
+    # Limits for every Redis client the API opens (run locks, caps, rate limit, token
+    # revocation, ownership cache, readiness probe). Without them a Redis that stops
+    # answering (not refusing) would hang each request that touches it. Seconds; 0 turns the
+    # timeout off. REDIS_MAX_CONNECTIONS bounds each client's pool; a request waits up to
+    # REDIS_POOL_TIMEOUT for a free connection. 0 means no bound.
+    REDIS_SOCKET_TIMEOUT: float = Field(default=5.0, ge=0.0)
+    REDIS_CONNECT_TIMEOUT: float = Field(default=5.0, ge=0.0)
+    REDIS_MAX_CONNECTIONS: int = Field(default=50, ge=0)
+    REDIS_POOL_TIMEOUT: float = Field(default=5.0, ge=0.0)
+    REDIS_HEALTH_CHECK_INTERVAL: float = Field(default=30.0, ge=0.0)
 
     #################################
     ###### sentry Config ############
@@ -244,6 +254,19 @@ class Settings(BaseSettings):
                 )
             if warnings:
                 logger.warning("\n".join(["\n🔒 PRODUCTION SECURITY WARNINGS:", *warnings]))
+
+            # Not security holes, but both leak request content into the logs and traces.
+            if (self.LOG_LEVEL or "").upper() in ("DEBUG", "NOTSET"):
+                logger.warning(
+                    "LOG_LEVEL=%s in production writes request and run details to the logs. "
+                    "Use INFO or WARNING.",
+                    self.LOG_LEVEL,
+                )
+            if (self.OTEL_LEVEL or "").lower() == "full" and self.OTEL_ENABLED:
+                logger.warning(
+                    "OTEL_LEVEL=full in production exports message content to your trace "
+                    "backend. Use 'standard' unless you need it."
+                )
 
         return self
 

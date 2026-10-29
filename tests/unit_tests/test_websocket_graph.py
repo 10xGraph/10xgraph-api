@@ -78,7 +78,23 @@ _RESUME_REQUEST = {
     "config": {"thread_id": "thread-abc"},
 }
 
-_DONE_JSON = StreamChunk(event=StreamEvent.UPDATES, data={"status": "done"}).model_dump_json()
+
+class _Done(str):
+    """The ``done`` chunk, equal to any serialisation of it whatever its timestamp."""
+
+    def __eq__(self, other):
+        try:
+            chunk = json.loads(other)
+        except (TypeError, ValueError):
+            return False
+        return chunk.get("event") == "updates" and chunk.get("data") == {"status": "done"}
+
+    __hash__ = str.__hash__
+
+
+_DONE_JSON = _Done(
+    StreamChunk(event=StreamEvent.UPDATES, data={"status": "done"}).model_dump_json()
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -358,3 +374,76 @@ class TestWebSocketFrameLimits:
 
         mod = importlib.import_module("tenxgraph_api.src.app.routers.graph.router")
         assert mod._ws_max_frame_chars() == get_settings().MAX_REQUEST_SIZE
+
+
+@pytest.mark.asyncio
+class TestIdleAndInvalidFrames:
+    """G-101: an idle socket does not outlive its token; junk frames are not free."""
+
+    async def test_idle_socket_is_closed_when_its_token_expires(self, monkeypatch):
+        import asyncio
+        import importlib
+        import time
+
+        router_module = importlib.import_module("tenxgraph_api.src.app.routers.graph.router")
+
+        monkeypatch.setattr(router_module, "ws_identity_still_valid", lambda ws, user: False)
+        ws = _make_websocket([])
+
+        async def never(*_a, **_k):
+            await asyncio.sleep(30)
+
+        ws.receive_text = AsyncMock(side_effect=never)
+        service = _make_service([[]])
+        user = {"user_id": "u1", "exp": time.time() + 0.2}
+
+        await asyncio.wait_for(websocket_graph(websocket=ws, service=service, user=user), 5)
+
+        ws.close.assert_awaited()
+        assert ws.close.call_args.kwargs["code"] == 1008
+        assert "expired" in ws.send_text.call_args_list[-1].args[0]
+
+    async def test_a_flood_of_invalid_frames_closes_the_socket(self):
+        from tenxgraph_api.src.app.routers.graph.router import WS_MAX_INVALID_FRAMES
+
+        ws = _make_websocket([])
+        ws.receive_text = AsyncMock(side_effect=["{bad"] * (WS_MAX_INVALID_FRAMES + 5))
+        service = _make_service([[]])
+
+        await websocket_graph(websocket=ws, service=service, user={})
+
+        ws.close.assert_awaited()
+        assert ws.close.call_args.kwargs["code"] == 1008
+        assert ws.receive_text.await_count == WS_MAX_INVALID_FRAMES + 1
+
+    async def test_invalid_frames_count_against_the_rate_limit(self, monkeypatch):
+        import importlib
+
+        router_module = importlib.import_module("tenxgraph_api.src.app.routers.graph.router")
+
+        monkeypatch.setattr(router_module, "ws_run_allowed", AsyncMock(return_value=7))
+        ws = _make_websocket([])
+        ws.receive_text = AsyncMock(side_effect=["{bad", "{bad", "{bad"])
+        service = _make_service([[]])
+
+        await websocket_graph(websocket=ws, service=service, user={})
+
+        assert ws.close.call_args.kwargs["code"] == 1013
+        assert ws.receive_text.await_count == 1
+
+    async def test_valid_frames_reset_the_invalid_count(self):
+        from tenxgraph_api.src.app.routers.graph.router import WS_MAX_INVALID_FRAMES
+
+        frames = (
+            ["{bad"] * (WS_MAX_INVALID_FRAMES - 1)
+            + [json.dumps(_FRESH_REQUEST)]
+            + ["{bad"] * (WS_MAX_INVALID_FRAMES - 1)
+            + [WebSocketDisconnect()]
+        )
+        ws = _make_websocket([])
+        ws.receive_text = AsyncMock(side_effect=frames)
+        service = _make_service([[]])
+
+        await websocket_graph(websocket=ws, service=service, user={})
+
+        assert len(service._stream_calls) == 1

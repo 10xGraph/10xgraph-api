@@ -71,6 +71,13 @@ class BuildCommand(BaseCommand):
             Exit code
         """
         try:
+            if docker_compose and k8s:
+                raise ValidationError(
+                    "--docker-compose and --k8s cannot be used together: the compose image has "
+                    "no start command, so the pod would crash-loop. Run build once with "
+                    "--k8s (Dockerfile and k8s.yaml) or once with --docker-compose.",
+                    field="k8s",
+                )
             self.output.command_header(
                 "build",
                 "Generate Dockerfile (and optional docker-compose.yml) for production image",

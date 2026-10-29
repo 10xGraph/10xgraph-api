@@ -250,7 +250,7 @@ def test_validation_error_handler_development():
     r = client.get("/validation-error")
     assert r.status_code == 422
     body = r.json()
-    assert body["error"]["code"] == "AGENTFLOW_VALIDATION_ERROR"
+    assert body["error"]["code"] == "VALIDATION_ERROR"
 
     cleanup_env()
 
@@ -267,7 +267,7 @@ def test_validation_error_handler_production():
     r = client.get("/validation-error")
     assert r.status_code == 422
     body = r.json()
-    assert body["error"]["code"] == "AGENTFLOW_VALIDATION_ERROR"
+    assert body["error"]["code"] == "VALIDATION_ERROR"
 
     cleanup_env()
 
@@ -334,7 +334,7 @@ def test_graph_recursion_error_handler():
 
     client = TestClient(app)
     r = client.get("/recursion-error")
-    assert r.status_code == 500
+    assert r.status_code == 422
     body = r.json()
     assert body["error"]["code"] == "GRAPH_RECURSION_001"
 
