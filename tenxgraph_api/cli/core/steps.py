@@ -15,6 +15,7 @@ Three implementations share one protocol:
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -125,6 +126,20 @@ class ProgressRun(Protocol):
     ) -> None: ...
 
     def record(self, label: str, *, status: str, detail: str = "") -> None: ...
+
+    def step(self, label: str, message: str) -> None: ...
+
+
+_STEP_MESSAGE_LIMIT = 100
+_LINE_BREAKS = re.compile(r"\s*[\r\n\t]+\s*")
+
+
+def one_line(text: str, limit: int = _STEP_MESSAGE_LIMIT) -> str:
+    """Collapse whitespace and newlines and cut ``text`` to at most ``limit`` characters."""
+    collapsed = _LINE_BREAKS.sub(" ", str(text)).strip()
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 3].rstrip() + "..."
 
 
 def format_elapsed(seconds: float) -> str:
@@ -459,8 +474,15 @@ class _BaseProgressRun:
             self.tally[status] += 1
         self._render(label, status, detail)
 
+    def step(self, label: str, message: str) -> None:
+        """Show an in-progress line for ``label`` without advancing the bar or tally."""
+        self._render_step(label, one_line(message))
+
     def _render(self, label: str, status: str, detail: str) -> None:
         """Emit whatever this output mode shows for one finished item."""
+
+    def _render_step(self, label: str, message: str) -> None:
+        """Emit whatever this output mode shows for one in-progress line."""
 
 
 class LiveProgressRun(_BaseProgressRun):
@@ -544,6 +566,14 @@ class LiveProgressRun(_BaseProgressRun):
             self._progress.console.print(line)
             self._progress.update(self._task, completed=self.completed, tally=self._tally_text())
 
+    def _render_step(self, label: str, message: str) -> None:
+        if self._progress is None:
+            return
+        line = Text("    ")
+        line.append(f"{label}  ", style="tenxgraph.muted")
+        line.append(message, style="tenxgraph.muted")
+        self._progress.console.print(line)
+
     def _tally_text(self) -> Text:
         glyphs = self._glyphs
         text = Text()
@@ -577,6 +607,9 @@ class StaticProgressRun(_BaseProgressRun):
         symbol = self._glyphs.check if status == "passed" else self._glyphs.cross
         suffix = f"  {detail}" if detail else ""
         self._emit(f"[{self.completed:>3}/{self.total}] {symbol} {label}  {status.upper()}{suffix}")
+
+    def _render_step(self, label: str, message: str) -> None:
+        self._emit(f"      {label}  {message}")
 
 
 class StructuredProgressRun(_BaseProgressRun):
@@ -615,6 +648,9 @@ class StructuredProgressRun(_BaseProgressRun):
                 "total": self.total,
             },
         )
+
+    def _render_step(self, label: str, message: str) -> None:
+        self._emit("eval_step", label, {"message": message})
 
 
 class QuietProgressRun(_BaseProgressRun):

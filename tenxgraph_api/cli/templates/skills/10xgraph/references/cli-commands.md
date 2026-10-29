@@ -52,7 +52,7 @@ agentflow = tenxgraph_api.cli.main:legacy_main   # deprecated alias, removed in 
 `10xgraph eval [TARGET]`
 
 - Runs agent evaluations: discovers `*_eval.py` and `eval_*.py` files in `TARGET` (default `evals/`) and runs their cases.
-- Options include `--output/-o` (default `eval_reports`), `--no-report`, `--threshold/-t` (fail below this pass rate), `--parallel/-p`, `--max-concurrency/-c` (default 4), `--verbose/-v`, and `--quiet/-q`.
+- Options include `--output/-o` (default `eval_reports`), `--no-report`, `--threshold/-t` (fail below this pass rate), `--parallel/-p`, `--max-concurrency/-c` (default 4), `--verbose/-v`, and `--quiet/-q`. Writes JSON and HTML reports and opens the HTML report in the browser at an interactive terminal; `--open/--no-open` (or `evaluation.open_report` in `10xgraph.json`) controls it.
 
 `10xgraph test [PATH]`
 

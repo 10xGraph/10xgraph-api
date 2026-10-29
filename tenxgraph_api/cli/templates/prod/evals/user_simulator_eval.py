@@ -59,19 +59,19 @@ def get_scenarios() -> list[ConversationScenario]:
             max_turns=8,
         ),
         ConversationScenario(
-            scenario_id="flight_booking_assistance",
-            description="User wants help finding a flight from London to New York",
-            starting_prompt="I need to fly from London to New York next Friday. Can you help?",
+            scenario_id="compare_two_cities",
+            description="User compares the weather in two cities to choose a destination",
+            starting_prompt="I can't decide between Rome and Berlin for a weekend trip.",
             conversation_plan=(
-                "1. Share travel dates and seat preferences\n"
-                "2. Ask about available flights and prices\n"
-                "3. Confirm booking details"
+                "1. Ask for the current weather in Rome\n"
+                "2. Ask for the current weather in Berlin\n"
+                "3. Ask which city has the nicer weather"
             ),
             goals=[
-                "User receives flight options for the requested route",
-                "User gets pricing information",
-                "Booking process is initiated or completed",
+                "User receives weather information for Rome",
+                "User receives weather information for Berlin",
+                "User is told which of the two cities has the nicer weather",
             ],
-            max_turns=10,
+            max_turns=8,
         ),
     ]

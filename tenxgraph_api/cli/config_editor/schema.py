@@ -892,6 +892,7 @@ _SECTIONS: list[dict[str, Any]] = [
             "threshold": 0.75,
             "parallel": False,
             "max_concurrency": 4,
+            "open_report": True,
         },
         "fields": [
             {"path": ["evaluation", "directory"], "label": "Eval directory", "type": "text"},
@@ -917,6 +918,13 @@ _SECTIONS: list[dict[str, Any]] = [
                 "min": 1,
                 "step": 1,
                 "show_if": {"path": ["evaluation", "parallel"], "equals": True},
+            },
+            {
+                "path": ["evaluation", "open_report"],
+                "label": "Open HTML report",
+                "type": "bool",
+                "default": True,
+                "help": "Open the HTML report in your browser when 10xgraph eval finishes.",
             },
         ],
     },

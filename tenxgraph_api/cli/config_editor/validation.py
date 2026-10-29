@@ -432,6 +432,8 @@ def _check_evaluation(config: dict, out: _Collector) -> None:
         out.error("evaluation.threshold", "threshold must be a number between 0 and 1.")
     if "parallel" in data and not isinstance(data["parallel"], bool):
         out.error("evaluation.parallel", "parallel must be true or false.")
+    if "open_report" in data and not isinstance(data["open_report"], bool):
+        out.error("evaluation.open_report", "open_report must be true or false.")
     concurrency = data.get("max_concurrency")
     if concurrency is not None and not (_is_int(concurrency) and concurrency >= 1):
         out.error("evaluation.max_concurrency", "max_concurrency must be a whole number >= 1.")

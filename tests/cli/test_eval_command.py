@@ -167,6 +167,7 @@ async def test_run_flat_pool_case_error(cmd):
     case1 = MagicMock()
     case1.eval_id = "c1"
     case1.name = "case_name"
+    case1.expected_summary.return_value = {"response": "r", "input": "q"}
     evaluator = MagicMock()
 
     async def mock_evaluate_case(case, collector_override):
@@ -192,6 +193,8 @@ async def test_run_flat_pool_case_error(cmd):
         assert len(results) == 1
         assert results[0][3].passed is False
         assert "evaluation failed" in results[0][3].error
+        assert results[0][3].expected == {"response": "r", "input": "q"}
+        assert results[0][3].duration_seconds > 0
 
 
 @pytest.mark.asyncio
@@ -214,7 +217,7 @@ async def test_run_flat_pool_simulation(cmd):
     sim_result.turns = 2
     sim_result.goals_achieved = 1
 
-    async def mock_simulator_run(graph, scenario):
+    async def mock_simulator_run(graph, scenario, on_event=None):
         return sim_result
 
     simulator.run = mock_simulator_run
@@ -241,7 +244,7 @@ async def test_run_flat_pool_simulation_error(cmd):
     mock_criterion.threshold = 0.7
     simulator.criteria = [mock_criterion]
 
-    async def mock_simulator_run(graph, scenario):
+    async def mock_simulator_run(graph, scenario, on_event=None):
         raise ValueError("simulation failed")
 
     simulator.run = mock_simulator_run
@@ -298,6 +301,7 @@ def test_execute_success(cmd, tmp_path):
 
     mock_rep_mgr_res = MagicMock()
     mock_rep_mgr_res.json_path = "path/to/report.json"
+    mock_rep_mgr_res.html_path = "path/to/report.html"
     mock_rep_mgr_res.has_errors = False
 
     mock_rep_mgr = MagicMock()
@@ -325,7 +329,8 @@ def test_execute_success(cmd, tmp_path):
     ):
         code = cmd.execute(target=str(tmp_path))
         assert code == 0
-        assert any("Open it in the playground" in m for m in cmd.output.infos)
+        assert any("Evals > Open report file" in m for m in cmd.output.infos)
+        assert any(m.startswith("HTML report:") for m in cmd.output.infos)
 
 
 def test_execute_below_threshold(cmd, tmp_path):
@@ -543,7 +548,7 @@ async def test_run_flat_pool_simulation_no_criterion(cmd):
     sim_result.turns = 2
     sim_result.goals_achieved = 1
 
-    async def mock_simulator_run(graph, scenario):
+    async def mock_simulator_run(graph, scenario, on_event=None):
         return sim_result
 
     simulator.run = mock_simulator_run

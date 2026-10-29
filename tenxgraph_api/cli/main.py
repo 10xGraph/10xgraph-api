@@ -769,6 +769,7 @@ def test(
 
 @app.command(name="eval")
 def eval_cmd(
+    ctx: typer.Context,
     target: str | None = typer.Argument(
         None,
         help="File or directory to evaluate (default: evals/ from 10xgraph.json or cwd)",
@@ -802,6 +803,11 @@ def eval_cmd(
         "-c",
         help="Max cases running concurrently when --parallel is set (global semaphore)",
     ),
+    open_report: bool | None = typer.Option(
+        None,
+        "--open/--no-open",
+        help="Open the HTML report in your browser when the run finishes (default: open).",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose output"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress all output except errors"),
 ) -> None:
@@ -809,8 +815,9 @@ def eval_cmd(
 
     Discovers *_eval.py / eval_*.py files in the target directory (default: evals/).
     Collects all cases from all files into a flat pool, then runs them under a single
-    event loop throttled by --max-concurrency.  Always writes a JSON report
-    in eval_reports/ unless --no-report is set.
+    event loop throttled by --max-concurrency.  Writes JSON and HTML reports
+    to eval_reports/ unless --no-report is set, and opens the HTML report in your
+    browser when the run ends at an interactive terminal (--no-open to skip).
 
     Each eval file must expose one of:
       get_eval_set() + get_eval_config() # CLI loads agent from 10xgraph.json
@@ -818,6 +825,8 @@ def eval_cmd(
       any function returning EvalSet     # auto-discovered, pytest-style
     """
     _configure_command(verbose=verbose, quiet=quiet)
+    runtime = ctx.find_root().obj
+    non_interactive = isinstance(runtime, CLIContext) and runtime.non_interactive
 
     try:
         command = EvalCommand(output)
@@ -830,6 +839,8 @@ def eval_cmd(
             max_concurrency=max_concurrency,
             verbose=verbose,
             quiet=quiet,
+            open_report=open_report,
+            non_interactive=non_interactive,
         )
         sys.exit(exit_code)
     except Exception as e:

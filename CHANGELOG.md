@@ -183,6 +183,18 @@ The stable 1.0 release of `10xgraph-api`. It requires `10xgraph` 1.0 and is alig
 - **`session_started` event on `/v1/graph/live`.** The first server event of every live session is
   `{"type": "session_started", "thread_id": "<id>"}`, with the server-made id when the init frame
   had none. Reconnect with that id to continue the thread.
+- **`10xgraph eval` writes an HTML report and opens it.** A run now writes the HTML report next
+  to the JSON one in `eval_reports/`, prints both paths, and opens the HTML report in the default
+  browser when it finishes. Pass `--no-open` (or set `evaluation.open_report` to `false` in
+  `10xgraph.json`) to skip it. It is never opened with `--no-report`, `-q`, `--format json` or
+  `jsonl`, `--non-interactive`, when `CI` is set, or when stdout is not a terminal. A failure to
+  open the browser only prints a warning. The playground can still open the JSON report.
+- **Live progress lines for `10xgraph eval`.** Each case prints a muted `running` line, and a
+  user-simulation scenario prints a line per step (simulated user message, agent reply, newly
+  achieved goals, criteria being judged, agent errors) so a long scenario no longer looks
+  frozen. Needs the matching `10xgraph` core release; with an older core the simulation still runs
+  and only the per-step lines are missing. `-q` hides them; `--format jsonl` emits `eval_step`
+  events. `ProgressRun` gains `step(label, message)`.
 
 
 ### Changed
@@ -282,6 +294,16 @@ The stable 1.0 release of `10xgraph-api`. It requires `10xgraph` 1.0 and is alig
 
 ### Fixed
 
+- **`10xgraph eval` reports carry each case's expectations.** The report's case results now
+  include `expected` (response, tool calls, node order, input). For a user simulation, `input`
+  is the starting prompt and `response` is the goals joined with `; `. Needs `10xgraph` 1.0.
+- **The `init` eval templates check what they declare and can pass.** `weather_agents_eval.py`
+  now scores the expected response (ROUGE-1, no LLM), the expected node order and the tool
+  calls; the greeting case no longer expects the placeholder `assistant`.
+  `user_simulator_eval.py` replaces the flight booking scenario, which a weather-only agent
+  could never complete, with a two-city weather comparison.
+- **`10xgraph eval` showed `0.00s` for user-simulation scenarios.** The CLI now times each
+  scenario and sets its duration.
 - A thread that was cancelled, disconnected or cut by a restart is usable on the next request
   (the core fix), and a client disconnect during a stream no longer leaves the thread lock held.
 - `POST /v1/threads/{thread_id}/messages` and the other write routes no longer race an active
