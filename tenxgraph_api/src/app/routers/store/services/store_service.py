@@ -165,11 +165,20 @@ class StoreService:
         user: dict[str, Any],
         limit: int = 100,
         options: dict[str, Any] | None = None,
+        offset: int = 0,
     ) -> MemoryListResponseSchema:
+        """One page of memories. The store has no offset, so it is asked for ``offset + limit
+        + 1`` rows and the page is cut from those; the extra row only tells ``has_more``."""
         store = self._get_store()
         cfg = self._config(config, user)
-        memories = await store.aget_all(cfg, limit=limit, **_client_options(options))
-        return MemoryListResponseSchema(memories=memories)
+        rows = await store.aget_all(cfg, limit=offset + limit + 1, **_client_options(options))
+        page = list(rows[offset : offset + limit])
+        has_more = len(rows) > offset + limit
+        return MemoryListResponseSchema(
+            memories=page,
+            has_more=has_more,
+            next_offset=offset + limit if has_more else None,
+        )
 
     async def update_memory(
         self,

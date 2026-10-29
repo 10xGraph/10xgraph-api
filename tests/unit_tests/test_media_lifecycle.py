@@ -448,6 +448,7 @@ def _thread_service(monkeypatch, media, messages: list[Message]) -> Checkpointer
     async def aclean(cfg):
         state["messages"] = []
 
+    cp.aget_state = AsyncMock(return_value=None)
     cp.alist_messages = AsyncMock(side_effect=alist)
     cp.aget_message = AsyncMock(side_effect=aget)
     cp.adelete_message = AsyncMock(side_effect=adelete)
@@ -469,6 +470,34 @@ async def test_thread_delete_removes_files_with_no_thread_left(monkeypatch, dele
     service = _thread_service(monkeypatch, media, [_img(f"graph://media/{key}")])
     await service.delete_thread({"thread_id": "t1"}, _USER, "t1")
     assert not await media.store.exists(key)
+
+
+@pytest.mark.asyncio
+async def test_thread_delete_releases_files_no_message_references(monkeypatch, delete_setting):
+    media = _media()
+    key = await _upload(media)
+    other = await _upload(media, owner="bob")
+    await media.link_threads([key], "t1", "alice")
+    # No message references the file any more (cleared state), so only its own link finds it.
+    service = _thread_service(monkeypatch, media, [])
+    await service.delete_thread({"thread_id": "t1"}, _USER, "t1")
+    assert not await media.store.exists(key)
+    assert await media.store.exists(other)
+
+
+@pytest.mark.asyncio
+async def test_release_thread_skips_other_owners_and_stores_without_list_keys(delete_setting):
+    media = _media()
+    key = await _upload(media, owner="bob")
+    await media.link_threads([key], "t1", "bob")
+    assert await media.release_thread("t1", "alice") == []
+    assert await media.store.exists(key)
+
+    class NoList(LinkStore):
+        async def list_keys(self):
+            raise NotImplementedError
+
+    assert await _media(NoList()).release_thread("t1", "alice") == []
 
 
 @pytest.mark.asyncio
@@ -541,10 +570,12 @@ async def test_cleanup_failures_never_fail_the_delete(monkeypatch, delete_settin
     service = _thread_service(monkeypatch, media, [_img(f"graph://media/{key}")])
     media.store.get_metadata = AsyncMock(side_effect=RuntimeError("store down"))
     res = await service.delete_thread({"thread_id": "t1"}, _USER, "t1")
-    assert res.success is True
+    # The delete itself went through, but a cleanup that failed is no longer reported as success.
+    assert res.success is False and res.data["deleted"] is True
+    assert "files" in res.data["cleanup_failed"]
     service.checkpointer.alist_messages = AsyncMock(side_effect=RuntimeError("db down"))
     res = await service.delete_thread({"thread_id": "t1"}, _USER, "t1")
-    assert res.success is True
+    assert res.success is False and "files" in res.data["cleanup_failed"]
     res = await service.delete_message({"thread_id": "t1"}, _USER, "m1")
     assert res.success is True
 

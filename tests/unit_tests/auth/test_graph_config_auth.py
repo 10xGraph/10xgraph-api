@@ -99,8 +99,7 @@ class TestGraphConfigAuthConfig:
         self,
         temp_config_file,
     ):
-        """Test that auth config works with strings containing 'jwt' substring."""
-        # The code uses 'jwt' in res, so "my-jwt-auth" would also match
+        """A string that only contains 'jwt' is not the jwt method (G-117: exact match)."""
         config_path = temp_config_file({"agent": "path/to/agent.py", "auth": "my-jwt-auth"})
 
         with patch.dict(
@@ -111,9 +110,8 @@ class TestGraphConfigAuthConfig:
             },
         ):
             graph_config = GraphConfig(path=config_path)
-            result = graph_config.auth_config()
-
-            assert result == {"method": "jwt"}
+            with pytest.raises(ValueError, match="Unsupported auth method"):
+                graph_config.auth_config()
 
     def test_auth_config_jwt_uppercase_raises_error(
         self,

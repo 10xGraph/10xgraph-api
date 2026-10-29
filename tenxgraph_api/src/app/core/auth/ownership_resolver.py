@@ -33,6 +33,8 @@ import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 
+from tenxgraph_api.src.app.core.redis_client import key_part, prefixed
+
 
 logger = logging.getLogger("tenxgraph_api.authorization")
 
@@ -56,7 +58,8 @@ class ThreadOwnershipResolver:
             When absent the resolver is L1-only. Redis errors degrade to the DB lookup and
             never fail a request.
         max_size: L1 LRU capacity (entries).
-        redis_prefix: key namespace for L2 entries.
+        redis_prefix: key namespace for L2 entries (default ``af:authz:owner`` behind
+            ``REDIS_KEY_PREFIX``).
         l1_ttl: seconds an L1 entry is trusted; bounds staleness after a delete elsewhere.
         l2_ttl: seconds an L2 entry lives in Redis.
     """
@@ -67,14 +70,14 @@ class ThreadOwnershipResolver:
         *,
         redis: object | None = None,
         max_size: int = 10_000,
-        redis_prefix: str = "af:authz:owner",
+        redis_prefix: str | None = None,
         l1_ttl: float = DEFAULT_L1_TTL_SECONDS,
         l2_ttl: int = DEFAULT_L2_TTL_SECONDS,
     ) -> None:
         self._lookup = lookup
         self._redis = redis
         self._max_size = max(1, max_size)
-        self._prefix = redis_prefix
+        self._prefix = redis_prefix if redis_prefix is not None else prefixed("af:authz:owner")
         self._l1_ttl = l1_ttl
         self._l2_ttl = l2_ttl
         # key -> (owner, monotonic expiry)
@@ -178,7 +181,7 @@ class ThreadOwnershipResolver:
     # Owner entries and delete markers live under different fixed segments, so no thread id
     # (not even one like "deleted:X") can make an owner key collide with a marker key.
     def _redis_key(self, key: str) -> str:
-        return f"{self._prefix}:id:{key}"
+        return f"{self._prefix}:id:{key_part(key)}"
 
     async def _redis_get(self, key: str) -> str | None:
         if self._redis is None:
@@ -204,7 +207,7 @@ class ThreadOwnershipResolver:
             logger.debug("Ownership L2 set failed for %s: %s", key, exc)
 
     def _tombstone_key(self, key: str) -> str:
-        return f"{self._prefix}:tomb:{key}"
+        return f"{self._prefix}:tomb:{key_part(key)}"
 
     async def _redis_tombstone(self, key: str, owner: str) -> None:
         if self._redis is None:

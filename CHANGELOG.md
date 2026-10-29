@@ -27,12 +27,163 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased]
+## [1.0.0] - Unreleased
 
-### Removed
+The stable 1.0 release of `10xgraph-api`. It requires `10xgraph` 1.0 and is aligned with
+`10xgraph-client` 1.0. It is the `1.0.0rc1` code plus the changes below. If you upgrade from
+0.9.x, the `1.0.0rc1` breaking list further down applies to you as well.
 
-- Removed the `/v1/evals/runs` endpoints; eval reports are JSON files opened in the playground.
-  `10xgraph eval` now writes only the JSON report and no longer has `--open`.
+### Breaking
+
+- **Ids in paths and bodies must match `^[A-Za-z0-9._:@-]{1,128}$`.** A `thread_id`,
+  `message_id` or memory id that is longer or has other characters gets 422
+  (`VALIDATION_ERROR`). Snowflake integers, UUIDs and the ids the stores return all fit. Ids
+  that start with `__system__` stay reserved.
+- **Nested `initial_state`, `config` and `resume` values deeper than 64 levels get 422**
+  (`VALIDATION_ERROR`). Before, about 5,000 levels passed validation and failed inside the run
+  with `RecursionError`.
+- **Resume errors answer 409 or 422.** A `resume_interrupt_id` or `interrupt_id` that is not the
+  pending interrupt's, a `resume` sent to a thread that is not paused, and a plain new message
+  sent to a thread paused at `interrupt()` return 409. A resume value that fails the
+  interrupt's `response_schema` returns 422. The 409 now comes before the stream starts on
+  `POST /v1/graph/stream` (it was a 200 with an error chunk).
+- **Writes during a run return 409.** `PUT` and `DELETE /v1/threads/{thread_id}/state`,
+  `POST /v1/threads/{thread_id}/messages`, `DELETE` of a thread message, `DELETE` of a thread
+  and `POST /v1/graph/fix` are refused at once with 409 while a run holds the thread. Retry
+  after the run ends or stop it first. They used to be overwritten by the run, or brought a
+  deleted thread back.
+- **Thread delete can return `success=false`.** When file cleanup, trace cleanup or cache
+  eviction failed, `DELETE /v1/threads/{thread_id}` answers `success=false` with
+  `data.cleanup_failed` listing the steps (`files`, `traces`, `cache`) and logs a warning. The
+  thread rows are deleted. Treat `success=false` as "retry the cleanup", not as "thread still
+  there".
+- **`JWT_ALGORITHM` must be on the allowlist.** `HS256`, `HS384`, `HS512`, `RS256`, `RS384`,
+  `RS512`, `ES256`, `ES384`, `ES512`, `PS256`, `PS384`, `PS512` and `EdDSA`. `none`, an empty
+  value or any other value stops startup. Startup also stops when `"auth": "jwt"` is set and
+  PyJWT is missing; before, every request failed with a 500.
+- **The `auth` value must be exactly `"jwt"`.** Before, any string that contained `jwt` was
+  accepted. A value such as `"jwt-custom"` now fails with `Unsupported auth method`.
+- **The `graph:setup` scope is gone.** The setup endpoint no longer exists, and a rule that
+  names the scope guards nothing. Remove it from your authorization config.
+- **Graph validation errors use the code `VALIDATION_ERROR`.** The duplicate
+  `AGENTFLOW_VALIDATION_ERROR` is no longer sent. The client and docs already branch on
+  `VALIDATION_ERROR`.
+- **A run that hits its recursion limit answers 422 (`GRAPH_RECURSION_LIMIT`), not 500.**
+- **`POST /v1/graph/stream` is labelled `application/x-ndjson`** (it was `text/event-stream`
+  while sending NDJSON). Idle streams send a blank keep-alive line every 15 s; NDJSON readers
+  skip it. Proxy rules or clients that matched on `text/event-stream` need updating.
+- **`10xgraph build` refuses `--docker-compose` together with `--k8s`.** The combined image had
+  no start command. Run it once for each target.
+- **Uploads are checked against new default limits** (see Added): images over 50,000,000
+  pixels and PDFs over 10 MB or 500 pages are refused with 413.
+- **The server needs the new dependency floors** (see Upgrade notes) and `10xgraph` 1.0.
+- **AG-UI and `/v1/graph/live` follow `runs.thread_ids` like REST.** Under the default
+  `"server"`, a thread id the server never issued gets 403 on `POST /v1/ag-ui`, and on live an
+  error event with code `not_authorized` and close code 1008. Before, both accepted any id. A
+  blank or `"new"` id, or no id, makes the server create the thread: AG-UI returns the new id in
+  `RUN_STARTED`, and live sends `{"type": "session_started", "thread_id": "<id>"}` as its first
+  server event. Frontends that make their own thread ids (CopilotKit does by default) must set
+  `"runs": {"thread_ids": "client"}` in `10xgraph.json`.
+
+### Upgrade notes
+
+- **Postgres:** `10xgraph` 1.0 runs schema migration v4 on first use. Stop all old pods, run
+  the migration (start one new pod and wait for it to be ready), then start the rest. A
+  rollback needs a database restore. `/health/ready` now fails while the schema version is
+  below the one the code expects, so a pod that cannot create or upgrade the schema stays out
+  of rotation. See the `10xgraph` changelog for the full note.
+- **Dependency minimums:** `python-multipart>=0.0.31`, `starlette>=1.3.1`, `PyJWT>=2.15.0`
+  (the `jwt` extra) and `opentelemetry-api` and `opentelemetry-sdk` `>=1.45.1` (the `otel`
+  extra). `10xgraph>=1.0.0rc1,<2.0` is the core floor in `pyproject.toml`.
+- **Shutdown timing:** the generated Gunicorn command uses a new worker class,
+  `tenxgraph_api.src.app.uvicorn_worker.TenxGraphUvicornWorker`. Regenerate Docker and
+  Kubernetes files with `10xgraph build`, or point your own command at it. Keep Gunicorn
+  `--graceful-timeout` above the sum of the three `SHUTDOWN_*_SECONDS` settings (50 s by
+  default) and the pod grace period above that.
+- **Alerting:** handled client errors log one WARNING line, not an ERROR with a traceback.
+  Alerts that matched ERROR for 4xx responses must match WARNING.
+
+### Added
+
+- **Shutdown settings.** `SHUTDOWN_GRACE_SECONDS` (default 10), `SHUTDOWN_STOP_SECONDS`
+  (default 10) and `SHUTDOWN_TIMEOUT_SECONDS` (default 30). The app lifespan calls
+  `graph.aclose(grace, stop_timeout, timeout)` once with these values, then closes the API's
+  own clients. Runs that are cut are saved INTERRUPTED and the thread resumes with the next
+  request.
+- **`503` while closing.** A run refused because the graph is closing (`GraphClosedError`)
+  answers 503 `SERVICE_UNAVAILABLE` with `Retry-After`. `/health/ready` answers 503
+  (`status: draining`) once shutdown starts.
+- A run refused while the graph is closing sends a stream error chunk or WebSocket frame with
+  `data.code = "SERVICE_UNAVAILABLE"` and `retry_after_seconds`. On a WebSocket the socket then
+  closes with code 1012.
+- **Final chunk on shutdown.** An open HTTP stream cut by a restart ends with an error chunk
+  that has `data.interrupted: true` and a reason, so the client knows to resume the thread.
+- **Terminal chunk on HTTP streams.** A run stream ends with
+  `{"event": "updates", "data": {"status": "done"}}`, as the WebSocket path already did. A
+  client can tell a finished stream from a cut one.
+- **`Retry-After` on 429 and 409.** The run-cap 429 and the busy-thread 409 now carry it, and
+  a queued request whose client has left no longer runs.
+- **Typed server errors.** An unhandled exception returns the JSON error envelope with the
+  request id, the security headers and `Cache-Control: no-store`, not bare text. A database or
+  Redis driver error that cannot connect answers 503 with `Retry-After`, and a model
+  provider's rate limit answers 429 `PROVIDER_RATE_LIMITED` with `Retry-After`. In production a
+  plain `ValueError` still answers 422 with "Invalid input provided."; only errors written for
+  the client (`ClientInputError`) keep their message.
+- **Redis client settings.** `REDIS_SOCKET_TIMEOUT` (5 s), `REDIS_CONNECT_TIMEOUT` (5 s),
+  `REDIS_POOL_TIMEOUT` (5 s), `REDIS_MAX_CONNECTIONS` (50) and `REDIS_HEALTH_CHECK_INTERVAL`
+  (30 s) apply to every Redis client the API opens (run locks and caps, rate limit, token
+  revocation, ownership cache, readiness). `0` turns a timeout off. A Redis that stops
+  answering no longer hangs requests.
+- **`REDIS_KEY_PREFIX`.** A prefix for every key the API writes to Redis, so deployments that
+  share one Redis do not collide. Give the core checkpointer the same value as
+  `redis_key_prefix`.
+- **Media limits.** `MEDIA_MAX_FILES_PER_USER` and `MEDIA_MAX_USER_STORAGE_MB` (both `0`, off),
+  `MEDIA_MAX_IMAGE_PIXELS` (50,000,000), `MEDIA_MAX_PDF_MB` (10) and `MEDIA_MAX_PDF_PAGES`
+  (500; checked before parsing, 413 before the file is stored), `MEDIA_INLINE_MAX_BYTES`
+  (50,000; larger inline base64 media is moved to the media store, `0` turns it off) and
+  `MEDIA_SWEEP_INTERVAL_SECONDS` (3600, `0` turns it off; removes orphan data files left by a
+  crash). The sweeper does not run on the cloud store, which cannot list blobs. The per-user
+  quotas do work on S3 and GCS (see the owner index under Changed).
+- `GET /v1/files` lists the caller's files (`limit` up to 200, `offset`, `has_more`). It works
+  on cloud stores too, for files stored with `10xgraph` 1.0 or later.
+- `has_more`, `offset` and `limit` on the thread and thread-message lists, and `offset`,
+  `has_more` and `next_offset` on the memory list.
+- **Run trace.** The observability route returns a span tree (run, node visits, LLM and tool
+  calls) with inputs, outputs, status, tokens and timings, plus `enabled` and `reason` so a UI
+  can tell tracing off from no runs yet. It is still dev only; the store is not created with
+  `MODE=production`.
+- `realtime_options` in the graph details: the Live init options `/v1/graph/live` honours.
+- **`10xgraph revoke`** revokes one token (`--jti`) or all of a user's tokens (`--user`) in the
+  Redis the server reads (`"token_revocation": "redis"`), with no restart. `10xgraph init
+  --template production` now sets `token_revocation` to `redis`.
+- `10xgraph build` and `10xgraph config` warn when auth is off or the production setup is
+  incomplete (see Changed).
+- `TenxGraphUvicornWorker`, a Gunicorn worker class that ends open streams with the final
+  chunk before the shutdown deadline.
+- The production template validators allow ordinary text (see Fixed) and the template enables
+  the rate limit per user when auth is on.
+- **Idempotency keys (opt-in).** Send `Idempotency-Key` (1 to 255 printable ASCII characters) on
+  `POST /v1/graph/invoke`, `POST /v1/graph/stream` and the AG-UI route, or `idempotency_key` in
+  the WebSocket run frame, and a gateway retry no longer runs the tools twice. Keys are scoped
+  to the user, and a record lives `IDEMPOTENCY_TTL_SECONDS` (default 86400) in Redis when
+  configured, else in the process.
+  - The same key while the first run is going: 409 with `Retry-After`.
+  - After the run finished: invoke returns the stored result, stream replays the final state
+    line plus `done`, and AG-UI and WebSocket answer 409 (their event output is not stored).
+  - The same key with a different body: 422. A malformed key: 422.
+  - A failed run stores nothing, so the key can be retried. A result over 1 MiB is not stored,
+    and the key then answers 409.
+  - A request without the header behaves as before.
+- **JWT key rotation (opt-in).** `JWT_SECRET_KEYS` is a JSON list of `{"kid": ..., "key": ...}`
+  objects or plain strings, checked beside `JWT_SECRET_KEY`, which works unchanged. A token whose
+  header has a `kid` is checked against the keys with that `kid`; a token without one is tried
+  against every key.
+- **`JWT_MAX_TOKEN_AGE_SECONDS` (opt-in).** A token older than this by its `iat` claim gets 401
+  `EXPIRED_TOKEN`, and a token with no `iat` is refused. Off by default.
+- **`session_started` event on `/v1/graph/live`.** The first server event of every live session is
+  `{"type": "session_started", "thread_id": "<id>"}`, with the server-made id when the init frame
+  had none. Reconnect with that id to continue the thread.
+
 
 ### Changed
 
@@ -60,6 +211,121 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   offer "Unlimited"; `rate_limit.exclude_paths` is described as extra paths (`/ping` and
   `/health/ready` are always skipped) and is no longer seeded; `observability.logfire.console: true`
   is now an error, because Logfire accepts only `false` or a `ConsoleOptions` object.
+- **Concurrency leases and revocation use the Redis clock.** Lease and revocation timing used
+  each pod's own clock, so skew over 60 s could trim another pod's live lease. A cancelled
+  waiter no longer leaves a ghost lease, a Redis error no longer lets a second run start on the
+  thread, and shutdown releases leases before it closes the limiter's Redis client.
+- **Thread-lock responses.** A busy thread answers 409 with `Retry-After`. `/v1/graph/live` and
+  `/v1/graph/ws` now take the thread lock and a run slot like the other run routes, release the
+  lock only after the run generator closes, and stop their child tasks when the handler is
+  cancelled.
+- **WebSocket.** `/v1/graph/ws` checks the token of an idle socket, rate limits invalid frames,
+  and applies a send timeout to slow consumers.
+- **Thread naming.** Thread naming no longer runs inline while a stream holds the
+  lock and run slot, and a failed naming call no longer turns a good run into an error chunk.
+- **Readiness** checks the database schema version, and a Redis blip no longer takes a pod out
+  of rotation by itself.
+- **Boot.** The lifespan calls `asetup()` on the checkpointer at startup and retries on first
+  use if it fails, so a fresh Postgres no longer answers the first request with a 500.
+- **Realtime sessions.** `/v1/graph/live` and `/v1/graph/ws` give each connection its own
+  `LiveAgent`, so concurrent users no longer share one provider session.
+- **Logging.** The API no longer drops core `tenxgraph.*` log records. The log sanitizer
+  redacts `sk-` and `AIza` secrets as well as Bearer and JWT values, keeps UUID ids readable,
+  redacts keys by whole name, and replaces CR and LF. Validation errors on WebSocket and AG-UI
+  no longer echo pydantic `input_value` text, and the access log does not print `?token=`.
+- **`ALLOWED_HOST` is stripped** before the middleware compares it, `IS_DEBUG=true` is reported
+  as ignored in production, and `10xgraph dev --host 0.0.0.0` and `--reload` in production log
+  a warning.
+- **Token revocation.** A `revoke_user` cutoff is never replaced by an older one, entries
+  expire (30 days by default), and a token without `iat` is dated from its `exp` when you give
+  the backend your `token_lifetime`. Revocation reads one key at a time, so Redis Cluster no
+  longer fails with CROSSSLOT.
+- **Snowflake ids.** The generator reads its settings from the environment when you pass none,
+  so workers no longer all share one node and worker id, and a partial configuration no longer
+  raises on the first id.
+- **Kubernetes manifest.** `ORIGINS` and `ALLOWED_HOST` entries no longer override the values in
+  the `envFrom` Secret.
+- **Rate limit.** `exclude_paths` in the production template names `/redocs`, the real path.
+- **`10xgraph audit`** has a seventh check, "Security posture", that warns about the same
+  production-readiness gaps as `10xgraph build` (auth, authorization, rate limit, token
+  revocation). It only warns.
+- **Media delete.** Deleting a file or a thread removes the extracted text from the 24 h cache,
+  and thread delete releases media linked through `PUT .../state`.
+- **Uploads.** A file's thread links are updated on every route that accepts media, and the
+  startup temp-cache cleanup now runs against the media store.
+- **Request size caps.** Client dicts and lists (`config`, `initial_state`, `resume`,
+  `metadata`, `filters` and the store and checkpointer request bodies, and WebSocket frames) are
+  limited to 1000 keys per object, 10000 items per list and 200000 values in all, beside the
+  64-level depth cap. A larger body gets 422 (`VALIDATION_ERROR`). The caps are fixed and have
+  no setting.
+- **The id rule covers more inputs.** The WebSocket `config.thread_id`, the thread id in the
+  live init frame and the AG-UI `threadId` must match the id pattern from Breaking. An invalid
+  one gets 422 or an error frame with `VALIDATION_ERROR`.
+- **Uploads are authenticated before the body is parsed,** so an unauthenticated caller can no
+  longer make the server spool a multipart body. An upload with no `file` part answers 422.
+- **Cloud media (S3, GCS).** `GET /v1/files`, the per-user quotas and release on thread delete
+  now work through the per-owner index of `10xgraph` 1.0. Files stored before 1.0, or with no
+  owner, are not in the index. Listing with auth off still answers 501 on a cloud store.
+- **A stored thread at a missing node answers 409** (`GRAPH_NODE_MISSING_001`), and stored state
+  from a newer `10xgraph` answers 500 with `STATE_FORMAT_001` and a message to upgrade. Before,
+  both were a generic 500.
+
+### Removed
+
+- Removed the `/v1/evals/runs` endpoints; eval reports are JSON files opened in the playground.
+  `10xgraph eval` now writes only the JSON report and no longer has `--open`.
+- The `graph:setup` scope is removed from the config editor and the docs (see Breaking).
+
+### Fixed
+
+- A thread that was cancelled, disconnected or cut by a restart is usable on the next request
+  (the core fix), and a client disconnect during a stream no longer leaves the thread lock held.
+- `POST /v1/threads/{thread_id}/messages` and the other write routes no longer race an active
+  run (see Breaking).
+- Resuming a thread paused at `interrupt()` works on Postgres over HTTP and WebSocket.
+- `DELETE` of a message removes it from the thread state and cache, not only from the message
+  list, and removes media only when state no longer references it.
+- Mem0 memory search: client `filters` cannot replace the owner `user_id`. The keys `user_id`,
+  `agent_id`, `app_id` and `run_id` are dropped from client filters.
+- Memory list paging: a user with more than 1,000 memories can page through them.
+- `10xgraph eval --threshold` exits 1 only when the pass rate is below the threshold, not below
+  100 percent. The production template's own gate (0.75) passes.
+- `10xgraph init` escapes the agent name before it writes `pyproject.toml` and `.env.example`,
+  `--python-version` accepts only supported versions, template substitution errors are no
+  longer swallowed, `10xgraph skills --force` copies before it deletes, and `10xgraph eval`
+  loads `confeval.py` only from the project.
+- The `checkpointer` key in `10xgraph.json` was ignored without a word. The server now warns
+  at load when it is set, and the skill templates no longer tell you to set it.
+- The in-memory checkpointer fallback and per-process locks now log a startup warning in
+  production or with more than one worker.
+- The run-trace store closes a cancelled run, so the playground no longer shows a disconnected
+  run as still running, and its memory use is bounded.
+- The first REST invoke example in the docs now sends a content block and no client-invented
+  `thread_id`.
+
+### Security
+
+- `POST /v1/threads/{id}/messages` and `PUT /v1/threads/{id}/state` now check `file_id` media
+  blocks for ownership the same way invoke does; provider file ids are refused there as on invoke.
+- Ids in requests are bounded (see Breaking), which keeps oversized ids out of log lines, Redis
+  keys and database keys.
+- Redis keys for ownership, run and WebSocket slots, the thread lock and revocation are built
+  from percent-encoded parts, so an id with a colon cannot collide with another key.
+- Redis timeouts and a bounded pool stop a blackholed Redis from hanging every request that
+  reaches revocation, the thread lock or the limiter.
+- JWT startup checks: the algorithm allowlist, PyJWT required at boot, and an exact `auth`
+  parse (see Breaking). The `user_id` and scope rules from `1.0.0rc1` still apply.
+- Rotating the JWT secret no longer has to invalidate every token (`JWT_SECRET_KEYS`), and a
+  maximum token age can be enforced (`JWT_MAX_TOKEN_AGE_SECONDS`). Both are opt-in.
+- Upload bodies are parsed after authentication, and client dicts and lists are size-capped
+  (see Changed), so an unauthenticated or oversized request costs less memory.
+- Secrets and request text no longer reach logs or clients through validation error echoes,
+  the access log or unsanitized log lines.
+- Extracted document text is removed with the file, and uploads are bounded by image pixel,
+  PDF size and page limits.
+- The production template defaults to JWT, ownership authorization, Redis rate limiting and
+  `by: user` rate limiting when auth is on, and `10xgraph build` and `10xgraph config` warn
+  about a missing auth or authorization setup.
 
 ## [1.0.0rc1] - 2026-10-28
 
@@ -74,8 +340,8 @@ This is the 1.0 release candidate. It requires `10xgraph` 1.0 (`10xgraph>=1.0.0r
   `/v1/graph/ws` and the checkpointer write routes (`PUT /v1/threads/{id}/state`, message
   writes). Migrate by omitting the id on the first request and using the `meta.thread_id` the
   server returns from then on (`"new"` over `/v1/graph/ws`), or set
-  `"runs": {"thread_ids": "client"}` in `10xgraph.json`. AG-UI and `/v1/graph/live` need no change. Only the built-in ownership and
-  rbac backends refuse; `allow_all` and custom backends do not unless they read
+  `"runs": {"thread_ids": "client"}` in `10xgraph.json`. AG-UI and `/v1/graph/live` follow the same setting (see the next item). Only the built-in
+  ownership and rbac backends refuse; `allow_all` and custom backends do not unless they read
   `server_thread_ids` themselves.
 - **Production deployments with the default or wildcard `ALLOWED_HOST` or `ORIGINS` refuse to
   start.** Set explicit values, or `STRICT_PRODUCTION_CHECKS=false`. A public, token-less API

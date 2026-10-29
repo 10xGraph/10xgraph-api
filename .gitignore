@@ -116,3 +116,6 @@ cython_debug/
 
 # uv lockfile: not tracked (this is a library; CI resolves fresh)
 uv.lock
+
+# Media uploads written by local runs and tests
+uploads/

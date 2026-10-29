@@ -209,6 +209,7 @@ class BuildCommand(BaseCommand):
             return self.handle_error(e)
         except Exception as e:
             docker_error = DockerError(f"Failed to generate Docker files: {e}")
+            docker_error.__cause__ = e
             return self.handle_error(docker_error)
 
     def _discover_requirements(self, current_dir: Path) -> tuple[list[Path], str]:

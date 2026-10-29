@@ -99,7 +99,9 @@ async def list_memories(
         payload = ListMemoriesSchema()
     cfg = payload.config or {}
     opts = payload.options
-    result = await service.list_memories(cfg, user, limit=payload.limit, options=opts)
+    result = await service.list_memories(
+        cfg, user, limit=payload.limit, options=opts, offset=payload.offset
+    )
     return success_response(result, request)
 
 

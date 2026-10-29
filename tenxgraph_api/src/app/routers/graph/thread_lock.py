@@ -21,7 +21,8 @@ repeats the request while it waits, in case the run had not saved its state yet)
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+import contextlib
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, Literal
 
 from fastapi import HTTPException
@@ -29,6 +30,7 @@ from fastapi import HTTPException
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.auth.request_config import normalize_thread_id
 from tenxgraph_api.src.app.core.concurrency import Lease, concurrency_limiter
+from tenxgraph_api.src.app.core.redis_client import key_part
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 
 
@@ -53,7 +55,7 @@ OnBusy = Literal["wait", "cancel"]
 
 
 def thread_lock_key(thread_id: str) -> str:
-    return f"runs:thread:{thread_id}"
+    return f"runs:thread:{key_part(thread_id)}"
 
 
 class ThreadBusyError(HTTPException):
@@ -82,6 +84,7 @@ async def acquire_thread_lock(
     on_busy: OnBusy = "wait",
     stop: Callable[[], Awaitable[Any]] | None = None,
     is_disconnected: Callable[[], Awaitable[bool]] | None = None,
+    wait_seconds: float | None = None,
 ) -> Lease:
     """Take the run lock for ``thread_id``, waiting for the active run if there is one.
 
@@ -89,11 +92,14 @@ async def acquire_thread_lock(
     while the thread is busy. Raises :class:`ThreadBusyError` (409) after the wait limit.
     ``is_disconnected`` tells whether the client is gone: a waiter whose client left raises
     :class:`ClientGoneError` instead of taking the lock and running for nobody.
+    ``wait_seconds`` defaults to ``THREAD_BUSY_WAIT_SECONDS``, read at call time.
     """
+    if wait_seconds is None:
+        wait_seconds = THREAD_BUSY_WAIT_SECONDS
     limiter = concurrency_limiter()
     key = thread_lock_key(thread_id)
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + THREAD_BUSY_WAIT_SECONDS
+    deadline = loop.time() + wait_seconds
     delay = THREAD_BUSY_POLL_MIN_SECONDS
     next_stop = 0.0
     waited = False
@@ -121,6 +127,26 @@ async def acquire_thread_lock(
                 )
         await asyncio.sleep(min(delay, max(deadline - loop.time(), 0)))
         delay = min(delay * 2, THREAD_BUSY_POLL_MAX_SECONDS)
+
+
+@contextlib.asynccontextmanager
+async def thread_write_guard(thread_id: Any) -> AsyncIterator[None]:
+    """Hold the thread's run lock around a state-changing REST call.
+
+    A state edit, message import, message or thread delete, or graph fix that races an active
+    run is overwritten by that run or brings a deleted thread back. This takes the lock the run
+    routes take, so the call is refused with 409 (``ThreadBusyError``) at once while a run holds
+    it, instead of waiting behind a run that can last minutes.
+    """
+    key = normalize_thread_id(thread_id)
+    if key is None:
+        yield
+        return
+    lease = await acquire_thread_lock(key, wait_seconds=0)
+    try:
+        yield
+    finally:
+        lease.release()
 
 
 def requested_thread_id(config: dict[str, Any] | None) -> str | None:

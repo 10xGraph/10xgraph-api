@@ -10,6 +10,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 from injectq import InjectQ, inject, singleton
 from pydantic import BaseModel, TypeAdapter, ValidationError
+from tenxgraph.core.exceptions import GraphClosedError
 from tenxgraph.core.exceptions.media_exceptions import UnsupportedMediaInputError
 from tenxgraph.core.graph import CompiledGraph
 from tenxgraph.core.state import AgentState, Message, StreamChunk, StreamEvent
@@ -91,6 +92,8 @@ def _resume_error_types() -> tuple[type[Exception], ...]:
     return (
         InterruptConflictError,
         *_core_error("InterruptMismatchError"),
+        *_core_error("NothingToResumeError"),
+        *_core_error("InterruptPendingError"),
         *_core_error("ResumeValidationError"),
     )
 
@@ -98,7 +101,12 @@ def _resume_error_types() -> tuple[type[Exception], ...]:
 def _resume_http_error(exc: Exception) -> HTTPException:
     """409 for a resume aimed at the wrong (or no) interrupt, 422 for an answer that fails the
     interrupt's schema. Both messages are written for the client, so production keeps them."""
-    conflict = (InterruptConflictError, *_core_error("InterruptMismatchError"))
+    conflict = (
+        InterruptConflictError,
+        *_core_error("InterruptMismatchError"),
+        *_core_error("NothingToResumeError"),
+        *_core_error("InterruptPendingError"),
+    )
     return HTTPException(
         status_code=409 if isinstance(exc, conflict) else 422,
         detail=str(getattr(exc, "message", None) or exc),
@@ -157,6 +165,9 @@ class RunTimeoutError(TimeoutError):
 
 _STREAM_DONE = object()
 
+# ``data.code`` of the error chunk for a run refused while the graph is closing.
+SERVICE_UNAVAILABLE_CODE = "SERVICE_UNAVAILABLE"
+
 
 def _stream_error_reason(exc: Exception) -> str:
     """The client-facing reason for a failed stream.
@@ -176,6 +187,23 @@ def _stream_error_reason(exc: Exception) -> str:
 
     is_production = get_settings().MODE == "production"
     return _sanitize_error_message(str(exc), "GRAPH_STREAM_ERROR", is_production)
+
+
+def _stream_error_data(exc: Exception) -> dict[str, Any]:
+    """The ``data`` of a stream's terminal ERROR chunk.
+
+    A run refused because the graph is closing carries the same code and retry hint as the
+    HTTP 503 (``SERVICE_UNAVAILABLE``), so a client can tell it from a failure and retry.
+    """
+    if isinstance(exc, GraphClosedError):
+        from tenxgraph_api.src.app.core.exceptions.server_errors import RETRY_AFTER_SECONDS
+
+        return {
+            "reason": "The server is shutting down. Retry the request.",
+            "code": SERVICE_UNAVAILABLE_CODE,
+            "retry_after_seconds": RETRY_AFTER_SECONDS,
+        }
+    return {"reason": _stream_error_reason(exc)}
 
 
 # Chunk ``data`` fields that carry exception text. ``message`` is what a tool's own
@@ -709,6 +737,10 @@ class GraphService:
         runs = getattr(self.config, "runs", None)
         return runs if isinstance(runs, RunsConfig) else RunsConfig()
 
+    async def new_thread_id(self) -> str:
+        """A fresh server-made thread id (public name of :meth:`_new_thread_id`)."""
+        return await self._new_thread_id()
+
     async def _new_thread_id(self) -> str:
         """Generate a thread id that nobody owns yet.
 
@@ -1202,7 +1234,7 @@ class GraphService:
                 logger.debug("Telemetry finish_run failed on stream error: %s", telemetry_exc)
             yield StreamChunk(
                 event=StreamEvent.ERROR,
-                data={"reason": _stream_error_reason(e)},
+                data=_stream_error_data(e),
                 metadata=meta,
             )
         finally:

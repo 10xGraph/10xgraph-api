@@ -25,6 +25,7 @@ from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.core.config.media_settings import MediaSettings, MediaStorageType
 from tenxgraph_api.src.app.core.config.setup_middleware import setup_middleware
+from tenxgraph_api.src.app.core.exceptions.handle_errors import init_errors_handler
 
 
 class HeaderAuth(BaseAuth):
@@ -109,6 +110,8 @@ def build_app(
     """Assemble a test app with real auth/authz wiring and the given routers."""
     app = FastAPI()
     setup_middleware(app)
+    # Same handlers as main.py, so a ClientInputError answers 422 as in production.
+    init_errors_handler(app)
 
     container = InjectQ()
     container.bind_instance(GraphConfig, _AuthOnConfig())

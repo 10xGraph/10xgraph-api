@@ -28,8 +28,8 @@ from tenxgraph_api.src.app.core.shutdown import interrupt_streams
 
 
 # Seconds uvicorn waits for open responses after SIGTERM. Must stay below the gunicorn
-# ``--graceful-timeout`` of the generated image (600) with room for the lifespan drain
-# (30 s) and ``graph.aclose``.
+# ``--graceful-timeout`` of the generated image (600) with room for the lifespan close
+# (``graph.aclose``: the three SHUTDOWN_*_SECONDS settings, 50 s in total by default).
 DEFAULT_GRACEFUL_SHUTDOWN_SECONDS = 540
 # Open streams are told to finish this long before uvicorn would cancel them.
 STREAM_INTERRUPT_MARGIN_SECONDS = 5.0

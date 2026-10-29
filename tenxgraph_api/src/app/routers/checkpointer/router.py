@@ -9,6 +9,7 @@ from tenxgraph.core.state import Message
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
 from tenxgraph_api.src.app.core.auth.request_config import client_config
 from tenxgraph_api.src.app.core.config.settings import get_settings
+from tenxgraph_api.src.app.routers.graph.thread_lock import thread_write_guard
 from tenxgraph_api.src.app.utils.parse_output import parse_message_output
 from tenxgraph_api.src.app.utils.response_helper import success_response
 from tenxgraph_api.src.app.utils.swagger_helper import generate_swagger_responses
@@ -120,11 +121,12 @@ async def put_state(
     # body config cannot redirect the call to another thread.
     config = {**client_config(payload.config), "thread_id": thread_id}
 
-    res = await service.put_state(
-        config,
-        user,
-        payload.state,
-    )
+    async with thread_write_guard(thread_id):
+        res = await service.put_state(
+            config,
+            user,
+            payload.state,
+        )
 
     return success_response(
         res,
@@ -159,10 +161,11 @@ async def clear_state(
     validate_thread_id(thread_id)
     config = {"thread_id": thread_id}
 
-    res = await service.clear_state(
-        config,
-        user,
-    )
+    async with thread_write_guard(thread_id):
+        res = await service.clear_state(
+            config,
+            user,
+        )
 
     return success_response(
         res,
@@ -212,12 +215,13 @@ async def put_messages(
     # body config cannot redirect the call to another thread.
     config = {**client_config(payload.config), "thread_id": thread_id}
 
-    res = await service.put_messages(
-        config,
-        user,
-        payload.messages,
-        payload.metadata,
-    )
+    async with thread_write_guard(thread_id):
+        res = await service.put_messages(
+            config,
+            user,
+            payload.messages,
+            payload.metadata,
+        )
 
     return success_response(
         res,
@@ -401,11 +405,12 @@ async def delete_message(
     # body config cannot redirect the call to another thread.
     config = {**client_config(payload.config), "thread_id": thread_id}
 
-    await service.delete_message(
-        config,
-        user,
-        message_id,
-    )
+    async with thread_write_guard(thread_id):
+        await service.delete_message(
+            config,
+            user,
+            message_id,
+        )
 
     return success_response(
         {"success": True, "message": "Message deleted successfully"},
@@ -526,11 +531,12 @@ async def delete_thread(
     # body config cannot redirect the call to another thread.
     config = {**client_config(payload.config), "thread_id": thread_id}
 
-    res = await service.delete_thread(
-        config,
-        user,
-        thread_id,
-    )
+    async with thread_write_guard(thread_id):
+        res = await service.delete_thread(
+            config,
+            user,
+            thread_id,
+        )
 
     return success_response(
         res,

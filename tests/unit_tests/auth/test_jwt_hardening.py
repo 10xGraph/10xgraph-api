@@ -86,3 +86,47 @@ def test_asymmetric_algorithms_are_not_length_checked():
 
 def test_strong_secret_passes():
     check_jwt_settings(_settings(MODE="production"))
+
+
+# G-117: algorithm allowlist, PyJWT checked at boot, exact auth parse
+
+
+@pytest.mark.parametrize("algorithm", ["none", "NONE", "None", "", "HS1", "hs256", "RS999"])
+def test_unknown_or_none_algorithm_is_refused_at_boot(algorithm):
+    with pytest.raises(ValueError, match="not allowed"):
+        check_jwt_settings(_settings(JWT_ALGORITHM=algorithm))
+
+
+@pytest.mark.parametrize("algorithm", ["HS256", "HS384", "HS512", "RS256", "ES256", "EdDSA"])
+def test_allowed_algorithms_pass_boot(algorithm):
+    check_jwt_settings(_settings(JWT_SECRET_KEY="x" * 64, JWT_ALGORITHM=algorithm))
+
+
+def test_algorithm_none_never_authenticates():
+    credential = HTTPAuthorizationCredentials(
+        scheme="Bearer", credentials=jwt.encode({"user_id": "u1"}, None, algorithm="none")
+    )
+    with patch(
+        "tenxgraph_api.src.app.core.auth.jwt_auth.get_settings",
+        return_value=_settings(JWT_ALGORITHM="none"),
+    ):
+        with pytest.raises(UserAccountError) as exc:
+            JwtAuth().authenticate(None, Response(), credential)
+    assert exc.value.status_code == 500
+
+
+def test_missing_pyjwt_fails_at_boot():
+    with patch("tenxgraph_api.src.app.core.auth.jwt_auth.jwt", None):
+        with pytest.raises(ImportError, match="PyJWT is required"):
+            check_jwt_settings(_settings())
+
+
+def test_auth_string_is_matched_exactly(monkeypatch):
+    from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
+
+    monkeypatch.setenv("JWT_SECRET_KEY", SECRET)
+    monkeypatch.setenv("JWT_ALGORITHM", "HS256")
+    assert GraphConfig._parse_auth_config("jwt") == {"method": "jwt"}
+    for bad in ("JWT", " jwt", "no-jwt-here", "jwt_custom", "notjwt", "custom jwt"):
+        with pytest.raises(ValueError, match="Unsupported auth method"):
+            GraphConfig._parse_auth_config(bad)

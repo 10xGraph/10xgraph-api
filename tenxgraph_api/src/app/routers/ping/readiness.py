@@ -56,6 +56,22 @@ async def _own_check(component: Any) -> bool:
     return True
 
 
+async def _check_schema_version(checkpointer: Any) -> None:
+    """Fail while the database schema is older than the one this code expects.
+
+    Reads the recorded version without creating anything (``aget_schema_version``), so a
+    missing or half-upgraded schema (boot setup failed, or the database was restored from an
+    older backup) keeps the pod out of rotation instead of failing every request.
+    """
+    read_version = getattr(checkpointer, "aget_schema_version", None)
+    expected_fn = getattr(checkpointer, "_get_current_schema_version", None)
+    if not callable(read_version) or not callable(expected_fn):
+        return
+    found, expected = await read_version(), expected_fn()
+    if found < expected:
+        raise RuntimeError(f"checkpointer schema version {found} is below the expected {expected}")
+
+
 async def check_checkpointer(checkpointer: Any) -> None:
     if checkpointer is None:
         raise _Skip
@@ -64,6 +80,7 @@ async def check_checkpointer(checkpointer: Any) -> None:
     run_query = getattr(checkpointer, "_run_query", None)
     if callable(run_query):  # PgCheckpointer: one round trip on its pool
         await run_query(lambda conn: conn.fetchval("SELECT 1"))
+        await _check_schema_version(checkpointer)
     redis = getattr(checkpointer, "redis", None)
     if redis is not None and callable(getattr(redis, "ping", None)):  # its cache tier
         await _maybe_await(redis.ping())

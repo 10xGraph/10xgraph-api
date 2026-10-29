@@ -2,7 +2,7 @@ import logging
 import os
 from functools import lru_cache
 
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -45,6 +45,18 @@ def normalize_mode_value(value: str | None) -> str:
 def _csv_tokens(value: str) -> list[str]:
     """Split a comma-separated setting into stripped, non-empty tokens."""
     return [token.strip() for token in value.split(",") if token.strip()]
+
+
+class JwtVerificationKey(BaseModel):
+    """One JWT verification key, optionally named by the ``kid`` its tokens carry."""
+
+    kid: str | None = None
+    key: str = Field(min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_plain_string(cls, value):
+        return {"key": value} if isinstance(value, str) else value
 
 
 class Settings(BaseSettings):
@@ -145,6 +157,24 @@ class Settings(BaseSettings):
     REDIS_MAX_CONNECTIONS: int = Field(default=50, ge=0)
     REDIS_POOL_TIMEOUT: float = Field(default=5.0, ge=0.0)
     REDIS_HEALTH_CHECK_INTERVAL: float = Field(default=30.0, ge=0.0)
+    # Put in front of every key the API writes to Redis (run locks and caps, ownership cache,
+    # token revocation), so two deployments that share one Redis cannot read each other's
+    # entries. Empty means no prefix. Give the core checkpointer the same value through its
+    # ``redis_key_prefix`` option so its cache keys are separated too.
+    REDIS_KEY_PREFIX: str = ""
+
+    #################################
+    ###### Shutdown #################
+    #################################
+    # Passed to ``graph.aclose()`` when the app stops (after uvicorn has finished or cut open
+    # responses). GRACE: seconds runs still going get to finish on their own. STOP: seconds
+    # after the stop flag, while each run saves its thread INTERRUPTED. TIMEOUT: seconds for the
+    # hard cancel and the background-task drain. Their sum must stay under the margin between
+    # uvicorn's graceful shutdown and gunicorn's --graceful-timeout (60 s in the generated
+    # image), or the worker is killed mid-close.
+    SHUTDOWN_GRACE_SECONDS: float = Field(default=10.0, ge=0.0)
+    SHUTDOWN_STOP_SECONDS: float = Field(default=10.0, ge=0.0)
+    SHUTDOWN_TIMEOUT_SECONDS: float = Field(default=30.0, ge=0.0)
 
     #################################
     ###### sentry Config ############
@@ -174,6 +204,22 @@ class Settings(BaseSettings):
     # another service that shares the signing key is not accepted here.
     JWT_ISSUER: str | None = None
     JWT_AUDIENCE: str | None = None
+    # Extra verification keys for key rotation (JSON in the environment), e.g.
+    # ``[{"kid": "2026-10", "key": "..."}, {"key": "old-secret-without-kid"}]``. They are tried
+    # beside ``JWT_SECRET_KEY``, which keeps working unchanged. A token whose header names a
+    # ``kid`` is checked against the keys with that ``kid`` (then the keys without one); a token
+    # without ``kid`` is tried against every key. Off by default.
+    JWT_SECRET_KEYS: list[JwtVerificationKey] | None = None
+    # When set, a token older than this many seconds (by its ``iat`` claim) is refused, and a
+    # token without ``iat`` is refused too. Off by default.
+    JWT_MAX_TOKEN_AGE_SECONDS: int | None = Field(default=None, gt=0)
+
+    #################################
+    ###### Idempotency ##############
+    #################################
+    # How long a finished run is remembered under its ``Idempotency-Key``. The header is opt-in:
+    # a request without it behaves as before.
+    IDEMPOTENCY_TTL_SECONDS: int = Field(default=86400, gt=0)
 
     #################################
     ###### OTEL Config ##############

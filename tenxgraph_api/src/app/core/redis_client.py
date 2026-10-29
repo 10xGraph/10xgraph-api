@@ -11,6 +11,23 @@ from __future__ import annotations
 from typing import Any
 
 
+def key_part(value: Any) -> str:
+    """An id made safe to sit between ``:`` separators in a Redis key.
+
+    ``:`` and ``%`` are percent-encoded, so ``a:b`` cannot read as two parts. Ids without
+    either (UUIDs, snowflake ids, most user ids) are unchanged, so existing keys stay valid.
+    """
+    return str(value).replace("%", "%25").replace(":", "%3A")
+
+
+def prefixed(namespace: str) -> str:
+    """``namespace`` with the deployment prefix (``REDIS_KEY_PREFIX``) in front, if one is set."""
+    from tenxgraph_api.src.app.core.config.settings import get_settings
+
+    prefix = get_settings().REDIS_KEY_PREFIX
+    return f"{prefix}:{namespace}" if prefix else namespace
+
+
 def redis_options() -> dict[str, Any]:
     """Connection keyword arguments built from the settings (0 turns a limit off)."""
     from tenxgraph_api.src.app.core.config.settings import get_settings

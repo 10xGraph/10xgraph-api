@@ -31,6 +31,7 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import Any
 
+from tenxgraph_api.src.app.core.redis_client import prefixed
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 
 
@@ -120,15 +121,20 @@ class RedisConcurrencyLimiter(ConcurrencyLimiter):
         self,
         client: Any,
         *,
-        prefix: str = "10xgraph:concurrency",
+        prefix: str | None = None,
         lease_ttl: float = 60.0,
     ) -> None:
         self._client = client
-        self._prefix = prefix
+        self._prefix = prefix if prefix is not None else prefixed("10xgraph:concurrency")
         self._lease_ttl = lease_ttl
         self._refreshers: set[asyncio.Task[None]] = set()
         # Counts used while Redis is unreachable, so one process still honours the cap.
         self._local = MemoryConcurrencyLimiter()
+
+    @property
+    def client(self) -> Any:
+        """The Redis client, so other shared state (idempotency records) uses the same one."""
+        return self._client
 
     @classmethod
     def from_url(cls, url: str, **kwargs: Any) -> RedisConcurrencyLimiter:

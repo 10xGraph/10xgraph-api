@@ -508,6 +508,46 @@ def _bind_shared_concurrency(container: InjectQ, redis_url: str | None) -> None:
     logger.info("Run and WebSocket connection caps are shared through Redis.")
 
 
+def _web_concurrency() -> int:
+    """Worker count from ``WEB_CONCURRENCY`` (Gunicorn's own variable); 1 when unset or bad."""
+    try:
+        return max(int(os.environ.get("WEB_CONCURRENCY", "1")), 1)
+    except ValueError:
+        return 1
+
+
+def warn_per_process_state(container: InjectQ, redis_url: str | None) -> None:
+    """Warn when threads or caps live in one process and the deployment may run several.
+
+    The in-memory and SQLite checkpointers keep threads in one process (or one file), and
+    without Redis the run locks, run caps and rate-limit counters are per process too. That is
+    fine for one process; with more than one worker or replica every process has its own view.
+    Warns in production or when ``WEB_CONCURRENCY`` is above 1 (the API cannot see replicas,
+    so production always gets the line). The choice stays the developer's.
+    """
+    workers = _web_concurrency()
+    if not (_is_production() or workers > 1):
+        return
+    checkpointer = container.try_get(BaseCheckpointer)
+    kind = type(checkpointer).__name__
+    if kind in {"InMemoryCheckpointer", "SqliteCheckpointer"}:
+        logger.warning(
+            "The checkpointer is %s: threads live in this process only (workers=%d). With more "
+            "than one worker or replica, a thread saved by one is invisible to the others and "
+            "is lost on restart. Use PgCheckpointer for a deployment with more than one process.",
+            kind,
+            workers,
+        )
+    if not redis_url:
+        logger.warning(
+            "No Redis configured: the per-thread run lock, run and WebSocket caps and "
+            "in-memory rate limits are counted per process (workers=%d). With more than one "
+            "worker or replica each limit multiplies and two processes can run the same thread "
+            "at once. Set `redis` in 10xgraph.json for a shared view.",
+            workers,
+        )
+
+
 async def attach_all_modules(
     config: GraphConfig,
     container: InjectQ,
@@ -609,6 +649,7 @@ async def attach_all_modules(
 
     _bind_token_revocation(container, config, bool(auth_config), ownership_redis_url)
     _bind_shared_concurrency(container, ownership_redis_url)
+    warn_per_process_state(container, ownership_redis_url)
 
     # --- Media service wiring ---
     from tenxgraph_api.src.app.core.config.media_settings import (

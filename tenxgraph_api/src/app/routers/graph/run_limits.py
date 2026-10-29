@@ -24,6 +24,7 @@ from fastapi import HTTPException
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.concurrency import Lease, concurrency_limiter
 from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+from tenxgraph_api.src.app.core.redis_client import key_part
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 
 
@@ -36,7 +37,7 @@ RunSlot = Lease
 
 
 def run_slot_key(user_id: str) -> str:
-    return f"runs:user:{user_id}"
+    return f"runs:user:{key_part(user_id)}"
 
 
 async def acquire_run_slot(user: dict[str, Any], runs: RunsConfig) -> Lease:

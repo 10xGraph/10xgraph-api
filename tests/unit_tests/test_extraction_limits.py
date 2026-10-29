@@ -150,7 +150,12 @@ async def test_upload_uses_its_declared_type():
 
     fake = RecordingExtractor()
     service = MediaService.__new__(MediaService)
-    service._settings = MagicMock(MEDIA_MAX_SIZE_MB=1)
+    service._settings = MagicMock(
+        MEDIA_MAX_SIZE_MB=1,
+        MEDIA_MAX_FILES_PER_USER=0,
+        MEDIA_MAX_USER_STORAGE_MB=0,
+        MEDIA_MAX_IMAGE_PIXELS=0,
+    )
     service._store = MagicMock(store=AsyncMock(return_value="k1"))
     service._pipeline = MagicMock(
         handling=DocumentHandling.EXTRACT_TEXT, extractor=DocumentExtractor(extractor=fake)

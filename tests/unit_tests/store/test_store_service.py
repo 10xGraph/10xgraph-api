@@ -285,7 +285,7 @@ class TestListMemories:
         assert len(result.memories) == 2
         mock_store.aget_all.assert_called_once()
         call_args = mock_store.aget_all.call_args
-        assert call_args[1]["limit"] == 100
+        assert call_args[1]["limit"] == 101  # one extra row tells has_more
 
     async def test_list_memories_custom_limit(
         self, store_service, mock_store, mock_user, sample_memory_results
@@ -300,7 +300,7 @@ class TestListMemories:
         # Assert
         assert len(result.memories) == 1
         call_args = mock_store.aget_all.call_args
-        assert call_args[1]["limit"] == 1
+        assert call_args[1]["limit"] == 2  # one extra row tells has_more
 
     async def test_list_memories_with_options(
         self, store_service, mock_store, mock_user, sample_memory_results

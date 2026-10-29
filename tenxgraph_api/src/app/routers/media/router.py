@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFil
 from fastapi.logger import logger
 from fastapi.responses import FileResponse, Response
 from injectq.integrations import InjectAPI
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
 from tenxgraph_api.src.app.core.auth.request_config import client_error_detail
@@ -127,6 +128,26 @@ def _file_download_response(file_id: str, path: Any, mime_type: str | None) -> R
     return FileResponse(path, media_type=mime, headers=headers)
 
 
+# One instance, so FastAPI resolves the permission check once per request and the file
+# dependency below runs only after it passed.
+_UPLOAD_PERMISSION = RequirePermission("files", "upload")
+
+
+async def _uploaded_file(
+    request: Request, _user: dict[str, Any] = Depends(_UPLOAD_PERMISSION)
+) -> UploadFile:
+    """The multipart ``file`` part, parsed only once the caller is authorized.
+
+    A ``file: UploadFile`` parameter would make FastAPI parse (and spool) the body before any
+    dependency runs, so an unauthenticated caller could force that work.
+    """
+    form = await request.form()
+    file = form.get("file")
+    if not isinstance(file, StarletteUploadFile):
+        raise HTTPException(status_code=422, detail="multipart field 'file' is required")
+    return file  # type: ignore[return-value]
+
+
 # ------------------------------------------------------------------
 # 4.1  POST /v1/files/upload
 # ------------------------------------------------------------------
@@ -138,12 +159,26 @@ def _file_download_response(file_id: str, path: Any, mime_type: str | None) -> R
         "Accepts a multipart file upload.  Stores binary in the configured "
         "MediaStore and optionally extracts text for documents."
     ),
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["file"],
+                        "properties": {"file": {"type": "string", "format": "binary"}},
+                    }
+                }
+            },
+        }
+    },
 )
 async def upload_file(
     request: Request,
-    file: UploadFile,
+    file: UploadFile = Depends(_uploaded_file),
     service: MediaService = InjectAPI(MediaService),
-    user: dict[str, Any] = Depends(RequirePermission("files", "upload")),
+    user: dict[str, Any] = Depends(_UPLOAD_PERMISSION),
 ):
     if file.filename is None:
         raise HTTPException(status_code=400, detail="filename is required")

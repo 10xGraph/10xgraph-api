@@ -64,3 +64,16 @@ async def test_remote_tool_pause_keeps_the_resume_key():
     state.execution_meta.interrupt_reason = "remote_tool_call"
     input_data = await _prepare(state, resume=None)
     assert "resume" in input_data
+
+
+def test_core_resume_errors_answer_409():
+    from tenxgraph.core.exceptions import InterruptPendingError, NothingToResumeError
+
+    from tenxgraph_api.src.app.routers.graph.services.graph_service import (
+        _resume_error_types,
+        _resume_http_error,
+    )
+
+    for exc in (NothingToResumeError(), InterruptPendingError("paused at i1")):
+        assert isinstance(exc, _resume_error_types())
+        assert _resume_http_error(exc).status_code == 409

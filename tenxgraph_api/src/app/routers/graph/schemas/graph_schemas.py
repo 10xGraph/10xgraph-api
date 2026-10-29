@@ -5,9 +5,11 @@ from tenxgraph.core.state import Message
 from tenxgraph.utils import ResponseGranularity
 
 from tenxgraph_api.src.app.core.auth.request_config import (
+    BoundedDict,
     ClientInputError,
     client_message_error,
     request_size_error,
+    structure_error,
     with_fresh_message_ids,
 )
 
@@ -43,11 +45,11 @@ class GraphInputSchema(BaseModel):
             "is rejected with 409 before anything runs."
         ),
     )
-    initial_state: dict[str, Any] | None = Field(
+    initial_state: BoundedDict | None = Field(
         default=None,
         description="Initial state for the graph execution",
     )
-    config: dict[str, Any] | None = Field(
+    config: BoundedDict | None = Field(
         default=None,
         description="Optional configuration for graph execution",
     )
@@ -72,6 +74,14 @@ class GraphInputSchema(BaseModel):
     def messages_within_limits(cls, v: Any) -> Any:
         # Before the messages are parsed into objects: an oversized request is refused cheaply.
         if error := request_size_error(v):
+            raise ClientInputError(error)
+        return v
+
+    @field_validator("initial_state", "config", "resume", mode="before")
+    @classmethod
+    def nesting_within_limit(cls, v: Any, info: ValidationInfo) -> Any:
+        # Before parsing: a very deep value would fail with RecursionError inside the run.
+        if error := structure_error(v, info.field_name or "input"):
             raise ClientInputError(error)
         return v
 
@@ -342,7 +352,7 @@ class GraphStopSchema(BaseModel):
             raise ValueError("thread_id cannot be empty or whitespace")
         return v.strip()
 
-    config: dict[str, Any] | None = Field(
+    config: BoundedDict | None = Field(
         default=None, description="Optional configuration for the stop operation"
     )
 
@@ -359,7 +369,7 @@ class FixGraphRequestSchema(BaseModel):
             raise ValueError("thread_id cannot be empty or whitespace")
         return v.strip()
 
-    config: dict[str, Any] | None = Field(
+    config: BoundedDict | None = Field(
         default=None, description="Optional configuration for the fix operation"
     )
 
@@ -395,6 +405,15 @@ class WsGraphInputSchema(BaseModel):
         can resume the correct checkpointed thread.  ``messages`` is unused.
     """
 
+    idempotency_key: str | None = Field(
+        default=None,
+        max_length=255,
+        description=(
+            "Optional Idempotency-Key for this run. The same key from the same user while the "
+            "first run is going, or after it finished, is refused with an error frame; a "
+            "different request under the same key is refused too."
+        ),
+    )
     invoke_type: Literal["fresh", "resume"] = Field(
         default="fresh",
         description=(
@@ -435,11 +454,11 @@ class WsGraphInputSchema(BaseModel):
     )
 
     # ── Shared fields (mirror GraphInputSchema) ───────────────────────────
-    initial_state: dict[str, Any] | None = Field(
+    initial_state: BoundedDict | None = Field(
         default=None,
         description="Initial state for the graph execution.",
     )
-    config: dict[str, Any] | None = Field(
+    config: BoundedDict | None = Field(
         default=None,
         description="Optional configuration.  Must include 'thread_id' for resume runs.",
     )
@@ -467,6 +486,13 @@ class WsGraphInputSchema(BaseModel):
     @classmethod
     def messages_within_limits(cls, v: Any, info: ValidationInfo) -> Any:
         if error := request_size_error(v, info.field_name or "messages"):
+            raise ClientInputError(error)
+        return v
+
+    @field_validator("resume", mode="before")
+    @classmethod
+    def resume_within_limits(cls, v: Any) -> Any:
+        if error := structure_error(v, "resume"):
             raise ClientInputError(error)
         return v
 

@@ -7,19 +7,22 @@ import json
 import logging
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from injectq import InjectQ, inject, singleton
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.storage.media.config import DocumentHandling
+from tenxgraph.storage.media.offload import MediaOffloadPolicy, ensure_media_offloaded
+from tenxgraph.storage.media.security import check_image_pixels
 from tenxgraph.storage.media.storage.base import BaseMediaStore
 
 from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
 from tenxgraph_api.src.app.core.config.graph_config import MediaConfig
 from tenxgraph_api.src.app.core.config.media_settings import MediaSettings, MediaStorageType
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
-from tenxgraph_api.src.app.utils.media.extractor import DocumentExtractor
+from tenxgraph_api.src.app.utils.media.extractor import DocumentExtractor, DocumentTooLargeError
 from tenxgraph_api.src.app.utils.media.pipeline import DocumentPipeline
 
 
@@ -101,16 +104,19 @@ def _build_config_instance(config_cls: type[Any], values: dict[str, Any]) -> Any
 def _create_media_store(settings: MediaSettings) -> BaseMediaStore:
     """Factory that instantiates the right MediaStore from settings."""
     stype = settings.MEDIA_STORAGE_TYPE
+    # The store enforces the upload cap itself, so offloaded and other non-upload writes
+    # cannot go past it either.
+    max_bytes = int(settings.MEDIA_MAX_SIZE_MB * 1024 * 1024)
 
     if stype == MediaStorageType.MEMORY:
         from tenxgraph.storage.media.storage.memory_store import InMemoryMediaStore
 
-        return InMemoryMediaStore()
+        return InMemoryMediaStore(max_size_bytes=max_bytes)
 
     if stype == MediaStorageType.LOCAL:
         from tenxgraph.storage.media.storage.local_store import LocalFileMediaStore
 
-        return LocalFileMediaStore(base_dir=settings.MEDIA_STORAGE_PATH)
+        return LocalFileMediaStore(base_dir=settings.MEDIA_STORAGE_PATH, max_size_bytes=max_bytes)
 
     if stype == MediaStorageType.CLOUD:
         from cloud_storage_manager import (
@@ -166,6 +172,7 @@ def _create_media_store(settings: MediaSettings) -> BaseMediaStore:
         return CloudMediaStore(
             storage=storage,
             prefix=settings.MEDIA_CLOUD_PREFIX,
+            max_size_bytes=max_bytes,
         )
 
     raise ValueError(f"Unknown MEDIA_STORAGE_TYPE: {stype}")
@@ -179,8 +186,35 @@ def _create_document_pipeline(settings: MediaSettings) -> DocumentPipeline:
     }
     handling = handling_map.get(settings.DOCUMENT_HANDLING, DocumentHandling.EXTRACT_TEXT)
 
-    extractor = DocumentExtractor() if handling == DocumentHandling.EXTRACT_TEXT else None
+    extractor = (
+        DocumentExtractor(
+            max_pdf_bytes=int(settings.MEDIA_MAX_PDF_MB * 1024 * 1024),
+            max_pdf_pages=settings.MEDIA_MAX_PDF_PAGES,
+        )
+        if handling == DocumentHandling.EXTRACT_TEXT
+        else None
+    )
     return DocumentPipeline(document_extractor=extractor, handling=handling)
+
+
+class _OwnedStore:
+    """Wraps a media store so offloaded blobs get the same metadata as an upload."""
+
+    def __init__(self, store: BaseMediaStore, user_id: str | None, track_threads: bool):
+        self._store = store
+        self._user_id = user_id
+        self._track_threads = track_threads
+
+    async def store(self, data: bytes, mime_type: str, metadata: dict[str, Any] | None = None):
+        meta: dict[str, Any] = {"created_at": int(time.time()), **(metadata or {})}
+        if self._user_id:
+            meta["owner_id"] = str(self._user_id)
+            if self._track_threads:
+                meta[THREADS_KEY] = []
+        return await self._store.store(data, mime_type, metadata=meta)
+
+    def to_media_ref(self, *args: Any, **kwargs: Any):
+        return self._store.to_media_ref(*args, **kwargs)
 
 
 @singleton
@@ -297,6 +331,26 @@ class MediaService:
                 f"File size {len(data)} exceeds maximum {self._settings.MEDIA_MAX_SIZE_MB}MB"
             )
 
+        if mime_type.lower().startswith("image/"):
+            try:
+                check_image_pixels(data, self._settings.MEDIA_MAX_IMAGE_PIXELS or None)
+            except ValueError as exc:
+                raise ClientInputError(str(exc)) from exc
+
+        extracting = self.pipeline.handling == DocumentHandling.EXTRACT_TEXT and (
+            self._is_extractable(mime_type)
+        )
+        check_limits = (
+            getattr(self.pipeline.extractor, "check_limits", None) if extracting else None
+        )
+        if callable(check_limits):
+            try:
+                check_limits(data, mime_type)
+            except DocumentTooLargeError as exc:
+                raise ClientInputError(str(exc)) from exc
+
+        await self._check_quota(user_id, len(data))
+
         # Store binary in the configured MediaStore. The owner is written into the
         # file's own metadata, so ownership survives as long as the file does --
         # unlike a cache entry, which would expire and silently un-own it.
@@ -324,9 +378,7 @@ class MediaService:
         }
 
         # If it's a document, try extraction
-        if self.pipeline.handling == DocumentHandling.EXTRACT_TEXT and self._is_extractable(
-            mime_type
-        ):
+        if extracting:
             try:
                 text = await self.pipeline.extractor.extract(data, filename, mime_type)
                 if text:
@@ -344,6 +396,68 @@ class MediaService:
             result["direct_url_expires_at"] = direct_url_info["expires_at"]
 
         return result
+
+    async def _check_quota(self, user_id: str | None, incoming_bytes: int) -> None:
+        """Refuse an upload that would take ``user_id`` past the per-user file or byte quota.
+
+        Does nothing without a user, with both quotas off, or when the store cannot list its
+        files (a warning is logged once). Counts only files that record this user as owner.
+        """
+        max_files = self._settings.MEDIA_MAX_FILES_PER_USER
+        max_bytes = int(self._settings.MEDIA_MAX_USER_STORAGE_MB * 1024 * 1024)
+        if not user_id or (not max_files and not max_bytes):
+            return
+        try:
+            keys = await self._keys_of(user_id)
+        except NotImplementedError:
+            if not getattr(self, "_quota_notice_logged", False):
+                self._quota_notice_logged = True
+                logger.warning(
+                    "MEDIA_MAX_FILES_PER_USER / MEDIA_MAX_USER_STORAGE_MB are set but %s "
+                    "cannot list files; the per-user quota is not enforced.",
+                    type(self.store).__name__,
+                )
+            return
+        count = 0
+        used = 0
+        for key in keys:
+            try:
+                meta = await self.store.get_metadata(key)
+            except Exception as exc:
+                logger.debug("Skipping unreadable file %s in quota count: %s", log_safe(key), exc)
+                continue
+            if meta and str(meta.get("owner_id")) == str(user_id):
+                count += 1
+                used += int(meta.get("size_bytes") or 0)
+        if max_files and count >= max_files:
+            raise ClientInputError(f"Upload limit reached: at most {max_files} files per user")
+        if max_bytes and used + incoming_bytes > max_bytes:
+            raise ClientInputError(
+                f"Storage limit reached: at most {self._settings.MEDIA_MAX_USER_STORAGE_MB}MB "
+                "of files per user"
+            )
+
+    async def offload_inline(self, messages: list[Any], user_id: str | None = None) -> None:
+        """Move large inline base64 media in ``messages`` into the store, in place.
+
+        Uses core ``ensure_media_offloaded`` with ``MEDIA_INLINE_MAX_BYTES`` as the threshold
+        (0 turns it off). Offloaded files are owned by ``user_id`` and carry the same metadata
+        as an upload, so the caller can link them to the thread and they are deleted with it.
+
+        Raises:
+            ClientInputError: The blob is not valid base64 or exceeds ``MEDIA_MAX_SIZE_MB``.
+        """
+        threshold = self._settings.MEDIA_INLINE_MAX_BYTES
+        if threshold <= 0:
+            return
+        store = _OwnedStore(self.store, user_id, self.supports_links)
+        try:
+            for message in messages:
+                await ensure_media_offloaded(
+                    message, store, MediaOffloadPolicy.THRESHOLD, max_inline_bytes=threshold
+                )
+        except ValueError as exc:  # bad base64 (binascii.Error) or MediaTooLargeError
+            raise ClientInputError(f"Inline media rejected: {exc}") from exc
 
     # ------------------------------------------------------------------
     # Thread links and deletion
@@ -370,6 +484,42 @@ class MediaService:
             return True
         return bool(media.delete_with_thread) if isinstance(media, MediaConfig) else True
 
+    async def _keys_of(self, user_id: str | None) -> list[str]:
+        """Keys worth inspecting for ``user_id``; every key when there is no user.
+
+        Uses the store's per-owner listing when it has one (the cloud store's owner index),
+        else lists all keys. Callers still check each file's recorded owner.
+
+        Raises:
+            NotImplementedError: The store cannot enumerate the files.
+        """
+        if user_id:
+            for_owner = getattr(self.store, "list_keys_for_owner", None)  # core before 1.0: none
+            if callable(for_owner):
+                return list(await for_owner(str(user_id)))
+        list_keys = getattr(self.store, "list_keys", None)  # absent in core older than 1.0
+        if not callable(list_keys):
+            raise NotImplementedError(f"{type(self.store).__name__} cannot list files")
+        return list(await list_keys())
+
+    async def _modify_metadata(
+        self, key: str, fn: Callable[[dict[str, Any]], dict[str, Any] | None]
+    ) -> bool:
+        """Change one file's metadata from its current value as a single step.
+
+        Uses the store's ``modify_metadata`` (atomic in the bundled stores). A store from an
+        older core falls back to read then ``update_metadata``, which can lose a concurrent
+        update. ``fn`` may run more than once, so it must only compute.
+        """
+        modify = getattr(self.store, "modify_metadata", None)
+        if callable(modify):
+            return bool(await modify(key, fn))
+        metadata = await self.store.get_metadata(key)
+        if metadata is None:
+            return False
+        updates = fn(dict(metadata))
+        return await self._update_metadata(key, updates) if updates else True
+
     async def link_threads(self, keys: list[str], thread_id: str, user_id: str) -> None:
         """Record ``thread_id`` on each file the caller owns that an accepted message references.
 
@@ -388,43 +538,139 @@ class MediaService:
             return
         for key in dict.fromkeys(keys):
             try:
-                metadata = await self.store.get_metadata(key)
-                if not metadata or str(metadata.get("owner_id")) != str(user_id):
-                    continue
-                threads = metadata.get(THREADS_KEY)
-                if not isinstance(threads, list) or thread_id in threads:
-                    continue
-                await self._update_metadata(key, {THREADS_KEY: [*threads, thread_id]})
+
+                def add_link(metadata: dict[str, Any]) -> dict[str, Any] | None:
+                    threads = metadata.get(THREADS_KEY)
+                    if (
+                        str(metadata.get("owner_id")) != str(user_id)
+                        or not isinstance(threads, list)
+                        or thread_id in threads
+                    ):
+                        return None
+                    return {THREADS_KEY: [*threads, thread_id]}
+
+                await self._modify_metadata(key, add_link)
             except Exception as exc:
                 logger.warning("Could not link file %s to a thread: %s", log_safe(key), exc)
 
-    async def unlink_threads(self, keys: list[str], thread_id: str) -> None:
+    async def unlink_threads(self, keys: list[str], thread_id: str) -> list[str]:
         """Drop ``thread_id`` from each file's links; delete a file left with none.
 
-        The delete only happens with ``media.delete_with_thread`` on. Never raises.
+        The delete only happens with ``media.delete_with_thread`` on. Never raises; returns the
+        keys that could not be released (empty when all were), so a caller can report a partial
+        cleanup.
         """
+        failed: list[str] = []
         if not keys or not self.supports_links:
-            return
+            return failed
         delete = self.delete_with_thread()
         for key in dict.fromkeys(keys):
             try:
-                metadata = await self.store.get_metadata(key)
-                threads = metadata.get(THREADS_KEY) if metadata else None
-                if not isinstance(threads, list) or thread_id not in threads:
-                    continue
-                remaining = [t for t in threads if t != thread_id]
-                if remaining or not delete:
-                    await self._update_metadata(key, {THREADS_KEY: remaining})
-                else:
+                last_link = False
+
+                def drop_link(metadata: dict[str, Any]) -> dict[str, Any] | None:
+                    nonlocal last_link
+                    last_link = False
+                    threads = metadata.get(THREADS_KEY)
+                    if not isinstance(threads, list) or thread_id not in threads:
+                        return None
+                    remaining = [t for t in threads if t != thread_id]
+                    if not remaining and delete:
+                        last_link = True  # deleted below, not rewritten
+                        return None
+                    return {THREADS_KEY: remaining}
+
+                await self._modify_metadata(key, drop_link)
+                if last_link:
                     await self.delete_file(key)
             except Exception as exc:
+                failed.append(key)
                 logger.warning("Could not release file %s from a thread: %s", log_safe(key), exc)
+        return failed
+
+    async def release_thread(self, thread_id: str, user_id: str | None) -> list[str]:
+        """Release every file ``user_id`` linked to ``thread_id``, whatever the messages say.
+
+        ``unlink_threads`` works from the keys a thread's messages reference. A file linked
+        through a message that is gone since (cleared state, replaced messages) would stay
+        linked to a deleted thread forever; this finds those by scanning the store's metadata
+        (needs ``list_keys()`` or ``list_keys_for_owner()``, so stores that cannot
+        enumerate are skipped). Same rules as ``unlink_threads``: a file left with no thread is
+        deleted only with ``media.delete_with_thread`` on. Never raises; returns the keys that
+        could not be released.
+        """
+        if not self.supports_links or user_id is None:
+            return []
+        try:
+            all_keys = await self._keys_of(user_id)
+        except NotImplementedError:
+            return []
+        except Exception as exc:
+            logger.warning("Could not list files for thread %s: %s", log_safe(thread_id), exc)
+            return ["*"]
+        linked: list[str] = []
+        failed: list[str] = []
+        for key in all_keys:
+            try:
+                metadata = await self.store.get_metadata(key)
+            except Exception as exc:
+                failed.append(key)
+                logger.warning("Could not read file %s to release it: %s", log_safe(key), exc)
+                continue
+            threads = metadata.get(THREADS_KEY) if metadata else None
+            if (
+                isinstance(threads, list)
+                and thread_id in threads
+                and str(metadata.get("owner_id")) == str(user_id)
+            ):
+                linked.append(key)
+        failed.extend(await self.unlink_threads(linked, thread_id))
+        return failed
 
     async def delete_file(self, file_id: str) -> bool:
         """Delete a file's bytes and metadata; False when it does not exist."""
+        mime_type: str | None = None
+        try:
+            metadata = await self.store.get_metadata(file_id)
+            mime_type = metadata.get("mime_type") if metadata else None
+        except Exception:
+            metadata = None
         deleted = bool(await self.store.delete(file_id))
-        self._extraction_cache.pop(file_id, None)
+        await self._forget_cached(file_id, mime_type)
         return deleted
+
+    async def _forget_cached(self, file_id: str, mime_type: str | None) -> None:
+        """Drop the file's extracted text and signed URLs from the local and shared caches.
+
+        The shared (checkpointer) entries outlive the file for 24 h otherwise, so a deleted
+        file's text could still be read back. Never raises.
+        """
+        self._extraction_cache.pop(file_id, None)
+        prefix = f"{file_id}:"
+        for key in [k for k in self._signed_url_cache if str(k).startswith(prefix)]:
+            self._signed_url_cache.pop(key, None)
+        checkpointer = self.checkpointer
+        if checkpointer is None:
+            return
+        keys = [(_EXTRACTION_NAMESPACE, file_id)]
+        signed_keys: list[str] = []
+        try:  # every ttl variant of the key; not all backends can list keys
+            signed_keys = list(
+                await checkpointer.alist_cache_keys(_SIGNED_URL_NAMESPACE, prefix=prefix) or []
+            )
+        except Exception as exc:
+            logger.debug("Could not list signed-URL cache keys: %s", exc)
+        if mime_type:
+            ttl = self._settings.MEDIA_SIGNED_URL_TTL_SECONDS
+            signed_keys.append(f"{file_id}:{mime_type}:{ttl}")
+        keys += [(_SIGNED_URL_NAMESPACE, key) for key in dict.fromkeys(signed_keys)]
+        for namespace, key in keys:
+            try:
+                await checkpointer.aclear_cache_value(namespace, key)
+            except Exception as exc:
+                logger.warning(
+                    "Could not clear cached %s for %s: %s", namespace, log_safe(file_id), exc
+                )
 
     async def list_files(
         self, user_id: str | None, offset: int = 0, limit: int = 50
@@ -438,10 +684,7 @@ class MediaService:
         Raises:
             NotImplementedError: The media store cannot enumerate its files.
         """
-        list_keys = getattr(self.store, "list_keys", None)  # absent in core older than 1.0
-        if not callable(list_keys):
-            raise NotImplementedError(f"{type(self.store).__name__} cannot list files")
-        keys = await list_keys()
+        keys = await self._keys_of(user_id)
         owned: list[dict[str, Any]] = []
         for key in keys:
             try:

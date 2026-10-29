@@ -138,7 +138,7 @@ class CheckpointerService:
     async def _thread_media_keys(
         self, cfg: dict[str, Any], skip_message_id: Any = None
     ) -> list[str]:
-        """Media keys referenced by the thread's messages (all pages), minus one message.
+        """Media keys referenced by the thread's messages and state context, minus one message.
 
         A read failure raises, so a partial list is never used: cleanup can only miss a file
         (it stays), never delete one that is still referenced.
@@ -146,6 +146,14 @@ class CheckpointerService:
         keys: list[str] = []
         offset = 0
         try:
+            # Files linked through PUT state live in the state's context, not in message rows.
+            state = await self.checkpointer.aget_state(cfg)
+            for message in getattr(state, "context", None) or []:
+                if skip_message_id is not None and str(getattr(message, "message_id", None)) == str(
+                    skip_message_id
+                ):
+                    continue
+                keys.extend(internal_media_keys(message))
             while True:
                 page = await self.checkpointer.alist_messages(cfg, None, offset, _CLEANUP_PAGE)
                 for message in page:
@@ -458,6 +466,9 @@ class CheckpointerService:
             log_safe(sanitize_for_logging(user)),
             log_safe(thread_id),
         )
+        # Cleanup after the thread row is gone is best effort, but a delete that left data
+        # behind must not read as a clean success: each step that failed is named in the reply.
+        incomplete: list[str] = []
         # Collect the files the thread's messages reference before they are gone.
         thread_keys: list[str] = []
         media = self._link_tracking_media()
@@ -465,10 +476,19 @@ class CheckpointerService:
             try:
                 thread_keys = list(dict.fromkeys(await self._thread_media_keys(cfg)))
             except Exception as exc:
-                logger.debug("File cleanup skipped for thread %s: %s", log_safe(thread_id), exc)
+                incomplete.append("files")
+                logger.warning("File cleanup skipped for thread %s: %s", log_safe(thread_id), exc)
         res = await self.checkpointer.aclean_thread(cfg)
-        if thread_keys and media is not None:
-            await media.unlink_threads(thread_keys, str(thread_id))
+        if (
+            thread_keys
+            and media is not None
+            and await media.unlink_threads(thread_keys, str(thread_id))
+        ):
+            incomplete.append("files")
+        # Files still linked to the thread through messages that are gone (cleared or replaced
+        # state) are not in `thread_keys`; release them by their own metadata.
+        if media is not None and await media.release_thread(str(thread_id), cfg.get("user_id")):
+            incomplete.append("files")
 
         # Clean telemetry traces if TelemetryStore is bound in InjectQ
         try:
@@ -480,7 +500,8 @@ class CheckpointerService:
             if telemetry_store:
                 telemetry_store.delete_thread(str(thread_id))
         except Exception as exc:
-            logger.debug(
+            incomplete.append("traces")
+            logger.warning(
                 "Telemetry store cleanup failed for thread %s: %s", log_safe(thread_id), exc
             )
 
@@ -497,10 +518,22 @@ class CheckpointerService:
                 if pending is not None:
                     await pending
         except Exception as exc:
-            logger.debug(
+            incomplete.append("cache")
+            logger.warning(
                 "Ownership cache eviction failed for thread %s: %s", log_safe(thread_id), exc
             )
 
+        if incomplete:
+            steps = ", ".join(dict.fromkeys(incomplete))
+            return ResponseSchema(
+                success=False,
+                message=f"Thread deleted, but cleanup did not finish: {steps}",
+                data={
+                    "deleted": True,
+                    "cleanup_failed": list(dict.fromkeys(incomplete)),
+                    "result": res,
+                },
+            )
         return ResponseSchema(success=True, message="Thread deleted successfully", data=res)
 
     # -------------------------------------------------

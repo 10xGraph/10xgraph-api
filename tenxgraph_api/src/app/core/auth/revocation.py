@@ -37,6 +37,8 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any
 
+from tenxgraph_api.src.app.core.redis_client import key_part, prefixed
+
 
 logger = logging.getLogger("tenxgraph_api.revocation")
 
@@ -170,7 +172,7 @@ class RedisTokenRevocation(TokenRevocationBackend):
         url: str | None = None,
         *,
         client: Any | None = None,
-        prefix: str = "10xgraph:revoked",
+        prefix: str | None = None,
         token_lifetime: float | None = None,
         user_ttl: int | None = DEFAULT_USER_REVOCATION_TTL,
     ) -> None:
@@ -189,13 +191,13 @@ class RedisTokenRevocation(TokenRevocationBackend):
                     'pip install "10xgraph-api[redis]"'
                 ) from exc
         self._client = client
-        self._prefix = prefix
+        self._prefix = prefix if prefix is not None else prefixed("10xgraph:revoked")
 
     def _jti_key(self, jti: Any) -> str:
-        return f"{self._prefix}:jti:{jti}"
+        return f"{self._prefix}:jti:{key_part(jti)}"
 
     def _user_key(self, user_id: Any) -> str:
-        return f"{self._prefix}:user:{user_id}"
+        return f"{self._prefix}:user:{key_part(user_id)}"
 
     async def revoke_token(self, jti: str, expires_at: float | None = None) -> None:
         ttl = None

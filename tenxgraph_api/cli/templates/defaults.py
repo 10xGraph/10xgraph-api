@@ -20,8 +20,9 @@ GRACEFUL_TIMEOUT_SECONDS: Final[int] = 600
 WORKER_TIMEOUT_SECONDS: Final[int] = 660
 
 # Uvicorn stops waiting for open responses after this many seconds and cancels them, so the
-# lifespan shutdown (30 s drain, graph.aclose) runs before gunicorn's --graceful-timeout
-# SIGKILLs the worker. Open NDJSON streams get a final "interrupted" chunk just before it.
+# lifespan shutdown (graph.aclose: the three SHUTDOWN_*_SECONDS settings, 50 s by default) runs
+# before gunicorn's --graceful-timeout SIGKILLs the worker. Open NDJSON streams get a final
+# "interrupted" chunk just before it.
 # Keep in step with ``uvicorn_worker.DEFAULT_GRACEFUL_SHUTDOWN_SECONDS``.
 UVICORN_GRACEFUL_SHUTDOWN_SECONDS: Final[int] = GRACEFUL_TIMEOUT_SECONDS - 60
 
@@ -238,7 +239,7 @@ ENVIRONMENT = "pytest"
 
 
 # Docker templates
-# The published name on PyPI. The bare name "10xgraph-api" belongs to someone else.
+# The published name on PyPI (pyproject.toml `name`).
 CLI_PACKAGE = "10xgraph-api"
 
 

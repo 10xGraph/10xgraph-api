@@ -36,6 +36,7 @@ from tenxgraph_api.src.app.core.concurrency import (
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.core.middleware.rate_limit import keying
 from tenxgraph_api.src.app.core.middleware.rate_limit.keying import client_key_for
+from tenxgraph_api.src.app.core.redis_client import key_part
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 
 
@@ -162,7 +163,9 @@ async def _shared_connection_slots(
             leases.append(lease)
         user_key = keying.verified_user_id(websocket)
         if user_key and ws_config.max_connections_per_user is not None:
-            lease = await limiter.acquire(f"ws:user:{user_key}", ws_config.max_connections_per_user)
+            lease = await limiter.acquire(
+                f"ws:user:{key_part(user_key)}", ws_config.max_connections_per_user
+            )
             if lease is None:
                 logger.warning(
                     "WebSocket per-user connection limit reached for %s (max=%s)",

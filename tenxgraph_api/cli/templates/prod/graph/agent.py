@@ -15,7 +15,8 @@ from graph.validators.manager import callback_manager
 load_dotenv()
 
 # Durable thread state: Postgres keeps every thread, Redis caches the hot ones.
-# Set DATABASE_URL and REDIS_URL in .env (see .env.example).
+# Set DATABASE_URL and REDIS_URL in .env (see .env.example). The tables are created (or
+# upgraded) when the server starts, so a fresh database needs no setup step.
 checkpointer = PgCheckpointer(
     postgres_dsn=os.getenv("DATABASE_URL"),
     redis_url=os.getenv("REDIS_URL"),

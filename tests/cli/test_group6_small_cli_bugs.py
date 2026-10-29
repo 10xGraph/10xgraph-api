@@ -90,3 +90,40 @@ def test_skills_force_keeps_the_old_install_when_the_copy_fails(
     with pytest.raises(OSError):
         cmd._install_one(templates_root, tmp_path, target, force=True)
     assert marker.read_text(encoding="utf-8") == "old"
+
+
+def test_build_unexpected_error_keeps_its_cause(tmp_path: Path, monkeypatch) -> None:
+    from tenxgraph_api.cli.commands import build as build_module
+    from tenxgraph_api.cli.exceptions import DockerError
+
+    monkeypatch.chdir(tmp_path)
+    original = RuntimeError("disk exploded")
+
+    def boom(*_a, **_k):
+        raise original
+
+    monkeypatch.setattr(build_module, "generate_dockerfile_content", boom)
+    cmd = build_module.BuildCommand(output=_out())
+    seen: list[Exception] = []
+    monkeypatch.setattr(cmd, "handle_error", lambda e: seen.append(e) or 1)
+    assert cmd.execute(output_file="Dockerfile", force=True) == 1
+    assert isinstance(seen[0], DockerError)
+    assert seen[0].__cause__ is original
+
+
+def test_handle_error_does_not_print_the_error_twice(caplog) -> None:
+    import logging
+
+    from tenxgraph_api.cli.commands.build import BuildCommand
+
+    cmd = BuildCommand(output=_out())
+    with caplog.at_level(logging.INFO, logger="tenxgraph_api.cli"):
+        cmd.handle_error(RuntimeError("only once"))
+    assert [r for r in caplog.records if r.levelno >= logging.INFO] == []
+
+
+def test_generated_dockerfile_comment_is_not_stale() -> None:
+    from tenxgraph_api.cli.templates import defaults
+
+    source = Path(defaults.__file__).read_text(encoding="utf-8")
+    assert "belongs to someone else" not in source

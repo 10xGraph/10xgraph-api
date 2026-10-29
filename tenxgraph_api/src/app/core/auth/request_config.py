@@ -53,7 +53,10 @@ A resume that names the interrupt it answers is checked against the thread's ope
 
 from __future__ import annotations
 
-from typing import Any
+import re
+from typing import Annotated, Any
+
+from pydantic import BeforeValidator, ValidationInfo
 
 from tenxgraph_api.src.app.core import logger
 
@@ -186,6 +189,79 @@ MAX_TEXT_CHARS = 1_000_000
 # graph and gets the limits above; the full history gets this looser message cap (plus the
 # per-message block cap) so a long chat keeps working.
 MAX_AG_UI_HISTORY_MESSAGES = 10_000
+
+
+# Deepest nesting of dicts and lists accepted in client ``initial_state``, ``config`` and
+# ``resume``. Deeper input would fail with RecursionError inside the run (copy, serialise).
+MAX_NESTING_DEPTH = 64
+
+
+def nesting_depth_error(value: Any, field: str, max_depth: int = MAX_NESTING_DEPTH) -> str | None:
+    """Describe a ``value`` nested deeper than ``max_depth`` dicts and lists, or ``None``.
+
+    Walks with an explicit stack, so a hostile value cannot trigger RecursionError here.
+    """
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict):
+            children: Any = item.values()
+        elif isinstance(item, list | tuple):
+            children = item
+        else:
+            continue
+        if depth > max_depth:
+            return f"{field}: nested more than {max_depth} levels deep"
+        stack.extend((child, depth + 1) for child in children)
+    return None
+
+
+# Size caps for the open dicts and lists a client sends (``config``, ``initial_state``,
+# ``metadata``, ``filters``, ``resume`` ...). Per container, plus a cap on all values together,
+# so a wide or bushy body cannot cost more memory than a normal request does. Fixed: no setting.
+MAX_CONTAINER_ITEMS = 10_000
+MAX_DICT_KEYS = 1_000
+MAX_TOTAL_NODES = 200_000
+
+
+def structure_error(value: Any, field: str) -> str | None:
+    """Describe why a client dict or list is too deep or too large, or ``None`` when it fits.
+
+    One walk with an explicit stack: nesting beyond ``MAX_NESTING_DEPTH``, a dict with more than
+    ``MAX_DICT_KEYS`` keys, a list with more than ``MAX_CONTAINER_ITEMS`` items, or more than
+    ``MAX_TOTAL_NODES`` values in all.
+    """
+    if (error := nesting_depth_error(value, field)) is not None:
+        return error
+    stack: list[Any] = [value]
+    total = 0
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            if len(item) > MAX_DICT_KEYS:
+                return f"{field}: an object has more than {MAX_DICT_KEYS} keys"
+            children: Any = item.values()
+        elif isinstance(item, list | tuple):
+            if len(item) > MAX_CONTAINER_ITEMS:
+                return f"{field}: a list has more than {MAX_CONTAINER_ITEMS} items"
+            children = item
+        else:
+            continue
+        total += len(item)
+        if total > MAX_TOTAL_NODES:
+            return f"{field}: more than {MAX_TOTAL_NODES} values in all"
+        stack.extend(children)
+    return None
+
+
+def _bounded(value: Any, info: ValidationInfo) -> Any:
+    if (error := structure_error(value, info.field_name or "value")) is not None:
+        raise ClientInputError(error)
+    return value
+
+
+# A client-supplied open dict, checked for depth and size before it is parsed further.
+BoundedDict = Annotated[dict[str, Any], BeforeValidator(_bounded)]
 
 
 class InterruptConflictError(Exception):
@@ -332,6 +408,30 @@ def unanswered_tool_calls(context: Any) -> dict[str, str]:
     for call_id in tool_result_ids(list(context or [])):
         calls.pop(call_id, None)
     return calls
+
+
+# One rule for every id a client names in a path or body (thread, message, memory). The API's
+# own ids (Snowflake integers, UUIDs, memory ids from the stores) all fit; a longer or odder id
+# would reach log lines, Redis keys and database keys unbounded.
+RESOURCE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:@-]{1,128}$")
+
+
+def resource_id_error(value: Any, field: str) -> str | None:
+    """Why ``value`` is not an acceptable resource id, or ``None`` when it is.
+
+    Checked in one place, ``RequirePermission``, for the ``thread_id``, ``message_id`` and
+    ``memory_id`` path parameters and the ``thread_id`` / ``config.thread_id`` body fields.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if not isinstance(value, str | int):
+        return f"{field} must be a string or integer"
+    if not RESOURCE_ID_PATTERN.fullmatch(str(value)):
+        return (
+            f"{field} must be 1 to 128 characters of letters, digits and . _ : @ - "
+            "(no spaces or slashes)"
+        )
+    return None
 
 
 def normalize_thread_id(value: Any) -> str | None:

@@ -4,13 +4,16 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from tenxgraph.core.exceptions import (
+    GraphClosedError,
     GraphError,
     GraphRecursionError,
     MetricsError,
     NodeError,
     SchemaVersionError,
     SerializationError,
+    StateFormatVersionError,
     StorageError,
+    StoredNodeMissingError,
     TransientStorageError,
 )
 from tenxgraph.utils.validators import ValidationError
@@ -53,7 +56,16 @@ def _sanitize_error_message(message: str, error_code: str, is_production: bool) 
     generic_messages = {
         "VALIDATION_ERROR": "The request data is invalid. Please check your input.",
         "HTTPException": "An error occurred processing your request.",
+        # Before "GRAPH_": the first matching prefix wins.
+        "GRAPH_NODE_MISSING_": (
+            "This thread was saved at a step that no longer exists in the graph. "
+            "Start a new thread, or ask the operator to map the old step."
+        ),
         "GRAPH_": "An error occurred executing the graph.",
+        "STATE_": (
+            "This thread was saved by a newer server version. "
+            "The server must be upgraded to read it."
+        ),
         "NODE_": "An error occurred in a graph node.",
         "STORAGE_": "An error occurred accessing storage.",
         "METRICS_": "An error occurred collecting metrics.",
@@ -197,7 +209,8 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
         request_id = getattr(request.state, "request_id", "unknown")
 
         message = str(exc)
-        if is_production:
+        # A ClientInputError is written for the client, so its message survives production.
+        if is_production and not isinstance(exc, ClientInputError):
             logger.warning("Request %s - ValueError details: %s", request_id, log_safe(message))
             message = "Invalid input provided."
 
@@ -260,6 +273,54 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
             error_code="VALIDATION_ERROR",
             message=message,
             status_code=422,
+        )
+
+    @app.exception_handler(GraphClosedError)
+    async def graph_closed_exception_handler(request: Request, exc: GraphClosedError):
+        # The server is shutting down: this replica takes no new runs, another one will.
+        _log_handled(request, exc, 503, "SERVICE_UNAVAILABLE", "Graph closed")
+        response = error_response(
+            request,
+            error_code="SERVICE_UNAVAILABLE",
+            message="The server is shutting down. Retry the request.",
+            status_code=503,
+        )
+        response.headers["Retry-After"] = str(RETRY_AFTER_SECONDS)
+        return response
+
+    @app.exception_handler(StoredNodeMissingError)
+    async def stored_node_missing_exception_handler(request: Request, exc: StoredNodeMissingError):
+        # The thread's stored position no longer exists in this graph: the client can start a
+        # new thread, so it is a 409 and not a 500.
+        error_code = getattr(exc, "error_code", "GRAPH_NODE_MISSING_001")
+        _log_handled(request, exc, 409, error_code, "StoredNodeMissingError")
+        message = _sanitize_error_message(
+            getattr(exc, "message", str(exc)), error_code, is_production
+        )
+        return error_response(
+            request,
+            error_code=error_code,
+            message=message,
+            details=_context_details(exc) if not is_production else None,
+            status_code=409,
+        )
+
+    @app.exception_handler(StateFormatVersionError)
+    async def state_format_version_exception_handler(
+        request: Request, exc: StateFormatVersionError
+    ):
+        # Stored state is newer than this server reads (a rollback): an operator problem.
+        error_code = getattr(exc, "error_code", "STATE_FORMAT_001")
+        logger.error("StateFormatVersionError: url: %s", request.base_url, exc_info=exc)
+        message = _sanitize_error_message(
+            getattr(exc, "message", str(exc)), error_code, is_production
+        )
+        return error_response(
+            request,
+            error_code=error_code,
+            message=message,
+            details=_context_details(exc) if not is_production else None,
+            status_code=500,
         )
 
     @app.exception_handler(GraphError)

@@ -20,8 +20,8 @@ from tenxgraph_api.src.app.core.auth.revocation import (
 )
 
 
+# Reference time for issued-at values only; token expiry is computed in each test.
 NOW = time.time()
-
 
 # ---------------------------------------------------------------------------
 # in-memory backend
@@ -31,7 +31,7 @@ NOW = time.time()
 @pytest.mark.asyncio
 async def test_memory_revokes_one_token_by_jti():
     backend = InMemoryTokenRevocation()
-    backend.revoke_token("t-1", expires_at=NOW + 60)
+    backend.revoke_token("t-1", expires_at=time.time() + 60)
     assert await backend.is_revoked({"user_id": "a", "jti": "t-1"}) is True
     assert await backend.is_revoked({"user_id": "a", "jti": "t-2"}) is False
     assert await backend.is_revoked({"user_id": "a"}) is False
@@ -40,7 +40,7 @@ async def test_memory_revokes_one_token_by_jti():
 @pytest.mark.asyncio
 async def test_memory_drops_entries_once_the_token_expired():
     backend = InMemoryTokenRevocation()
-    backend.revoke_token("old", expires_at=NOW - 1)
+    backend.revoke_token("old", expires_at=time.time() - 1)
     assert await backend.is_revoked({"user_id": "a", "jti": "old"}) is False
     assert backend._tokens == {}
 

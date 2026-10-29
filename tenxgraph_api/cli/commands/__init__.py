@@ -36,7 +36,9 @@ class BaseCommand(ABC, CLILoggerMixin):
         Returns:
             Appropriate exit code
         """
-        self.logger.error("Command failed: %s", error)
+        # The user sees the message once, through the output formatter below. The log line
+        # carries the traceback (and the chained cause) for --verbose only.
+        self.logger.debug("Command failed: %s", error, exc_info=error)
 
         # Import here to avoid circular imports
         from tenxgraph_api.cli.exceptions import CLIError
