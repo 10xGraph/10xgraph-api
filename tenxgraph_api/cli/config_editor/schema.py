@@ -301,7 +301,10 @@ _SECTIONS: list[dict[str, Any]] = [
                 "default": True,
                 "label": "Fail open",
                 "type": "bool",
-                "help": "Allow requests when the backend errors. Off means deny.",
+                "help": (
+                    "Allow requests when the backend errors. Off means deny them with 503 "
+                    "RATE_LIMIT_UNAVAILABLE."
+                ),
             },
             {
                 "path": ["rate_limit", "trusted_proxy_headers"],
@@ -947,6 +950,20 @@ _ENVIRONMENT: list[dict[str, Any]] = [
                 "purpose": (
                     "Refuse to start in production with wildcard ORIGINS or ALLOWED_HOST, or "
                     "docs enabled. Unset means on in production; false only warns."
+                ),
+            },
+            {
+                "name": "STARTUP_CHECKS",
+                "purpose": (
+                    "Refuse to start while a configured Postgres, Redis or store is unreachable, "
+                    "in development and production. Defaults to true; false skips the check."
+                ),
+            },
+            {
+                "name": "STARTUP_CHECK_TIMEOUT_SECONDS",
+                "purpose": (
+                    "Seconds startup keeps retrying an unreachable backend before it gives up. "
+                    "Defaults to 30."
                 ),
             },
         ],

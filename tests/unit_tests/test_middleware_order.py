@@ -52,10 +52,10 @@ def _assert_decorated(response):
 
 def test_cors_is_outermost():
     stack = [m.cls for m in _app().user_middleware]  # outermost first
-    assert stack[0] is CORSMiddleware
+    assert issubclass(stack[0], CORSMiddleware)
     names = [cls.__name__ for cls in stack]
     assert names == [
-        "CORSMiddleware",
+        "AllowlistCORSMiddleware",
         "RequestIDMiddleware",
         "SecurityHeadersMiddleware",
         "HealthCheckAwareTrustedHostMiddleware",
@@ -96,6 +96,34 @@ def test_preflight_is_answered_before_the_rate_limiter(path):
     for _ in range(3):  # CORS answers preflights itself; they never reach the limiter
         assert client.options(path, headers=headers).status_code == 200
     assert client.get(path, headers={"Origin": ORIGIN}).status_code == 200
+
+
+PREFLIGHT = {"Access-Control-Request-Method": "GET"}
+PRIVATE_NETWORK = {"Access-Control-Request-Private-Network": "true"}
+
+
+def test_private_network_preflight_from_allowed_origin_is_granted():
+    # The hosted playground calling a local dev server: browsers add this header.
+    headers = {"Origin": ORIGIN, **PREFLIGHT, **PRIVATE_NETWORK}
+    resp = TestClient(_app()).options("/", headers=headers)
+    assert resp.status_code == 200
+    assert resp.headers.get("access-control-allow-origin") == ORIGIN
+    assert resp.headers.get("access-control-allow-private-network") == "true"
+
+
+def test_private_network_preflight_from_other_origin_is_refused():
+    headers = {"Origin": "https://evil.example.com", **PREFLIGHT, **PRIVATE_NETWORK}
+    resp = TestClient(_app()).options("/", headers=headers)
+    assert resp.status_code == 400
+    assert "access-control-allow-origin" not in resp.headers
+    assert "access-control-allow-private-network" not in resp.headers
+
+
+def test_preflight_without_private_network_header_is_unchanged():
+    resp = TestClient(_app()).options("/", headers={"Origin": ORIGIN, **PREFLIGHT})
+    assert resp.status_code == 200
+    assert resp.headers.get("access-control-allow-origin") == ORIGIN
+    assert "access-control-allow-private-network" not in resp.headers
 
 
 def test_unhandled_exception_is_a_json_500_with_request_id_and_headers():
