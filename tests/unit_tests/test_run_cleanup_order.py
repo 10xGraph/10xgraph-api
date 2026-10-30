@@ -18,6 +18,7 @@ from injectq import InjectQ
 from injectq.core.context import ContainerContext
 from starlette.responses import StreamingResponse
 from tenxgraph.core.graph import StateGraph
+from tenxgraph.core.graph.utils.run_registry import current_run
 from tenxgraph.core.state import AgentState, ExecutionStatus, Message
 from tenxgraph.storage.checkpointer import InMemoryCheckpointer
 from tenxgraph.storage.checkpointer.base_checkpointer import ACTIVE_RUN_NAMESPACE
@@ -214,3 +215,75 @@ async def test_cancel_and_wait_gives_up_after_the_timeout():
     release.set()
     await asyncio.wait({task}, timeout=1)
     assert task.cancelled()
+
+
+# --- the run's context across stream chunks ---------------------------------------------------
+
+
+class CacheDown(InMemoryCheckpointer):
+    """The stop key is unreachable: a stop reaches the run only through its in-process flag."""
+
+    async def arequest_stop(self, config):
+        raise ConnectionError("cache down")
+
+    async def ais_stop_requested(self, config):
+        raise ConnectionError("cache down")
+
+
+def build_chain(seen: dict, stop_in_b: bool = False):
+    """A -> B -> C; B records the run handle it sees and may stop the run."""
+    holder: dict = {}
+
+    async def a(state: AgentState, config: dict):
+        return [Message.text_message("a", role="assistant")]
+
+    async def b(state: AgentState, config: dict):
+        seen["b"] = current_run.get()
+        if seen["b"] is not None:
+            # The task a hard cancel targets is the one running this step, not a finished one.
+            seen["b_task_done"] = seen["b"].task is None or seen["b"].task.done()
+        if stop_in_b:
+            await holder["app"].astop(config)
+        return [Message.text_message("b", role="assistant")]
+
+    async def c(state: AgentState, config: dict):
+        seen["c"] = True
+        return [Message.text_message("c", role="assistant")]
+
+    graph = StateGraph()
+    graph.add_node("A", a)
+    graph.add_node("B", b)
+    graph.add_node("C", c)
+    graph.set_entry_point("A")
+    graph.add_edge("A", "B")
+    graph.add_edge("B", "C")
+    graph.add_edge("C", END)
+    app = holder["app"] = graph.compile(checkpointer=CacheDown())
+    return app
+
+
+@pytest.mark.asyncio
+async def test_end_on_shutdown_keeps_the_run_context_after_the_first_chunk():
+    shutdown.reset()
+    seen: dict = {}
+    app = build_chain(seen)
+
+    async for _ in shutdown.end_on_shutdown(lines(app), keepalive_seconds=15):
+        pass
+
+    assert seen["b"] is not None  # the run's handle, not lost with the first chunk's task
+    assert seen["b_task_done"] is False
+    await app.aclose()
+
+
+@pytest.mark.asyncio
+async def test_in_process_stop_reaches_a_rest_stream_after_the_first_chunk():
+    shutdown.reset()
+    seen: dict = {}
+    app = build_chain(seen, stop_in_b=True)
+
+    async for _ in shutdown.end_on_shutdown(lines(app), keepalive_seconds=15):
+        pass
+
+    assert "c" not in seen  # stopped after B
+    await app.aclose()

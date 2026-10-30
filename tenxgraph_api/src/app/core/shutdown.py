@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import logging
 from collections.abc import AsyncIterator, Callable
 
@@ -116,8 +117,13 @@ async def end_on_shutdown(
 
     With ``keepalive_seconds``, a blank line is yielded each time the stream has been silent
     that long, so idle proxies keep the connection open.
+
+    Each step of ``stream`` runs in a task of its own, all in one shared context: a context
+    variable the stream sets (the graph's current run, which carries its stop flag and
+    shutdown reason) stays set for every later step. Only one step runs at a time.
     """
     loop = asyncio.get_running_loop()
+    context = contextvars.copy_context()
     waiter: asyncio.Future[None] = loop.create_future()
     if _interrupted:
         waiter.set_result(None)
@@ -126,7 +132,7 @@ async def end_on_shutdown(
     try:
         while True:
             # Eager: a chunk that is ready without waiting costs no event-loop turn.
-            pending = asyncio.Task(_next(stream), loop=loop, eager_start=True)
+            pending = asyncio.Task(_next(stream), loop=loop, eager_start=True, context=context)
             while not pending.done() and not waiter.done():
                 await asyncio.wait(
                     {pending, waiter},

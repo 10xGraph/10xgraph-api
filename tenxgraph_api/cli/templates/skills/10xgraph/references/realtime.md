@@ -9,7 +9,7 @@ Live is implemented.
 ## Install and environment
 
 - `pip install "10xgraph[realtime]"` (pulls `google-genai>=1.56.0`).
-- Set `GEMINI_API_KEY`; optionally `GEMINI_LIVE_MODEL` (default `gemini-live-2.5-flash-preview`).
+- Set `GEMINI_API_KEY`; optionally `GEMINI_LIVE_MODEL` (default `gemini-3.8-live`).
 - Provider SDK imports are lazy: importing `tenxgraph.core.realtime` never requires the extra.
 
 ## Audio and media formats
@@ -31,8 +31,8 @@ from tenxgraph.prebuilt.agent import AudioAgent
 from tenxgraph.core.realtime import RealtimeConfig
 
 app = AudioAgent(
-    "gemini-live-2.5-flash-preview",
-    realtime_config=RealtimeConfig(model="gemini-live-2.5-flash-preview", voice="Puck"),
+    "gemini-3.8-live",
+    realtime_config=RealtimeConfig(model="gemini-3.8-live", voice="Puck"),
     tools=[my_tool],          # advertised to the model automatically; runs React-style
 ).compile()
 ```

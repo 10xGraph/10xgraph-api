@@ -413,7 +413,7 @@ _SECTIONS: list[dict[str, Any]] = [
                 "path": ["websocket", "realtime_models"],
                 "label": "Realtime models clients may pick",
                 "type": "list",
-                "placeholder": "gemini-2.5-flash-live",
+                "placeholder": "gemini-3.8-live",
                 "help": (
                     "Models a /v1/graph/live client may request. Any other request uses the "
                     "agent's own model. Empty means clients cannot choose."

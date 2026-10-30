@@ -307,7 +307,7 @@ class WebSocketConfig:
             "enabled": true,
             "max_connections": 1000,
             "max_connections_per_user": 10,
-            "realtime_models": ["gemini-2.5-flash-live"],
+            "realtime_models": ["gemini-3.8-live"],
             "realtime_client_overrides": ["voice", "modalities", "vad"]
         }
 

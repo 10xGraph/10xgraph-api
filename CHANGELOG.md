@@ -27,10 +27,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [1.0.0] - Unreleased
+## [1.0.0rc2] - 2026-10-30
 
-The stable 1.0 release of `10xgraph-api`. It requires `10xgraph` 1.0 and is aligned with
-`10xgraph-client` 1.0. It is the `1.0.0rc1` code plus the changes below. If you upgrade from
+The second release candidate of `10xgraph-api` 1.0. It requires `10xgraph` 1.0.0rc2 and is aligned
+with `10xgraph-client` 1.0.0-rc.2. It is the `1.0.0rc1` code plus the changes below. If you upgrade from
 0.9.x, the `1.0.0rc1` breaking list further down applies to you as well.
 
 ### Breaking
@@ -94,7 +94,7 @@ The stable 1.0 release of `10xgraph-api`. It requires `10xgraph` 1.0 and is alig
   of rotation. See the `10xgraph` changelog for the full note.
 - **Dependency minimums:** `python-multipart>=0.0.31`, `starlette>=1.3.1`, `PyJWT>=2.15.0`
   (the `jwt` extra) and `opentelemetry-api` and `opentelemetry-sdk` `>=1.45.1` (the `otel`
-  extra). `10xgraph>=1.0.0rc1,<2.0` is the core floor in `pyproject.toml`.
+  extra). `10xgraph>=1.0.0rc2,<2.0` is the core floor in `pyproject.toml`.
 - **Shutdown timing:** the generated Gunicorn command uses a new worker class,
   `tenxgraph_api.src.app.uvicorn_worker.TenxGraphUvicornWorker`. Regenerate Docker and
   Kubernetes files with `10xgraph build`, or point your own command at it. Keep Gunicorn
@@ -300,6 +300,17 @@ The stable 1.0 release of `10xgraph-api`. It requires `10xgraph` 1.0 and is alig
 
 ### Fixed
 
+- **Stop and shutdown reach a REST stream after its first chunk.** `end_on_shutdown` ran each
+  step of the stream in a new task with a fresh context, so the graph's current run (which
+  carries the in-process stop flag and the shutdown reason) was lost after the first chunk. All
+  steps now share one context.
+- **Template weather tool answers per city.** The weather tool in the `dev` and `prod` templates
+  always said "sunny", so an eval goal such as "which city has nicer weather" could never pass.
+  It now returns fixed weather for a few known cities and a stable answer for any other name
+  (no randomness), with the same signature and reply format.
+- **Current Gemini Live model in the defaults.** The `websocket.realtime_models` default and the
+  config editor placeholder named `gemini-2.5-flash-live`, which is not a current model; they
+  now name `gemini-3.8-live`.
 - **A disconnected stream frees its thread only after the run is saved.** `end_on_shutdown`
   and the `runs.timeout` wrapper cancelled the run task and then awaited it, which under
   Starlette's cancel scope cancelled the run on every loop turn and returned before core's

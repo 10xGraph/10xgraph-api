@@ -820,7 +820,7 @@ class EvalCommand(BaseCommand):
     # Main entry point
     # ------------------------------------------------------------------
 
-    def execute(  # noqa: PLR0912, PLR0913, PLR0915
+    def execute(  # noqa: PLR0912, PLR0915
         self,
         target: str | None = None,
         output_dir: str = "eval_reports",

@@ -52,21 +52,21 @@ def get_eval_set() -> EvalSet:
             query="What is the weather in London?",
             tool_name="get_weather",
             tool_args={"location": "London"},
-            expected_response="The weather in London is sunny.",
+            expected_response="The weather in London is cloudy, 14C.",
             case_id="weather_london",
         )
         .add_tool_test(
             query="Tell me the current weather in New York",
             tool_name="get_weather",
             tool_args={"location": "New York"},
-            expected_response="The weather in New York is sunny.",
+            expected_response="The weather in New York is partly cloudy, 18C.",
             case_id="weather_new_york",
         )
         .add_tool_test(
             query="How is the weather in Tokyo today?",
             tool_name="get_weather",
             tool_args={"location": "Tokyo"},
-            expected_response="The weather in Tokyo is sunny.",
+            expected_response="The weather in Tokyo is sunny, 24C.",
             case_id="weather_tokyo",
         )
         .build()
