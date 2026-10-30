@@ -1,4 +1,30 @@
-# 10xgraph-api 1.0.0rc2
+# 10xgraph-api 1.0.0rc3
+
+The third 1.0 release candidate: the `1.0.0rc2` code plus a startup check for every configured backend, a clear 503 when the rate limiter's backend is down, and a CORS fix so the hosted playground can reach a local `10xgraph dev` server.
+
+```bash
+pip install -U --pre "10xgraph-api==1.0.0rc3"
+```
+
+This pulls `10xgraph` 1.0.0rc3. `10xgraph-client` stays at 1.0.0-rc.2 (no client changes).
+
+## Before you upgrade (changes in rc3)
+
+- **The server refuses to start while a configured backend is unreachable**, in development and production. It checks the checkpointer's Postgres (query and schema version) and Redis, the memory store (`aping()`, now required in `10xgraph` 1.0.0rc3), the API's Redis and the rate limiter's Redis. It retries for `STARTUP_CHECK_TIMEOUT_SECONDS` (default 30), then exits naming each failed backend and its `host:port` (no credentials). Set `STARTUP_CHECKS=false` to skip it.
+- **A rate-limiter backend outage answers 503, not 429.** With `fail_open: false` and Redis unreachable, requests get `503 RATE_LIMIT_UNAVAILABLE` with `Retry-After: 5`. A real limit hit is still `429 RATE_LIMIT_EXCEEDED`. Retry on 503 as well as 429.
+- **Running `10xgraph dev` on your machine against Docker backends:** publish Postgres, Redis and Qdrant on `127.0.0.1` and use `localhost` in `.env`. The compose service names only resolve inside the Docker network, and the startup check now reports this at boot.
+
+## What changed in rc3
+
+- The hosted playground (`https://play.10xgraph.com`) can reach a local `10xgraph dev` server: CORS answers the browser's private-network preflight for origins in `ORIGINS` (before, it answered 400 and the browser reported a CORS error). Chrome also asks the user to allow access to the local machine; the playground now shows the steps.
+- A custom rate-limit backend can signal an outage with `RateLimitDecision.backend_unavailable()`.
+- The Redis rate-limit backend logs one traceback per outage instead of one per request.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full list. The rc2 notes follow.
+
+---
+
+## 10xgraph-api 1.0.0rc2
 
 The second 1.0 release candidate: it is the `1.0.0rc1` code plus graceful shutdown, stricter request validation, 409 answers for writes during a run, idempotency keys, JWT key rotation and a redesigned eval and config experience.
 

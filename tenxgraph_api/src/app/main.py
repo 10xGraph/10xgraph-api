@@ -105,6 +105,28 @@ async def _prepare_checkpointer() -> None:
         )
 
 
+async def _check_backends(app: FastAPI) -> None:
+    """Refuse to start while a configured backend (Postgres, Redis, store) is unreachable.
+
+    Retries for ``STARTUP_CHECK_TIMEOUT_SECONDS``, then raises ``StartupCheckError``, which
+    stops uvicorn and gunicorn with the failed components in the log. Off with
+    ``STARTUP_CHECKS=false``.
+    """
+    if not settings.STARTUP_CHECKS:
+        logger.warning(
+            "STARTUP_CHECKS is off: starting without checking that the configured backends "
+            "are reachable."
+        )
+        return
+    from tenxgraph_api.src.app.routers.ping.startup_checks import check_backends_at_startup
+
+    await check_backends_at_startup(
+        container,
+        timeout=settings.STARTUP_CHECK_TIMEOUT_SECONDS,
+        rate_limit_backend=getattr(app.state, "rate_limit_backend", None),
+    )
+
+
 async def _cleanup_temp_media_cache() -> None:
     """Run best-effort cleanup of expired temporary media cache entries."""
     try:
@@ -142,6 +164,9 @@ async def lifespan(app: FastAPI):
     )
 
     await _prepare_checkpointer()
+
+    # Fail fast, in development and production, while a configured backend is unreachable.
+    await _check_backends(app)
 
     # Clean up expired temporary media cache on startup
     try:

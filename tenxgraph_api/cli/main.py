@@ -49,7 +49,7 @@ def _lazy_command(module_name: str, class_name: str) -> type:
                     hints=(
                         "Run `10xgraph audit` to inspect installed package compatibility.",
                         "Upgrade with `python -m pip install --upgrade "
-                        '"10xgraph>=1.0.0rc2,<2"`.',
+                        '"10xgraph>=1.0.0rc3,<2"`.',
                     ),
                 ) from exc
             implementation = getattr(module, class_name)

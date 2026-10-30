@@ -118,18 +118,51 @@ async def check_redis(url: str | None) -> None:
         await client.aclose()
 
 
-async def run_check(name: str, check: Callable[[], Awaitable[None]]) -> str:
+async def check_outcome(
+    check: Callable[[], Awaitable[None]], timeout: float = CHECK_TIMEOUT_SECONDS
+) -> tuple[str, BaseException | None]:
+    """Run one time-boxed check: ``(ok | fail | skipped, the error when it failed)``.
+
+    A timeout is reported as a ``TimeoutError``. Shared by the readiness probe and the startup
+    check (``startup_checks``), so both judge a component the same way.
+    """
     try:
-        await asyncio.wait_for(check(), CHECK_TIMEOUT_SECONDS)
+        await asyncio.wait_for(check(), timeout)
     except _Skip:
-        return SKIPPED
-    except TimeoutError:
+        return SKIPPED, None
+    except Exception as exc:  # a timeout too: TimeoutError
+        return FAIL, exc
+    return OK, None
+
+
+async def run_check(name: str, check: Callable[[], Awaitable[None]]) -> str:
+    result, error = await check_outcome(check)
+    if isinstance(error, TimeoutError):
         logger.warning("Readiness check %s timed out after %ss", name, CHECK_TIMEOUT_SECONDS)
-        return FAIL
-    except Exception as exc:
-        logger.warning("Readiness check %s failed: %s", name, exc)
-        return FAIL
-    return OK
+    elif error is not None:
+        logger.warning("Readiness check %s failed: %s", name, error)
+    return result
+
+
+def readiness_targets(container: Any) -> tuple[Any, Any, str | None]:
+    """``(checkpointer, store, redis_url)`` the checks run against, from the app's container.
+
+    Redis is the URL the API's own clients use (run locks and caps, ownership cache, token
+    revocation): ``redis`` in 10xgraph.json, else ``REDIS_URL``. None for what is not set.
+    """
+    from tenxgraph.storage.checkpointer import BaseCheckpointer
+    from tenxgraph.storage.store import BaseStore
+
+    from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
+    from tenxgraph_api.src.app.core.config.settings import get_settings
+
+    graph_config = container.try_get(GraphConfig) if GraphConfig in container else None
+    redis_url = getattr(graph_config, "redis_url", None) or get_settings().REDIS_URL
+    return (
+        container.try_get(BaseCheckpointer) if BaseCheckpointer in container else None,
+        container.try_get(BaseStore) if BaseStore in container else None,
+        redis_url if isinstance(redis_url, str) else None,
+    )
 
 
 def redis_required(graph_config: Any) -> bool:

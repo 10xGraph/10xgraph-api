@@ -78,7 +78,7 @@ single Redis operation, which prevents concurrent requests from racing past the 
 | `trusted_proxy_headers` | boolean | `false` | Use `X-Forwarded-For` as the client IP (only behind a trusted proxy). |
 | `redis.url` | string | `null` | Redis URL; required for the Redis backend. Supports `${ENV_VAR}` expansion. |
 | `redis.prefix` | string | `"10xgraph:rate-limit"` | Prefix for all Redis keys. |
-| `fail_open` | boolean | `true` | On Redis errors, allow (`true`) or deny (`false`) requests. |
+| `fail_open` | boolean | `true` | On Redis errors, allow (`true`) or deny (`false`, 503) requests. |
 
 ## Identity Modes
 
@@ -107,7 +107,7 @@ Every response includes:
 | `X-RateLimit-Remaining` | Requests remaining in the current window. |
 | `X-RateLimit-Reset` | Unix timestamp for the window reset estimate. |
 | `X-RateLimit-Reset-After` | Seconds until the window reset estimate. |
-| `Retry-After` | Present on `429` responses only. |
+| `Retry-After` | Present on `429` and `503` responses only. |
 
 When the limit is exceeded, 10xGraph returns `429 Too Many Requests`:
 
@@ -119,6 +119,24 @@ When the limit is exceeded, 10xGraph returns `429 Too Many Requests`:
     "limit": 100,
     "window_seconds": 60,
     "retry_after_seconds": 12
+  },
+  "metadata": {
+    "request_id": "request-id",
+    "status": "error"
+  }
+}
+```
+
+When the backend cannot be reached and `fail_open` is `false`, the request is denied with
+`503 Service Unavailable` and `Retry-After: 5`, not 429, so clients can tell an outage from a
+limit hit:
+
+```json
+{
+  "error": {
+    "code": "RATE_LIMIT_UNAVAILABLE",
+    "message": "Rate limiter unavailable: its backend could not be reached.",
+    "retry_after_seconds": 5
   },
   "metadata": {
     "request_id": "request-id",
@@ -153,6 +171,9 @@ class MyRateLimitBackend(BaseRateLimitBackend):
     async def close(self) -> None:
         return None
 ```
+
+When the backend's store cannot be reached and the request must not pass, return
+`RateLimitDecision.backend_unavailable()`; the middleware answers it with the 503 above.
 
 ```json
 {

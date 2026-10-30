@@ -10,7 +10,7 @@ from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.config.graph_config import RateLimitConfig
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 
-from .base import BaseRateLimitBackend
+from .base import BaseRateLimitBackend, RateLimitDecision
 from .keying import client_key_for
 
 
@@ -22,8 +22,9 @@ HEALTH_CHECK_PATHS = frozenset({"/ping", "/health/ready"})
 class RateLimitMiddleware:
     """Backend-agnostic rate-limit middleware.
 
-    Pure ASGI: it answers 429 itself or edits the ``http.response.start`` message on the way
-    out, so it adds no per-request task and never buffers a streaming body.
+    Pure ASGI: it answers 429 (limit hit) or 503 (backend unreachable) itself, or edits the
+    ``http.response.start`` message on the way out, so it adds no per-request task and never
+    buffers a streaming body.
     """
 
     def __init__(
@@ -53,6 +54,12 @@ class RateLimitMiddleware:
             window=self.config.window,
         )
         reset_at_epoch = int(time.time()) + decision.reset_after
+
+        if not decision.allowed and decision.unavailable:
+            # The backend failed and fails closed: an outage, not the client's fault. The
+            # backend logs the error itself, so this does not log per request.
+            await self._unavailable(decision, scope)(scope, receive, send)
+            return
 
         if not decision.allowed:
             request_id = (scope.get("state") or {}).get("request_id", "unknown")
@@ -107,3 +114,22 @@ class RateLimitMiddleware:
             await send(message)
 
         await self.app(scope, receive, send_with_headers)
+
+    @staticmethod
+    def _unavailable(decision: RateLimitDecision, scope: Scope) -> JSONResponse:
+        retry_after = max(decision.reset_after, 1)
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "error": {
+                    "code": "RATE_LIMIT_UNAVAILABLE",
+                    "message": "Rate limiter unavailable: its backend could not be reached.",
+                    "retry_after_seconds": retry_after,
+                },
+                "metadata": {
+                    "request_id": (scope.get("state") or {}).get("request_id", "unknown"),
+                    "status": "error",
+                },
+            },
+            headers={"Retry-After": str(retry_after)},
+        )

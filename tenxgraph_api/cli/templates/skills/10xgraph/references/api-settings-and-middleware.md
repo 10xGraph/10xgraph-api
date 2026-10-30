@@ -19,6 +19,8 @@ Important variables:
 - `DOCS_PATH`
 - `REDOCS_PATH`
 - `REDIS_URL`
+- `STARTUP_CHECKS`
+- `STARTUP_CHECK_TIMEOUT_SECONDS`
 - `SENTRY_DSN`
 - `JWT_SECRET_KEY`
 - `JWT_ALGORITHM`
@@ -63,6 +65,14 @@ default in production (`STRICT_PRODUCTION_CHECKS=false` downgrades them to warni
 - debug enabled
 - docs endpoints enabled
 - `ALLOWED_HOST=*`
+
+## Startup Checks
+
+In every mode, the server refuses to start while a configured backend is unreachable: the
+checkpointer's Postgres and Redis, the store (when it has `aping`/`ping`), `REDIS_URL` (or
+`redis` in `10xgraph.json`) and the rate limiter's Redis. It retries for
+`STARTUP_CHECK_TIMEOUT_SECONDS` (30) first, then exits with each failed component, its
+`host:port` and the error. `STARTUP_CHECKS=false` skips the check.
 
 ## Sentry
 

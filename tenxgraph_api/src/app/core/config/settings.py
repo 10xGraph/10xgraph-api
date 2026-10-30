@@ -161,6 +161,19 @@ class Settings(BaseSettings):
     REDIS_KEY_PREFIX: str = ""
 
     #################################
+    ###### Startup checks ###########
+    #################################
+    # At startup, before serving, ping every configured backend (the checkpointer's Postgres
+    # and Redis, the store, the API's Redis, the rate limiter's Redis) and refuse to start when
+    # one stays unreachable. Applies in development and production, so a wrong connection
+    # string fails the boot (and the deploy) instead of the first request. False skips it.
+    STARTUP_CHECKS: bool = True
+    # How long, in seconds, startup keeps retrying a failing backend (with a short backoff)
+    # before it gives up, so services started together (docker compose) can come up in any
+    # order. Each attempt is bounded by the readiness probe's own per-check timeout.
+    STARTUP_CHECK_TIMEOUT_SECONDS: float = Field(default=30.0, ge=0.0)
+
+    #################################
     ###### Shutdown #################
     #################################
     # Passed to ``graph.aclose()`` when the app stops (after uvicorn has finished or cut open

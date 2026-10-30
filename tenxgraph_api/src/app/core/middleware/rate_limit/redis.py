@@ -58,7 +58,17 @@ end
 
 
 class RedisRateLimitBackend(BaseRateLimitBackend):
-    """Distributed sliding-window rate limiter backed by Redis."""
+    """Distributed sliding-window rate limiter backed by Redis.
+
+    On a Redis error it allows the request (``fail_open``) or denies it as unavailable, which
+    the middleware answers with 503, never with the 429 of a real limit hit.
+    """
+
+    # The URL the client was built from (``from_url``); None for a client passed in. The
+    # startup check pings it.
+    redis_url: str | None = None
+    # True while Redis keeps failing: only the first error of an outage logs a traceback.
+    _failing = False
 
     def __init__(
         self,
@@ -88,7 +98,9 @@ class RedisRateLimitBackend(BaseRateLimitBackend):
         from tenxgraph_api.src.app.core.redis_client import create_redis
 
         redis = create_redis(redis_url)
-        return cls(redis=redis, prefix=prefix, fail_open=fail_open, close_redis=True)
+        backend = cls(redis=redis, prefix=prefix, fail_open=fail_open, close_redis=True)
+        backend.redis_url = redis_url
+        return backend
 
     async def check(self, key: str, *, limit: int, window: int) -> RateLimitDecision:
         redis_key = f"{self._prefix}:{key}"
@@ -101,16 +113,33 @@ class RedisRateLimitBackend(BaseRateLimitBackend):
                 keys=[redis_key],
                 args=[now_ms, window_ms, limit, member],
             )
-            return RateLimitDecision(
+            decision = RateLimitDecision(
                 allowed=bool(result[0]),
                 remaining=int(result[1]),
                 reset_after=int(result[2]),
             )
-        except Exception:
-            logger.exception("Redis rate-limit backend error")
+        except Exception as exc:
+            self._log_error(exc)
             if self._fail_open:
                 return RateLimitDecision(allowed=True, remaining=0, reset_after=window)
-            return RateLimitDecision(allowed=False, remaining=0, reset_after=window)
+            return RateLimitDecision.backend_unavailable()
+        if self._failing:
+            self._failing = False
+            logger.info("Redis rate-limit backend recovered")
+        return decision
+
+    def _log_error(self, exc: Exception) -> None:
+        """Traceback for the first error of an outage; one line for each error after it."""
+        action = "allowing" if self._fail_open else "denying (503)"
+        if not self._failing:
+            self._failing = True
+            logger.exception(
+                "Redis rate-limit backend error; %s requests until it recovers", action
+            )
+        else:
+            logger.warning(
+                "Redis rate-limit backend error (%s): %s: %s", action, type(exc).__name__, exc
+            )
 
     async def close(self) -> None:
         if self._close_redis:

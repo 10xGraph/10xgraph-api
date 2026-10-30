@@ -43,14 +43,11 @@ async def ping_server(
 )
 async def readiness_probe(request: Request):
     from injectq import InjectQ
-    from tenxgraph.storage.checkpointer import BaseCheckpointer
-    from tenxgraph.storage.store import BaseStore
 
     from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
-    from tenxgraph_api.src.app.core.config.settings import get_settings
     from tenxgraph_api.src.app.core.utils.container import current_container
 
-    from .readiness import cached_readiness, is_ready, redis_required
+    from .readiness import cached_readiness, is_ready, readiness_targets, redis_required
 
     if getattr(request.app.state, "draining", False):
         # Shutting down: leave the load balancer's rotation before the sockets close.
@@ -58,12 +55,7 @@ async def readiness_probe(request: Request):
 
     container: InjectQ = current_container()
     graph_config = container.try_get(GraphConfig) if GraphConfig in container else None
-    redis_url = getattr(graph_config, "redis_url", None) or get_settings().REDIS_URL
-    checks = await cached_readiness(
-        container.try_get(BaseCheckpointer) if BaseCheckpointer in container else None,
-        container.try_get(BaseStore) if BaseStore in container else None,
-        redis_url if isinstance(redis_url, str) else None,
-    )
+    checks = await cached_readiness(*readiness_targets(container))
     ready = is_ready(checks, redis_is_required=redis_required(graph_config))
     return JSONResponse(
         status_code=200 if ready else 503,

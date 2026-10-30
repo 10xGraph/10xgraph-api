@@ -7,9 +7,10 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from injectq import InjectQ
-from starlette.datastructures import MutableHeaders
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
+from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from tenxgraph_api.src.app.core.exceptions.server_errors import UnhandledErrorMiddleware
@@ -74,6 +75,21 @@ try:
     from tenxgraph.core.exceptions import StaleStateError
 except ImportError:  # pragma: no cover - depends on installed core version
     StaleStateError = None  # type: ignore[assignment]
+
+
+class AllowlistCORSMiddleware(CORSMiddleware):
+    """``CORSMiddleware`` that grants private-network access only to allowed origins.
+
+    Starlette adds ``Access-Control-Allow-Private-Network: true`` to every preflight that asks
+    for it, including one it refuses for its origin. That refusal still stands (400, no
+    ``Access-Control-Allow-Origin``), but an origin outside ``ORIGINS`` should not get the grant.
+    """
+
+    def preflight_response(self, request_headers: Headers) -> Response:
+        response = super().preflight_response(request_headers)
+        if not self.is_allowed_origin(origin=request_headers["origin"]):
+            del response.headers["Access-Control-Allow-Private-Network"]
+        return response
 
 
 class InsecureCorsConfigError(RuntimeError):
@@ -507,11 +523,13 @@ def setup_middleware(
     app.add_middleware(RequestIDMiddleware)
 
     app.add_middleware(
-        CORSMiddleware,
+        AllowlistCORSMiddleware,
         allow_origins=origins,
         allow_credentials=allow_credentials,
         allow_methods=["*"],
         allow_headers=["*"],
+        # Answer the Private Network Access preflight the hosted playground sends to a local server.
+        allow_private_network=True,
     )
 
     logger.debug("Middleware set up")

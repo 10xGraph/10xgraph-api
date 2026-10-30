@@ -5,13 +5,13 @@ core framework see `agentflow/CLAUDE.md`; for the TS client, docs, or playground
 for the monorepo overview see the workspace-root `CLAUDE.md`.
 
 - Package name (PyPI): `10xgraph-api` (formerly `10xscale-agentflow-cli`, last release 0.6.x)
-- Version: `1.0.0rc2` (`pyproject.toml`; 0.7.0 was the first release under the 10xGraph name). `CLI_VERSION`
+- Version: `1.0.0rc3` (`pyproject.toml`; 0.7.0 was the first release under the 10xGraph name). `CLI_VERSION`
   and `tenxgraph_api.__version__` are single-sourced from the installed distribution metadata
   (falling back to `pyproject.toml` only for a non-installed source checkout).
 - Requires: Python >= 3.12 · Status: `5 - Production/Stable`
 - Console entry points: `10xgraph = tenxgraph_api.cli.main:main`, plus the deprecated alias
   `agentflow = tenxgraph_api.cli.main:legacy_main` (prints a notice to stderr; removed in 2.0)
-- Depends on the core framework: `10xgraph>=1.0.0rc2,<2.0` (import `tenxgraph`). Must not be
+- Depends on the core framework: `10xgraph>=1.0.0rc3,<2.0` (import `tenxgraph`). Must not be
   installed alongside the old `10xscale-agentflow`: both provide an `agentflow` module.
 
 ## Rename compatibility (kept until 2.0)
