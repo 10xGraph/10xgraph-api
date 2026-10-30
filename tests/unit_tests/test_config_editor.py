@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import http.client
+import importlib.util
 import json
 import re
 from pathlib import Path
@@ -89,9 +90,11 @@ def test_every_env_name_exists_in_the_source_tree() -> None:
     sources = [
         p for p in root.rglob("*.py") if p.name != "schema.py" or "config_editor" not in str(p)
     ]
-    core = Path(__file__).resolve().parents[3] / "agentflow" / "tenxgraph"
-    if core.is_dir():
-        sources += list(core.rglob("*.py"))
+    # Core env names live in the installed tenxgraph package (a sibling checkout only exists in
+    # the monorepo, not in this repo's CI).
+    core_spec = importlib.util.find_spec("tenxgraph")
+    for location in (core_spec.submodule_search_locations or []) if core_spec else []:
+        sources += list(Path(location).rglob("*.py"))
     text = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in sources)
     missing = sorted({e["name"] for e in _env_entries() if e["name"] not in text})
     assert not missing
