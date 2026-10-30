@@ -14,6 +14,7 @@ import contextlib
 import contextvars
 import logging
 from collections.abc import AsyncIterator, Callable
+from typing import Any
 
 import anyio
 from tenxgraph.core.state import StreamChunk, StreamEvent
@@ -134,8 +135,9 @@ async def end_on_shutdown(
             # Eager: a chunk that is ready without waiting costs no event-loop turn.
             pending = asyncio.Task(_next(stream), loop=loop, eager_start=True, context=context)
             while not pending.done() and not waiter.done():
+                watched: set[asyncio.Future[Any]] = {pending, waiter}
                 await asyncio.wait(
-                    {pending, waiter},
+                    watched,
                     timeout=keepalive_seconds,
                     return_when=asyncio.FIRST_COMPLETED,
                 )

@@ -537,7 +537,9 @@ class InitCommand(BaseCommand):
             if rl == "none":
                 rows.append(("Rate limit", "None"))
             else:
-                rl_by = {"global": "Global", "user": "Per user"}.get(context.get("rl_by"), "Per IP")
+                rl_by = {"global": "Global", "user": "Per user"}.get(
+                    str(context.get("rl_by")), "Per IP"
+                )
                 proxy = " · proxy headers on" if context.get("rl_trusted_proxy") else ""
                 rows.append(
                     (

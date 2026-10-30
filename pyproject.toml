@@ -252,6 +252,7 @@ docstring-code-format = true
 
 [tool.mypy]
 python_version = "3.12"
+plugins = ["pydantic.mypy"]
 files = ["tenxgraph_api"]
 # Templates are emitted code, not library code - they reference modules that only
 # exist in a scaffolded project.

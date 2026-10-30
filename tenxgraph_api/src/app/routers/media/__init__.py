@@ -9,7 +9,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from injectq import InjectQ, inject, singleton
 from tenxgraph.storage.checkpointer import BaseCheckpointer
@@ -454,7 +454,10 @@ class MediaService:
         try:
             for message in messages:
                 await ensure_media_offloaded(
-                    message, store, MediaOffloadPolicy.THRESHOLD, max_inline_bytes=threshold
+                    message,
+                    cast("BaseMediaStore", store),
+                    MediaOffloadPolicy.THRESHOLD,
+                    max_inline_bytes=threshold,
                 )
         except ValueError as exc:  # bad base64 (binascii.Error) or MediaTooLargeError
             raise ClientInputError(f"Inline media rejected: {exc}") from exc
@@ -619,7 +622,8 @@ class MediaService:
                 continue
             threads = metadata.get(THREADS_KEY) if metadata else None
             if (
-                isinstance(threads, list)
+                metadata is not None
+                and isinstance(threads, list)
                 and thread_id in threads
                 and str(metadata.get("owner_id")) == str(user_id)
             ):

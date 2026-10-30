@@ -135,7 +135,7 @@ def telemetry_record(chunk: Any, ts: float | None = None) -> dict[str, Any]:
                 elif btype == "error" and _get(block, "message"):
                     block_errors.append(str(_get(block, "message")))
 
-    event = getattr(chunk, "event", None)
+    event: Any = getattr(chunk, "event", None)
     event_name = str(event.value) if hasattr(event, "value") else str(event or "")
     is_error = event_name == "error" or bool(getattr(chunk, "is_error", False))
     error = None
@@ -364,12 +364,12 @@ def reconstruct_run(trace: Any) -> ObsRunSchema:  # noqa: PLR0912, PLR0915
         # Tool results close the tool span (create one for runs without tool updates).
         for res in rec.get("tool_results") or []:
             cid = res.get("call_id")
-            tspan = tool_spans.get(cid) if cid else None
-            if tspan is None and cid:
+            result_span = tool_spans.get(cid) if cid else None
+            if result_span is None and cid:
                 call = pending_calls.get(cid) or {}
                 name = call.get("name") or rec.get("tool_name") or "tool"
                 start = call.get("ts", ts)
-                tspan = ObsSpanSchema(
+                result_span = ObsSpanSchema(
                     id=new_span_id(),
                     name=f"tool: {name}",
                     kind="tool",
@@ -380,16 +380,16 @@ def reconstruct_run(trace: Any) -> ObsRunSchema:  # noqa: PLR0912, PLR0915
                     tool_name=name,
                     tool_call_id=cid,
                 )
-                tool_spans[cid] = tspan
-                spans.append(tspan)
-            if tspan is not None and tspan.outputs is None:
-                tspan.duration_ms = max(0.0, off_ms(ts) - tspan.start_ms)
-                tspan.outputs = {"result": res.get("output")}
+                tool_spans[cid] = result_span
+                spans.append(result_span)
+            if result_span is not None and result_span.outputs is None:
+                result_span.duration_ms = max(0.0, off_ms(ts) - result_span.start_ms)
+                result_span.outputs = {"result": res.get("output")}
                 if res.get("is_error"):
-                    tspan.status = "error"
-                    tspan.error = tspan.error or clip(res.get("output")) or "tool error"
+                    result_span.status = "error"
+                    result_span.error = result_span.error or clip(res.get("output")) or "tool error"
                 else:
-                    tspan.status = "ok"
+                    result_span.status = "ok"
             if cur is not None:
                 cur.boundary = max(cur.boundary, ts)
 

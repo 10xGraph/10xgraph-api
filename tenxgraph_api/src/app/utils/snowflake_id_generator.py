@@ -3,6 +3,7 @@ import os
 import socket
 import zlib
 from importlib.util import find_spec
+from typing import overload
 
 from tenxgraph.utils.id_generator import BaseIDGenerator, IDType
 
@@ -13,6 +14,10 @@ HAS_SNOWFLAKE = find_spec("snowflakekit") is not None
 logger = logging.getLogger("tenxgraph_api.snowflake")
 
 
+@overload
+def _setting(value: int | None, env_name: str, default: int) -> int: ...
+@overload
+def _setting(value: int | None, env_name: str, default: None) -> int | None: ...
 def _setting(value: int | None, env_name: str, default: int | None) -> int | None:
     """``value`` when given, else the environment variable, else ``default``."""
     if value is not None:
