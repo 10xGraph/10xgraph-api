@@ -35,7 +35,11 @@ from tenxgraph_api.src.app.core.auth.request_config import (
 )
 from tenxgraph_api.src.app.core.concurrency import Lease
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RunsConfig
-from tenxgraph_api.src.app.core.shutdown import KEEPALIVE_SECONDS, end_on_shutdown
+from tenxgraph_api.src.app.core.shutdown import (
+    KEEPALIVE_SECONDS,
+    cancel_and_wait,
+    end_on_shutdown,
+)
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe, sanitize_for_logging
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     GraphInputSchema,
@@ -324,9 +328,8 @@ async def _bounded_stream(stream: AsyncIterator[Any], timeout: float) -> AsyncIt
             consumed.set()
     finally:
         if not producer.done():
-            producer.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await producer
+            # Waits for the run's cancel save before the caller frees the thread lock.
+            await cancel_and_wait(producer)
 
 
 # Realtime init-frame key -> RealtimeConfig field name.

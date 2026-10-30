@@ -11,9 +11,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator, Callable
 
+import anyio
 from tenxgraph.core.state import StreamChunk, StreamEvent
+
+
+try:
+    from tenxgraph.core.graph.utils.utils import FINALIZE_TIMEOUT_SECONDS
+except ImportError:  # an older core; same value
+    FINALIZE_TIMEOUT_SECONDS = 10.0
+
+logger = logging.getLogger("tenxgraph_api.shutdown")
 
 
 INTERRUPTED_REASON = (
@@ -26,6 +36,10 @@ INTERRUPTED_REASON = (
 # the wire.
 KEEPALIVE_LINE = "\n"
 KEEPALIVE_SECONDS = 15.0
+
+# How long a cancelled run task is waited for: core saves a cancelled run within
+# ``FINALIZE_TIMEOUT_SECONDS``, then releases its run marker.
+RUN_CLEANUP_WAIT_SECONDS = FINALIZE_TIMEOUT_SECONDS + 5.0
 
 _interrupted = False
 _waiters: set[asyncio.Future[None]] = set()
@@ -60,6 +74,39 @@ async def _next(stream: AsyncIterator[str]) -> str:
     return await anext(stream)
 
 
+async def cancel_and_wait(task: asyncio.Future, timeout: float = RUN_CLEANUP_WAIT_SECONDS) -> None:
+    """Cancel ``task`` once and wait until it is done, up to ``timeout`` seconds.
+
+    For a task that runs a graph: core saves a cancelled run before the task ends, and a lock
+    the caller releases afterwards (the thread lock) must not be free before that save is.
+    ``await task`` would forward every cancel the caller gets to ``task``; under a cancelled
+    anyio scope (Starlette on a client disconnect) that is one cancel per event-loop turn. The
+    wait runs in a shielded anyio scope instead, and a plain cancel that still reaches the
+    caller is raised once ``task`` is done or the time is up. The task's own result or error
+    is not raised.
+    """
+    if task.done():
+        return
+    task.cancel()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    cancel: asyncio.CancelledError | None = None
+    with anyio.CancelScope(shield=True):
+        while not task.done():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                logger.warning("A cancelled run did not finish within %ss", timeout)
+                break
+            try:
+                await asyncio.wait({task}, timeout=remaining)
+            except asyncio.CancelledError as e:
+                cancel = e
+    if task.done() and not task.cancelled():
+        task.exception()  # retrieved: it is the run's own error, reported by the run
+    if cancel is not None:
+        raise cancel
+
+
 async def end_on_shutdown(
     stream: AsyncIterator[str],
     final: Callable[[], str] = interrupted_line,
@@ -89,9 +136,7 @@ async def end_on_shutdown(
                 if not pending.done() and not waiter.done():
                     yield KEEPALIVE_LINE
             if not pending.done():
-                pending.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await pending
+                await cancel_and_wait(pending)
                 pending = None
                 yield final()
                 return
@@ -104,11 +149,11 @@ async def end_on_shutdown(
             yield item
     finally:
         _waiters.discard(waiter)
-        if pending is not None and not pending.done():
-            pending.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await pending
-        aclose = getattr(stream, "aclose", None)
-        if callable(aclose):
-            with contextlib.suppress(Exception):
-                await aclose()
+        try:
+            if pending is not None and not pending.done():
+                await cancel_and_wait(pending)
+        finally:
+            aclose = getattr(stream, "aclose", None)
+            if callable(aclose):
+                with contextlib.suppress(Exception):
+                    await aclose()

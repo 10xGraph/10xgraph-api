@@ -300,6 +300,11 @@ The stable 1.0 release of `10xgraph-api`. It requires `10xgraph` 1.0 and is alig
 
 ### Fixed
 
+- **A disconnected stream frees its thread only after the run is saved.** `end_on_shutdown`
+  and the `runs.timeout` wrapper cancelled the run task and then awaited it, which under
+  Starlette's cancel scope cancelled the run on every loop turn and returned before core's
+  cancel save finished, so the thread lock was free while the old run still wrote. They now
+  cancel once and wait (bounded, 15 s) in a shielded scope. Needs `10xgraph` 1.0.
 - **`10xgraph eval` reports carry each case's expectations.** The report's case results now
   include `expected` (response, tool calls, node order, input). For a user simulation, `input`
   is the starting prompt and `response` is the goals joined with `; `. Needs `10xgraph` 1.0.
