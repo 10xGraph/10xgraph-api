@@ -390,4 +390,8 @@ dev = [
     "textxtract[pdf,docx,html,xml,md]>=0.2.0",
     # The ag-ui extra, so the AG-UI router tests run in CI instead of failing.
     "ag-ui-protocol>=1.0,<2",
+    # The production worker class (uvicorn_worker.py) and its shutdown tests import these;
+    # same ranges the generated Dockerfile installs.
+    "gunicorn>=23,<27",
+    "uvicorn-worker>=0.4,<1",
 ]
