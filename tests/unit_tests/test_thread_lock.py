@@ -46,6 +46,7 @@ def _input(thread_id="t1", **extra):
 def _request():
     request = MagicMock()
     request.state = SimpleNamespace(request_id="r", timestamp="t")
+    request.is_disconnected = AsyncMock(return_value=False)
     return request
 
 
@@ -53,6 +54,7 @@ def _service(invoke):
     service = MagicMock()
     service.runs_policy.return_value = RunsConfig()
     service.invoke_graph = invoke
+    service.check_resume_target = AsyncMock()
     service.stop_graph = AsyncMock(return_value={"ok": True})
     return service
 
@@ -514,3 +516,62 @@ async def test_development_still_shows_error_text(monkeypatch):
     assert SECRET in stream
     assert SECRET in await _ws_output(service)
     assert SECRET in await _ag_ui_output(service)
+
+
+# ---------------------------------------------------------------------------
+# G-105: Retry-After and a waiter whose client left
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_busy_409_and_run_cap_429_carry_retry_after(fresh_locks, monkeypatch):
+    held = await thread_lock.acquire_thread_lock("t-retry")
+    with pytest.raises(HTTPException) as busy:
+        await thread_lock.acquire_thread_lock("t-retry")
+    assert busy.value.status_code == 409
+    assert busy.value.headers["Retry-After"]
+    held.release()
+
+    from tenxgraph_api.src.app.routers.graph import run_limits
+
+    limiter = MemoryConcurrencyLimiter()
+    monkeypatch.setattr(run_limits, "concurrency_limiter", lambda: limiter)
+    slot = await run_limits.acquire_run_slot(ALICE, RunsConfig(max_concurrent_per_user=1))
+    with pytest.raises(HTTPException) as capped:
+        await run_limits.acquire_run_slot(ALICE, RunsConfig(max_concurrent_per_user=1))
+    assert capped.value.status_code == 429
+    assert capped.value.headers["Retry-After"]
+    slot.release()
+
+
+@pytest.mark.asyncio
+async def test_a_waiter_whose_client_left_gives_up_and_takes_nothing(fresh_locks):
+    held = await thread_lock.acquire_thread_lock("t-gone")
+    gone = AsyncMock(return_value=True)
+    with pytest.raises(HTTPException) as exc:
+        await thread_lock.acquire_thread_lock("t-gone", is_disconnected=gone)
+    assert exc.value.status_code == thread_lock.CLIENT_CLOSED_REQUEST
+    held.release()
+    # The lock is free again: the abandoned waiter did not queue up behind it.
+    again = await thread_lock.acquire_thread_lock("t-gone")
+    again.release()
+
+
+@pytest.mark.asyncio
+async def test_a_client_that_left_just_before_the_lock_freed_does_not_start_a_run(fresh_locks):
+    held = await thread_lock.acquire_thread_lock("t-late")
+    calls = {"n": 0}
+
+    async def disconnected():
+        calls["n"] += 1
+        return calls["n"] > 1  # present while waiting, gone once the lock is free
+
+    waiter = asyncio.create_task(
+        thread_lock.acquire_thread_lock("t-late", is_disconnected=disconnected)
+    )
+    await asyncio.sleep(0.1)
+    held.release()
+    with pytest.raises(HTTPException):
+        await waiter
+    free = await thread_lock.acquire_thread_lock("t-late")  # not left held by the waiter
+    free.release()

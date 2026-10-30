@@ -363,7 +363,8 @@ async def test_reserved_keys_are_stripped_not_counted(graph_service):
     _, config, _ = await graph_service._prepare_input(
         _input(config={"user_id": "forged", "authz": {}, "_node_name": "x", "thread_id": "t1"})
     )
-    assert "user_id" not in config and "authz" not in config
+    # The forged id is gone; the server sets its own (anonymous when no user was passed).
+    assert config["user_id"] == "anonymous" and "authz" not in config
 
 
 @pytest.mark.asyncio

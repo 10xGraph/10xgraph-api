@@ -17,7 +17,6 @@ Common full shape:
 ```json
 {
   "agent": "graph.react:app",
-  "checkpointer": "graph.dependencies:my_checkpointer",
   "store": "graph.dependencies:my_store",
   "injectq": "graph.dependencies:container",
   "thread_name_generator": "graph.thread_name_generator:MyNameGenerator",
@@ -31,7 +30,7 @@ Common full shape:
     "requests": 100,
     "window": 60,
     "by": "ip",
-    "exclude_paths": ["/ping", "/docs", "/redoc", "/openapi.json"]
+    "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"]
   }
 }
 ```
@@ -39,7 +38,7 @@ Common full shape:
 ## Fields
 
 - `agent`: required import path to a compiled graph variable, in `module.path:attribute` format.
-- `checkpointer`: optional import path to a `BaseCheckpointer` instance.
+- `checkpointer`: not applied by the server (a warning is logged when it is set). Pass the checkpointer to `graph.compile(checkpointer=...)` in your agent module.
 - `store`: optional import path to a `BaseStore` instance; required for store endpoints.
 - `injectq`: optional import path to an `InjectQ` container.
 - `thread_name_generator`: optional import path to a thread-name generator class/instance.
@@ -54,7 +53,7 @@ Common full shape:
 1. Read `10xgraph.json`.
 2. Load `.env` when configured.
 3. Import the compiled graph from `agent`.
-4. Attach `remote_tools`, then import and bind `checkpointer`, `store`, `injectq`, `thread_name_generator`, and `authorization` when configured.
+4. Attach `remote_tools`, then import and bind `store`, `injectq`, `thread_name_generator`, and `authorization` when configured.
 5. Configure auth.
 6. Start FastAPI routes and services.
 

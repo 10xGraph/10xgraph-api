@@ -65,6 +65,6 @@ def test_production_alias_turns_on_production_behaviour():
     assert settings.REDOCS_PATH == ""
     # The comparison main.py uses to leave the evals router out.
     app = FastAPI()
-    init_routes(app, evals=settings.MODE != "production")
+    init_routes(app)
     paths = {path for path, _route, _guarded in _iter_routes(app.routes)}
     assert not any(path.startswith("/v1/evals") for path in paths)

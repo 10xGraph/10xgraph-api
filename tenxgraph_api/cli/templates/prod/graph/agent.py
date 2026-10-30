@@ -1,8 +1,9 @@
+import os
 from datetime import datetime
 
 from tenxgraph.core.state import MessageContextManager
 from tenxgraph.prebuilt.agent import ReactAgent
-from tenxgraph.storage.checkpointer import InMemoryCheckpointer
+from tenxgraph.storage.checkpointer import PgCheckpointer
 from dotenv import load_dotenv
 from injectq import InjectQ
 
@@ -13,7 +14,19 @@ from graph.validators.manager import callback_manager
 
 load_dotenv()
 
-checkpointer = InMemoryCheckpointer()
+# Durable thread state: Postgres keeps every thread, Redis caches the hot ones.
+# Set DATABASE_URL and REDIS_URL in .env (see .env.example). The tables are created (or
+# upgraded) when the server starts, so a fresh database needs no setup step.
+checkpointer = PgCheckpointer(
+    postgres_dsn=os.getenv("DATABASE_URL"),
+    redis_url=os.getenv("REDIS_URL"),
+)
+
+# Local testing without Postgres and Redis: comment out the block above and use this.
+# Threads live only in this process (lost on restart, not shared between workers),
+# so switch back to PgCheckpointer once you are ready to deploy.
+# from tenxgraph.storage.checkpointer import InMemoryCheckpointer
+# checkpointer = InMemoryCheckpointer()
 
 # Dependency injection container; 10xgraph.json points at it ("injectq": "graph.agent:container").
 container = InjectQ.get_instance()

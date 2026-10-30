@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import HTTPException
@@ -46,6 +47,19 @@ class CheckpointerUnavailableError(HTTPException, ValueError):
 
 # Messages read per page when collecting a thread's media references for cleanup.
 _CLEANUP_PAGE = 500
+
+
+async def _has_more(
+    count: int, offset: int | None, limit: int | None, probe: Callable[[int], Awaitable[list]]
+) -> bool:
+    """Whether a row exists past this page.
+
+    No checkpointer exposes a total, so a full page triggers a one-row read at the next
+    offset. A short page (or an unlimited read) is the end.
+    """
+    if not limit or count < limit:
+        return False
+    return bool(await probe((offset or 0) + limit))
 
 
 @singleton
@@ -124,7 +138,7 @@ class CheckpointerService:
     async def _thread_media_keys(
         self, cfg: dict[str, Any], skip_message_id: Any = None
     ) -> list[str]:
-        """Media keys referenced by the thread's messages (all pages), minus one message.
+        """Media keys referenced by the thread's messages and state context, minus one message.
 
         A read failure raises, so a partial list is never used: cleanup can only miss a file
         (it stays), never delete one that is still referenced.
@@ -132,6 +146,14 @@ class CheckpointerService:
         keys: list[str] = []
         offset = 0
         try:
+            # Files linked through PUT state live in the state's context, not in message rows.
+            state = await self.checkpointer.aget_state(cfg)
+            for message in getattr(state, "context", None) or []:
+                if skip_message_id is not None and str(getattr(message, "message_id", None)) == str(
+                    skip_message_id
+                ):
+                    continue
+                keys.extend(internal_media_keys(message))
             while True:
                 page = await self.checkpointer.alist_messages(cfg, None, offset, _CLEANUP_PAGE)
                 for message in page:
@@ -363,7 +385,12 @@ class CheckpointerService:
     ) -> MessagesListResponseSchema:
         cfg = self._config(config, user)
         res = await self.checkpointer.alist_messages(cfg, search, offset, limit)
-        return MessagesListResponseSchema(messages=res)
+        has_more = await _has_more(
+            len(res), offset, limit, lambda o: self.checkpointer.alist_messages(cfg, search, o, 1)
+        )
+        return MessagesListResponseSchema(
+            messages=res, has_more=has_more, offset=offset or 0, limit=limit
+        )
 
     async def delete_message(
         self,
@@ -417,7 +444,15 @@ class CheckpointerService:
     ) -> ThreadsListResponseSchema:
         cfg = self._config({}, user)
         res = await self.checkpointer.alist_threads(cfg, search, offset, limit)
-        return ThreadsListResponseSchema(threads=[t.model_dump() for t in res])
+        has_more = await _has_more(
+            len(res), offset, limit, lambda o: self.checkpointer.alist_threads(cfg, search, o, 1)
+        )
+        return ThreadsListResponseSchema(
+            threads=[t.model_dump() for t in res],
+            has_more=has_more,
+            offset=offset or 0,
+            limit=limit,
+        )
 
     async def delete_thread(
         self,
@@ -431,6 +466,9 @@ class CheckpointerService:
             log_safe(sanitize_for_logging(user)),
             log_safe(thread_id),
         )
+        # Cleanup after the thread row is gone is best effort, but a delete that left data
+        # behind must not read as a clean success: each step that failed is named in the reply.
+        incomplete: list[str] = []
         # Collect the files the thread's messages reference before they are gone.
         thread_keys: list[str] = []
         media = self._link_tracking_media()
@@ -438,10 +476,19 @@ class CheckpointerService:
             try:
                 thread_keys = list(dict.fromkeys(await self._thread_media_keys(cfg)))
             except Exception as exc:
-                logger.debug("File cleanup skipped for thread %s: %s", log_safe(thread_id), exc)
+                incomplete.append("files")
+                logger.warning("File cleanup skipped for thread %s: %s", log_safe(thread_id), exc)
         res = await self.checkpointer.aclean_thread(cfg)
-        if thread_keys and media is not None:
-            await media.unlink_threads(thread_keys, str(thread_id))
+        if (
+            thread_keys
+            and media is not None
+            and await media.unlink_threads(thread_keys, str(thread_id))
+        ):
+            incomplete.append("files")
+        # Files still linked to the thread through messages that are gone (cleared or replaced
+        # state) are not in `thread_keys`; release them by their own metadata.
+        if media is not None and await media.release_thread(str(thread_id), cfg.get("user_id")):
+            incomplete.append("files")
 
         # Clean telemetry traces if TelemetryStore is bound in InjectQ
         try:
@@ -453,7 +500,8 @@ class CheckpointerService:
             if telemetry_store:
                 telemetry_store.delete_thread(str(thread_id))
         except Exception as exc:
-            logger.debug(
+            incomplete.append("traces")
+            logger.warning(
                 "Telemetry store cleanup failed for thread %s: %s", log_safe(thread_id), exc
             )
 
@@ -470,10 +518,22 @@ class CheckpointerService:
                 if pending is not None:
                     await pending
         except Exception as exc:
-            logger.debug(
+            incomplete.append("cache")
+            logger.warning(
                 "Ownership cache eviction failed for thread %s: %s", log_safe(thread_id), exc
             )
 
+        if incomplete:
+            steps = ", ".join(dict.fromkeys(incomplete))
+            return ResponseSchema(
+                success=False,
+                message=f"Thread deleted, but cleanup did not finish: {steps}",
+                data={
+                    "deleted": True,
+                    "cleanup_failed": list(dict.fromkeys(incomplete)),
+                    "result": res,
+                },
+            )
         return ResponseSchema(success=True, message="Thread deleted successfully", data=res)
 
     # -------------------------------------------------

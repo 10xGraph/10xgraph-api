@@ -131,9 +131,9 @@ async def test_redis_is_pinged_and_closed(monkeypatch):
         async def aclose(self):
             calls.append("closed")
 
-    import redis.asyncio
-
-    monkeypatch.setattr(redis.asyncio.Redis, "from_url", classmethod(lambda cls, url: _Client()))
+    monkeypatch.setattr(
+        "tenxgraph_api.src.app.core.redis_client.create_redis", lambda url, **kw: _Client()
+    )
     assert (await readiness.readiness(None, None, "redis://cache"))["redis"] == "ok"
     assert calls == ["ping", "closed"]
 
@@ -224,3 +224,34 @@ async def test_results_are_cached_and_shared_by_concurrent_callers(monkeypatch):
     monkeypatch.setattr(readiness, "CACHE_SECONDS", 0.0)
     await readiness.cached_readiness(probe, None, None)
     assert len(calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# schema version (G-164)
+# ---------------------------------------------------------------------------
+
+
+class _PgWithVersion(_PgLike):
+    def __init__(self, found, expected=4):
+        super().__init__()
+        self._found, self._expected = found, expected
+
+    async def aget_schema_version(self):
+        return self._found
+
+    def _get_current_schema_version(self):
+        return self._expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("found", [0, 3])
+async def test_old_or_missing_schema_is_not_ready(found):
+    checks = await readiness.readiness(_PgWithVersion(found), None, None)
+    assert checks["checkpointer"] == "fail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("found", [4, 5])
+async def test_current_schema_is_ready(found):
+    checks = await readiness.readiness(_PgWithVersion(found), None, None)
+    assert checks["checkpointer"] == "ok"

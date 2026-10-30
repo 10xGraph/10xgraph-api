@@ -5,13 +5,13 @@ core framework see `agentflow/CLAUDE.md`; for the TS client, docs, or playground
 for the monorepo overview see the workspace-root `CLAUDE.md`.
 
 - Package name (PyPI): `10xgraph-api` (formerly `10xscale-agentflow-cli`, last release 0.6.x)
-- Version: `1.0.0rc1` (`pyproject.toml`; 0.7.0 was the first release under the 10xGraph name). `CLI_VERSION`
+- Version: `1.0.0rc2` (`pyproject.toml`; 0.7.0 was the first release under the 10xGraph name). `CLI_VERSION`
   and `tenxgraph_api.__version__` are single-sourced from the installed distribution metadata
   (falling back to `pyproject.toml` only for a non-installed source checkout).
 - Requires: Python >= 3.12 · Status: `5 - Production/Stable`
 - Console entry points: `10xgraph = tenxgraph_api.cli.main:main`, plus the deprecated alias
   `agentflow = tenxgraph_api.cli.main:legacy_main` (prints a notice to stderr; removed in 2.0)
-- Depends on the core framework: `10xgraph>=1.0.0rc1,<2.0` (import `tenxgraph`). Must not be
+- Depends on the core framework: `10xgraph>=1.0.0rc2,<2.0` (import `tenxgraph`). Must not be
   installed alongside the old `10xscale-agentflow`: both provide an `agentflow` module.
 
 ## Rename compatibility (kept until 2.0)
@@ -54,7 +54,7 @@ Public exports from the package root (`from tenxgraph_api import ...`): `BaseAut
 | `10xgraph dev` | The only server command: local Uvicorn dev server (reload on) via `commands/api.py::APICommand`, opens the hosted playground when ready. `api` and `play` were removed (use `dev --no-open` / `dev`); production runs Gunicorn in the `10xgraph build` image | `--config/-c` (default `10xgraph.json`), `--host/-H`, `--port/-p` (8000), `--reload/--no-reload`, `--open/--no-open`, `-v/-q` |
 | `10xgraph init` | Interactively scaffold a project (guided prompts pick dev vs production, auth, rate limit) | `--path/-p`, `--force/-f`, `--name`, `--template` (quick-start\|production), `--auth` (none\|jwt\|custom), `--rate-limit` (none\|memory\|redis), `--provider` (google\|openai\|anthropic), `--websocket/--no-websocket` (default off; writes `websocket.enabled`). Prod `pyproject.toml` depends on `10xgraph[<provider>]` and `10xgraph-api[jwt,redis,websocket]` as chosen, `--yes/-y`, `--non-interactive`, `--dry-run`. There is **no `--prod` flag** |
 | `10xgraph build` | Generate a `Dockerfile` (and optionally `docker-compose.yml` / `k8s.yaml`). The builder stage strips CLI assets, runs `tenxgraph_api/_slim_image.py` (uninstalls typer/rich/questionary and what only they need, unless another package needs them) and removes pip, so the image carries no CLI code paths | `--output/-o`, `--force/-f`, `--python-version` (3.13), `--port`, `--docker-compose/--no-docker-compose`, `--k8s/--no-k8s`, `--service-name` |
-| `10xgraph eval` | Run agent evaluations; discovers `*_eval.py`/`eval_*.py`, runs cases (optionally `--parallel`), writes HTML+JSON to `eval_reports/` | `--output/-o`, `--no-report`, `--threshold/-t`, `--open`, `--parallel/-p`, `--max-concurrency/-c` |
+| `10xgraph eval` | Run agent evaluations; discovers `*_eval.py`/`eval_*.py`, runs cases (optionally `--parallel`), writes JSON and HTML reports to `eval_reports/` and opens the HTML report in the browser (only at an interactive terminal: skipped with `--no-open`, `--no-report`, `-q`, json/jsonl, `--non-interactive`, `CI`, non-TTY; `evaluation.open_report` in `10xgraph.json` sets the default). Simulations print per-turn step lines via `ProgressRun.step` | `--output/-o`, `--no-report`, `--threshold/-t`, `--parallel/-p`, `--max-concurrency/-c`, `--open/--no-open` |
 | `10xgraph test` | Run project tests via pytest (args after `--` forwarded verbatim) | `--coverage/-C`, `--html`, `-k`, path arg |
 | `10xgraph skills` | Install the bundled 10xGraph skill (Agent Skills spec) for Codex/Claude/GitHub, or validate skills | `--agent/-a`, `--path/-p`, `--force/-f`, `--all`, `--list/-l`, `--validate PATH` |
 | `10xgraph version` | Show CLI + core framework version | both resolve from installed distribution metadata |
@@ -194,7 +194,7 @@ and for redis backend a `redis` sub-object `{ "url", "prefix" }` (or shorthand U
   `THREAD_BUSY_WAIT_SECONDS` (30), then 409 "thread is busy" in the standard error envelope (WS: error chunk
   `data.reason = "thread is busy"`, socket stays open). Request option `on_busy`
   (`"wait"` | `"cancel"`, top level next to `recursion_limit`; not on AG-UI): `cancel` calls
-  `GraphService.stop_graph` while waiting. `/v1/graph/live` is not locked.
+  `GraphService.stop_graph` while waiting. `/v1/graph/live` takes the lock for the session (and a run slot) too, refused with a fatal `thread_busy` / `too_many_runs` error event and close 1013. Every entry point takes lock + run slot through `routers/graph/run_guard.py::acquire_run_guard`. A Redis error falls back to a per-process count; a refresh that finds its lease gone sets `Lease.lost` and takes it again.
 - **Production error chunks:** `graph_service.sanitize_error_chunk` (called in
   `stream_chunks`, so stream, WS and AG-UI share it) replaces `data.reason` / `data.error` /
   `data.message` and `state.execution_meta.internal_data["error"]` of `ERROR` chunks with the
@@ -227,13 +227,13 @@ were removed in the 0.5.0 readiness pass; they were fully commented out and neve
 `core/config/settings.py` is a `pydantic-settings` `Settings` (with `extra="allow"`, so unknown
 env vars are tolerated). Notable vars: `APP_NAME`, `APP_VERSION`, `MODE` (`production` | `prod` |
 `development` | `dev` | `local`, case-insensitive, normalised to `production` or `development`;
-anything else refuses to start, unset is `development`), `LOG_LEVEL`, `IS_DEBUG`, `MAX_REQUEST_SIZE` (10MB default), security headers
+anything else refuses to start, unset is `development`), `LOG_LEVEL`, `MAX_REQUEST_SIZE` (10MB default), security headers
 (`SECURITY_HEADERS_ENABLED`, `HSTS_*`, `FRAME_OPTIONS`, `CSP_POLICY`, ...), `ORIGINS` (CORS,
 default `*` with a wildcard warning), `ALLOWED_HOST`, `ROOT_PATH`/`DOCS_PATH`/`REDOCS_PATH`,
 `REDIS_URL`, `SENTRY_DSN`, `SNOWFLAKE_*` (epoch/node/worker/bit layout), `JWT_SECRET_KEY`/
 `JWT_ALGORITHM`, `OTEL_ENABLED`/`OTEL_SERVICE_NAME`/`OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_LEVEL`,
 `STRICT_PRODUCTION_CHECKS` (production refuses wildcard `ALLOWED_HOST`/`ORIGINS` or enabled
-docs). `IS_DEBUG` is forced off in production. Media: `MEDIA_REQUIRE_OWNER` defaults on in
+docs). Debug follows `MODE` (on in development, off in production); a leftover `IS_DEBUG` is ignored with a warning. Media: `MEDIA_REQUIRE_OWNER` defaults on in
 production. In production: set `MODE=production`, a non-`*` `ORIGINS`, and a strong
 `JWT_SECRET_KEY`; see `SECURITY.md` for the full checklist.
 

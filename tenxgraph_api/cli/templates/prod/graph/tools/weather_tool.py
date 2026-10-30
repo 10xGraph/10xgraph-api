@@ -1,5 +1,6 @@
 import logging
 import random
+import zlib
 
 from tenxgraph.core.state.stream_emitter import StreamEmitter
 
@@ -11,11 +12,32 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES = 3
 
 
+_CITY_WEATHER = {
+    "london": "cloudy, 14C",
+    "new york": "partly cloudy, 18C",
+    "tokyo": "sunny, 24C",
+    "paris": "rainy, 12C",
+    "rome": "sunny, 27C",
+    "berlin": "overcast, 10C",
+    "sydney": "clear, 22C",
+    "cairo": "hot and dry, 35C",
+}
+_FALLBACK_WEATHER = ("sunny, 25C", "cloudy, 15C", "rainy, 11C", "windy, 17C", "foggy, 9C")
+
+
+def _weather_for(location: str) -> str:
+    """Deterministic weather: known cities from a table, others from a stable hash."""
+    key = location.strip().lower()
+    if key in _CITY_WEATHER:
+        return _CITY_WEATHER[key]
+    return _FALLBACK_WEATHER[zlib.crc32(key.encode("utf-8")) % len(_FALLBACK_WEATHER)]
+
+
 def call_weather_api(location: str) -> str:
     is_failed = random.choice([True, False])  # noqa: S311
     if is_failed:
         raise Exception("Failed to fetch weather data due to a simulated API error.")
-    return f"The weather in {location} is sunny"
+    return f"The weather in {location} is {_weather_for(location)}"
 
 
 def get_weather(

@@ -31,6 +31,7 @@ from tenxgraph_api.src.app.core.auth.request_config import (
     ClientInputError,
     request_size_error,
 )
+from tenxgraph_api.src.app.core.utils.log_sanitizer import summarize_validation_error
 
 
 _MEDIA_BLOCKS = {
@@ -69,7 +70,9 @@ def parse_run_input(body: Any) -> RunAgentInput:
     try:
         return RunAgentInput.model_validate(body)
     except ValidationError as exc:
-        raise ClientInputError(f"Invalid AG-UI RunAgentInput: {exc}") from exc
+        raise ClientInputError(
+            f"Invalid AG-UI RunAgentInput: {summarize_validation_error(exc)}"
+        ) from exc
 
 
 def _trailing_turn(messages: list[Any]) -> list[Any]:

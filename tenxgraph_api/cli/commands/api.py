@@ -116,6 +116,11 @@ class APICommand(BaseCommand):
                     except ValueError as e:
                         raise ConfigurationError(str(e)) from e
 
+                    for warning in self.production_launch_warnings(
+                        os.environ.get("MODE"), validated_options["host"], reload
+                    ):
+                        self.output.warning(warning)
+
                     os.environ["GRAPH_PATH"] = str(actual_config_path)
 
                     # Add project root to sys.path for importing graph modules
@@ -191,6 +196,29 @@ class APICommand(BaseCommand):
                 port=port,
             )
             return self.handle_error(server_error)
+
+    @staticmethod
+    def production_launch_warnings(mode: str | None, host: str, reload: bool) -> list[str]:
+        """Warnings for starting the dev server with settings meant for a real deployment."""
+        try:
+            production = normalize_mode_value(mode) == "production"
+        except ValueError:
+            return []
+        if not production:
+            return []
+        warnings = []
+        if reload:
+            warnings.append(
+                "MODE=production with --reload: the file watcher restarts the server on "
+                "every change. `10xgraph dev` is for development; deploy the `10xgraph build` "
+                "image instead."
+            )
+        if host not in ("127.0.0.1", "localhost", "::1", "[::1]"):
+            warnings.append(
+                f"MODE=production and --host {host} exposes the dev server to the network "
+                "without TLS. Use `10xgraph build` and put a TLS proxy in front."
+            )
+        return warnings
 
     @staticmethod
     def _port_in_use(host: str, port: int) -> bool:

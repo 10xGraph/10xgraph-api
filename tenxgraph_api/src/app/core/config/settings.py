@@ -2,11 +2,10 @@ import logging
 import os
 from functools import lru_cache
 
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
-IS_PRODUCTION = False
 LOGGER_NAME = os.getenv("LOGGER_NAME", "10xgraph-api")
 
 logger = logging.getLogger(LOGGER_NAME)
@@ -47,6 +46,18 @@ def _csv_tokens(value: str) -> list[str]:
     return [token.strip() for token in value.split(",") if token.strip()]
 
 
+class JwtVerificationKey(BaseModel):
+    """One JWT verification key, optionally named by the ``kid`` its tokens carry."""
+
+    kid: str | None = None
+    key: str = Field(min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_plain_string(cls, value):
+        return {"key": value} if isinstance(value, str) else value
+
+
 class Settings(BaseSettings):
     """
     This class defines the configuration settings for the application.
@@ -80,8 +91,6 @@ class Settings(BaseSettings):
     # DEBUG = 10
     # NOTSET = 0
     LOG_LEVEL: str = "INFO"
-    # Forced off when MODE=production, whatever the environment says.
-    IS_DEBUG: bool = True
     # When true, MODE=production refuses to start on the settings it otherwise only warns
     # about: wildcard ALLOWED_HOST, wildcard ORIGINS, and enabled API docs. Unset means on in
     # production and off in development; STRICT_PRODUCTION_CHECKS=false opts out.
@@ -135,6 +144,34 @@ class Settings(BaseSettings):
     ###### REDIS Config ##########
     #################################
     REDIS_URL: str | None = None
+    # Limits for every Redis client the API opens (run locks, caps, rate limit, token
+    # revocation, ownership cache, readiness probe). Without them a Redis that stops
+    # answering (not refusing) would hang each request that touches it. Seconds; 0 turns the
+    # timeout off. REDIS_MAX_CONNECTIONS bounds each client's pool; a request waits up to
+    # REDIS_POOL_TIMEOUT for a free connection. 0 means no bound.
+    REDIS_SOCKET_TIMEOUT: float = Field(default=5.0, ge=0.0)
+    REDIS_CONNECT_TIMEOUT: float = Field(default=5.0, ge=0.0)
+    REDIS_MAX_CONNECTIONS: int = Field(default=50, ge=0)
+    REDIS_POOL_TIMEOUT: float = Field(default=5.0, ge=0.0)
+    REDIS_HEALTH_CHECK_INTERVAL: float = Field(default=30.0, ge=0.0)
+    # Put in front of every key the API writes to Redis (run locks and caps, ownership cache,
+    # token revocation), so two deployments that share one Redis cannot read each other's
+    # entries. Empty means no prefix. Give the core checkpointer the same value through its
+    # ``redis_key_prefix`` option so its cache keys are separated too.
+    REDIS_KEY_PREFIX: str = ""
+
+    #################################
+    ###### Shutdown #################
+    #################################
+    # Passed to ``graph.aclose()`` when the app stops (after uvicorn has finished or cut open
+    # responses). GRACE: seconds runs still going get to finish on their own. STOP: seconds
+    # after the stop flag, while each run saves its thread INTERRUPTED. TIMEOUT: seconds for the
+    # hard cancel and the background-task drain. Their sum must stay under the margin between
+    # uvicorn's graceful shutdown and gunicorn's --graceful-timeout (60 s in the generated
+    # image), or the worker is killed mid-close.
+    SHUTDOWN_GRACE_SECONDS: float = Field(default=10.0, ge=0.0)
+    SHUTDOWN_STOP_SECONDS: float = Field(default=10.0, ge=0.0)
+    SHUTDOWN_TIMEOUT_SECONDS: float = Field(default=30.0, ge=0.0)
 
     #################################
     ###### sentry Config ############
@@ -164,6 +201,22 @@ class Settings(BaseSettings):
     # another service that shares the signing key is not accepted here.
     JWT_ISSUER: str | None = None
     JWT_AUDIENCE: str | None = None
+    # Extra verification keys for key rotation (JSON in the environment), e.g.
+    # ``[{"kid": "2026-10", "key": "..."}, {"key": "old-secret-without-kid"}]``. They are tried
+    # beside ``JWT_SECRET_KEY``, which keeps working unchanged. A token whose header names a
+    # ``kid`` is checked against the keys with that ``kid`` (then the keys without one); a token
+    # without ``kid`` is tried against every key. Off by default.
+    JWT_SECRET_KEYS: list[JwtVerificationKey] | None = None
+    # When set, a token older than this many seconds (by its ``iat`` claim) is refused, and a
+    # token without ``iat`` is refused too. Off by default.
+    JWT_MAX_TOKEN_AGE_SECONDS: int | None = Field(default=None, gt=0)
+
+    #################################
+    ###### Idempotency ##############
+    #################################
+    # How long a finished run is remembered under its ``Idempotency-Key``. The header is opt-in:
+    # a request without it behaves as before.
+    IDEMPOTENCY_TTL_SECONDS: int = Field(default=86400, gt=0)
 
     #################################
     ###### OTEL Config ##############
@@ -201,17 +254,18 @@ class Settings(BaseSettings):
         """Check for insecure configurations in production mode."""
         if self.STRICT_PRODUCTION_CHECKS is None:
             self.STRICT_PRODUCTION_CHECKS = self.MODE == "production"
+        # IS_DEBUG used to switch debug on or off; debug now follows MODE. Never fail on it.
+        if any(key.upper() == "IS_DEBUG" for key in (*os.environ, *(self.model_extra or {}))):
+            logger.warning(
+                "IS_DEBUG is no longer read; debug follows MODE "
+                "(on in development, off in production)."
+            )
         if self.MODE == "production":
             # Docs (and the OpenAPI schema behind them) are off in production unless a path
             # was set explicitly.
             for field in ("DOCS_PATH", "REDOCS_PATH"):
                 if field not in self.model_fields_set:
                     setattr(self, field, "")
-
-            # Debug output is never allowed in production: enforce it rather than warn.
-            if self.IS_DEBUG:
-                self.IS_DEBUG = False
-                logger.warning("IS_DEBUG=true is ignored in production; debug is forced off.")
 
             warnings = []
 
@@ -244,6 +298,19 @@ class Settings(BaseSettings):
                 )
             if warnings:
                 logger.warning("\n".join(["\n🔒 PRODUCTION SECURITY WARNINGS:", *warnings]))
+
+            # Not security holes, but both leak request content into the logs and traces.
+            if (self.LOG_LEVEL or "").upper() in ("DEBUG", "NOTSET"):
+                logger.warning(
+                    "LOG_LEVEL=%s in production writes request and run details to the logs. "
+                    "Use INFO or WARNING.",
+                    self.LOG_LEVEL,
+                )
+            if (self.OTEL_LEVEL or "").lower() == "full" and self.OTEL_ENABLED:
+                logger.warning(
+                    "OTEL_LEVEL=full in production exports message content to your trace "
+                    "backend. Use 'standard' unless you need it."
+                )
 
         return self
 

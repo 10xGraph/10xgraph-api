@@ -124,19 +124,24 @@ async def test_unsupported_checkpointer_fails_closed():
 
 
 @pytest.mark.asyncio
-async def test_no_checkpointer_fails_closed():
+async def test_no_checkpointer_fails_closed(monkeypatch):
+    from injectq import InjectQ
+
+    # The property falls back to the global DI container, which other tests in a long run may
+    # have bound a checkpointer into. Point it at an empty container so "none configured" holds.
+    monkeypatch.setattr(InjectQ, "get_instance", classmethod(lambda cls: InjectQ()))
     b = OwnershipAuthorizationBackend(checkpointer=None)
-    # Property tries the DI container; in this unit context nothing is bound -> None.
-    b._checkpointer = None
     assert b.checkpointer is None
     assert await b.authorize(ALICE, "checkpointer", "read", resource_id="t1") is False
     assert await b.authorize(ALICE, "graph", "invoke", resource_id="t1") is False
 
 
 @pytest.mark.asyncio
-async def test_no_checkpointer_still_allows_requests_without_a_thread():
+async def test_no_checkpointer_still_allows_requests_without_a_thread(monkeypatch):
+    from injectq import InjectQ
+
+    monkeypatch.setattr(InjectQ, "get_instance", classmethod(lambda cls: InjectQ()))
     b = OwnershipAuthorizationBackend(checkpointer=None)
-    b._checkpointer = None
     assert await b.authorize(ALICE, "checkpointer", "read", resource_id=None) is True
 
 

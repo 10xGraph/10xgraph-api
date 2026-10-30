@@ -1,11 +1,13 @@
 """Config command implementation: a browser editor for ``10xgraph.json``."""
 
+import json
 import webbrowser
 from pathlib import Path
 from typing import Any
 
 from tenxgraph_api.cli.commands import BaseCommand
 from tenxgraph_api.cli.config_editor import ConfigEditorServer
+from tenxgraph_api.cli.config_editor.validation import production_readiness_warnings
 from tenxgraph_api.cli.constants import DEFAULT_CONFIG_FILE, LEGACY_CONFIG_FILE
 from tenxgraph_api.cli.exceptions import ServerError
 
@@ -51,6 +53,7 @@ class ConfigCommand(BaseCommand):
             },
             next_steps=["Press Ctrl+C to stop the editor when you are done."],
         )
+        self._print_readiness_warnings(config_path)
         if open_browser:
             webbrowser.open_new_tab(server.url)
 
@@ -61,6 +64,17 @@ class ConfigCommand(BaseCommand):
         finally:
             server.shutdown()
         return 0
+
+    def _print_readiness_warnings(self, config_path: Path) -> None:
+        # Skip silently when the file is missing or not valid JSON; the editor reports that.
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        for issue in production_readiness_warnings(data):
+            self.output.warning(f"{issue['path']}: {issue['message']}")
 
 
 def _file_note(config_path: Path, seeded: bool, seed_path: Path | None) -> str:

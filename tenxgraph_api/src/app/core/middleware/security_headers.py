@@ -132,6 +132,9 @@ class SecurityHeadersMiddleware:
             ("X-Frame-Options", self.frame_options),
             ("X-XSS-Protection", self.xss_protection),  # legacy browsers
             ("Referrer-Policy", self.referrer_policy),
+            # API answers carry per-user data; a shared cache or the browser must not keep them.
+            # A route that sets its own Cache-Control (a file download) keeps it.
+            ("Cache-Control", "no-store"),
         ]
         if self.permissions_policy:
             headers.append(("Permissions-Policy", self.permissions_policy))

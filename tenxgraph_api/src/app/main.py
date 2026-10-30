@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 
@@ -6,7 +7,6 @@ from fastapi.concurrency import asynccontextmanager
 from injectq import InjectQ
 from injectq.integrations.fastapi import setup_fastapi
 from tenxgraph.core.graph import CompiledGraph
-from tenxgraph.utils.background_task_manager import BackgroundTaskManager
 
 # # Prometheus Instrumentator import
 # from prometheus_fastapi_instrumentator import Instrumentator
@@ -25,11 +25,9 @@ from tenxgraph_api.src.app.routers import init_routes
 
 logger = logging.getLogger("tenxgraph_api")
 
-# How long shutdown waits for in-flight background work (event publishing,
-# checkpoint writes) before giving up. Bounded on purpose: a wedged sink must not
-# hold the pod open until the kubelet SIGKILLs it, which would lose more than
-# draining for a fixed window and then moving on.
-SHUTDOWN_DRAIN_TIMEOUT_SECONDS = 30.0
+# Boot-time temp media cleanup is best effort. It must not hold the app (and so the first
+# readiness probe) behind a slow or wedged checkpointer or media store.
+BOOT_CLEANUP_TIMEOUT_SECONDS = 15.0
 
 # GraphConfig loads the ``env`` file named in 10xgraph.json, so it must run before Settings
 # is first built. `10xgraph dev` loads that file itself, but plain `gunicorn ...main:app`
@@ -45,13 +43,79 @@ container: InjectQ = load_container(graph_config.injectq_path) or InjectQ.get_in
 container.bind_instance(GraphConfig, graph_config)
 
 
+def _media_store():
+    """The media store the API serves files from, or None when media is not wired.
+
+    The app binds ``MediaService`` (never a bare ``media_store``), so that is where it lives.
+    """
+    try:
+        from tenxgraph_api.src.app.routers.media import MediaService
+
+        service = container.try_get(MediaService)
+        return service.store if service is not None else None
+    except Exception as exc:
+        logger.debug("No media store available: %s", exc)
+        return None
+
+
+# Files younger than this are never swept: an upload may still be writing them.
+MEDIA_SWEEP_MIN_AGE_SECONDS = 3600.0
+
+
+async def _sweep_media_loop(interval: float) -> None:
+    """Delete files a crash left in the media store, every ``interval`` seconds, forever.
+
+    Runs once straight away (the crash that left them was probably the last shutdown). A store
+    without ``sweep_orphans`` (memory, cloud, older core) makes this return at once.
+    """
+    while True:
+        store = _media_store()
+        sweep = getattr(store, "sweep_orphans", None)
+        if not callable(sweep):
+            return
+        try:
+            removed = await sweep(MEDIA_SWEEP_MIN_AGE_SECONDS)
+            if removed:
+                logger.info("Media sweeper removed %d orphan files", removed)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Media sweep failed: %s", exc)
+        await asyncio.sleep(interval)
+
+
+async def _prepare_checkpointer() -> None:
+    """Create or upgrade the checkpointer's schema at boot when it has a ``asetup`` step.
+
+    A fresh Postgres then works without a manual setup call, and a bad connection string or
+    missing permission shows in the boot log instead of on the first request. Best effort:
+    the checkpointer also creates its schema on its first query, so a failure here only logs.
+    """
+    checkpointer = container.try_get("checkpointer") or container.try_get("BaseCheckpointer")
+    asetup = getattr(checkpointer, "asetup", None)
+    if not callable(asetup):
+        return
+    try:
+        await asyncio.wait_for(asetup(), BOOT_CLEANUP_TIMEOUT_SECONDS)
+    except Exception as exc:
+        logger.error(
+            "Checkpointer setup failed at startup (%s: %s); it will be retried on first use",
+            type(exc).__name__,
+            exc,
+        )
+
+
 async def _cleanup_temp_media_cache() -> None:
     """Run best-effort cleanup of expired temporary media cache entries."""
     try:
         from tenxgraph.storage.media.temp_cache import TemporaryMediaCache
 
         checkpointer = container.try_get("checkpointer") or container.try_get("BaseCheckpointer")
-        media_store = container.try_get("media_store") or container.try_get("BaseMediaStore")
+        media_store = (
+            container.try_get("media_store")
+            or container.try_get("BaseMediaStore")
+            or _media_store()
+        )
 
         if checkpointer is None:
             logger.debug("No checkpointer available, skipping temp media cache cleanup")
@@ -77,27 +141,50 @@ async def lifespan(app: FastAPI):
         container=container,
     )
 
+    await _prepare_checkpointer()
+
     # Clean up expired temporary media cache on startup
-    await _cleanup_temp_media_cache()
+    try:
+        await asyncio.wait_for(_cleanup_temp_media_cache(), BOOT_CLEANUP_TIMEOUT_SECONDS)
+    except TimeoutError:
+        logger.warning(
+            "Temporary media cache cleanup timed out after %ss; continuing startup",
+            BOOT_CLEANUP_TIMEOUT_SECONDS,
+        )
 
     # load Store
     # store = load_store(graph_config.store_path)
     # injector.binder.bind(BaseStore, store)
 
+    sweeper: asyncio.Task | None = None
+    from tenxgraph_api.src.app.core.config.media_settings import get_media_settings
+
+    sweep_interval = get_media_settings().MEDIA_SWEEP_INTERVAL_SECONDS
+    if sweep_interval > 0:
+        sweeper = asyncio.create_task(_sweep_media_loop(sweep_interval))
+
     yield
 
-    # Shutdown. Order matters: drain in-flight work BEFORE tearing down the
-    # resources that work depends on.
-    #
-    # Previously this went straight to `graph.aclose()`, which released the graph's
-    # resources while background work (publisher emits, checkpoint writes) could
-    # still be in flight -- so a rolling deploy could drop the tail end of a run's
-    # events and its final checkpoint.
-    await _drain_background_tasks()
+    app.state.draining = True  # readiness answers 503 from here on
+    if sweeper is not None:
+        sweeper.cancel()
+        await asyncio.gather(sweeper, return_exceptions=True)
 
+    # Shutdown. Order matters: the sweeper is already stopped, so nothing touches the media
+    # store while the graph closes. One core call ends active runs in phases (finish, stop,
+    # cancel; each saved INTERRUPTED), drains its own background work (events, checkpoint
+    # writes) and then releases the checkpointer, publisher and store. The API's own clients
+    # close after it because that work may still use them.
     if graph:
-        # release all the resources
-        await graph.aclose()
+        try:
+            stats = await graph.aclose(
+                grace=settings.SHUTDOWN_GRACE_SECONDS,
+                stop_timeout=settings.SHUTDOWN_STOP_SECONDS,
+                timeout=settings.SHUTDOWN_TIMEOUT_SECONDS,
+            )
+            logger.info("Graph closed: %s", stats)
+        except Exception as exc:
+            logger.warning("Graph close did not finish cleanly: %s", exc)
 
     # Close rate-limit backend (e.g. Redis connection pool)
     backend = getattr(app.state, "rate_limit_backend", None)
@@ -135,37 +222,10 @@ async def lifespan(app: FastAPI):
         logger.debug("Authorization backend close failed: %s", exc)
 
 
-async def _drain_background_tasks(timeout: float = SHUTDOWN_DRAIN_TIMEOUT_SECONDS) -> None:
-    """Wait for in-flight background tasks (event publishing, checkpoint writes).
-
-    Bounded: if the sink is wedged we still shut down, rather than hanging the pod
-    until the kubelet SIGKILLs it -- which would lose strictly more than draining
-    for a bounded window and then giving up.
-    """
-    try:
-        task_manager = InjectQ.get_instance().try_get(BackgroundTaskManager)
-    except Exception:  # container not configured; nothing to drain
-        return
-
-    if task_manager is None:
-        return
-
-    pending = getattr(task_manager, "pending_count", 0)
-    if not pending:
-        return
-
-    logger.info("Draining %d in-flight background tasks before shutdown", pending)
-    try:
-        await task_manager.wait_for_all(timeout=timeout)
-        logger.info("Background tasks drained")
-    except Exception as e:
-        logger.warning("Background task drain did not finish cleanly: %s", e)
-
-
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    debug=settings.MODE == "DEVELOPMENT",
+    debug=settings.MODE != "production",
     summary=settings.SUMMARY,
     docs_url=settings.DOCS_PATH if settings.DOCS_PATH else None,
     redoc_url=settings.REDOCS_PATH if settings.REDOCS_PATH else None,
@@ -189,11 +249,9 @@ init_errors_handler(app)
 graph_config.media  # noqa: B018
 
 # init routes
-# The evals viewer reads local report files and has no auth, so it is a development tool only.
 # The AG-UI endpoint is opt-in through 10xgraph.json; the WebSocket routes can be turned off there.
 init_routes(
     app,
-    evals=settings.MODE != "production",
     ag_ui=graph_config.ag_ui.enabled,
     websocket=graph_config.websocket.enabled,
 )

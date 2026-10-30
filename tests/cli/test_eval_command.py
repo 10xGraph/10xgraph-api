@@ -167,6 +167,7 @@ async def test_run_flat_pool_case_error(cmd):
     case1 = MagicMock()
     case1.eval_id = "c1"
     case1.name = "case_name"
+    case1.expected_summary.return_value = {"response": "r", "input": "q"}
     evaluator = MagicMock()
 
     async def mock_evaluate_case(case, collector_override):
@@ -192,6 +193,8 @@ async def test_run_flat_pool_case_error(cmd):
         assert len(results) == 1
         assert results[0][3].passed is False
         assert "evaluation failed" in results[0][3].error
+        assert results[0][3].expected == {"response": "r", "input": "q"}
+        assert results[0][3].duration_seconds > 0
 
 
 @pytest.mark.asyncio
@@ -214,7 +217,7 @@ async def test_run_flat_pool_simulation(cmd):
     sim_result.turns = 2
     sim_result.goals_achieved = 1
 
-    async def mock_simulator_run(graph, scenario):
+    async def mock_simulator_run(graph, scenario, on_event=None):
         return sim_result
 
     simulator.run = mock_simulator_run
@@ -241,7 +244,7 @@ async def test_run_flat_pool_simulation_error(cmd):
     mock_criterion.threshold = 0.7
     simulator.criteria = [mock_criterion]
 
-    async def mock_simulator_run(graph, scenario):
+    async def mock_simulator_run(graph, scenario, on_event=None):
         raise ValueError("simulation failed")
 
     simulator.run = mock_simulator_run
@@ -297,8 +300,8 @@ def test_execute_success(cmd, tmp_path):
     mock_report.summary.total_token_usage = TokenUsage(input_tokens=100, output_tokens=50)
 
     mock_rep_mgr_res = MagicMock()
-    mock_rep_mgr_res.html_path = "/absolute/path/to/report.html"
     mock_rep_mgr_res.json_path = "path/to/report.json"
+    mock_rep_mgr_res.html_path = "path/to/report.html"
     mock_rep_mgr_res.has_errors = False
 
     mock_rep_mgr = MagicMock()
@@ -323,12 +326,11 @@ def test_execute_success(cmd, tmp_path):
         patch.object(cmd, "_run_flat_pool", return_value=quads),
         patch.object(cmd, "_merge_reports", return_value=mock_report),
         patch("tenxgraph_api.cli.commands.eval.ReporterManager", return_value=mock_rep_mgr),
-        patch("webbrowser.open") as mock_web_open,
     ):
-        code = cmd.execute(target=str(tmp_path), open_report=True)
+        code = cmd.execute(target=str(tmp_path))
         assert code == 0
-        mock_web_open.assert_called_once()
-        assert len(cmd.output.successes) > 0
+        assert any("Evals > Open report file" in m for m in cmd.output.infos)
+        assert any(m.startswith("HTML report:") for m in cmd.output.infos)
 
 
 def test_execute_below_threshold(cmd, tmp_path):
@@ -546,7 +548,7 @@ async def test_run_flat_pool_simulation_no_criterion(cmd):
     sim_result.turns = 2
     sim_result.goals_achieved = 1
 
-    async def mock_simulator_run(graph, scenario):
+    async def mock_simulator_run(graph, scenario, on_event=None):
         return sim_result
 
     simulator.run = mock_simulator_run
@@ -623,3 +625,14 @@ def test_execute_load_config_error(cmd, tmp_path):
     ):
         code = cmd.execute(target=str(tmp_path))
         assert code == 1
+
+
+def test_threshold_decides_the_exit_code():
+    """A pass rate at or above --threshold exits 0 even when it is below 100 percent."""
+    from tenxgraph_api.cli.commands.eval import EvalCommand
+
+    assert EvalCommand._exit_code(0.8, 0.75) == 0
+    assert EvalCommand._exit_code(0.75, 0.75) == 0
+    assert EvalCommand._exit_code(0.7, 0.75) == 1
+    assert EvalCommand._exit_code(0.9, None) == 1
+    assert EvalCommand._exit_code(1.0, None) == 0

@@ -8,7 +8,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/10xgraph-api)](https://pypi.org/project/10xgraph-api/)
 [![License](https://img.shields.io/github/license/10xGraph/10xgraph-api)](https://github.com/10xGraph/10xgraph-api/blob/main/LICENSE)
 
-`10xgraph-api` generates the production server around a [10xGraph](https://github.com/10xGraph/10xGraph) agent. Point `10xgraph.json` at your compiled graph and it serves REST, SSE streaming, WebSocket and realtime-audio endpoints with JWT or custom auth, scoped authorization on every endpoint, owner-only threads and rate limiting, then writes your Docker Compose and Kubernetes files. MIT licensed and self-hosted.
+`10xgraph-api` generates the production server around a [10xGraph](https://github.com/10xGraph/10xGraph) agent. Point `10xgraph.json` at your compiled graph and it serves REST, NDJSON streaming, WebSocket and realtime-audio endpoints with JWT or custom auth, scoped authorization on every endpoint, owner-only threads and rate limiting, then writes your Docker Compose and Kubernetes files. MIT licensed and self-hosted.
 
 Other frameworks give you the graph. 10xGraph gives you the graph and the server around it, in the same open-source project.
 
@@ -16,7 +16,7 @@ Other frameworks give you the graph. 10xGraph gives you the graph and the server
 
 ## What the server gives you
 
-- **Endpoints generated from the graph.** Invoke, SSE stream, stop, WebSocket and realtime audio; threads, state and messages; the memory store; file uploads for multimodal input; and an optional [AG-UI](https://10xgraph.com/docs/server/ag-ui) endpoint for CopilotKit and other AG-UI clients.
+- **Endpoints generated from the graph.** Invoke, NDJSON stream, stop, WebSocket and realtime audio; threads, state and messages; the memory store; file uploads for multimodal input; and an optional [AG-UI](https://10xgraph.com/docs/server/ag-ui) endpoint for CopilotKit and other AG-UI clients.
 - **Authentication.** `"auth": "jwt"`, or your own `BaseAuth` subclass.
 - **Scoped authorization on every endpoint.** Routes require `resource:action` scopes such as `graph:invoke`, `graph:stream` or `checkpointer:read`, checked by a pluggable `AuthorizationBackend`. The server refuses to start if any non-public route has no guard.
 - **Owner-only threads.** In production mode a thread is readable and writable only by the user who created it, on every step that touches it. Ownership checks are cached in-process and optionally in Redis, so they do not hit the database on each request.
@@ -217,7 +217,7 @@ Generate production Docker files.
 
 ### `10xgraph eval` / `10xgraph test`
 
-Run agent evaluations (discovers `*_eval.py` / `eval_*.py`, writes HTML + JSON to `eval_reports/`) and project tests (pytest).
+Run agent evaluations (discovers `*_eval.py` / `eval_*.py`, writes JSON and HTML reports to `eval_reports/` and opens the HTML report; `--no-open` skips that) and project tests (pytest).
 
 ```bash
 10xgraph eval --parallel --threshold 0.8
@@ -447,7 +447,6 @@ Security features of the server:
 ```bash
 MODE=production                  # production mode
 JWT_SECRET_KEY=<32+ chars>       # strong secret (secrets.token_urlsafe(32))
-IS_DEBUG=false                   # disable debug
 ORIGINS=https://yourdomain.com   # specific CORS origins (never *)
 ALLOWED_HOST=yourdomain.com      # specific allowed hosts (never *)
 DOCS_PATH=                       # recommended: disable API docs
@@ -528,7 +527,7 @@ sdist + wheel, checks the distribution metadata, and creates a GitHub Release wi
 notes and the artifacts attached. PyPI publishing is manual (`make publish`).
 
 ```bash
-git tag v1.0.0rc1 && git push origin v1.0.0rc1
+git tag v1.0.0rc2 && git push origin v1.0.0rc2
 ```
 
 ---

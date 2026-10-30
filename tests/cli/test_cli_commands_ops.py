@@ -332,3 +332,11 @@ def test_ws_max_size_follows_max_request_size(monkeypatch, raw, expected):
     else:
         monkeypatch.setenv("MAX_REQUEST_SIZE", raw)
     assert _max_request_size() == expected
+
+
+def test_build_command_refuses_compose_together_with_k8s(tmp_path, monkeypatch, silent_output):
+    monkeypatch.chdir(tmp_path)
+    cmd = BuildCommand(output=silent_output)
+    code = cmd.execute(output_file="Dockerfile", force=True, docker_compose=True, k8s=True)
+    assert code != 0
+    assert list(tmp_path.iterdir()) == []

@@ -27,6 +27,8 @@ _IMPORT_PATH = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_][\w.]*$")
 _OBSERVABILITY_LEVELS = ("spans", "standard", "full")
 _USER_ID_MODES = ("raw", "hash", "mask")
 _MAX_PERCENT = 100
+# Built-in authorization names that skip the per-thread ownership check.
+_OPEN_AUTHORIZATION = tuple(name for name in BUILTIN_AUTHORIZATION if name != "ownership")
 
 
 class _Collector:
@@ -80,10 +82,64 @@ def validate_config(config: Any, base_dir: Path | None = None) -> list[Issue]:
     _check_remote_tools(config, out)
     _check_test(config, out)
     _check_evaluation(config, out)
+    out.issues.extend(production_readiness_warnings(config))
 
     for key in config:
         if key not in KNOWN_TOP_LEVEL_KEYS:
             out.warning(key, f"'{key}' is not read by 10xGraph. It is kept as-is.")
+    return out.issues
+
+
+def production_readiness_warnings(config: dict) -> list[Issue]:
+    """Return warnings for settings that are fine locally but risky in production.
+
+    Reads only the JSON, never ``.env`` or the environment. Auth stays the developer's
+    choice, so these are warnings, never errors.
+    """
+    out = _Collector()
+    auth = config.get("auth")
+    if not auth:
+        out.warning(
+            "auth",
+            "Auth is off, so any caller can use every endpoint. Fine for local development; "
+            'set "jwt" or a custom BaseAuth before production.',
+        )
+    else:
+        authorization = config.get("authorization")
+        if isinstance(authorization, str) and authorization.strip().lower() in _OPEN_AUTHORIZATION:
+            out.warning(
+                "authorization",
+                f"'{authorization}' lets any authenticated user read and delete any thread. "
+                'Use "ownership" or a custom backend in production.',
+            )
+
+    rate_limit = config.get("rate_limit")
+    if rate_limit is None or (isinstance(rate_limit, dict) and rate_limit.get("enabled") is False):
+        out.warning(
+            "rate_limit",
+            "Rate limiting is off, so one caller can exhaust the service. Enable it, with the "
+            "redis backend for more than one worker, before production.",
+        )
+    elif isinstance(rate_limit, dict) and rate_limit.get("enabled") is not False:
+        if auth and rate_limit.get("by", "ip") == "ip":
+            out.warning(
+                "rate_limit.by",
+                "Counting requests per IP with auth on shares one budget between users behind a "
+                'proxy. Use "by": "user", or set trusted_proxy_headers behind your proxy.',
+            )
+        exclude = rate_limit.get("exclude_paths")
+        if isinstance(exclude, list) and "/redoc" in exclude and "/redocs" not in exclude:
+            out.warning(
+                "rate_limit.exclude_paths",
+                'The ReDoc page is served at /redocs, not /redoc; "/redoc" excludes nothing.',
+            )
+
+    if auth and not config.get("token_revocation"):
+        out.warning(
+            "token_revocation",
+            "Token revocation is off, so a leaked or logged-out token works until it expires. "
+            'Set "token_revocation": "redis" and revoke with `10xgraph revoke`.',
+        )
     return out.issues
 
 
@@ -302,6 +358,13 @@ def _check_observability(config: dict, out: _Collector) -> None:
         if not isinstance(enabled, bool):
             out.error(f"observability.{backend}.enabled", "enabled must be true or false.")
         any_enabled = any_enabled or enabled is True
+        console = block.get("console")
+        if backend == "logfire" and console is not None and console is not False:
+            out.error(
+                "observability.logfire.console",
+                "console must be false or left out. Logfire takes False or a ConsoleOptions "
+                "object, which JSON cannot express.",
+            )
     if not any_enabled:
         out.warning(
             "observability", "Neither Logfire nor LangSmith is enabled, so nothing is traced."
@@ -369,6 +432,8 @@ def _check_evaluation(config: dict, out: _Collector) -> None:
         out.error("evaluation.threshold", "threshold must be a number between 0 and 1.")
     if "parallel" in data and not isinstance(data["parallel"], bool):
         out.error("evaluation.parallel", "parallel must be true or false.")
+    if "open_report" in data and not isinstance(data["open_report"], bool):
+        out.error("evaluation.open_report", "open_report must be true or false.")
     concurrency = data.get("max_concurrency")
     if concurrency is not None and not (_is_int(concurrency) and concurrency >= 1):
         out.error("evaluation.max_concurrency", "max_concurrency must be a whole number >= 1.")

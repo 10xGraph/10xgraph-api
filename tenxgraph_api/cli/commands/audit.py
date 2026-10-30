@@ -56,7 +56,7 @@ class Diagnostic:
 class AuditCommand(BaseCommand):
     """Audit the local CLI, core package, project config, and default port.
 
-    Runs six checks in a fixed order and reports them twice: live, through the
+    Runs seven checks in a fixed order and reports them twice: live, through the
     step timeline, and again as a summary table once every check has finished.
 
     ============  ==========================================================
@@ -71,6 +71,9 @@ class AuditCommand(BaseCommand):
     config        ``10xgraph.json`` exists here, parses, declares an
                   ``agent`` key in ``module:attribute`` form, and contains
                   valid ``remote_tools`` definitions if present.
+    security      The settings in ``10xgraph.json`` that matter before production
+                  (auth, authorization, rate limiting, token revocation), as
+                  warnings only: they are the developer's choices, never failures.
     port          The default API port is free to bind.
     ============  ==========================================================
     """
@@ -99,6 +102,7 @@ class AuditCommand(BaseCommand):
             ("core", "Core framework", lambda: self._package_check("10xgraph")),
             ("evaluation", "Evaluation API", self._evaluation_api_check),
             ("config", "Project configuration", lambda: self._config_check(config)),
+            ("security", "Security posture", lambda: self._security_check(config)),
             ("port", f"Port {DEFAULT_PORT}", lambda: self._port_check(DEFAULT_PORT)),
         )
 
@@ -193,6 +197,29 @@ class AuditCommand(BaseCommand):
         except ValueError as exc:
             return Diagnostic("Project config", "fail", str(exc))
         return Diagnostic("Project config", "pass", f"{config_path} ({len(tools)} remote tools)")
+
+    @staticmethod
+    def _security_check(config: str = DEFAULT_CONFIG_FILE) -> Diagnostic:
+        """Warn about production-readiness gaps in ``10xgraph.json``.
+
+        Reads only the JSON file (never ``.env``). A missing or unreadable config is left to
+        the config check; this one then passes with a note.
+        """
+        from tenxgraph_api.cli.config_editor.validation import production_readiness_warnings
+
+        config_path = resolve_default_config(config).resolve()
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return Diagnostic("Security", "pass", "no readable config to check")
+        if not isinstance(data, dict):
+            return Diagnostic("Security", "pass", "no readable config to check")
+        issues = production_readiness_warnings(data)
+        if not issues:
+            return Diagnostic("Security", "pass", "no production-readiness warnings")
+        return Diagnostic(
+            "Security", "warn", "; ".join(f"{i['path']}: {i['message']}" for i in issues)
+        )
 
     @staticmethod
     def _port_check(port: int) -> Diagnostic:

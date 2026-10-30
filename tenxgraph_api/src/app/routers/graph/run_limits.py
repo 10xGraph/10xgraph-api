@@ -24,17 +24,20 @@ from fastapi import HTTPException
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.concurrency import Lease, concurrency_limiter
 from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+from tenxgraph_api.src.app.core.redis_client import key_part
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 
 
 HTTP_TOO_MANY_REQUESTS = 429
+# Seconds a client is told to wait before it starts another run.
+RUN_CAP_RETRY_AFTER_SECONDS = 5
 
 # A slot that was never counted (no identity, or no cap).
 RunSlot = Lease
 
 
 def run_slot_key(user_id: str) -> str:
-    return f"runs:user:{user_id}"
+    return f"runs:user:{key_part(user_id)}"
 
 
 async def acquire_run_slot(user: dict[str, Any], runs: RunsConfig) -> Lease:
@@ -58,6 +61,7 @@ async def acquire_run_slot(user: dict[str, Any], runs: RunsConfig) -> Lease:
                 f"Too many runs in progress for this user (limit {limit}). "
                 "Wait for one to finish and retry."
             ),
+            headers={"Retry-After": str(RUN_CAP_RETRY_AFTER_SECONDS)},
         )
     return lease
 

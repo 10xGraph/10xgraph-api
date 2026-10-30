@@ -455,3 +455,59 @@ async def test_attach_refuses_ownership_without_owner_lookup(auth_on):
             # Auth off: no owner checks ever run, so nothing to refuse.
             await attach_all_modules(config, container)
             assert isinstance(container.get(AuthorizationBackend), OwnershipAuthorizationBackend)
+
+
+# ---------------------------------------------------------------------------
+# G-28: per-process state warning
+# ---------------------------------------------------------------------------
+
+
+def _warn_container(checkpointer):
+    from unittest.mock import MagicMock
+
+    container = MagicMock()
+    container.try_get.return_value = checkpointer
+    return container
+
+
+def test_warns_for_in_memory_checkpointer_and_missing_redis_in_production(monkeypatch, caplog):
+    import logging
+
+    from tenxgraph.storage.checkpointer import InMemoryCheckpointer
+
+    from tenxgraph_api.src.app import loader
+
+    monkeypatch.setattr(loader, "_is_production", lambda: True)
+    with caplog.at_level(logging.WARNING):
+        loader.warn_per_process_state(_warn_container(InMemoryCheckpointer()), None)
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "InMemoryCheckpointer" in text
+    assert "No Redis configured" in text
+
+
+def test_no_warning_in_single_process_development(monkeypatch, caplog):
+    import logging
+
+    from tenxgraph.storage.checkpointer import InMemoryCheckpointer
+
+    from tenxgraph_api.src.app import loader
+
+    monkeypatch.setattr(loader, "_is_production", lambda: False)
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    with caplog.at_level(logging.WARNING):
+        loader.warn_per_process_state(_warn_container(InMemoryCheckpointer()), None)
+    assert not caplog.records
+
+
+def test_web_concurrency_above_one_warns_even_in_development(monkeypatch, caplog):
+    import logging
+
+    from tenxgraph_api.src.app import loader
+
+    monkeypatch.setattr(loader, "_is_production", lambda: False)
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+    with caplog.at_level(logging.WARNING):
+        loader.warn_per_process_state(_warn_container(None), "redis://x")
+        assert not caplog.records
+        loader.warn_per_process_state(_warn_container(None), None)
+    assert "No Redis configured" in caplog.text

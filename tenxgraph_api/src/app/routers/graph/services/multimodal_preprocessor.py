@@ -128,6 +128,29 @@ def internal_media_keys(message: Message | dict[str, Any]) -> list[str]:
     return keys
 
 
+def media_file_ids(message: Message | dict[str, Any]) -> list[str]:
+    """The ``file_id`` of every top-level media block (``media.kind == "file_id"``).
+
+    These are the blocks ``preprocess_multimodal_messages`` rewrites to ``graph://media/``
+    references, so they are held to the same ownership rule.
+    """
+    content = (
+        message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
+    )
+    ids: list[str] = []
+    for block in content or []:
+        media = block.get("media") if isinstance(block, dict) else getattr(block, "media", None)
+        if media is None:
+            continue
+        kind = media.get("kind") if isinstance(media, dict) else media.kind
+        file_id = (
+            media.get("file_id") if isinstance(media, dict) else getattr(media, "file_id", None)
+        )
+        if kind == "file_id" and isinstance(file_id, str) and file_id:
+            ids.append(file_id)
+    return ids
+
+
 async def _ensure_access(media_service: MediaService, file_id: str, user_id: str) -> None:
     """Ownership check with one answer for missing and foreign files.
 
@@ -152,7 +175,7 @@ async def check_media_references(
     written straight into a thread, since the next run resolves those references too.
     """
     for message in messages:
-        keys = list(dict.fromkeys(internal_media_keys(message)))
+        keys = list(dict.fromkeys([*internal_media_keys(message), *media_file_ids(message)]))
         if not keys:
             continue
         if media_service is None:
@@ -182,6 +205,18 @@ async def _get_cached_extraction(media_service: MediaService, file_id: str) -> s
     return None
 
 
+async def _offload_inline(
+    media_service: MediaService, messages: list[Message], user_id: str | None
+) -> None:
+    """Move large inline base64 blobs into the media store before anything copies them into state.
+
+    Skipped for a stand-in service (it has no store to offload into).
+    """
+    offload = getattr(media_service, "offload_inline", None)
+    if inspect.iscoroutinefunction(offload):
+        await offload(messages, user_id)
+
+
 async def preprocess_multimodal_messages(
     messages: list[Message],
     media_service: MediaService | None,
@@ -205,6 +240,8 @@ async def preprocess_multimodal_messages(
         await check_media_references(messages, media_service, user_id)
     if media_service is None:
         return messages
+
+    await _offload_inline(media_service, messages, user_id)
 
     processed: list[Message] = []
     for msg in messages:

@@ -1,16 +1,25 @@
-import { closeInspector, copyJson, go, validate } from "./actions.js";
+import { useEffect, useRef } from "preact/hooks";
+import { closeDrawer, copyJson, go } from "./actions.js";
 import { SECTION_ICONS } from "./icons.js";
-import { commit, counts, fieldIdFor, isDirty, isStale, issuesFor, plural, store } from "./store.js";
-import { EmptyPanel, Icon } from "./ui.jsx";
+import { commit, counts, fieldIdFor, isDirty, issuesFor, plural, store } from "./store.js";
+import { Icon } from "./ui.jsx";
 
-// Docked on the right from xl up (sticky, its own scroll); a drawer below that.
-export function Inspector() {
+// Right-hand drawer with the JSON preview and, only while there are issues, a Problems tab.
+export function Drawer() {
+  const ref = useRef(null);
+  useEffect(() => {
+    const dialog = ref.current;
+    if (!dialog) return;
+    if (store.drawerOpen && !dialog.open) dialog.showModal();
+    else if (!store.drawerOpen && dialog.open) dialog.close();
+  });
+  const hasIssues = store.issues.length > 0;
+  const tab = hasIssues && store.tab === "problems" ? "problems" : "json";
   const { errors, warnings } = counts();
-  const count = errors + warnings;
-  const tab = (id, label, badge) => (
+  const tabButton = (id, label, badge) => (
     <button
-      type="button" role="tab" id={`tab-${id}`} aria-selected={store.tab === id ? "true" : "false"}
-      class={`focus-ring inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors duration-150 ${store.tab === id
+      type="button" role="tab" id={`tab-${id}`} aria-selected={tab === id ? "true" : "false"}
+      class={`focus-ring inline-flex h-10 cursor-pointer items-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors duration-150 ${tab === id
         ? "bg-raised text-ink" : "text-muted hover:text-ink"}`}
       onClick={() => commit((s) => { s.tab = id; })}
     >
@@ -18,88 +27,73 @@ export function Inspector() {
     </button>
   );
   return (
-    <aside
-      aria-label="Inspector"
-      class={`fixed inset-y-0 right-0 z-40 flex w-[min(100vw,400px)] flex-col border-l border-line bg-surface transition-transform duration-200 ease-out xl:sticky xl:top-14 xl:bottom-auto xl:z-auto xl:self-start xl:h-[calc(100dvh-3.5rem)] xl:w-[380px] xl:shrink-0 xl:translate-x-0 ${store.inspectorOpen ? "translate-x-0" : "translate-x-full"}`}
+    <dialog
+      ref={ref} aria-label="10xgraph.json preview"
+      class="m-0 ml-auto h-dvh max-h-none w-[min(540px,100vw)] border-0 border-l border-line-strong bg-surface p-0 text-body shadow-pop backdrop:bg-black/45"
+      onClose={() => { if (store.drawerOpen) closeDrawer(); }}
+      onClick={(e) => { if (e.target === e.currentTarget) closeDrawer(); }}
     >
-      <div class="flex h-14 shrink-0 items-center gap-1 border-b border-line px-3">
-        <div role="tablist" class="flex flex-1 gap-1">
-          {tab("problems", "Problems", store.validated !== null && count ? (
-            <span class={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[11px] font-semibold ${errors ? "bg-danger-soft text-danger" : "bg-warn-soft text-warn"}`}>
-              {count}
-            </span>
-          ) : null)}
-          {tab("json", "10xgraph.json", null)}
+      <div class="flex h-full flex-col">
+        <div class="flex h-14 shrink-0 items-center gap-1 border-b border-line px-3">
+          <div role="tablist" class="flex flex-1 gap-1">
+            {tabButton("json", "10xgraph.json", null)}
+            {hasIssues ? tabButton("problems", "Problems", (
+              <span class={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[11px] font-semibold ${errors ? "bg-danger-soft text-danger" : "bg-warn-soft text-warn"}`}>
+                {errors + warnings}
+              </span>
+            )) : null}
+          </div>
+          <button type="button" class="icon-btn" aria-label="Close preview" onClick={closeDrawer}>
+            <Icon name="x" class="size-5" />
+          </button>
         </div>
-        <button type="button" class="icon-btn xl:hidden" aria-label="Close inspector" onClick={closeInspector}>
-          <Icon name="x" class="size-5" />
-        </button>
+        <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+          {tab === "problems" ? <Problems /> : <JsonView />}
+        </div>
       </div>
-      <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-        {store.tab === "problems" ? <Problems /> : <JsonView />}
-      </div>
-    </aside>
+    </dialog>
   );
 }
 
 function Problems() {
-  if (!store.schema) return null;
-  if (store.validated === null) {
-    return (
-      <EmptyPanel icon="checkCircle" tint="text-faint" title="Not checked yet" text="Validate runs the same rules 10xgraph api applies when it starts.">
-        <button type="button" class="btn btn-outline mt-5" disabled={!!store.busy} onClick={validate}>Validate now</button>
-      </EmptyPanel>
-    );
-  }
   const { errors, warnings } = counts();
-  const stale = isStale();
   const groups = store.sections.map((sec) => [sec, issuesFor(sec.id)]).filter(([, list]) => list.length);
   return (
     <div>
-      <div class="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
+      <div class="border-b border-line px-4 py-3">
         <p class="text-sm text-muted">
           <span class={errors ? "font-medium text-danger" : ""}>{plural(errors, "error")}</span>{" · "}
           <span class={warnings ? "font-medium text-warn" : ""}>{plural(warnings, "warning")}</span>
         </p>
-        {stale ? <button type="button" class="text-sm font-medium text-brand hover:underline" onClick={validate}>Re-check</button> : null}
       </div>
-      {stale ? (
-        <div class="mx-4 mt-3 flex gap-2 rounded-lg bg-raised px-3 py-2 text-[13px] text-muted">
-          <Icon name="info" class="mt-0.5 size-3.5 text-faint" />You changed the form since this check.
-        </div>
-      ) : null}
-      {!store.issues.length ? (
-        <EmptyPanel icon="checkCircle" tint="text-ok" title="No problems found" text="This configuration passes every check." />
-      ) : (
-        <div class="space-y-5 px-3 py-4">
-          {groups.map(([sec, list]) => (
-            <div key={sec.id}>
-              <p class="eyebrow mb-1.5 flex items-center gap-2 px-2">
-                <Icon name={SECTION_ICONS[sec.id] || "box"} class="size-3.5" />{sec.title}
-              </p>
-              <ul class="space-y-0.5">
-                {list.map((issue, i) => {
-                  const error = issue.level === "error";
-                  return (
-                    <li key={i}>
-                      <button
-                        type="button" onClick={() => go(sec.id, fieldIdFor(issue.path))}
-                        class="focus-ring flex w-full cursor-pointer gap-2.5 rounded-lg px-2 py-2 text-left transition-colors duration-150 hover:bg-raised"
-                      >
-                        <Icon name={error ? "xCircle" : "alert"} class={`mt-0.5 size-4 ${error ? "text-danger" : "text-warn"}`} />
-                        <span class="min-w-0">
-                          <span class="block text-[13px] leading-5 text-body">{issue.message}</span>
-                          {issue.path ? <span class="mt-0.5 block truncate font-mono text-xs text-faint">{issue.path}</span> : null}
-                        </span>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          ))}
-        </div>
-      )}
+      <div class="space-y-5 px-3 py-4">
+        {groups.map(([sec, list]) => (
+          <div key={sec.id}>
+            <p class="eyebrow mb-1.5 flex items-center gap-2 px-2">
+              <Icon name={SECTION_ICONS[sec.id] || "box"} class="size-3.5" />{sec.title}
+            </p>
+            <ul class="space-y-0.5">
+              {list.map((issue, i) => {
+                const error = issue.level === "error";
+                return (
+                  <li key={i}>
+                    <button
+                      type="button" onClick={() => go(sec.id, fieldIdFor(issue.path))}
+                      class="focus-ring flex min-h-11 w-full cursor-pointer gap-2.5 rounded-lg px-2 py-2 text-left transition-colors duration-150 hover:bg-raised"
+                    >
+                      <Icon name={error ? "xCircle" : "alert"} class={`mt-0.5 size-4 ${error ? "text-danger" : "text-warn"}`} />
+                      <span class="min-w-0">
+                        <span class="block text-[13px] leading-5 text-body">{issue.message}</span>
+                        {issue.path ? <span class="mt-0.5 block truncate font-mono text-xs text-faint">{issue.path}</span> : null}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

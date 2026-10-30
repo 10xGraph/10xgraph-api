@@ -26,11 +26,21 @@ export const ICONS = {
   power: '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/>',
   spinner: '<path d="M21 12a9 9 0 1 1-6.219-8.56"/>',
   book: '<path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20"/>',
+  flag: '<path d="M5 21V4"/><path d="M5 4h11l-2 4 2 4H5"/>',
+  lock: '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  play: '<path d="M6 4l14 8-14 8z"/>',
+  bolt: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
+  terminal: '<path d="M4 17l6-5-6-5"/><path d="M12 19h8"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
+  chevronRight: '<path d="m9 6 6 6-6 6"/>',
+  code: '<path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/>',
+  circle: '<circle cx="12" cy="12" r="9"/>',
   external: '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
 };
 
 export const SECTION_ICONS = {
-  core: "box", auth: "key", authorization: "shield", rate_limit: "gauge", websocket: "arrows",
-  ag_ui: "external",
-  observability: "activity", plugins: "layers", remote_tools: "wrench", test: "flask", evaluation: "target",
+  "get-running": "flag", environment: "terminal",
+  core: "flag", auth: "lock", authorization: "shield", token_revocation: "key", rate_limit: "gauge",
+  observability: "activity", runs: "play", websocket: "bolt", ag_ui: "external", remote_tools: "wrench",
+  media: "file", plugins: "layers", test: "flask", evaluation: "target",
 };

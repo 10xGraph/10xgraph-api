@@ -250,7 +250,7 @@ def test_validation_error_handler_development():
     r = client.get("/validation-error")
     assert r.status_code == 422
     body = r.json()
-    assert body["error"]["code"] == "AGENTFLOW_VALIDATION_ERROR"
+    assert body["error"]["code"] == "VALIDATION_ERROR"
 
     cleanup_env()
 
@@ -267,7 +267,7 @@ def test_validation_error_handler_production():
     r = client.get("/validation-error")
     assert r.status_code == 422
     body = r.json()
-    assert body["error"]["code"] == "AGENTFLOW_VALIDATION_ERROR"
+    assert body["error"]["code"] == "VALIDATION_ERROR"
 
     cleanup_env()
 
@@ -334,7 +334,7 @@ def test_graph_recursion_error_handler():
 
     client = TestClient(app)
     r = client.get("/recursion-error")
-    assert r.status_code == 500
+    assert r.status_code == 422
     body = r.json()
     assert body["error"]["code"] == "GRAPH_RECURSION_001"
 
@@ -477,3 +477,65 @@ def test_client_input_error_in_a_validator_keeps_its_message_in_production():
     assert r.json()["error"]["message"] == "The request data is invalid. Please check your input."
 
     cleanup_env()
+
+
+NODE_MISSING_MESSAGE = (
+    "This thread was saved at a step that no longer exists in the graph. "
+    "Start a new thread, or ask the operator to map the old step."
+)
+NEWER_STATE_MESSAGE = (
+    "This thread was saved by a newer server version. The server must be upgraded to read it."
+)
+
+
+def _raise_app(mode, exc):
+    app = setup_app(mode)
+
+    @app.get("/boom")
+    def boom():
+        raise exc
+
+    try:
+        return TestClient(app).get("/boom")
+    finally:
+        cleanup_env()
+
+
+def test_stored_node_missing_is_409_with_detail_in_development():
+    from tenxgraph.core.exceptions import StoredNodeMissingError
+
+    r = _raise_app("development", StoredNodeMissingError("old_node", thread_id="t1"))
+    assert r.status_code == 409
+    error = r.json()["error"]
+    assert error["code"] == "GRAPH_NODE_MISSING_001"
+    assert "old_node" in error["message"]
+
+
+def test_stored_node_missing_is_409_with_safe_message_in_production():
+    from tenxgraph.core.exceptions import StoredNodeMissingError
+
+    r = _raise_app("production", StoredNodeMissingError("old_node", thread_id="t1"))
+    assert r.status_code == 409
+    error = r.json()["error"]
+    assert error["code"] == "GRAPH_NODE_MISSING_001"
+    assert error["message"] == NODE_MISSING_MESSAGE
+
+
+def test_state_format_error_is_500_with_detail_in_development():
+    from tenxgraph.core.exceptions import StateFormatVersionError
+
+    r = _raise_app("development", StateFormatVersionError(found=9, supported=2, thread_id="t1"))
+    assert r.status_code == 500
+    error = r.json()["error"]
+    assert error["code"] == "STATE_FORMAT_001"
+    assert "format" in error["message"]
+
+
+def test_state_format_error_is_500_with_clear_message_in_production():
+    from tenxgraph.core.exceptions import StateFormatVersionError
+
+    r = _raise_app("production", StateFormatVersionError(found=9, supported=2, thread_id="t1"))
+    assert r.status_code == 500
+    error = r.json()["error"]
+    assert error["code"] == "STATE_FORMAT_001"
+    assert error["message"] == NEWER_STATE_MESSAGE

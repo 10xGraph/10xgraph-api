@@ -285,7 +285,7 @@ class TestListMemories:
         assert len(result.memories) == 2
         mock_store.aget_all.assert_called_once()
         call_args = mock_store.aget_all.call_args
-        assert call_args[1]["limit"] == 100
+        assert call_args[1]["limit"] == 101  # one extra row tells has_more
 
     async def test_list_memories_custom_limit(
         self, store_service, mock_store, mock_user, sample_memory_results
@@ -300,7 +300,7 @@ class TestListMemories:
         # Assert
         assert len(result.memories) == 1
         call_args = mock_store.aget_all.call_args
-        assert call_args[1]["limit"] == 1
+        assert call_args[1]["limit"] == 2  # one extra row tells has_more
 
     async def test_list_memories_with_options(
         self, store_service, mock_store, mock_user, sample_memory_results
@@ -525,3 +525,34 @@ class TestForgetMemory:
         assert "memory_type" not in call_args[1]
         assert "category" not in call_args[1]
         assert "filters" not in call_args[1]
+
+
+@pytest.mark.asyncio
+class TestReservedFilterKeys:
+    """J-4: client filters never carry owner keys to the store."""
+
+    HOSTILE = {
+        "user_id": "victim",
+        "agent_id": "a",
+        "app_id": "b",
+        "run_id": "c",
+        "source": "chat",
+        "OR": [{"user_id": "victim"}, {"tag": "x"}],
+    }
+
+    async def test_search_drops_reserved_keys(self, store_service, mock_store, mock_user):
+        mock_store.asearch.return_value = []
+        await store_service.search_memories(
+            SearchMemorySchema(query="q", filters=dict(self.HOSTILE)), mock_user
+        )
+        assert mock_store.asearch.call_args.kwargs["filters"] == {
+            "source": "chat",
+            "OR": [{"tag": "x"}],
+        }
+
+    async def test_forget_drops_reserved_keys(self, store_service, mock_store, mock_user):
+        await store_service.forget_memory(ForgetMemorySchema(filters=dict(self.HOSTILE)), mock_user)
+        assert mock_store.aforget_memory.call_args.kwargs["filters"] == {
+            "source": "chat",
+            "OR": [{"tag": "x"}],
+        }

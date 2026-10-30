@@ -139,19 +139,19 @@
 
 @layer components {
   .input {
-    @apply block h-10 w-full rounded-lg border border-line-strong bg-sunken px-3 text-base text-ink
+    @apply block h-11 w-full rounded-lg border border-line-strong bg-sunken px-3 text-base text-ink
       transition-[border-color,box-shadow] duration-150 placeholder:text-faint
       hover:border-faint/60 focus:border-brand focus:ring-4 focus:ring-brand-ring focus:outline-none
-      sm:h-9 sm:text-sm;
+      disabled:cursor-not-allowed disabled:opacity-50 sm:text-sm;
   }
   .input-invalid {
     @apply border-danger focus:border-danger focus:ring-danger-soft;
   }
   .btn {
-    @apply inline-flex h-10 shrink-0 cursor-pointer items-center justify-center gap-2 rounded-lg px-3.5
+    @apply inline-flex h-11 shrink-0 cursor-pointer items-center justify-center gap-2 rounded-lg px-3.5
       text-sm font-medium whitespace-nowrap transition-colors duration-150
       focus-visible:ring-4 focus-visible:ring-brand-ring focus-visible:outline-none
-      disabled:cursor-not-allowed disabled:opacity-45 sm:h-9;
+      disabled:cursor-not-allowed disabled:opacity-45;
   }
   .btn-primary {
     @apply bg-brand-solid text-white shadow-card hover:bg-brand-solid-hover;
@@ -163,9 +163,9 @@
     @apply text-muted hover:bg-raised hover:text-ink;
   }
   .icon-btn {
-    @apply inline-flex size-10 shrink-0 cursor-pointer items-center justify-center rounded-lg text-muted
+    @apply inline-flex size-11 shrink-0 cursor-pointer items-center justify-center rounded-lg text-muted
       transition-colors duration-150 hover:bg-raised hover:text-ink
-      focus-visible:ring-4 focus-visible:ring-brand-ring focus-visible:outline-none sm:size-9;
+      focus-visible:ring-4 focus-visible:ring-brand-ring focus-visible:outline-none;
   }
   .panel {
     @apply rounded-xl border border-line bg-surface shadow-card;

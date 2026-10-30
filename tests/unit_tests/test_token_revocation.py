@@ -20,8 +20,8 @@ from tenxgraph_api.src.app.core.auth.revocation import (
 )
 
 
+# Reference time for issued-at values only; token expiry is computed in each test.
 NOW = time.time()
-
 
 # ---------------------------------------------------------------------------
 # in-memory backend
@@ -31,7 +31,7 @@ NOW = time.time()
 @pytest.mark.asyncio
 async def test_memory_revokes_one_token_by_jti():
     backend = InMemoryTokenRevocation()
-    backend.revoke_token("t-1", expires_at=NOW + 60)
+    backend.revoke_token("t-1", expires_at=time.time() + 60)
     assert await backend.is_revoked({"user_id": "a", "jti": "t-1"}) is True
     assert await backend.is_revoked({"user_id": "a", "jti": "t-2"}) is False
     assert await backend.is_revoked({"user_id": "a"}) is False
@@ -40,7 +40,7 @@ async def test_memory_revokes_one_token_by_jti():
 @pytest.mark.asyncio
 async def test_memory_drops_entries_once_the_token_expired():
     backend = InMemoryTokenRevocation()
-    backend.revoke_token("old", expires_at=NOW - 1)
+    backend.revoke_token("old", expires_at=time.time() - 1)
     assert await backend.is_revoked({"user_id": "a", "jti": "old"}) is False
     assert backend._tokens == {}
 
@@ -71,8 +71,18 @@ class _FakeRedis:
         self.data[key] = value
         self.ttl[key] = ex
 
-    async def mget(self, keys):
-        return [self.data.get(k) for k in keys]
+    async def get(self, key):
+        return self.data.get(key)
+
+    async def eval(self, script, numkeys, key, cutoff, ttl):
+        """Python stand-in for the revoke_user script (keeps the newest cutoff)."""
+        new = float(cutoff) if cutoff else time.time()
+        current = self.data.get(key)
+        if current is not None and float(current) >= new:
+            return 0
+        self.data[key] = repr(new).encode()
+        self.ttl[key] = int(ttl) or None
+        return 1
 
     async def aclose(self):
         self.closed = True
@@ -242,7 +252,8 @@ def test_config_editor_validates_token_revocation():
     from tenxgraph_api.cli.config_editor import validate_config
 
     base = {"agent": "graph:app", "auth": "jwt"}
-    assert validate_config({**base, "token_revocation": "memory"}) == []
+    issues = validate_config({**base, "token_revocation": "memory"})
+    assert not [i for i in issues if i["path"].startswith("token_revocation")]
     assert any(
         i["level"] == "error" for i in validate_config({**base, "token_revocation": "bad path"})
     )

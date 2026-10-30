@@ -2,6 +2,7 @@ import { useRef } from "preact/hooks";
 import { ICONS } from "./icons.js";
 
 export function Icon({ name, class: cls = "size-4" }) {
+  if (!/(^|\s)size-/.test(cls)) cls = `size-4 ${cls}`;
   return (
     <span class={`inline-flex shrink-0 ${cls}`} aria-hidden="true">
       <svg
@@ -35,6 +36,23 @@ export function Toggle({ id, on, label, onChange }) {
   );
 }
 
+// Pick one of a few options; "Use defaults / Customize" and Default / On / Off.
+export function Segmented({ id, label, options, value, onPick }) {
+  return (
+    <div id={id} role="radiogroup" aria-label={label} class="inline-flex max-w-full flex-wrap gap-0.5 rounded-[10px] border border-line-strong bg-raised p-0.5">
+      {options.map(([v, text]) => (
+        <button
+          key={v} type="button" role="radio" aria-checked={v === value ? "true" : "false"}
+          class={`focus-ring min-h-10 cursor-pointer rounded-lg px-3.5 text-sm font-medium transition-colors duration-150 ${v === value ? "bg-surface text-ink shadow-card" : "text-muted hover:text-ink"}`}
+          onClick={() => { if (v !== value) onPick(v); }}
+        >
+          {text}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function Select({ id, options, value, invalid, onChange }) {
   return (
     <div class="relative">
@@ -60,7 +78,7 @@ export function Chips({ id, values, placeholder, suggestions, onChange }) {
   const listId = suggestions ? `${id}-options` : undefined;
   return (
     <div
-      class="flex min-h-10 cursor-text flex-wrap items-center gap-1.5 rounded-lg border border-line-strong bg-sunken px-1.5 py-1.5 transition-[border-color,box-shadow] duration-150 focus-within:border-brand focus-within:ring-4 focus-within:ring-brand-ring sm:min-h-9 sm:py-1"
+      class="flex min-h-11 cursor-text flex-wrap items-center gap-1.5 rounded-lg border border-line-strong bg-sunken px-1.5 py-1.5 transition-[border-color,box-shadow] duration-150 focus-within:border-brand focus-within:ring-4 focus-within:ring-brand-ring sm:py-1"
       onClick={(e) => { if (e.target === e.currentTarget) input.current?.focus(); }}
     >
       {values.map((v, i) => (

@@ -5,10 +5,11 @@ from __future__ import annotations
 import mimetypes
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
 from fastapi.logger import logger
 from fastapi.responses import FileResponse, Response
 from injectq.integrations import InjectAPI
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
 from tenxgraph_api.src.app.core.auth.request_config import client_error_detail
@@ -19,6 +20,8 @@ from tenxgraph_api.src.app.routers.media.schemas import (
     FileAccessUrlResponse,
     FileDeleteResponse,
     FileInfoResponse,
+    FileListItem,
+    FileListResponse,
     FileUploadResponse,
     MultimodalConfigResponse,
 )
@@ -46,6 +49,7 @@ _INLINE_TYPES = frozenset(
         "text/plain",
     }
 )
+MAX_FILE_LIST_LIMIT = 200
 _INLINE_PREFIXES = ("audio/", "video/")
 
 
@@ -124,6 +128,26 @@ def _file_download_response(file_id: str, path: Any, mime_type: str | None) -> R
     return FileResponse(path, media_type=mime, headers=headers)
 
 
+# One instance, so FastAPI resolves the permission check once per request and the file
+# dependency below runs only after it passed.
+_UPLOAD_PERMISSION = RequirePermission("files", "upload")
+
+
+async def _uploaded_file(
+    request: Request, _user: dict[str, Any] = Depends(_UPLOAD_PERMISSION)
+) -> UploadFile:
+    """The multipart ``file`` part, parsed only once the caller is authorized.
+
+    A ``file: UploadFile`` parameter would make FastAPI parse (and spool) the body before any
+    dependency runs, so an unauthenticated caller could force that work.
+    """
+    form = await request.form()
+    file = form.get("file")
+    if not isinstance(file, StarletteUploadFile):
+        raise HTTPException(status_code=422, detail="multipart field 'file' is required")
+    return file  # type: ignore[return-value]
+
+
 # ------------------------------------------------------------------
 # 4.1  POST /v1/files/upload
 # ------------------------------------------------------------------
@@ -135,12 +159,26 @@ def _file_download_response(file_id: str, path: Any, mime_type: str | None) -> R
         "Accepts a multipart file upload.  Stores binary in the configured "
         "MediaStore and optionally extracts text for documents."
     ),
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["file"],
+                        "properties": {"file": {"type": "string", "format": "binary"}},
+                    }
+                }
+            },
+        }
+    },
 )
 async def upload_file(
     request: Request,
-    file: UploadFile,
+    file: UploadFile = Depends(_uploaded_file),
     service: MediaService = InjectAPI(MediaService),
-    user: dict[str, Any] = Depends(RequirePermission("files", "upload")),
+    user: dict[str, Any] = Depends(_UPLOAD_PERMISSION),
 ):
     if file.filename is None:
         raise HTTPException(status_code=400, detail="filename is required")
@@ -180,6 +218,41 @@ async def upload_file(
         raise HTTPException(status_code=413, detail=client_error_detail(exc))
 
     return success_response(FileUploadResponse(**result), request)
+
+
+# ------------------------------------------------------------------
+# GET /v1/files  — the caller's own files, paged (declared before /{file_id})
+# ------------------------------------------------------------------
+@router.get(
+    "/v1/files",
+    summary="List the caller's files",
+    response_model=FileListResponse,
+    description=(
+        "Lists the files the authenticated user uploaded (files without a recorded owner are "
+        "not listed), newest first. With authentication off there is no user, so, like the "
+        "download route, every file is listed. Returns 501 when the configured media store cannot "
+        "enumerate its files."
+    ),
+)
+async def list_files(
+    request: Request,
+    limit: int = Query(50, ge=1, le=MAX_FILE_LIST_LIMIT),
+    offset: int = Query(0, ge=0),
+    service: MediaService = InjectAPI(MediaService),
+    user: dict[str, Any] = Depends(RequirePermission("files", "read")),
+):
+    user_id = user.get("user_id")
+    try:
+        items, has_more = await service.list_files(user_id, offset, limit)
+    except NotImplementedError:
+        raise HTTPException(status_code=501, detail="The configured media store cannot list files")
+    payload = FileListResponse(
+        files=[FileListItem(**item) for item in items],
+        has_more=has_more,
+        offset=offset,
+        limit=limit,
+    )
+    return success_response(payload, request)
 
 
 # ------------------------------------------------------------------

@@ -23,13 +23,10 @@ from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
 logger = logging.getLogger("tenxgraph_api.route_guard")
 
 # Paths that are intentionally public (no authorization). Keep this list tiny and explicit.
-# Evals is a dev-only report viewer over local files (no user data, not a production surface).
 DEFAULT_PUBLIC_PATHS = frozenset(
     {
         "/ping",
         "/health/ready",
-        "/v1/evals/runs",
-        "/v1/evals/runs/{run_id}",
     }
 )
 

@@ -7,7 +7,7 @@
 | `1.0.x` (`10xgraph-api`) | Yes |
 | `< 1.0` | No |
 
-`10xgraph-api` is at 1.0 (release candidate `1.0.0rc1`). Security fixes are applied to the
+`10xgraph-api` is at 1.0 (release candidate `1.0.0rc2`). Security fixes are applied to the
 latest published release only; there are no long-term support branches. The old
 `10xscale-agentflow-cli` package is no longer published; upgrade to `10xgraph-api` to receive
 fixes.
@@ -69,7 +69,7 @@ Out of scope:
 The API refuses to start on some misconfigurations rather than warning - notably wildcard
 CORS combined with credentials in production. For anything else, in production set:
 
-- `MODE=production` and `IS_DEBUG=false`
+- `MODE=production` (debug is off in production)
 - `ORIGINS` to an explicit comma-separated list, never `*`
 - `JWT_SECRET_KEY` to a random value of 32 characters or more
 - An `authorization` backend (it defaults to `ownership` whenever auth is on; do not weaken

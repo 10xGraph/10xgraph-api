@@ -16,6 +16,7 @@ Section shape::
         "widget": None,  # custom renderer: "auth", "authorization", "remote_tools"
         "fields": [...],  # generic fields, paths are relative to the root
         "notes": ["..."],  # extra hints (secrets that belong in .env, ...)
+        "env": [{"name": "REDIS_URL", "purpose": "..."}],  # related variables, read-only
     }
 
 Field shape::
@@ -31,9 +32,19 @@ Field shape::
         "step": 1,  # number only
         "required": False,
         "default": ...,  # value the server assumes when the key is absent
+        "unset_label": "...",  # offer a choice that removes the key; says what the server does
+        "allow_true": False,  # bool only: render just Default / Off, never On
+        "unlimited_value": 0,  # number only: an "Unlimited" checkbox that writes this value
+        "null_label": "No limit",  # number only: a choice that writes JSON null
+        "exclusive_min": 0,  # number only: the value must be greater than this
         "group": "Backend",  # fields sharing a group render together
         "show_if": {"path": [...], "equals": value},
     }
+
+``build_schema()`` also returns ``environment``: server environment variable groups that are
+not tied to one section, as ``[{"title": ..., "vars": [{"name": ..., "purpose": ...}]}]``.
+A group may also carry an optional ``note`` (a short string shown under the group title).
+The editor only lists names; it never reads a ``.env`` file.
 """
 
 from __future__ import annotations
@@ -58,7 +69,6 @@ AUTHORIZATION_SCOPES: tuple[str, ...] = (
     "graph:fix",
     "graph:invoke",
     "graph:read",
-    "graph:setup",
     "graph:stop",
     "graph:stream",
     "store:delete",
@@ -133,6 +143,24 @@ _SECTIONS: list[dict[str, Any]] = [
             "JWT needs JWT_SECRET_KEY and JWT_ALGORITHM in your .env file.",
             "Custom auth points at a BaseAuth subclass, as module:attribute.",
         ],
+        "env": [
+            {
+                "name": "JWT_SECRET_KEY",
+                "purpose": "Signing secret for JWT tokens. Required when auth is jwt.",
+            },
+            {
+                "name": "JWT_ALGORITHM",
+                "purpose": "Signing algorithm for JWT tokens. Defaults to HS256.",
+            },
+            {
+                "name": "JWT_ISSUER",
+                "purpose": "When set, tokens must carry a matching iss claim.",
+            },
+            {
+                "name": "JWT_AUDIENCE",
+                "purpose": "When set, tokens must carry a matching aud claim.",
+            },
+        ],
     },
     {
         "id": "authorization",
@@ -164,10 +192,10 @@ _SECTIONS: list[dict[str, Any]] = [
                 "label": "Graph introspection",
                 "type": "select",
                 "options": ["open", "scoped"],
+                "unset_label": "Automatic: scoped in production, open in development",
                 "help": (
                     "Who may read the graph structure, tool schemas and state schema. scoped "
-                    "requires the graph:read scope. Defaults to scoped in production, open in "
-                    "development."
+                    "requires the graph:read scope."
                 ),
             },
             {
@@ -179,6 +207,12 @@ _SECTIONS: list[dict[str, Any]] = [
                     "redis (shared, uses the redis key or REDIS_URL), memory (one process), "
                     "or module:attr for your own TokenRevocationBackend. Empty means off."
                 ),
+            },
+        ],
+        "env": [
+            {
+                "name": "REDIS_URL",
+                "purpose": "Redis for the revocation list when no redis key is set.",
             },
         ],
     },
@@ -195,7 +229,6 @@ _SECTIONS: list[dict[str, Any]] = [
             "requests": 100,
             "window": 60,
             "by": "ip",
-            "exclude_paths": ["/ping", "/docs", "/redoc", "/openapi.json"],
         },
         "fields": [
             {
@@ -304,9 +337,23 @@ _SECTIONS: list[dict[str, Any]] = [
             {
                 "path": ["rate_limit", "exclude_paths"],
                 "group": "Excluded paths",
-                "label": "Excluded paths",
+                "label": "Extra paths to skip",
                 "type": "list",
-                "placeholder": "/ping",
+                "placeholder": "/docs",
+                "help": (
+                    "Paths that are never rate limited. /ping and /health/ready are always "
+                    "skipped. API docs paths (/docs, /redocs, /openapi.json) are limited unless "
+                    "listed here. The server default is an empty list."
+                ),
+            },
+        ],
+        "env": [
+            {
+                "name": "REDIS_URL",
+                "purpose": (
+                    "Not read by rate limiting itself. Reference it as ${REDIS_URL} in "
+                    "rate_limit.redis.url; required then when the backend is redis."
+                ),
             },
         ],
     },
@@ -323,16 +370,20 @@ _SECTIONS: list[dict[str, Any]] = [
             "/v1/graph/ws and /v1/graph/live stay mounted with the default caps "
             "(1000 per process, 10 per user)."
         ),
-        "default": {"enabled": True, "max_connections": 1000, "max_connections_per_user": 10},
+        "default": {"max_connections": 1000, "max_connections_per_user": 10},
         "fields": [
             {
                 "path": ["websocket", "enabled"],
-                "default": True,
                 "label": "Enabled",
                 "type": "bool",
+                "unset_label": (
+                    "Default: routes stay mounted; only a warning if the websockets package "
+                    "is missing"
+                ),
                 "help": (
-                    "Mounts /v1/graph/ws and /v1/graph/live. Needs the websockets package "
-                    '(pip install "10xgraph-api[websocket]"). Off: neither route exists.'
+                    "On mounts /v1/graph/ws and /v1/graph/live and refuses to start without "
+                    'the websockets package (pip install "10xgraph-api[websocket]"). Off: '
+                    "neither route exists."
                 ),
             },
             {
@@ -342,7 +393,8 @@ _SECTIONS: list[dict[str, Any]] = [
                 "min": 0,
                 "step": 1,
                 "placeholder": "1000",
-                "help": "Per worker process. Defaults to 1000; 0 means unlimited.",
+                "unlimited_value": 0,
+                "help": "Per worker process. Defaults to 1000; 0 or null means unlimited.",
             },
             {
                 "path": ["websocket", "max_connections_per_user"],
@@ -351,13 +403,17 @@ _SECTIONS: list[dict[str, Any]] = [
                 "min": 0,
                 "step": 1,
                 "placeholder": "10",
-                "help": "Stops one account holding every slot. Defaults to 10; 0 means unlimited.",
+                "unlimited_value": 0,
+                "help": (
+                    "Stops one account holding every slot. Defaults to 10; 0 or null means "
+                    "unlimited."
+                ),
             },
             {
                 "path": ["websocket", "realtime_models"],
                 "label": "Realtime models clients may pick",
                 "type": "list",
-                "placeholder": "gemini-2.5-flash-live",
+                "placeholder": "gemini-3.8-live",
                 "help": (
                     "Models a /v1/graph/live client may request. Any other request uses the "
                     "agent's own model. Empty means clients cannot choose."
@@ -427,18 +483,21 @@ _SECTIONS: list[dict[str, Any]] = [
                 "step": 1,
                 "placeholder": "10",
                 "default": 10,
-                "help": "HTTP runs in flight per user, per process. 0 means unlimited.",
+                "unlimited_value": 0,
+                "help": "HTTP runs in flight per user, per process. 0 or null means unlimited.",
             },
             {
                 "path": ["runs", "timeout"],
                 "label": "Run timeout (seconds)",
                 "type": "number",
-                "min": 0,
+                "exclusive_min": 0,
+                "null_label": "No limit",
                 "step": 1,
                 "help": (
-                    "A run that takes longer is cancelled. Empty uses the default: 300 in "
-                    "production (MODE=production), no limit in development. Set null in the "
-                    "file for no limit in production."
+                    "A run that takes longer is cancelled. Must be greater than 0; decimals "
+                    "are allowed. Empty uses the default: 300 in production (MODE=production), "
+                    "no limit in development. No limit writes null, which also removes the "
+                    "production limit."
                 ),
             },
             {
@@ -451,6 +510,22 @@ _SECTIONS: list[dict[str, Any]] = [
                 "help": (
                     "Tool calls one model turn may run at once. Empty uses core's default, "
                     "10, or the TENXGRAPH_MAX_PARALLEL_TOOL_CALLS environment variable."
+                ),
+            },
+        ],
+        "env": [
+            {
+                "name": "TENXGRAPH_MAX_PARALLEL_TOOL_CALLS",
+                "purpose": (
+                    "Tool calls one turn may run at once when max_parallel_tool_calls is "
+                    "not set above."
+                ),
+            },
+            {
+                "name": "MODE",
+                "purpose": (
+                    "production gives runs a 300 second timeout when none is set above; "
+                    "development sets no limit."
                 ),
             },
         ],
@@ -508,6 +583,81 @@ _SECTIONS: list[dict[str, Any]] = [
                     "(use DELETE /v1/files/{file_id}). Files uploaded before this setting "
                     "existed are never deleted automatically."
                 ),
+            },
+        ],
+        "env": [
+            {
+                "name": "MEDIA_STORAGE_TYPE",
+                "purpose": "Where uploads are stored: memory, local or cloud. Defaults to local.",
+            },
+            {
+                "name": "MEDIA_STORAGE_PATH",
+                "purpose": "Upload folder when the storage type is local. Defaults to ./uploads.",
+            },
+            {
+                "name": "MEDIA_MAX_SIZE_MB",
+                "purpose": "Largest accepted upload in megabytes. Defaults to 25.",
+            },
+            {
+                "name": "DOCUMENT_HANDLING",
+                "purpose": (
+                    "How uploaded documents reach the model: extract_text, pass_raw or skip. "
+                    "Defaults to extract_text."
+                ),
+            },
+            {
+                "name": "MEDIA_ALLOWED_CONTENT_TYPES",
+                "purpose": (
+                    "Comma-separated upload allowlist such as image/*,application/pdf. "
+                    "Empty accepts any type."
+                ),
+            },
+            {
+                "name": "MEDIA_REQUIRE_OWNER",
+                "purpose": (
+                    "Deny files with no recorded owner. Unset means on in production, off in "
+                    "development."
+                ),
+            },
+            {
+                "name": "MEDIA_CLOUD_PROVIDER",
+                "purpose": "Cloud provider, aws or gcp. Used when the storage type is cloud.",
+            },
+            {
+                "name": "MEDIA_CLOUD_BUCKET",
+                "purpose": "Bucket name. Required when the storage type is cloud.",
+            },
+            {
+                "name": "MEDIA_CLOUD_REGION",
+                "purpose": "Bucket region. Defaults to us-east-1.",
+            },
+            {
+                "name": "MEDIA_CLOUD_PREFIX",
+                "purpose": "Key prefix for stored objects. Defaults to 10xgraph-media.",
+            },
+            {
+                "name": "MEDIA_CLOUD_ACCESS_KEY_ID",
+                "purpose": "Access key id for cloud storage.",
+            },
+            {
+                "name": "MEDIA_CLOUD_SECRET_ACCESS_KEY",
+                "purpose": "Secret access key for cloud storage.",
+            },
+            {
+                "name": "MEDIA_CLOUD_SESSION_TOKEN",
+                "purpose": "Temporary session token for cloud storage credentials.",
+            },
+            {
+                "name": "MEDIA_CLOUD_PROJECT_ID",
+                "purpose": "Project id when the cloud provider is gcp.",
+            },
+            {
+                "name": "MEDIA_CLOUD_CREDENTIALS_JSON",
+                "purpose": "Service account credentials as JSON for cloud storage.",
+            },
+            {
+                "name": "MEDIA_SIGNED_URL_TTL_SECONDS",
+                "purpose": "How long a signed download URL stays valid. Defaults to 3600.",
             },
         ],
     },
@@ -571,9 +721,14 @@ _SECTIONS: list[dict[str, Any]] = [
             {
                 "path": ["observability", "logfire", "console"],
                 "group": "Logfire",
-                "default": False,
                 "label": "Print spans to console",
                 "type": "bool",
+                "unset_label": "Default: Logfire's own console behavior",
+                "allow_true": False,
+                "help": (
+                    "Only Default or Off work from this file. Logfire takes False or a "
+                    "ConsoleOptions object, which JSON cannot express, so true is rejected."
+                ),
                 "show_if": {"path": ["observability", "logfire", "enabled"], "equals": True},
             },
             {
@@ -601,6 +756,36 @@ _SECTIONS: list[dict[str, Any]] = [
             },
         ],
         "notes": ["Tokens stay in .env: LOGFIRE_TOKEN and LANGSMITH_API_KEY."],
+        "env": [
+            {
+                "name": "LOGFIRE_TOKEN",
+                "purpose": "Logfire write token. Needed to send spans to Logfire.",
+            },
+            {
+                "name": "LANGSMITH_API_KEY",
+                "purpose": "LangSmith API key. Required when LangSmith is enabled.",
+            },
+            {
+                "name": "TENXGRAPH_TRACE_USER_ID_KEY",
+                "purpose": "Secret that keys the hash of user ids in traces when the mode is hash.",
+            },
+            {
+                "name": "OTEL_ENABLED",
+                "purpose": "Export OpenTelemetry traces from the API server. Defaults to false.",
+            },
+            {
+                "name": "OTEL_LEVEL",
+                "purpose": "Detail of the OpenTelemetry traces: spans, standard or full.",
+            },
+            {
+                "name": "OTEL_SERVICE_NAME",
+                "purpose": "Service name on OpenTelemetry traces. Defaults to 10xgraph-api.",
+            },
+            {
+                "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+                "purpose": "OTLP endpoint that receives the traces.",
+            },
+        ],
     },
     {
         "id": "plugins",
@@ -654,6 +839,12 @@ _SECTIONS: list[dict[str, Any]] = [
                 ),
             },
         ],
+        "env": [
+            {
+                "name": "REDIS_URL",
+                "purpose": "Redis for the ownership cache when the redis key above is empty.",
+            },
+        ],
     },
     {
         "id": "remote_tools",
@@ -701,6 +892,7 @@ _SECTIONS: list[dict[str, Any]] = [
             "threshold": 0.75,
             "parallel": False,
             "max_concurrency": 4,
+            "open_report": True,
         },
         "fields": [
             {"path": ["evaluation", "directory"], "label": "Eval directory", "type": "text"},
@@ -727,6 +919,167 @@ _SECTIONS: list[dict[str, Any]] = [
                 "step": 1,
                 "show_if": {"path": ["evaluation", "parallel"], "equals": True},
             },
+            {
+                "path": ["evaluation", "open_report"],
+                "label": "Open HTML report",
+                "type": "bool",
+                "default": True,
+                "help": "Open the HTML report in your browser when 10xgraph eval finishes.",
+            },
+        ],
+    },
+]
+
+_ENVIRONMENT: list[dict[str, Any]] = [
+    {
+        "title": "Mode and logging",
+        "vars": [
+            {
+                "name": "MODE",
+                "purpose": (
+                    "development or production. Production turns on stricter defaults, "
+                    "including the API docs being off."
+                ),
+            },
+            {"name": "LOG_LEVEL", "purpose": "Python log level such as INFO or DEBUG."},
+            {
+                "name": "STRICT_PRODUCTION_CHECKS",
+                "purpose": (
+                    "Refuse to start in production with wildcard ORIGINS or ALLOWED_HOST, or "
+                    "docs enabled. Unset means on in production; false only warns."
+                ),
+            },
+        ],
+    },
+    {
+        "title": "CORS and hosts",
+        "vars": [
+            {
+                "name": "ORIGINS",
+                "purpose": "Allowed CORS origins, comma-separated. Defaults to *.",
+            },
+            {
+                "name": "ALLOWED_HOST",
+                "purpose": "Comma-separated host names the server answers to. Defaults to *.",
+            },
+            {
+                "name": "CORS_ALLOW_CREDENTIALS",
+                "purpose": (
+                    "Let cross-origin requests carry cookies and auth headers. Defaults to "
+                    "true; production refuses it together with ORIGINS=*."
+                ),
+            },
+        ],
+    },
+    {
+        "title": "Paths and limits",
+        "vars": [
+            {
+                "name": "ROOT_PATH",
+                "purpose": "URL prefix when the app is served behind a proxy path.",
+            },
+            {
+                "name": "DOCS_PATH",
+                "purpose": "Swagger docs path. Empty turns them off; off by default in production.",
+            },
+            {
+                "name": "REDOCS_PATH",
+                "purpose": "ReDoc docs path. Empty turns them off; off by default in production.",
+            },
+            {
+                "name": "MAX_REQUEST_SIZE",
+                "purpose": "Largest request body in bytes. Defaults to 10 MB.",
+            },
+        ],
+    },
+    {
+        "title": "Security headers",
+        "vars": [
+            {
+                "name": "SECURITY_HEADERS_ENABLED",
+                "purpose": "Add security headers to every response. Defaults to true.",
+            },
+            {
+                "name": "HSTS_ENABLED",
+                "purpose": "Send Strict-Transport-Security. Defaults to true.",
+            },
+            {"name": "HSTS_MAX_AGE", "purpose": "HSTS max-age in seconds. Defaults to one year."},
+            {
+                "name": "HSTS_INCLUDE_SUBDOMAINS",
+                "purpose": "Add includeSubDomains to the HSTS header. Defaults to true.",
+            },
+            {
+                "name": "HSTS_PRELOAD",
+                "purpose": "Add preload to the HSTS header. Defaults to false.",
+            },
+            {"name": "FRAME_OPTIONS", "purpose": "X-Frame-Options value. Defaults to DENY."},
+            {
+                "name": "CONTENT_TYPE_OPTIONS",
+                "purpose": "X-Content-Type-Options value. Defaults to nosniff.",
+            },
+            {
+                "name": "REFERRER_POLICY",
+                "purpose": "Referrer-Policy value. Defaults to strict-origin-when-cross-origin.",
+            },
+            {
+                "name": "PERMISSIONS_POLICY",
+                "purpose": "Permissions-Policy value. Unset uses the built-in policy.",
+            },
+            {
+                "name": "CSP_POLICY",
+                "purpose": "Content-Security-Policy value. Unset uses the built-in policy.",
+            },
+        ],
+    },
+    {
+        "title": "Error tracking",
+        "vars": [
+            {
+                "name": "SENTRY_DSN",
+                "purpose": "Sentry project DSN. Error tracking is off without it.",
+            },
+            {
+                "name": "SENTRY_TRACES_SAMPLE_RATE",
+                "purpose": "Share of requests traced, 0 to 1. Defaults to 0.1.",
+            },
+            {
+                "name": "SENTRY_PROFILES_SAMPLE_RATE",
+                "purpose": "Share of requests profiled, 0 to 1. Defaults to 0.",
+            },
+        ],
+    },
+    {
+        "title": "Snowflake IDs (optional)",
+        "note": (
+            "Only needed if you use SnowFlakeIdGenerator with no arguments "
+            "(needs the snowflakekit extra). Otherwise leave these unset."
+        ),
+        "vars": [
+            {
+                "name": "SNOWFLAKE_EPOCH",
+                "purpose": "Epoch in milliseconds for Snowflake ids.",
+            },
+            {
+                "name": "SNOWFLAKE_NODE_ID",
+                "purpose": "Node id for Snowflake ids. Give each machine a different one.",
+            },
+            {
+                "name": "SNOWFLAKE_WORKER_ID",
+                "purpose": "Worker id for Snowflake ids. Make it unique per process on a node.",
+            },
+            {
+                "name": "SNOWFLAKE_TIME_BITS",
+                "purpose": "Bits for the timestamp part of a Snowflake id.",
+            },
+            {"name": "SNOWFLAKE_NODE_BITS", "purpose": "Bits for the node part of a Snowflake id."},
+            {
+                "name": "SNOWFLAKE_WORKER_BITS",
+                "purpose": "Bits for the worker part of a Snowflake id.",
+            },
+            {
+                "name": "SNOWFLAKE_TOTAL_BITS",
+                "purpose": "Total bits in a Snowflake id. Defaults to 64.",
+            },
         ],
     },
 ]
@@ -734,7 +1087,11 @@ _SECTIONS: list[dict[str, Any]] = [
 
 def build_schema() -> dict[str, Any]:
     """Return a fresh, JSON-serialisable copy of the editor schema."""
-    return {"docs_url": DOCS_URL, "sections": copy.deepcopy(_SECTIONS)}
+    return {
+        "docs_url": DOCS_URL,
+        "sections": copy.deepcopy(_SECTIONS),
+        "environment": copy.deepcopy(_ENVIRONMENT),
+    }
 
 
 def section_for_key(key: str) -> str:

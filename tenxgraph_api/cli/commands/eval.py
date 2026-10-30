@@ -1,4 +1,4 @@
-"""Eval command — discover and run 10xGraph evaluations, always generating reports."""
+"""Eval command — discover and run 10xGraph evaluations, always writing a JSON report."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import importlib
 import importlib.util
 import inspect
 import sys
+import time
 import typing
 import webbrowser
 from collections import defaultdict
@@ -27,8 +28,10 @@ from tenxgraph.qa.evaluation.evaluator import AgentEvaluator
 from tenxgraph.qa.evaluation.reporters.manager import ReporterManager
 from tenxgraph.utils.callbacks import CallbackManager
 
+from tenxgraph_api.cli.capabilities import OutputFormat
 from tenxgraph_api.cli.commands import BaseCommand
 from tenxgraph_api.cli.core.config import ConfigManager
+from tenxgraph_api.cli.core.steps import ProgressRun
 
 
 if TYPE_CHECKING:
@@ -83,7 +86,7 @@ DEFAULT_CONCURRENCY = 4
 
 
 class EvalCommand(BaseCommand):
-    """Discover and run agent evaluations; always write HTML + JSON reports."""
+    """Discover and run agent evaluations; always write a JSON report."""
 
     # ------------------------------------------------------------------
     # Discovery
@@ -199,9 +202,12 @@ class EvalCommand(BaseCommand):
             return [evals_dir]
 
         dirs: list[Path] = []
+        # Walk up only inside the project: a target outside the working directory must not
+        # pick up a confeval.py (it is imported and run) from an unrelated parent folder.
+        inside_project = cur == cwd or cwd in cur.parents
         while True:
             dirs.append(cur)
-            if cur in (cwd, cur.parent):
+            if not inside_project or cur in (cwd, cur.parent):
                 break
             cur = cur.parent
 
@@ -537,11 +543,53 @@ class EvalCommand(BaseCommand):
             detail += f"  in={tok.input_tokens} out={tok.output_tokens}"
         return detail
 
+    @staticmethod
+    def _accepts_on_event(run: Any) -> bool:
+        try:
+            params = inspect.signature(run).parameters
+        except (TypeError, ValueError):
+            return False
+        return "on_event" in params or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+
+    @staticmethod
+    def _simulation_events(progress: ProgressRun, label: str) -> Any:
+        """Build the ``on_event`` callback that turns simulator events into progress lines."""
+
+        max_turns: list[int] = []
+
+        def on_event(name: str, data: dict[str, Any]) -> None:
+            if "max_turns" in data:
+                max_turns[:] = [data["max_turns"]]
+            turn = ""
+            if "turn" in data:
+                of = f"/{max_turns[0]}" if max_turns else ""
+                turn = f"turn {data['turn']}{of}  "
+            if name == "turn_started":
+                progress.step(label, f"{turn}user: {data.get('user_message', '')}")
+            elif name == "agent_replied":
+                progress.step(label, f"{turn}agent: {data.get('response', '')}")
+            elif name == "goals_checked":
+                gained = data.get("newly_achieved") or []
+                if gained:
+                    progress.step(
+                        label,
+                        f"{turn}goals {data.get('achieved', 0)}/{data.get('total', 0)}"
+                        f" (+ {', '.join(str(g) for g in gained)})",
+                    )
+            elif name == "evaluating":
+                progress.step(label, f"evaluating criteria: {', '.join(data.get('criteria', []))}")
+            elif name == "agent_error":
+                progress.step(label, f"{turn}agent error: {data.get('error', '')}")
+
+        return on_event
+
     # ------------------------------------------------------------------
     # Flat pool execution — single asyncio event loop for all cases
     # ------------------------------------------------------------------
 
-    async def _run_flat_pool(
+    async def _run_flat_pool(  # noqa: PLR0915
         self,
         pending: list[_PendingCase | _PendingSimulation],
         max_concurrency: int,
@@ -553,7 +601,12 @@ class EvalCommand(BaseCommand):
         """
         total = len(pending)
 
-        async def _run_case(pc: _PendingCase) -> tuple[str, str, str, EvalCaseResult]:
+        async def _run_case(
+            pc: _PendingCase, progress: ProgressRun
+        ) -> tuple[str, str, str, EvalCaseResult]:
+            label = f"{pc.file_name}::{pc.case.name or pc.case.eval_id}"
+            progress.step(label, "running")
+            started = time.perf_counter()
             local_collector = TrajectoryCollector(
                 capture_all_events=pc.evaluator.collector.capture_all_events,
             )
@@ -573,15 +626,34 @@ class EvalCommand(BaseCommand):
                         eval_id=pc.case.eval_id,
                         error=str(exc),
                         name=pc.case.name,
+                        duration_seconds=time.perf_counter() - started,
+                        expected=pc.case.expected_summary(),
                     )
+                if not result.duration_seconds:
+                    result.duration_seconds = time.perf_counter() - started
             return (pc.file_name, pc.eval_set_id, pc.eval_set_name, result)
 
-        async def _run_simulation(ps: _PendingSimulation) -> tuple[str, str, str, EvalCaseResult]:
+        async def _run_simulation(
+            ps: _PendingSimulation, progress: ProgressRun
+        ) -> tuple[str, str, str, EvalCaseResult]:
             from tenxgraph.qa.evaluation.eval_result import CriterionResult
             from tenxgraph.qa.evaluation.token_usage import TokenUsage
 
+            sim_name = ps.scenario.description or ps.scenario.scenario_id
+            label = f"{ps.file_name}::{sim_name}"
+            run_kwargs: dict[str, Any] = {}
+            # Older core releases have no on_event hook; run without step lines there.
+            if self._accepts_on_event(ps.simulator.run):
+                run_kwargs["on_event"] = self._simulation_events(progress, label)
+            started = time.perf_counter()
+            expected = {
+                "input": getattr(ps.scenario, "starting_prompt", "") or None,
+                "response": "; ".join(getattr(ps.scenario, "goals", None) or []) or None,
+                "tool_calls": None,
+                "node_order": None,
+            }
             try:
-                sim_result = await ps.simulator.run(ps.graph, ps.scenario)
+                sim_result = await ps.simulator.run(ps.graph, ps.scenario, **run_kwargs)
                 # Use the full CriterionResult objects (with per-criterion token_usage)
                 # if available; fall back to rebuilding from scores dict.
                 criterion_results = sim_result.criterion_results or [
@@ -624,21 +696,25 @@ class EvalCommand(BaseCommand):
                         "goals_achieved": sim_result.goals_achieved,
                         "completed": sim_result.completed,
                     },
+                    duration_seconds=time.perf_counter() - started,
+                    expected=expected,
                 )
             except Exception as exc:
                 result = EvalCaseResult.failure(
                     eval_id=ps.scenario.scenario_id,
                     error=str(exc),
                     name=ps.scenario.description or ps.scenario.scenario_id,
+                    duration_seconds=time.perf_counter() - started,
+                    expected=expected,
                 )
             return (ps.file_name, ps.eval_set_id, ps.eval_set_name, result)
 
         async def _dispatch(
-            item: _PendingCase | _PendingSimulation,
+            item: _PendingCase | _PendingSimulation, progress: ProgressRun
         ) -> tuple[str, str, str, EvalCaseResult]:
             if isinstance(item, _PendingSimulation):
-                return await _run_simulation(item)
-            return await _run_case(item)
+                return await _run_simulation(item, progress)
+            return await _run_case(item, progress)
 
         def _record(progress: Any, quad: tuple[str, str, str, EvalCaseResult]) -> None:
             file_name, _, _, result = quad
@@ -654,7 +730,7 @@ class EvalCommand(BaseCommand):
             results: list[tuple[str, str, str, EvalCaseResult]] = []
             with self.output.progress_run(title, total=total) as progress:
                 for item in pending:
-                    quad = await _dispatch(item)
+                    quad = await _dispatch(item, progress)
                     _record(progress, quad)
                     results.append(quad)
             return results
@@ -662,14 +738,14 @@ class EvalCommand(BaseCommand):
         semaphore = asyncio.Semaphore(max_concurrency)
 
         async def _run_one(
-            item: _PendingCase | _PendingSimulation,
+            item: _PendingCase | _PendingSimulation, progress: ProgressRun
         ) -> tuple[str, str, str, EvalCaseResult]:
             async with semaphore:
-                return await _dispatch(item)
+                return await _dispatch(item, progress)
 
         output_results: list[tuple[str, str, str, EvalCaseResult]] = []
         with self.output.progress_run(title, total=total) as progress:
-            tasks = [asyncio.create_task(_run_one(item)) for item in pending]
+            tasks = [asyncio.create_task(_run_one(item, progress)) for item in pending]
             for coro in asyncio.as_completed(tasks):
                 quad = await coro
                 _record(progress, quad)
@@ -714,6 +790,32 @@ class EvalCommand(BaseCommand):
                 )
         return Path.cwd() / directory
 
+    def _should_open_report(
+        self, open_report: bool | None, *, quiet: bool, non_interactive: bool
+    ) -> bool:
+        """Open the HTML report only for a person at an interactive terminal."""
+        if open_report is False or quiet or non_interactive or self.output.quiet:
+            return False
+        # `interactive` is false when stdout is not a TTY or CI is set; structured
+        # formats (json/jsonl) never run with an interactive human format.
+        caps = self.output.capabilities
+        return caps.interactive and caps.output_format == OutputFormat.HUMAN
+
+    def _open_report(self, path: str) -> None:
+        try:
+            opened = webbrowser.open(Path(path).resolve().as_uri())
+        except Exception as exc:
+            self.output.warning(f"Could not open the HTML report: {exc}")
+            return
+        if not opened:
+            self.output.warning("Could not open the HTML report in a browser; open the file above.")
+
+    @staticmethod
+    def _exit_code(pass_rate: float, threshold: float | None) -> int:
+        """0 when the pass rate meets ``threshold``; without one, only a clean run passes."""
+        required = 1.0 if threshold is None else threshold
+        return 0 if pass_rate >= required else 1
+
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
@@ -724,11 +826,12 @@ class EvalCommand(BaseCommand):
         output_dir: str = "eval_reports",
         no_report: bool = False,
         threshold: float | None = None,
-        open_report: bool = False,
         parallel: bool = False,
         max_concurrency: int = 4,
         verbose: bool = False,
         quiet: bool = False,
+        open_report: bool | None = None,
+        non_interactive: bool = False,
         **kwargs: Any,
     ) -> int:
         # 1. Load infra settings from 10xgraph.json — no criteria here.
@@ -753,6 +856,8 @@ class EvalCommand(BaseCommand):
                         "max_concurrency", DEFAULT_CONCURRENCY
                     )
                 json_directory = global_eval_cfg.get("directory", json_directory)
+                if open_report is None and isinstance(global_eval_cfg.get("open_report"), bool):
+                    open_report = global_eval_cfg["open_report"]
             except Exception:
                 self.logger.warning("Failed to load eval config from 10xgraph.json; using defaults")
 
@@ -858,14 +963,19 @@ class EvalCommand(BaseCommand):
         if isinstance(getattr(merged, "metadata", None), dict):
             merged.metadata["criteria_by_file"] = self._criteria_by_file(pending)
 
+        # Record the pass-rate gate the exit code uses so the reports can state it.
+        if isinstance(getattr(merged, "metadata", None), dict):
+            merged.metadata["pass_rate_threshold"] = 1.0 if threshold is None else threshold
+            merged.metadata["pass_rate_threshold_source"] = (
+                "default" if threshold is None else "threshold"
+            )
+
         # 9. Determine exit code
-        if threshold is not None and merged.summary.pass_rate < threshold:
+        return_code = self._exit_code(merged.summary.pass_rate, threshold)
+        if threshold is not None and return_code:
             self.output.error(
                 f"Pass rate {merged.summary.pass_rate:.1%} is below threshold {threshold:.1%}"
             )
-            return_code = 1
-        else:
-            return_code = 0 if merged.summary.pass_rate == 1.0 else 1
 
         # 10. Generate reports
         if not no_report:
@@ -881,15 +991,20 @@ class EvalCommand(BaseCommand):
             report_result = manager.run_all(merged)
 
             if report_result.html_path:
-                self.output.success(f"HTML report: {report_result.html_path}")
+                self.output.info(f"HTML report: {report_result.html_path}", emoji=False)
             if report_result.json_path:
                 self.output.info(f"JSON report: {report_result.json_path}", emoji=False)
+                self.output.info(
+                    "Also viewable in the playground: Evals > Open report file (pick the JSON).",
+                    emoji=False,
+                )
             if report_result.has_errors:
                 for name, err in report_result.errors:
                     self.output.warning(f"Reporter error [{name}]: {err}")
-
-            if open_report and report_result.html_path:
-                webbrowser.open(Path(report_result.html_path).resolve().as_uri())
+            if report_result.html_path and self._should_open_report(
+                open_report, quiet=quiet, non_interactive=non_interactive
+            ):
+                self._open_report(report_result.html_path)
 
         summary = merged.summary
         self.output.info(

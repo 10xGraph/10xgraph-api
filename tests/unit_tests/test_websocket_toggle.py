@@ -48,8 +48,8 @@ def test_config_rejects_non_bool_enabled() -> None:
 def test_disabled_leaves_out_both_websocket_routes_only(monkeypatch) -> None:
     monkeypatch.setattr(setup_router, "websocket_library_available", lambda: False)
     on, off = FastAPI(), FastAPI()
-    setup_router.init_routes(on, evals=False, websocket=None)
-    setup_router.init_routes(off, evals=False, websocket=False)
+    setup_router.init_routes(on, websocket=None)
+    setup_router.init_routes(off, websocket=False)
 
     assert _ws_paths(on) == WS_PATHS
     assert _ws_paths(off) == set()
@@ -62,14 +62,14 @@ def test_disabled_leaves_out_both_websocket_routes_only(monkeypatch) -> None:
 def test_enabled_without_a_websocket_library_refuses_to_boot(monkeypatch) -> None:
     monkeypatch.setattr(setup_router, "websocket_library_available", lambda: False)
     with pytest.raises(RuntimeError, match=r"10xgraph-api\[websocket\]"):
-        setup_router.init_routes(FastAPI(), evals=False, websocket=True)
+        setup_router.init_routes(FastAPI(), websocket=True)
 
 
 def test_unset_without_a_websocket_library_warns_and_keeps_routes(monkeypatch, caplog) -> None:
     monkeypatch.setattr(setup_router, "websocket_library_available", lambda: False)
     app = FastAPI()
     with caplog.at_level(logging.WARNING, logger="tenxgraph_api"):
-        setup_router.init_routes(app, evals=False, websocket=None)
+        setup_router.init_routes(app, websocket=None)
 
     assert _ws_paths(app) == WS_PATHS
     assert "10xgraph-api[websocket]" in caplog.text
@@ -79,7 +79,7 @@ def test_enabled_with_a_websocket_library_mounts_quietly(monkeypatch, caplog) ->
     monkeypatch.setattr(setup_router, "websocket_library_available", lambda: True)
     app = FastAPI()
     with caplog.at_level(logging.WARNING, logger="tenxgraph_api"):
-        setup_router.init_routes(app, evals=False, websocket=True)
+        setup_router.init_routes(app, websocket=True)
 
     assert _ws_paths(app) == WS_PATHS
     assert "websocket" not in caplog.text.lower()

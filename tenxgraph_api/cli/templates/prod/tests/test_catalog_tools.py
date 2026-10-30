@@ -45,3 +45,11 @@ def test_get_weather_accepts_injected_tool_call_id_and_state() -> None:
         result = get_weather(location="Berlin", tool_call_id="call_1", state=state)
 
     assert "Berlin" in result
+
+
+def test_weather_is_deterministic_and_differs_between_cities() -> None:
+    from graph.tools.weather_tool import _weather_for
+
+    assert _weather_for("Rome") == _weather_for("rome ")
+    assert _weather_for("Rome") != _weather_for("Berlin")
+    assert _weather_for("Atlantis") == _weather_for("Atlantis")

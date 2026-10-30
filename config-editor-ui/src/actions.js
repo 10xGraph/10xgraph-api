@@ -1,5 +1,6 @@
 import {
-  TIERS, TOKEN, clone, commit, counts, isDirty, isOn, plural, section, snapshot, store,
+  NAV, PAGES, TOKEN, clone, commit, counts, currentRouteId, fieldIdFor, isDirty, navItem, plural,
+  routeHash, section, snapshot, store,
 } from "./store.js";
 
 // ------------------------------------------------------------------ network
@@ -15,15 +16,6 @@ async function api(method, url, body) {
 
 const fatal = (title, text) => commit((s) => { s.fatal = { title, text }; });
 
-function rank(order, id) {
-  const i = order.indexOf(id);
-  return i === -1 ? order.length : i;
-}
-
-function openIssues() {
-  for (const issue of store.issues) if (section(issue.section)) store.open.add(issue.section);
-}
-
 export async function load() {
   if (!TOKEN) return fatal("Open the link printed by 10xgraph config", "This page needs the session token included in that link.");
   let res;
@@ -37,10 +29,14 @@ export async function load() {
   const data = res.data;
   commit((s) => {
     s.schema = data.schema;
-    const order = TIERS.flatMap((t) => t.sections);
-    s.sections = [...data.schema.sections].sort((a, b) => rank(order, a.id) - rank(order, b.id));
-    s.tiers = TIERS.map((t) => ({ ...t, list: t.sections.map(section).filter(Boolean) }));
-    s.tiers[s.tiers.length - 1].list.push(...s.sections.filter((sec) => !order.includes(sec.id)));
+    s.sections = data.schema.sections;
+    const listed = new Set(NAV.flatMap((g) => g.items));
+    const extra = s.sections.map((sec) => sec.id).filter((id) => id !== "core" && !listed.has(id));
+    s.nav = NAV.map((g, i) => ({
+      label: g.label,
+      // Sections the nav does not name join the last group, ahead of the environment page.
+      items: i < NAV.length - 1 ? g.items.filter((id) => PAGES[id] || section(id)) : [...extra, ...g.items],
+    }));
     for (const sec of s.sections) for (const f of sec.fields) s.fields.set(f.path.join("."), f);
     s.config = data.config;
     s.version = data.version;
@@ -51,32 +47,28 @@ export async function load() {
     const clean = data.exists && !data.parse_error;
     s.saved = clean ? snapshot() : "";
     s.validated = clean ? snapshot() : null;
-    // Open everything that is required, switched on, or has something to fix.
-    for (const sec of s.sections) if (!sec.optional || isOn(sec)) s.open.add(sec.id);
-    openIssues();
   });
-  const requested = new URLSearchParams(location.hash.slice(1)).get("section");
-  if (requested && section(requested)) go(requested);
+  applyRoute({ focus: false });
+  // Swap #token=... for a clean page route (the token stays in memory and sessionStorage).
+  history.replaceState(null, "", routeHash(store.page));
 }
 
+// Runs automatically a moment after edits (see main.jsx). Quiet: results show inline.
+let lastTried = null;
 export async function validate() {
-  if (store.busy || !guardJson()) return;
-  commit((s) => { s.busy = "validate"; });
+  const snap = snapshot();
+  if (!store.schema || store.validated === snap || lastTried === snap) return;
+  if (Object.values(store.toolParams).some((t) => t.error)) return;
+  lastTried = snap;
   try {
-    const res = await api("POST", "/api/validate", { config: store.config });
-    if (!res.ok) return toast("error", res.data.error || "Validation failed.");
-    store.issues = res.data.issues;
-    store.validated = snapshot();
-    openIssues();
-    const { errors, warnings } = counts();
-    const show = { label: "Show", run: () => openInspector("problems") };
-    if (errors) toast("error", `${plural(errors, "error")} to fix before saving.`, show);
-    else if (warnings) toast("warning", `Valid, with ${plural(warnings, "warning")}.`, show);
-    else toast("success", "Configuration is valid.");
+    const res = await api("POST", "/api/validate", { config: JSON.parse(snap) });
+    if (!res.ok) return;
+    commit((s) => {
+      s.issues = res.data.issues;
+      s.validated = snap;
+    });
   } catch {
-    toast("error", "Cannot reach the config server.");
-  } finally {
-    commit((s) => { s.busy = null; });
+    // Offline or stopped: the next edit tries again.
   }
 }
 
@@ -90,7 +82,6 @@ export async function save() {
     if (res.data.issues) {
       store.issues = res.data.issues;
       store.validated = snapshot();
-      openIssues();
     }
     if (res.ok) {
       store.version = res.data.version;
@@ -106,7 +97,7 @@ export async function save() {
       toast("error", res.data.error, { label: "Reload", run: () => location.reload() });
     } else if (res.status === 422) {
       const { errors } = counts();
-      toast("error", `Not saved: ${plural(errors, "error")} to fix first.`, { label: "Show", run: () => openInspector("problems") });
+      toast("error", `Not saved: ${plural(errors, "error")} to fix first.`, { label: "Show", run: showFirstError });
     } else {
       toast("error", res.data.error || "Save failed.");
     }
@@ -130,62 +121,115 @@ function guardJson() {
 
 export function setSection(sec, on) {
   commit((s) => {
-    if (on) {
-      s.config[sec.key] = clone(sec.default);
-      s.open.add(sec.id);
-    } else {
-      delete s.config[sec.key];
-    }
+    if (on) s.config[sec.key] = clone(sec.default);
+    else delete s.config[sec.key];
     if (sec.key === "remote_tools") s.toolParams = {};
   });
 }
 
-export function toggleOpen(id) {
-  commit((s) => {
-    if (s.open.has(id)) s.open.delete(id);
-    else s.open.add(id);
-  });
+function showFirstError() {
+  const issue = store.issues.find((i) => i.level === "error") || store.issues[0];
+  if (issue) go(issue.section, fieldIdFor(issue.path));
 }
 
-export function setAllOpen(open) {
-  commit((s) => { s.open = open ? new Set(s.sections.map((sec) => sec.id)) : new Set(); });
-}
+// ------------------------------------------------------------------ routing
 
 const smooth = () => (window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth");
 
-// Expand a section and bring it (or one of its fields) into view.
-export function go(id, fieldId) {
+function resolvePage(id) {
+  if (id === "core") return "get-running";
+  return PAGES[id] || section(id) ? id : "get-running";
+}
+
+// Read the hash into store.page. A route change leaves search and moves focus to the heading.
+export function applyRoute({ focus = true } = {}) {
   commit((s) => {
-    s.open.add(id);
-    s.inspectorOpen = false;
+    s.page = resolvePage(currentRouteId());
+    s.query = "";
+    s.drawerOpen = false;
   });
-  history.replaceState(null, "", `#token=${encodeURIComponent(TOKEN)}&section=${id}`);
+  if (!focus) return;
   requestAnimationFrame(() => {
-    const field = fieldId ? document.getElementById(fieldId) : null;
-    if (field) {
-      field.scrollIntoView({ block: "center", behavior: smooth() });
-      field.focus({ preventScroll: true });
-      return;
-    }
-    document.getElementById(`sec-${id}`)?.scrollIntoView({ block: "start", behavior: smooth() });
-    document.getElementById(`acc-${id}`)?.focus({ preventScroll: true });
+    window.scrollTo(0, 0);
+    document.getElementById("page-title")?.focus({ preventScroll: true });
   });
 }
 
-export function scrollToTier(id) {
-  document.getElementById(`tier-${id}`)?.scrollIntoView({ block: "start", behavior: smooth() });
+// Open a page, and optionally bring one of its fields into view.
+export function go(id, fieldId) {
+  const hash = routeHash(id);
+  if (location.hash !== hash) history.pushState(null, "", hash);
+  applyRoute();
+  if (!fieldId) return;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const field = document.getElementById(fieldId);
+    if (!field) return;
+    field.scrollIntoView({ block: "center", behavior: smooth() });
+    field.focus({ preventScroll: true });
+  }));
 }
 
-// ------------------------------------------------------------------ inspector
+export const hasPage = (id) => !!navItem(id);
 
-export function openInspector(tab) {
+export function setQuery(query) {
+  commit((s) => { s.query = query; });
+}
+
+// ------------------------------------------------------------------ sidebar
+
+const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+let sideTimer;
+
+export function setSidebar(open, { instant = false } = {}) {
+  try { localStorage.setItem("tg-sidebar", open ? "shown" : "hidden"); } catch { /* private mode */ }
+  clearTimeout(sideTimer);
+  const still = instant || reducedMotion();
+  commit((s) => {
+    s.sideOpen = open;
+    if (open) { s.sideRender = true; s.sideShown = still; } else s.sideShown = false;
+    if (!open && still) s.sideRender = false;
+  });
+  if (open && !still) requestAnimationFrame(() => requestAnimationFrame(() => commit((s) => { s.sideShown = true; })));
+  if (!open && !still) sideTimer = setTimeout(() => commit((s) => { if (!s.sideOpen) s.sideRender = false; }), 200);
+}
+
+export function focusSearch() {
+  if (!store.sideOpen) setSidebar(true, { instant: true });
+  requestAnimationFrame(() => {
+    const input = document.getElementById("q");
+    input?.focus();
+    input?.select();
+  });
+}
+
+// ------------------------------------------------------------------ drawer
+
+export function openDrawer(tab) {
   commit((s) => {
     if (tab) s.tab = tab;
-    s.inspectorOpen = !window.matchMedia("(min-width: 1280px)").matches;
+    s.drawerOpen = true;
   });
 }
 
-export const closeInspector = () => commit((s) => { s.inspectorOpen = false; });
+export const closeDrawer = () => commit((s) => { s.drawerOpen = false; });
+
+export async function copyCommand() {
+  const text = "10xgraph dev";
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.append(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    } catch { /* nothing more to try */ }
+  }
+  commit((s) => { s.copied = true; });
+  setTimeout(() => commit((s) => { s.copied = false; }), 2000);
+}
 
 export async function copyJson() {
   try {

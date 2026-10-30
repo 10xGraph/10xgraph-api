@@ -148,7 +148,7 @@ class RateLimitConfig:
             "window": 60,
             "by": "ip",
             "trusted_proxy_headers": false,
-            "exclude_paths": ["/ping", "/docs", "/redoc", "/openapi.json"]
+            "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"]
         }
 
     Example (Redis backend)::
@@ -307,7 +307,7 @@ class WebSocketConfig:
             "enabled": true,
             "max_connections": 1000,
             "max_connections_per_user": 10,
-            "realtime_models": ["gemini-2.5-flash-live"],
+            "realtime_models": ["gemini-3.8-live"],
             "realtime_client_overrides": ["voice", "modalities", "vad"]
         }
 
@@ -439,9 +439,10 @@ class RunsConfig:
     thread under any id it picks; under owner-only authorization the first writer of an id then
     owns it, so a user who claims a guessable id (``"default"``) first locks its intended owner
     out, and a request on an unknown id answers differently from one on someone else's. AG-UI
-    (``POST /v1/ag-ui``) and realtime (``/v1/graph/live``) always accept an id the frontend
-    made, even with ``"server"``, because CopilotKit and the realtime client create their own;
-    the caller owns a new one.
+    (``POST /v1/ag-ui``) and realtime (``/v1/graph/live``) follow the same rule as REST: with
+    ``"server"`` an id the server has never seen is refused (403). An AG-UI client that has no
+    thread yet sends ``threadId`` blank or ``"new"`` and reads the server's id from
+    ``RUN_STARTED``; a frontend that makes its own ids needs ``"client"``.
 
     ``config_keys`` and ``state_keys`` are allow-lists for client input. When set, a request
     whose ``config`` or ``initial_state`` carries any other key is rejected with 422.
@@ -705,13 +706,15 @@ class GraphConfig:
         if not res:
             return None
 
-        if isinstance(res, str) and "jwt" in res:
+        if isinstance(res, str) and res == "jwt":
             # Now check jwt secret and algorithm available in env
             secret = os.environ.get("JWT_SECRET_KEY", None)
             algorithm = os.environ.get("JWT_ALGORITHM", None)
-            if not secret or not algorithm:
+            rotation_keys = os.environ.get("JWT_SECRET_KEYS", None)
+            if not (secret or rotation_keys) or not algorithm:
                 raise ValueError(
-                    "JWT_SECRET_KEY and JWT_ALGORITHM must be set in environment variables",
+                    "JWT_SECRET_KEY (or JWT_SECRET_KEYS) and JWT_ALGORITHM must be set in "
+                    "environment variables",
                 )
             return {
                 "method": "jwt",

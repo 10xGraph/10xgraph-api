@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import importlib
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
 import pytest
@@ -150,8 +150,8 @@ def test_put_state_on_an_unknown_id_is_refused_by_default():
 
 
 @pytest.mark.asyncio
-async def test_ws_run_refuses_an_unknown_id_but_live_accepts_it(monkeypatch):
-    """/v1/graph/ws follows the server mode; /v1/graph/live passes client_thread_ids."""
+async def test_ws_and_live_refuse_an_unknown_id_in_server_mode(monkeypatch):
+    """G-113: /v1/graph/ws and /v1/graph/live follow runs.thread_ids like REST."""
     from injectq import InjectQ
 
     container = MagicMock()
@@ -165,14 +165,13 @@ async def test_ws_run_refuses_an_unknown_id_but_live_accepts_it(monkeypatch):
     check = graph_router_module._ws_thread_authorized
 
     assert await check(authz, alice, "frontend-id", "stream") is False
-    assert await check(authz, alice, "frontend-id", "stream", client_thread_ids=True) is True
-    # Fresh threads and owned threads are unchanged; a foreign thread stays refused on live.
+    # Fresh threads and owned threads are unchanged; a foreign thread stays refused.
     assert await check(authz, alice, None, "stream") is True
     assert await check(authz, alice, "taken", "stream") is True
-    assert (
-        await check(authz, {"user_id": "mallory"}, "taken", "stream", client_thread_ids=True)
-        is False
-    )
+    assert await check(authz, {"user_id": "mallory"}, "taken", "stream") is False
+    # Opting in with runs.thread_ids "client" lets the caller name a new thread.
+    opted = _backend(checkpointer, thread_ids="client")
+    assert await check(opted, alice, "frontend-id", "stream") is True
 
 
 @pytest.mark.asyncio
@@ -199,7 +198,7 @@ async def test_the_caller_owns_a_frontend_id_after_claiming_it():
 
 
 @pytest.mark.asyncio
-async def test_ag_ui_asks_the_backend_with_client_thread_ids():
+async def test_ag_ui_asks_the_backend_without_the_client_exemption():
     pytest.importorskip("ag_ui")
     from tenxgraph_api.src.app.routers.ag_ui.router import run_ag_ui
 
@@ -227,5 +226,57 @@ async def test_ag_ui_asks_the_backend_with_client_thread_ids():
         await run_ag_ui(request, MagicMock(), {"user_id": "alice"}, authz, config)
     assert exc.value.status_code == HTTP_FORBIDDEN
     authz.authorize.assert_awaited_once_with(
-        {"user_id": "alice"}, "graph", "stream", resource_id="copilot-9", client_thread_ids=True
+        {"user_id": "alice"}, "graph", "stream", resource_id="copilot-9"
     )
+
+
+def _ag_ui_request(thread_id):
+    request = MagicMock()
+    request.json = AsyncMock(
+        return_value={
+            "threadId": thread_id,
+            "runId": "r1",
+            "state": {},
+            "messages": [{"id": "m1", "role": "user", "content": "hi"}],
+            "tools": [],
+            "context": [],
+            "forwardedProps": {},
+        }
+    )
+    request.headers = {}
+    return request
+
+
+@pytest.mark.asyncio
+async def test_ag_ui_blank_thread_id_gets_a_server_id_without_authz():
+    pytest.importorskip("ag_ui")
+    from tenxgraph_api.src.app.routers.ag_ui.router import run_ag_ui
+
+    service = MagicMock()
+    service.new_thread_id = AsyncMock(return_value="srv-1")
+    service.check_media_urls = MagicMock()
+    authz = MagicMock()
+    authz.authorize = AsyncMock(return_value=False)
+    config = SimpleNamespace(
+        auth_config=lambda: "jwt", ag_ui=SimpleNamespace(allow_client_tools=True)
+    )
+    with patch(
+        "tenxgraph_api.src.app.routers.ag_ui.router.acquire_run_guard", new=AsyncMock()
+    ) as guard:
+        response = await run_ag_ui(_ag_ui_request(""), service, {"user_id": "a"}, authz, config)
+    assert response.status_code == HTTP_OK
+    authz.authorize.assert_not_awaited()
+    assert guard.await_args.kwargs["thread_id"] == "srv-1"
+
+
+@pytest.mark.asyncio
+async def test_ag_ui_bad_thread_id_is_a_validation_error():
+    pytest.importorskip("ag_ui")
+    from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
+    from tenxgraph_api.src.app.routers.ag_ui.router import run_ag_ui
+
+    config = SimpleNamespace(auth_config=lambda: None, ag_ui=SimpleNamespace())
+    with pytest.raises(ClientInputError):
+        await run_ag_ui(
+            _ag_ui_request("a/b"), MagicMock(), {"user_id": "a"}, MagicMock(), config
+        )

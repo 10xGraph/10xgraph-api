@@ -12,7 +12,6 @@ Important variables:
 - `APP_VERSION`
 - `MODE`
 - `LOG_LEVEL`
-- `IS_DEBUG`
 - `MAX_REQUEST_SIZE`
 - `ORIGINS`
 - `ALLOWED_HOST`

@@ -36,13 +36,18 @@ class _FakeRedis:
         self._check()
         self.zsets.get(key, {}).pop(member, None)
 
-    async def zadd(self, key, mapping, xx=False):
+    async def zadd(self, key, mapping, xx=False, ch=False):
+        """Like redis-py: the count of new members (plus changed scores with ``ch``)."""
         self._check()
         zset = self.zsets.setdefault(key, {})
+        count = 0
         for member, score in mapping.items():
             if xx and member not in zset:
                 continue
+            if member not in zset or ch and zset[member] != score:
+                count += 1
             zset[member] = score
+        return count
 
     async def expire(self, key, seconds):
         self._check()
@@ -184,7 +189,10 @@ async def test_redis_outage_fails_open():
     redis.fail = True
     limiter = RedisConcurrencyLimiter(redis)
     lease = await limiter.acquire("k", 1)
-    assert lease is not None and lease.released  # allowed, nothing to release
+    assert lease is not None  # allowed, counted in this process only
+    assert await limiter.acquire("k", 1) is None  # still one holder at a time per process
+    lease.release()
+    assert await limiter.acquire("k", 1) is not None
 
 
 @pytest.mark.asyncio

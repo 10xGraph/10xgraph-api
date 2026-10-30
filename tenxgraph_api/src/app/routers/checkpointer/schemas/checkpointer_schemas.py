@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 from tenxgraph.core.state import Message
 
 from tenxgraph_api.src.app.core.auth.request_config import (
+    BoundedDict,
     ClientInputError,
     client_message_error,
     request_size_error,
@@ -16,7 +17,7 @@ from tenxgraph_api.src.app.core.auth.request_config import (
 class ConfigSchema(BaseModel):
     """Schema for state data."""
 
-    config: dict[str, Any] | None = Field(
+    config: BoundedDict | None = Field(
         default_factory=dict, description="Configuration for the state"
     )
 
@@ -30,7 +31,7 @@ class StateResponseSchema(BaseModel):
 class StateSchema(ConfigSchema):
     """Schema for putting state."""
 
-    state: dict[str, Any] = Field(..., description="State data")
+    state: BoundedDict = Field(..., description="State data")
 
     @field_validator("state")
     @classmethod
@@ -45,7 +46,7 @@ class PutMessagesSchema(ConfigSchema):
     """Schema for putting messages."""
 
     messages: list[Message] = Field(..., description="List of messages to store")
-    metadata: dict[str, Any] | None = Field(None, description="Optional metadata")
+    metadata: BoundedDict | None = Field(None, description="Optional metadata")
 
     @field_validator("messages", mode="before")
     @classmethod
@@ -121,7 +122,7 @@ class DeleteMessageSchema(ConfigSchema):
 class PutThreadSchema(ConfigSchema):
     """Schema for putting thread info."""
 
-    thread_info: dict[str, Any] = Field(..., description="Thread information to store")
+    thread_info: BoundedDict = Field(..., description="Thread information to store")
 
 
 class GetThreadSchema(ConfigSchema):
@@ -163,6 +164,9 @@ class MessagesListResponseSchema(BaseModel):
     """Response schema for message list operations."""
 
     messages: list[Message] | None = Field(None, description="List of messages")
+    has_more: bool | None = Field(None, description="Whether another page follows")
+    offset: int | None = Field(None, description="Offset applied to this page")
+    limit: int | None = Field(None, description="Page size applied to this page")
 
 
 class ThreadResponseSchema(BaseModel):
@@ -175,3 +179,6 @@ class ThreadsListResponseSchema(BaseModel):
     """Response schema for thread list operations."""
 
     threads: list[dict[str, Any]] | None = Field(None, description="List of threads")
+    has_more: bool | None = Field(None, description="Whether another page follows")
+    offset: int | None = Field(None, description="Offset applied to this page")
+    limit: int | None = Field(None, description="Page size applied to this page")

@@ -27,6 +27,30 @@ class MediaSettings(BaseSettings):
     MEDIA_MAX_SIZE_MB: float = 25.0
     DOCUMENT_HANDLING: str = "extract_text"  # extract_text | pass_raw | skip
 
+    # Per-user upload quotas, checked on upload. 0 means no limit. Counting reads the
+    # metadata of every stored file, so it needs a store that can list its files (memory and
+    # local); on one that cannot (cloud) the quota is skipped with a warning.
+    MEDIA_MAX_FILES_PER_USER: int = 0
+    MEDIA_MAX_USER_STORAGE_MB: float = 0.0
+
+    # Refuse an image with more pixels than this before it is stored (a small file can
+    # decode to a huge bitmap). 0 means no limit. Needs Pillow; without it the check is skipped.
+    MEDIA_MAX_IMAGE_PIXELS: int = 50_000_000
+
+    # PDFs are refused (413) before text extraction when larger than this many MB or with more
+    # than this many pages. 0 means no limit. Only applies while DOCUMENT_HANDLING=extract_text.
+    MEDIA_MAX_PDF_MB: float = 10.0
+    MEDIA_MAX_PDF_PAGES: int = 500
+
+    # Inline base64 media in a run request larger than this many bytes is moved into the media
+    # store and replaced by a reference, so it is not copied into state at every step.
+    # 0 turns the offload off.
+    MEDIA_INLINE_MAX_BYTES: int = 50_000
+
+    # Seconds between sweeps that delete files a crash left behind in the media store
+    # (local store only). 0 turns the sweeper off.
+    MEDIA_SWEEP_INTERVAL_SECONDS: float = 3600.0
+
     # Comma-separated content-type allowlist for uploads. Empty (the default) means
     # accept any type -- the developer's call. Set e.g.
     # ``MEDIA_ALLOWED_CONTENT_TYPES=image/*,application/pdf`` to restrict. Entries may

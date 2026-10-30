@@ -1,6 +1,5 @@
 """Init command implementation."""
 
-import contextlib
 import json
 import re
 from collections.abc import Callable
@@ -52,6 +51,33 @@ _PROVIDERS: dict[str, dict[str, str]] = {
 _DEFAULT_PROVIDER = "google"
 
 
+def _escape_agent_name(name: str, filename: str) -> str:
+    """Make ``name`` safe inside the quoted value of the file it is substituted into."""
+    if filename.endswith(".toml"):
+        return name.replace("\\", "\\\\").replace('"', '\\"')
+    if filename.startswith(".env"):
+        escaped = name.replace("\\", "\\\\").replace('"', '\\"')
+        return escaped.replace("$", "\\$").replace("`", "\\`")
+    return name
+
+
+def _agent_name_problem(value: str) -> bool | str:
+    """Prompt validator: True when the name is usable, else the message to show."""
+    if not value.strip() or not _slugify(value):
+        return "Use at least one letter or number"
+    try:
+        _check_agent_name(value)
+    except ValidationError as exc:
+        return exc.message
+    return True
+
+
+def _check_agent_name(name: str) -> None:
+    """Refuse a name with control characters (a newline would add lines to pyproject.toml)."""
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in name):  # noqa: PLR2004
+        raise ValidationError("Agent name cannot contain control characters.", field="name")
+
+
 def _slugify(name: str) -> str:
     """Convert 'WeatherBot' → 'weather-bot'."""
     s = re.sub(r"([A-Z])", r"-\1", name).lstrip("-").lower()
@@ -80,15 +106,21 @@ def _template_vars(context: dict[str, Any]) -> dict[str, Any]:
     """Derive the template variables that depend on the user's answers.
 
     The production pyproject.toml lists only what the answers need: the provider SDK
-    through the core extra, PyJWT for JWT auth, redis for the Redis rate limiter, and
-    websockets for WebSocket streaming / realtime. The generated Dockerfile installs
-    exactly this list.
+    and the Postgres + Redis checkpointer (``pg_checkpoint``) through the core extras,
+    PyJWT for JWT auth, redis (always, the checkpointer and the default rate limiter use
+    it), and websockets for WebSocket streaming / realtime. The generated Dockerfile
+    installs exactly this list. Quick-start has no Postgres or Redis, so its core
+    requirement is the provider extra alone.
     """
     provider = _PROVIDERS[context.get("provider", _DEFAULT_PROVIDER)]
+    is_prod = context.get("setup_type") == "production"
+    core_extras = [provider["extra"]]
+    if is_prod:
+        core_extras.append("pg_checkpoint")
     api_extras = []
     if context.get("auth") == "jwt":
         api_extras.append("jwt")
-    if context.get("rate_limit") == "redis":
+    if is_prod or context.get("rate_limit") == "redis":
         api_extras.append("redis")
     if context.get("websocket"):
         api_extras.append("websocket")
@@ -97,7 +129,7 @@ def _template_vars(context: dict[str, Any]) -> dict[str, Any]:
         "llm_model": provider["model"],
         "llm_sim_model": provider["sim_model"],
         "llm_api_key_env": provider["api_key_env"],
-        "core_requirement": f"10xgraph[{provider['extra']}]",
+        "core_requirement": f"10xgraph[{','.join(core_extras)}]",
         "api_requirement": (
             f"10xgraph-api[{','.join(api_extras)}]" if api_extras else "10xgraph-api"
         ),
@@ -216,6 +248,17 @@ class InitCommand(BaseCommand):
                 else [f'pip install "{_template_vars(context)["core_requirement"]}"']
                 + (['pip install "10xgraph-api[websocket]"'] if context.get("websocket") else [])
             )
+            prod_steps = (
+                [
+                    "Set DATABASE_URL (Postgres) and REDIS_URL (Redis) in .env.",
+                    "graph/agent.py keeps a commented InMemoryCheckpointer for local testing "
+                    "without Postgres and Redis.",
+                    "10xgraph config to review auth, rate limiting and the other settings.",
+                    "10xgraph build to generate the Dockerfile for deployment.",
+                ]
+                if is_prod
+                else ["10xgraph config to review the settings in your browser."]
+            )
             self.output.completion_screen(
                 "Project ready",
                 f'"{agent_name}" was created successfully',
@@ -230,6 +273,7 @@ class InitCommand(BaseCommand):
                     f"cd {base_path}",
                     *install_step,
                     f"Copy .env.example to .env and set {provider_info['api_key_env']}.",
+                    *prod_steps,
                     "10xgraph dev",
                 ],
             )
@@ -262,6 +306,7 @@ class InitCommand(BaseCommand):
 
         inferred_name = Path(path).resolve().name if path not in {"", "."} else "MyAgent"
         resolved_name = (agent_name or inferred_name).strip()
+        _check_agent_name(resolved_name)
         slug = _slugify(resolved_name)
         if not resolved_name or not slug:
             raise ValidationError(
@@ -269,14 +314,17 @@ class InitCommand(BaseCommand):
                 field="name",
             )
 
-        resolved_auth = (auth or "none").strip().lower()
+        is_prod_template = resolved_template == "production"
+        resolved_auth = (auth or ("jwt" if is_prod_template else "none")).strip().lower()
         if resolved_auth not in {"none", "jwt", "custom"}:
             raise ValidationError(
                 f"Invalid auth mode '{resolved_auth}'. Choose none, jwt, or custom.",
                 field="auth",
             )
 
-        resolved_rate_limit = (rate_limit or "none").strip().lower()
+        resolved_rate_limit = (
+            (rate_limit or ("redis" if is_prod_template else "none")).strip().lower()
+        )
         if resolved_rate_limit not in {"none", "memory", "redis"}:
             raise ValidationError(
                 f"Invalid rate-limit mode '{resolved_rate_limit}'. "
@@ -309,7 +357,8 @@ class InitCommand(BaseCommand):
             "rate_limit": resolved_rate_limit,
             "rl_requests": 100,
             "rl_window": 60,
-            "rl_by": "ip",
+            # With auth on, one budget per user; "ip" would share one budget behind a proxy.
+            "rl_by": "user" if resolved_auth in {"jwt", "custom"} else "ip",
             "rl_trusted_proxy": False,
         }
 
@@ -317,7 +366,7 @@ class InitCommand(BaseCommand):
     # Prompts
     # ------------------------------------------------------------------
 
-    def _prompt_user(self) -> dict | None:  # noqa: PLR0911, PLR0912
+    def _prompt_user(self) -> dict | None:  # noqa: PLR0911
         prompts = self.output.prompts()
         prompts.require_interactive(
             field="template",
@@ -327,7 +376,11 @@ class InitCommand(BaseCommand):
             ),
         )
 
-        agent_name = prompts.text("What is your agent name?", default="MyAgent")
+        agent_name = prompts.text(
+            "What is your agent name?",
+            default="MyAgent",
+            validate=_agent_name_problem,
+        )
         if agent_name is None:
             return None
 
@@ -342,7 +395,7 @@ class InitCommand(BaseCommand):
                 Choice(
                     "production",
                     "Production",
-                    "Auth, rate limiting, evals, and tests scaffolded in",
+                    "JWT auth, Postgres + Redis, rate limiting, evals, and tests scaffolded in",
                 ),
             ],
             default="quick_start",
@@ -393,14 +446,11 @@ class InitCommand(BaseCommand):
                 Choice("jwt", "JWT", "Requires JWT_SECRET_KEY and JWT_ALGORITHM"),
                 Choice("custom", "Custom", "Scaffolds a BaseAuth subclass under auth/"),
             ],
-            default="none",
+            default="jwt",
         )
         if auth is None:
             return None
         context["auth"] = auth
-
-        if auth == "none":
-            return context
 
         rate_limit = prompts.select(
             "Rate limiting backend?",
@@ -409,7 +459,7 @@ class InitCommand(BaseCommand):
                 Choice("memory", "Memory", "Per-process counters — single instance only"),
                 Choice("redis", "Redis", "Shared counters — requires REDIS_URL"),
             ],
-            default="none",
+            default="redis",
         )
         if rate_limit is None:
             return None
@@ -436,13 +486,19 @@ class InitCommand(BaseCommand):
             return None
         context["rl_window"] = int(rl_window)
 
+        auth_on = context.get("auth") in ("jwt", "custom")
         rl_by = prompts.select(
             "Count requests per?",
             [
-                Choice("ip", "Per IP", "Recommended — each client gets its own budget"),
+                Choice(
+                    "user",
+                    "Per user",
+                    "Recommended with auth — each signed-in user gets their own budget",
+                ),
+                Choice("ip", "Per IP", "Each client address gets its own budget"),
                 Choice("global", "Global", "One shared budget across all clients"),
             ],
-            default="ip",
+            default="user" if auth_on else "ip",
         )
         if rl_by is None:
             return None
@@ -481,7 +537,9 @@ class InitCommand(BaseCommand):
             if rl == "none":
                 rows.append(("Rate limit", "None"))
             else:
-                rl_by = "Global" if context.get("rl_by") == "global" else "Per IP"
+                rl_by = {"global": "Global", "user": "Per user"}.get(
+                    str(context.get("rl_by")), "Per IP"
+                )
                 proxy = " · proxy headers on" if context.get("rl_trusted_proxy") else ""
                 rows.append(
                     (
@@ -495,41 +553,6 @@ class InitCommand(BaseCommand):
             ["Setting", "Value"],
             [[label, value] for label, value in rows],
             title="Project summary",
-        )
-
-    def _print_next_steps(self, context: dict, is_prod: bool) -> None:
-        steps: list[tuple[str, str]] = []
-
-        steps.append(("10xgraph skills", "Install coding agent skills"))
-
-        if is_prod:
-            steps.append(("pre-commit install", "Set up Git hooks (ruff, bandit, etc.)"))
-
-        provider = _PROVIDERS[context.get("provider", _DEFAULT_PROVIDER)]
-        if not is_prod:
-            # Production lists the provider SDK in pyproject.toml already.
-            steps.append(
-                (f'pip install "10xgraph[{provider["extra"]}]"', "Add the AI provider library")
-            )
-        steps.append(
-            ("cp .env.example .env", f"Copy env template, then set {provider['api_key_env']}")
-        )
-
-        if context["auth"] == "jwt":
-            steps.append(("# Set JWT_SECRET_KEY in .env", "Required for JWT auth to work"))
-
-        if context["rate_limit"] == "redis":
-            steps.append(("# Set REDIS_URL in .env", "Required for Redis rate limiting"))
-
-        steps.append(("10xgraph dev", "Launch your agent"))
-
-        self.output.print_table(
-            ["#", "Command", "Purpose"],
-            [
-                [str(index), command, description]
-                for index, (command, description) in enumerate(steps, 1)
-            ],
-            title="Next steps",
         )
 
     # ------------------------------------------------------------------
@@ -576,14 +599,18 @@ class InitCommand(BaseCommand):
                 "backend": rate_limit,
                 "requests": context.get("rl_requests", 100),
                 "window": context.get("rl_window", 60),
-                "by": context.get("rl_by", "ip"),
+                "by": context.get("rl_by", "user" if auth in ("jwt", "custom") else "ip"),
                 "trusted_proxy_headers": context.get("rl_trusted_proxy", False),
-                "exclude_paths": ["/ping", "/docs", "/redoc", "/openapi.json"],
+                "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"],
             }
             if rate_limit == "redis":
                 # Resolved from REDIS_URL in .env; the redis backend refuses to start
                 # without a URL or a Redis client bound in InjectQ.
                 config["rate_limit"]["redis"] = {"url": "${REDIS_URL}"}
+                if auth in ("jwt", "custom"):
+                    # Redis is configured, so a leaked or logged-out token can be revoked
+                    # for every worker. See `10xgraph revoke` and the token_revocation docs.
+                    config["token_revocation"] = "redis"  # noqa: S105 - a backend name, not a secret  # nosec B105
 
         return config
 
@@ -608,12 +635,19 @@ class InitCommand(BaseCommand):
         if src.name == ".env.example" and is_prod:
             content = _strip_env_blocks(
                 content,
-                keep_redis=context["rate_limit"] == "redis",
+                keep_redis=True,
                 keep_jwt=context["auth"] == "jwt",
             )
 
-        with contextlib.suppress(Exception):
-            content = Template(content).safe_substitute({**context, **_template_vars(context)})
+        try:
+            values = {**context, **_template_vars(context)}
+            if "agent_name" in values:
+                values["agent_name"] = _escape_agent_name(str(values["agent_name"]), src.name)
+            content = Template(content).safe_substitute(values)
+        except Exception as exc:
+            raise FileOperationError(
+                f"Could not fill in the template {src.name}: {exc}", file_path=str(src)
+            ) from exc
 
         return content
 

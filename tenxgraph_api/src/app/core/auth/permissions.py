@@ -22,7 +22,11 @@ from tenxgraph_api.src.app.core.auth.authorization import (
     scopes_from_claims,
 )
 from tenxgraph_api.src.app.core.auth.identity_cache import recall_identity
-from tenxgraph_api.src.app.core.auth.request_config import normalize_thread_id
+from tenxgraph_api.src.app.core.auth.request_config import (
+    ClientInputError,
+    normalize_thread_id,
+    resource_id_error,
+)
 from tenxgraph_api.src.app.core.auth.reserved_identity import (
     RESERVED_USER_ID_MESSAGE,
     identity_is_reserved,
@@ -329,6 +333,7 @@ class RequirePermission:
             resource_id = self._extract_resource_id_from_path(connection)
             if resource_id is None:
                 resource_id = await self._extract_resource_id_from_body(connection)
+            self._check_resource_ids(connection, resource_id)
 
         # Step 4: Scope check -- does this identity carry the permission for this
         # endpoint at all? The required scope is "<resource>:<action>". Scopes come from
@@ -386,6 +391,25 @@ class RequirePermission:
         )
 
         return user
+
+    @staticmethod
+    def _check_resource_ids(connection: HTTPConnection, resource_id: str | None) -> None:
+        """Refuse an id that breaks the shared resource-id rule (422 ``VALIDATION_ERROR``).
+
+        Covers the thread id from the path or body and the message and memory ids in the path.
+        """
+        problem = None
+        params = connection.path_params
+        for name in ("thread_id", "message_id", "memory_id"):
+            if name in params:
+                problem = resource_id_error(params[name], name) or problem
+        if problem is None:
+            problem = resource_id_error(resource_id, "thread_id")
+        if problem is None:
+            return
+        if isinstance(connection, WebSocket):
+            _reject(connection, 422, problem)
+        raise ClientInputError(problem)
 
     def _extract_resource_id_from_path(self, connection: HTTPConnection) -> str | None:
         """

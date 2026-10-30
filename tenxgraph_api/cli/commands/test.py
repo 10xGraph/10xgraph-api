@@ -45,7 +45,7 @@ class TestCommand(BaseCommand):
                         config_manager.load_config(str(discovered))
                         cfg = config_manager.get_test_config()
                         step.detail(str(discovered))
-                    except Exception:  # nosec: B110
+                    except Exception:
                         self.logger.warning("Failed to load test configuration from %s", discovered)
                         step.detail(f"ignored unreadable config at {discovered}")
                 else:

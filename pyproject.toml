@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "10xgraph-api"
-version = "1.0.0rc1"
+version = "1.0.0rc2"
 description = "Production server for 10xGraph agents (formerly 10xscale-agentflow-cli). Serves a compiled graph over REST, SSE, WebSocket, realtime audio and AG-UI with JWT or custom auth, scoped authorization on every endpoint, owner-only threads and rate limiting, and generates Docker Compose and Kubernetes files. Includes the 10xgraph CLI. MIT licensed, self-hosted."
 readme = "README.md"
 license = "MIT"
@@ -60,11 +60,12 @@ classifiers = [
 dependencies = [
     # This release needs core 1.0 (import `tenxgraph`). The explicit rc in the
     # specifier lets pip and uv pick the core pre-release until 1.0.0 is out.
-    "10xgraph>=1.0.0rc1,<2.0",
+    "10xgraph>=1.0.0rc2,<2.0",
     # Pre-1.0 and major-version-risky deps are capped; floors are the versions
     # the suite is verified against.
     "fastapi>=0.116,<1.0",
-    "python-multipart>=0.0.19,<0.1",
+    "python-multipart>=0.0.31,<0.1",
+    "starlette>=1.3.1",
     "pydantic>=2.13,<3",
     "pydantic-settings>=2.3,<3",
     "uvicorn>=0.36,<1.0",
@@ -96,7 +97,7 @@ redis = [
     "redis>=5.0.7,<7",
 ]
 jwt = [
-    "PyJWT>=2.8,<3",
+    "PyJWT>=2.15.0,<3",
 ]
 media = [
     "textxtract[pdf,docx,html,xml,md]>=0.2.0",
@@ -104,14 +105,14 @@ media = [
 # Pillow for image resize / EXIF / format conversion in core's media processor.
 # Without it, uploaded images pass through unchanged.
 images = [
-    "10xgraph[images]>=1.0.0rc1,<2.0",
+    "10xgraph[images]>=1.0.0rc2,<2.0",
 ]
 gcloud = [
     "google-cloud-logging",
 ]
 otel = [
-    "opentelemetry-api>=1.20.0",
-    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-api>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
     "opentelemetry-instrumentation-fastapi>=0.40b0",
     "opentelemetry-exporter-otlp>=1.20.0",
 ]
@@ -251,6 +252,7 @@ docstring-code-format = true
 
 [tool.mypy]
 python_version = "3.12"
+plugins = ["pydantic.mypy"]
 files = ["tenxgraph_api"]
 # Templates are emitted code, not library code - they reference modules that only
 # exist in a scaffolded project.
@@ -372,7 +374,7 @@ ENVIRONMENT = "pytest"
 
 [dependency-groups]
 dev = [
-    "10xgraph>=1.0.0rc1",
+    "10xgraph>=1.0.0rc2",
     "snowflakekit",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
@@ -389,4 +391,8 @@ dev = [
     "textxtract[pdf,docx,html,xml,md]>=0.2.0",
     # The ag-ui extra, so the AG-UI router tests run in CI instead of failing.
     "ag-ui-protocol>=1.0,<2",
+    # The production worker class (uvicorn_worker.py) and its shutdown tests import these;
+    # same ranges the generated Dockerfile installs.
+    "gunicorn>=23,<27",
+    "uvicorn-worker>=0.4,<1",
 ]

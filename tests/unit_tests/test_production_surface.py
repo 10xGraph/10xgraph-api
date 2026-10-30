@@ -1,6 +1,5 @@
 """Production does not expose dev-only surfaces (M3, M4).
 
-- The evals report viewer has no auth, so it is not mounted in production.
 - API docs and the OpenAPI schema are off in production unless a path is set explicitly.
 - Generated Docker builds do not copy local uploads or eval reports into the image.
 """
@@ -23,15 +22,9 @@ def _paths(app: FastAPI) -> set[str]:
     return {path for path, _route, _guarded in _iter_routes(app.routes)}
 
 
-def test_evals_viewer_is_mounted_by_default():
+def test_no_evals_endpoints_are_mounted():
     app = FastAPI()
     init_routes(app)
-    assert "/v1/evals/runs" in _paths(app)
-
-
-def test_evals_viewer_can_be_left_out():
-    app = FastAPI()
-    init_routes(app, evals=False)
     assert not any(path.startswith("/v1/evals") for path in _paths(app))
 
 
@@ -187,7 +180,7 @@ def test_dockerfile_installs_only_what_the_dependency_file_lists():
 
 def test_dockerfile_uses_the_uvicorn_worker_package():
     content = _dockerfile(has_requirements=False, has_pyproject=True)
-    assert '"uvicorn_worker.UvicornWorker"' in content
+    assert '"tenxgraph_api.src.app.uvicorn_worker.TenxGraphUvicornWorker"' in content
     assert "uvicorn.workers" not in content
 
 

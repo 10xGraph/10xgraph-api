@@ -5,9 +5,11 @@ from tenxgraph.core.state import Message
 from tenxgraph.utils import ResponseGranularity
 
 from tenxgraph_api.src.app.core.auth.request_config import (
+    BoundedDict,
     ClientInputError,
     client_message_error,
     request_size_error,
+    structure_error,
     with_fresh_message_ids,
 )
 
@@ -43,11 +45,11 @@ class GraphInputSchema(BaseModel):
             "is rejected with 409 before anything runs."
         ),
     )
-    initial_state: dict[str, Any] | None = Field(
+    initial_state: BoundedDict | None = Field(
         default=None,
         description="Initial state for the graph execution",
     )
-    config: dict[str, Any] | None = Field(
+    config: BoundedDict | None = Field(
         default=None,
         description="Optional configuration for graph execution",
     )
@@ -72,6 +74,14 @@ class GraphInputSchema(BaseModel):
     def messages_within_limits(cls, v: Any) -> Any:
         # Before the messages are parsed into objects: an oversized request is refused cheaply.
         if error := request_size_error(v):
+            raise ClientInputError(error)
+        return v
+
+    @field_validator("initial_state", "config", "resume", mode="before")
+    @classmethod
+    def nesting_within_limit(cls, v: Any, info: ValidationInfo) -> Any:
+        # Before parsing: a very deep value would fail with RecursionError inside the run.
+        if error := structure_error(v, info.field_name or "input"):
             raise ClientInputError(error)
         return v
 
@@ -152,6 +162,20 @@ class EdgeSchema(BaseModel):
     target: str = Field(..., description="Target node identifier")
 
 
+class RealtimeOptionsSchema(BaseModel):
+    """Which /v1/graph/live init-frame options the server applies."""
+
+    client_overrides: list[str] = Field(
+        default_factory=list,
+        description="Init keys applied from the client (voice, modalities, vad, system_prompt)",
+    )
+    models: list[str] = Field(
+        default_factory=list, description="Models a client may request; empty means none"
+    )
+    model_selectable: bool = Field(False, description="Whether the init `model` is honored")
+    tools_tags: bool = Field(True, description="Whether the client may narrow the tool tags")
+
+
 class GraphInfoSchema(BaseModel):
     """Schema for graph metadata and configuration."""
 
@@ -160,6 +184,10 @@ class GraphInfoSchema(BaseModel):
     is_realtime: bool = Field(
         False,
         description="Whether the graph is a realtime/live agent (driven over /v1/graph/live)",
+    )
+    realtime_options: RealtimeOptionsSchema | None = Field(
+        None,
+        description="Live init options the server honors; null when the graph is not realtime",
     )
     checkpointer: bool = Field(..., description="Whether checkpointer is enabled")
     checkpointer_type: str | None = Field(None, description="Type of checkpointer if enabled")
@@ -220,7 +248,7 @@ class GraphToolsSchema(BaseModel):
 
 
 class ObsSpanSchema(BaseModel):
-    """A reconstructed span in the run trace."""
+    """A reconstructed span in the run trace (root > node visit > llm / tool)."""
 
     id: str = Field(..., description="Span id (stable within the run)")
     name: str = Field(..., description="Display name, e.g. 'node: agent' or 'tool: get_weather'")
@@ -228,9 +256,33 @@ class ObsSpanSchema(BaseModel):
     parent: str | None = Field(None, description="Parent span id")
     start_ms: float = Field(..., description="Start offset from run start, in ms")
     duration_ms: float = Field(..., description="Duration in ms")
+    status: Literal["ok", "error", "running"] = Field("ok", description="Span outcome")
+    error: str | None = Field(None, description="Error text when status is 'error'")
+    inputs: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "What went in. root: user_message. node: incoming_message (approximate). "
+            "tool: args. llm: always null (the prompt is not recorded)."
+        ),
+    )
+    outputs: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "What came out. root: assistant_message. node: messages emitted in the visit. "
+            "llm: text and tool_calls. tool: result."
+        ),
+    )
+    step: int | None = Field(None, description="Graph step of the visit (node spans)")
+    visit: int | None = Field(
+        None, description="1-based visit count of this node name (node spans)"
+    )
     model: str | None = Field(None, description="LLM model (llm spans)")
     input_tokens: int | None = Field(None, description="Prompt tokens (llm spans)")
     output_tokens: int | None = Field(None, description="Completion tokens (llm spans)")
+    total_tokens: int | None = Field(None, description="Total tokens (llm spans)")
+    reasoning_tokens: int | None = Field(None, description="Reasoning tokens (llm spans)")
+    tool_name: str | None = Field(None, description="Tool name (tool spans)")
+    tool_call_id: str | None = Field(None, description="Tool call id (tool spans)")
 
 
 class ObsEventSchema(BaseModel):
@@ -266,13 +318,23 @@ class ObsRunSchema(BaseModel):
     usage: ObsTokenUsageSchema = Field(default_factory=ObsTokenUsageSchema)
     llm_calls: int = 0
     tool_calls: int = 0
-    iterations: int = 0
+    iterations: int = Field(0, description="Number of node visits")
+    error: str | None = Field(None, description="First error text seen in the run")
+    model: str | None = Field(None, description="First model seen in the run")
+    models: list[str] = Field(default_factory=list, description="Distinct models seen")
+    notes: list[str] = Field(
+        default_factory=list, description="Honest limits of this reconstruction"
+    )
 
 
 class ObservabilitySchema(BaseModel):
     """Observability payload for a thread: available runs + the selected run."""
 
     thread_id: str
+    enabled: bool = Field(True, description="False when run tracing is off on this server")
+    reason: Literal["disabled_in_production", "store_unavailable", "no_runs"] | None = Field(
+        None, description="Why there is no run: tracing off, store missing, or none captured yet"
+    )
     run_count: int = 0
     run_ids: list[str] = Field(default_factory=list)
     run: ObsRunSchema | None = Field(None, description="The requested/latest run, if any")
@@ -290,7 +352,7 @@ class GraphStopSchema(BaseModel):
             raise ValueError("thread_id cannot be empty or whitespace")
         return v.strip()
 
-    config: dict[str, Any] | None = Field(
+    config: BoundedDict | None = Field(
         default=None, description="Optional configuration for the stop operation"
     )
 
@@ -307,7 +369,7 @@ class FixGraphRequestSchema(BaseModel):
             raise ValueError("thread_id cannot be empty or whitespace")
         return v.strip()
 
-    config: dict[str, Any] | None = Field(
+    config: BoundedDict | None = Field(
         default=None, description="Optional configuration for the fix operation"
     )
 
@@ -343,6 +405,15 @@ class WsGraphInputSchema(BaseModel):
         can resume the correct checkpointed thread.  ``messages`` is unused.
     """
 
+    idempotency_key: str | None = Field(
+        default=None,
+        max_length=255,
+        description=(
+            "Optional Idempotency-Key for this run. The same key from the same user while the "
+            "first run is going, or after it finished, is refused with an error frame; a "
+            "different request under the same key is refused too."
+        ),
+    )
     invoke_type: Literal["fresh", "resume"] = Field(
         default="fresh",
         description=(
@@ -383,11 +454,11 @@ class WsGraphInputSchema(BaseModel):
     )
 
     # ── Shared fields (mirror GraphInputSchema) ───────────────────────────
-    initial_state: dict[str, Any] | None = Field(
+    initial_state: BoundedDict | None = Field(
         default=None,
         description="Initial state for the graph execution.",
     )
-    config: dict[str, Any] | None = Field(
+    config: BoundedDict | None = Field(
         default=None,
         description="Optional configuration.  Must include 'thread_id' for resume runs.",
     )
@@ -415,6 +486,13 @@ class WsGraphInputSchema(BaseModel):
     @classmethod
     def messages_within_limits(cls, v: Any, info: ValidationInfo) -> Any:
         if error := request_size_error(v, info.field_name or "messages"):
+            raise ClientInputError(error)
+        return v
+
+    @field_validator("resume", mode="before")
+    @classmethod
+    def resume_within_limits(cls, v: Any) -> Any:
+        if error := structure_error(v, "resume"):
             raise ClientInputError(error)
         return v
 

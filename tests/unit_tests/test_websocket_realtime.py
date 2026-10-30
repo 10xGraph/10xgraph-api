@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import WebSocketDisconnect
 
+from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
 from tenxgraph_api.src.app.routers.graph.router import realtime_graph_ws
 
 
@@ -54,6 +55,8 @@ def _make_websocket(receive_side_effects: list, init: dict):
 def _make_service(events: list):
     service = MagicMock()
     service.is_live_agent = True  # live graph: allowed on /v1/graph/live
+    service.runs_policy.return_value = RunsConfig()
+    service.new_thread_id = AsyncMock(return_value="srv-1")
     captured = {}
 
     async def _gen(input_queue, init, user):
@@ -157,6 +160,8 @@ class TestRealtimeWebSocket:
     async def test_downstream_error_closes_with_1011(self):
         ws = _make_websocket([WebSocketDisconnect()], init={"model": "gemini-2.5-flash-live"})
         service = MagicMock()
+        service.runs_policy.return_value = RunsConfig()
+        service.new_thread_id = AsyncMock(return_value="srv-1")
 
         async def _boom(input_queue, init, user):
             raise RuntimeError("graph has no LiveAgent")
@@ -230,6 +235,8 @@ class TestRealtimeWebSocket:
                 yield e
 
         service = MagicMock()
+        service.runs_policy.return_value = RunsConfig()
+        service.new_thread_id = AsyncMock(return_value="srv-1")
         service.realtime_graph = _slow_gen
 
         ws = _make_websocket(
@@ -254,6 +261,8 @@ class TestRealtimeWebSocket:
             yield  # make it an async generator
 
         service = MagicMock()
+        service.runs_policy.return_value = RunsConfig()
+        service.new_thread_id = AsyncMock(return_value="srv-1")
         service.realtime_graph = _boom
 
         ws = _make_websocket([WebSocketDisconnect()], init={"model": "gemini-x"})
@@ -264,6 +273,76 @@ class TestRealtimeWebSocket:
         errors = [m for m in sent if m.get("type") == "error"]
         assert errors and errors[0]["fatal"] is True
         assert errors[0]["code"] == "invalid_config"
+
+
+class TestLiveThreadIds:
+    """G-113/R-113: /v1/graph/live follows ``runs.thread_ids`` and returns the thread id."""
+
+    @staticmethod
+    def _authz(monkeypatch, *, thread_ids):
+        from injectq import InjectQ
+        from tenxgraph.storage.checkpointer import InMemoryCheckpointer
+
+        from tenxgraph_api.src.app.core.auth.authorization import OwnershipAuthorizationBackend
+
+        container = MagicMock()
+        container.get.return_value = SimpleNamespace(auth_config=lambda: "jwt")
+        monkeypatch.setattr(InjectQ, "get_instance", staticmethod(lambda: container))
+        runs = RunsConfig(thread_ids=thread_ids)
+        return OwnershipAuthorizationBackend(
+            checkpointer=InMemoryCheckpointer(), server_thread_ids=runs.server_thread_ids
+        )
+
+    @staticmethod
+    def _sent(ws):
+        return [json.loads(c.args[0]) for c in ws.send_text.call_args_list]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("init", [{}, {"thread_id": ""}, {"thread_id": "new"}])
+    async def test_no_id_gets_a_server_id_returned_first(self, monkeypatch, init):
+        authz = self._authz(monkeypatch, thread_ids="server")
+        ws = _make_websocket([WebSocketDisconnect()], init={"model": "m", **init})
+        service = _make_service([_json_event("turn_complete")])
+
+        await realtime_graph_ws(
+            websocket=ws, service=service, user={"user_id": "u1"}, authz=authz
+        )
+
+        service.new_thread_id.assert_awaited_once()
+        assert service._captured["init"]["thread_id"] == "srv-1"
+        sent = self._sent(ws)
+        assert sent[0] == {"type": "session_started", "thread_id": "srv-1"}
+        assert not any(e.get("code") == "not_authorized" for e in sent)
+
+    @pytest.mark.asyncio
+    async def test_unknown_id_is_refused_under_server(self, monkeypatch):
+        authz = self._authz(monkeypatch, thread_ids="server")
+        ws = _make_websocket([WebSocketDisconnect()], init={"model": "m", "thread_id": "made-up"})
+        service = _make_service([])
+
+        await realtime_graph_ws(
+            websocket=ws, service=service, user={"user_id": "u1"}, authz=authz
+        )
+
+        sent = self._sent(ws)
+        assert any(e.get("code") == "not_authorized" for e in sent)
+        assert not any(e.get("type") == "session_started" for e in sent)
+        assert any(c.kwargs.get("code") == 1008 for c in ws.close.call_args_list)
+        assert "init" not in service._captured
+
+    @pytest.mark.asyncio
+    async def test_unknown_id_is_allowed_under_client(self, monkeypatch):
+        authz = self._authz(monkeypatch, thread_ids="client")
+        ws = _make_websocket([WebSocketDisconnect()], init={"model": "m", "thread_id": "mine"})
+        service = _make_service([])
+
+        await realtime_graph_ws(
+            websocket=ws, service=service, user={"user_id": "u1"}, authz=authz
+        )
+
+        service.new_thread_id.assert_not_awaited()
+        assert service._captured["init"]["thread_id"] == "mine"
+        assert self._sent(ws)[0] == {"type": "session_started", "thread_id": "mine"}
 
 
 class TestIsLiveAgent:
@@ -618,3 +697,71 @@ class TestRealtimeSessionLimits:
         assert [i.kind for i in got] == ["audio"]
         q.send_audio(b"c")  # closed queue drops and does not leak budget
         assert q._buffered == 0
+
+
+class TestConcurrentLiveSessions:
+    """Two live connections on one worker's graph must not share provider state (G-10)."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_sessions_get_their_own_provider_client(self):
+        import asyncio
+
+        from tenxgraph.core.realtime.base import AudioDeltaEvent
+        from tenxgraph.prebuilt.agent import AudioAgent
+
+        from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
+
+        class Client:
+            def __init__(self, tag):
+                self.tag, self.audio, self.closed = tag, [], False
+                self.connected = asyncio.Event()
+
+            async def connect(self, config, resume_handle=None):
+                self.connected.set()
+
+            async def send_audio(self, pcm, sample_rate):
+                self.audio.append(pcm)
+
+            async def receive(self):
+                yield AudioDeltaEvent(data=self.tag)
+                await asyncio.Event().wait()
+
+            async def close(self):
+                self.closed = True
+
+        clients = [Client(b"A"), Client(b"B")]
+        pending = list(clients)
+        app = AudioAgent(
+            "gemini-2.5-flash-live", realtime_client_factory=lambda: pending.pop(0)
+        ).compile()
+        svc = GraphService(graph=app, checkpointer=_checkpointer(), config=_config())
+        queues = {}
+
+        async def session(name):
+            from tenxgraph_api.src.app.routers.graph.router import _ByteBoundedLiveInputQueue
+
+            queues[name] = _ByteBoundedLiveInputQueue()
+            return [
+                e
+                async for e in svc.realtime_graph(
+                    queues[name], {"thread_id": name}, {"user_id": name}
+                )
+            ]
+
+        ta = asyncio.create_task(session("ta"))
+        await clients[0].connected.wait()
+        tb = asyncio.create_task(session("tb"))
+        await clients[1].connected.wait()
+
+        queues["ta"].send_audio(b"1")
+        queues["tb"].send_audio(b"2")
+        await asyncio.sleep(0.1)
+        queues["ta"].close()
+        await asyncio.wait_for(ta, 2)
+
+        assert clients[0].audio == [b"1"]
+        assert clients[1].audio == [b"2"]
+        assert clients[0].closed is True
+        assert clients[1].closed is False
+        queues["tb"].close()
+        await asyncio.wait_for(tb, 2)

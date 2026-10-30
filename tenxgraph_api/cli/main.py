@@ -49,7 +49,7 @@ def _lazy_command(module_name: str, class_name: str) -> type:
                     hints=(
                         "Run `10xgraph audit` to inspect installed package compatibility.",
                         "Upgrade with `python -m pip install --upgrade "
-                        '"10xgraph>=1.0.0rc1,<2"`.',
+                        '"10xgraph>=1.0.0rc2,<2"`.',
                     ),
                 ) from exc
             implementation = getattr(module, class_name)
@@ -67,6 +67,7 @@ ConfigCommand = _lazy_command("tenxgraph_api.cli.commands.config", "ConfigComman
 DemoCommand = _lazy_command("tenxgraph_api.cli.commands.demo", "DemoCommand")
 EvalCommand = _lazy_command("tenxgraph_api.cli.commands.eval", "EvalCommand")
 InitCommand = _lazy_command("tenxgraph_api.cli.commands.init", "InitCommand")
+RevokeCommand = _lazy_command("tenxgraph_api.cli.commands.revoke", "RevokeCommand")
 SkillsCommand = _lazy_command("tenxgraph_api.cli.commands.skills", "SkillsCommand")
 TestCommand = _lazy_command("tenxgraph_api.cli.commands.test", "TestCommand")
 VersionCommand = _lazy_command("tenxgraph_api.cli.commands.version", "VersionCommand")
@@ -358,7 +359,7 @@ def audit(
 ) -> None:
     """Audit package compatibility and the current project environment.
 
-    Runs six read-only checks and prints them as a table: the Python
+    Runs seven read-only checks and prints them as a table: the Python
     interpreter, the installed CLI and core packages, whether the core exposes
     the evaluation API this CLI expects, whether `10xgraph.json` declares a
     valid `agent` key and remote-tool schemas, and whether the default port is free.
@@ -413,6 +414,41 @@ def version(
         command = VersionCommand(output)
         exit_code = command.execute()
         sys.exit(exit_code)
+    except Exception as e:
+        sys.exit(handle_exception(e))
+
+
+@app.command(rich_help_panel="Manage")
+def revoke(
+    user: str | None = typer.Option(
+        None, "--user", help="Revoke all tokens of this user_id issued so far (log out everywhere)."
+    ),
+    jti: str | None = typer.Option(None, "--jti", help="Revoke the one token with this jti claim."),
+    before: float | None = typer.Option(
+        None, "--before", help="With --user: revoke tokens issued at or before this epoch time."
+    ),
+    expires_at: float | None = typer.Option(
+        None, "--expires-at", help="With --jti: the token's exp (epoch seconds), to drop the entry."
+    ),
+    redis_url: str | None = typer.Option(
+        None, "--redis-url", help="Redis URL (default: REDIS_URL, then `redis` in 10xgraph.json)."
+    ),
+    config_file: str = typer.Option(
+        DEFAULT_CONFIG_FILE, "--config", "-c", help="Project configuration file."
+    ),
+) -> None:
+    """Revoke a token or all of a user's tokens (needs "token_revocation": "redis")."""
+    try:
+        sys.exit(
+            RevokeCommand(output).execute(
+                user=user,
+                jti=jti,
+                before=before,
+                expires_at=expires_at,
+                redis_url=redis_url,
+                config=config_file,
+            )
+        )
     except Exception as e:
         sys.exit(handle_exception(e))
 
@@ -733,6 +769,7 @@ def test(
 
 @app.command(name="eval")
 def eval_cmd(
+    ctx: typer.Context,
     target: str | None = typer.Argument(
         None,
         help="File or directory to evaluate (default: evals/ from 10xgraph.json or cwd)",
@@ -754,11 +791,6 @@ def eval_cmd(
         "-t",
         help="Fail if overall pass rate is below this value (0.0-1.0)",
     ),
-    open_report: bool = typer.Option(
-        False,
-        "--open",
-        help="Open the HTML report in the default browser after the run",
-    ),
     parallel: bool = typer.Option(
         False,
         "--parallel",
@@ -771,6 +803,11 @@ def eval_cmd(
         "-c",
         help="Max cases running concurrently when --parallel is set (global semaphore)",
     ),
+    open_report: bool | None = typer.Option(
+        None,
+        "--open/--no-open",
+        help="Open the HTML report in your browser when the run finishes (default: open).",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose output"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress all output except errors"),
 ) -> None:
@@ -778,8 +815,9 @@ def eval_cmd(
 
     Discovers *_eval.py / eval_*.py files in the target directory (default: evals/).
     Collects all cases from all files into a flat pool, then runs them under a single
-    event loop throttled by --max-concurrency.  Always generates HTML + JSON reports
-    in eval_reports/ unless --no-report is set.
+    event loop throttled by --max-concurrency.  Writes JSON and HTML reports
+    to eval_reports/ unless --no-report is set, and opens the HTML report in your
+    browser when the run ends at an interactive terminal (--no-open to skip).
 
     Each eval file must expose one of:
       get_eval_set() + get_eval_config() # CLI loads agent from 10xgraph.json
@@ -787,6 +825,8 @@ def eval_cmd(
       any function returning EvalSet     # auto-discovered, pytest-style
     """
     _configure_command(verbose=verbose, quiet=quiet)
+    runtime = ctx.find_root().obj
+    non_interactive = isinstance(runtime, CLIContext) and runtime.non_interactive
 
     try:
         command = EvalCommand(output)
@@ -795,11 +835,12 @@ def eval_cmd(
             output_dir=output_dir,
             no_report=no_report,
             threshold=threshold,
-            open_report=open_report,
             parallel=parallel,
             max_concurrency=max_concurrency,
             verbose=verbose,
             quiet=quiet,
+            open_report=open_report,
+            non_interactive=non_interactive,
         )
         sys.exit(exit_code)
     except Exception as e:

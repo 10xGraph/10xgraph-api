@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import re
 import zipfile
 from pathlib import PurePosixPath
 from typing import Any
@@ -57,13 +58,50 @@ EXTRACTION_TIMEOUT_SECONDS = 30.0
 #
 # Markup and text parsers expand their input: a 12 MB ``text/html`` file used about 1.2 GB RSS
 # (roughly 100x) and a 20 MB one took 32.8 s of CPU. 5 MB keeps one parse near 500 MB and
-# inside the timeout. PDF and DOCX are not capped here: they are bounded by the upload cap and,
-# for DOCX, by the archive checks above.
+# inside the timeout. DOCX is bounded by the archive checks above and PDF by the caps below.
 MAX_TEXT_DOCUMENT_BYTES = 5 * 1024 * 1024
 _SIZE_CAPPED_EXTENSIONS = frozenset({".html", ".xml", ".csv", ".md", ".json", ".txt"})
 # At most this many extractions run (or are still running after a timeout) at once.
 MAX_CONCURRENT_EXTRACTIONS = 2
 MAX_EXTRACTED_CHARS = 1_000_000
+
+
+# PDF caps. A 0.9 MB PDF can inflate to ~1 GB while parsed and a 100,000-page one outlives the
+# timeout, so both are checked before any parser sees the bytes. The page count is read from the
+# raw bytes (page objects and page-tree ``/Count`` values), with no parsing: a PDF that hides
+# its page tree in compressed object streams is bounded by the size cap alone.
+MAX_PDF_BYTES = 10 * 1024 * 1024
+MAX_PDF_PAGES = 500
+_PDF_PAGE_RE = re.compile(rb"/Type\s*/Page(?![A-Za-z])")
+_PDF_COUNT_RE = re.compile(rb"/Count\s+(\d{1,9})")
+
+
+class DocumentTooLargeError(ValueError):
+    """A document is over a configured size or page limit (the upload route answers 413)."""
+
+
+def pdf_page_estimate(data: bytes) -> int:
+    """Best-effort page count read from the raw bytes, without parsing the PDF."""
+    pages = len(_PDF_PAGE_RE.findall(data))
+    counts = [int(m) for m in _PDF_COUNT_RE.findall(data)]
+    return max([pages, *counts])
+
+
+def check_pdf_limits(data: bytes, max_bytes: int | None, max_pages: int | None) -> None:
+    """Raise :class:`DocumentTooLargeError` when a PDF is over the size or page cap.
+
+    ``None`` or ``0`` disables a cap. Runs before parsing.
+    """
+    if max_bytes and len(data) > max_bytes:
+        raise DocumentTooLargeError(
+            f"PDF is {len(data)} bytes; the limit for text extraction is {max_bytes} bytes"
+        )
+    if max_pages:
+        pages = pdf_page_estimate(data)
+        if pages > max_pages:
+            raise DocumentTooLargeError(
+                f"PDF has about {pages} pages; the limit for text extraction is {max_pages} pages"
+            )
 
 
 def _handler_extension(filename: str | None, mime_type: str | None) -> str | None:
@@ -115,7 +153,14 @@ class DocumentExtractor:
         text = await extractor.extract(pdf_bytes, "report.pdf")
     """
 
-    def __init__(self, extractor: Any | None = None):
+    def __init__(
+        self,
+        extractor: Any | None = None,
+        max_pdf_bytes: int | None = MAX_PDF_BYTES,
+        max_pdf_pages: int | None = MAX_PDF_PAGES,
+    ):
+        self.max_pdf_bytes = max_pdf_bytes
+        self.max_pdf_pages = max_pdf_pages
         if extractor is not None:
             self.extractor = extractor
             return
@@ -127,6 +172,15 @@ class DocumentExtractor:
             )
 
         self.extractor = AsyncTextExtractor()
+
+    def check_limits(self, data: bytes, mime_type: str | None) -> None:
+        """Raise :class:`DocumentTooLargeError` when ``data`` is a PDF over the caps.
+
+        Lets the upload route refuse the file up front instead of storing it and then skipping
+        its text.
+        """
+        if _handler_extension(None, mime_type) == ".pdf":
+            check_pdf_limits(data, self.max_pdf_bytes, self.max_pdf_pages)
 
     def _slots(self) -> asyncio.Semaphore:
         slots = getattr(self, "_slot_semaphore", None)
@@ -196,6 +250,8 @@ class DocumentExtractor:
                         "Not extracting %s (%s): not a supported document", filename, mime_type
                     )
                     return None
+                if extension == ".pdf":
+                    check_pdf_limits(data, self.max_pdf_bytes, self.max_pdf_pages)
                 if extension == ".docx":
                     _check_zip_container(data)
                 if extension in _SIZE_CAPPED_EXTENSIONS and len(data) > MAX_TEXT_DOCUMENT_BYTES:

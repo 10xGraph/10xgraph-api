@@ -280,16 +280,14 @@ class TestGraphServiceMethods:
         async for c in service.stream_graph(gi, {}):
             chunks.append(c)
 
-        assert (
-            len(chunks) == 2
-        )  # message chunk + final completed status chunk (due to thread name generator path branch)
+        # Naming runs in the background after the run: no extra chunk on the stream, only the
+        # terminal "done" update.
+        assert len(chunks) == 2
 
         data0 = json.loads(chunks[0])
         assert data0["event"] == "message"
-
-        data1 = json.loads(chunks[1])
-        assert data1["event"] == "updates"
-        assert data1["data"]["status"] == "completed"
+        assert json.loads(chunks[1])["data"] == {"status": "done"}
+        await service.drain_naming_tasks()
 
     @pytest.mark.asyncio
     async def test_stream_graph_exception_handling(self, service, mock_graph, monkeypatch):
