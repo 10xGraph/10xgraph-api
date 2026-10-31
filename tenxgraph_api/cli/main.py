@@ -513,13 +513,20 @@ def init(  # noqa: PLR0913
         "--auth",
         help="Production authentication: none, jwt, or custom.",
     ),
-    rate_limit: str | None = typer.Option(
+    cache_store: str | None = typer.Option(
         None,
-        "--rate-limit",
-        help=(
-            "Rate limiting: none (off), memory (on, in-memory cache store), or redis (on, "
-            "Redis cache store on ${REDIS_URL}, plus token revocation with auth)."
-        ),
+        "--cache-store",
+        help="Production cache store: memory or redis (default redis, URL from REDIS_URL).",
+    ),
+    rate_limit: bool | None = typer.Option(
+        None,
+        "--rate-limit/--no-rate-limit",
+        help="Production rate limiting (default on).",
+    ),
+    token_revocation: bool | None = typer.Option(
+        None,
+        "--token-revocation/--no-token-revocation",
+        help="Production token revocation (default on with jwt or custom auth).",
     ),
     provider: str | None = typer.Option(
         None,
@@ -575,7 +582,9 @@ def init(  # noqa: PLR0913
             agent_name=name,
             template=template,
             auth=auth,
+            cache_store=cache_store,
             rate_limit=rate_limit,
+            token_revocation=token_revocation,
             provider=provider,
             websocket=websocket,
             yes=yes,

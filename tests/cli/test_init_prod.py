@@ -32,7 +32,9 @@ def test_init_prod_creates_extra_files(monkeypatch, tmp_path: Path) -> None:
         "agent_name_slug": "my-agent",
         "setup_type": "production",
         "auth": "none",
-        "rate_limit": "none",
+        "cache_store": "memory",
+        "rate_limit": False,
+        "token_revocation": False,
     }
     monkeypatch.setattr(InitCommand, "_prompt_user", lambda self: ctx)
     monkeypatch.setattr(InitCommand, "_should_skip", _skip_binary(InitCommand._should_skip))
@@ -93,7 +95,7 @@ def test_production_template_defaults_to_recommended_setup(tmp_path: Path) -> No
     assert config["auth"] == "jwt"
     assert config["authorization"] == "ownership"
     assert config["cache_store"]["type"] == "redis"
-    assert config["cache_store"]["url"] == "${REDIS_URL}"
+    assert "url" not in config["cache_store"]
     assert config["cache_store"]["rate_limit"]["enabled"] is True
     assert config["cache_store"]["token_revocation"] is True
 
@@ -112,33 +114,111 @@ def test_production_template_defaults_to_recommended_setup(tmp_path: Path) -> No
     assert any(dep.startswith("10xgraph-api[") and "redis" in dep for dep in dependencies)
 
 
-def test_interactive_production_prompts_default_to_jwt_and_redis(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """Accepting every default in the production flow gives JWT and the Redis limiter."""
+class _Scripted:
+    """Prompt double: answers by message prefix, else accepts the default; records asks."""
 
-    class _AcceptDefaults:
-        def require_interactive(self, **_kwargs) -> None:
-            return None
+    def __init__(self, answers: dict[str, object] | None = None) -> None:
+        self.answers = answers or {}
+        self.asked: list[str] = []
 
-        def text(self, _message, default="", **_kwargs):
-            return default
+    def _answer(self, message, default):
+        self.asked.append(message)
+        for prefix, value in self.answers.items():
+            if message.startswith(prefix):
+                return value
+        return default
 
-        def confirm(self, _message, default=False, **_kwargs):
-            return default
+    def require_interactive(self, **_kwargs) -> None:
+        return None
 
-        def select(self, message, _choices, default=None, **_kwargs):
-            return "production" if message == "Which project template?" else default
+    def text(self, message, default="", **_kwargs):
+        return self._answer(message, default)
 
-    output = SilentOutput()
-    monkeypatch.setattr(output, "prompts", lambda: _AcceptDefaults())
+    def confirm(self, message, default=False, **_kwargs):
+        return self._answer(message, default)
 
-    context = InitCommand(output=output)._prompt_user()
+    def select(self, message, _choices, default=None, **_kwargs):
+        if message == "Which project template?":
+            return "production"
+        return self._answer(message, default)
 
+
+def _run_prompts(monkeypatch, answers=None):
+    output = io.StringIO()
+    formatter = OutputFormatter(stream=output)
+    scripted = _Scripted(answers)
+    monkeypatch.setattr(formatter, "prompts", lambda: scripted)
+    return InitCommand(output=formatter)._prompt_user(), scripted, output.getvalue()
+
+
+def test_interactive_production_asks_only_the_basics(monkeypatch) -> None:
+    """Name, template and provider are the only questions; Production gets the full setup."""
+    context, scripted, text = _run_prompts(monkeypatch)
+
+    assert scripted.asked == [
+        "What is your agent name?",
+        "Which AI provider?",
+    ]
     assert context is not None
     assert context["setup_type"] == "production"
     assert context["auth"] == "jwt"
-    assert context["rate_limit"] == "redis"
+    assert context["cache_store"] == "redis"
+    assert context["rate_limit"] is True
+    assert context["token_revocation"] is True
+    assert context["id_generator"] == "uuid"
+    assert context["websocket"] is False
+    assert "cannot reach" not in text
+
+
+def test_interactive_quick_start_has_no_cache_store(monkeypatch) -> None:
+    class _Quick(_Scripted):
+        def select(self, message, _choices, default=None, **_kwargs):
+            return "quick_start" if message == "Which project template?" else default
+
+    output = io.StringIO()
+    formatter = OutputFormatter(stream=output)
+    monkeypatch.setattr(formatter, "prompts", lambda: _Quick())
+    context = InitCommand(output=formatter)._prompt_user()
+    assert context is not None and context["setup_type"] == "quick_start"
+    assert context["cache_store"] is None and context["rate_limit"] is False
+    assert InitCommand(output=formatter)._build_config(context, False).keys() >= {"agent"}
+    assert "cache_store" not in InitCommand(output=formatter)._build_config(context, False)
+
+
+def test_interactive_production_writes_the_recommended_config(monkeypatch, tmp_path) -> None:
+    import json
+
+    context, _, _ = _run_prompts(monkeypatch)
+    config = InitCommand(output=SilentOutput())._build_config(context, True)
+    assert config["auth"] == "jwt"
+    assert config["authorization"] == "ownership"
+    assert config["id_generator"] == "uuid"
+    assert config["cache_store"] == {
+        "type": "redis",
+        "rate_limit": {
+            "enabled": True,
+            "requests": 100,
+            "window": 60,
+            "by": "user",
+            "trusted_proxy_headers": False,
+            "fail_open": False,
+            "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"],
+        },
+        "token_revocation": True,
+    }
+    template = Path(__file__).parents[2] / "tenxgraph_api/cli/templates/prod/10xgraph.json"
+    static = json.loads(template.read_text(encoding="utf-8"))
+    for key in ("auth", "authorization", "id_generator", "cache_store", "thread_name_generator"):
+        assert static[key] == config[key], key
+
+
+def test_summary_shows_the_production_choices(monkeypatch) -> None:
+    context, _, _ = _run_prompts(monkeypatch)
+    stream = io.StringIO()
+    InitCommand(output=OutputFormatter(stream=stream))._print_summary(context)
+    text = stream.getvalue()
+    for label in ("Auth", "Cache store", "Rate limit", "Token revocation", "ID generator"):
+        assert label in text
 
 
 def test_production_graph_builds_a_pg_checkpointer_without_services(tmp_path: Path) -> None:

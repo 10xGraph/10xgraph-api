@@ -25,7 +25,6 @@ def test_dry_run_does_not_create_target(tmp_path: Path) -> None:
         agent_name="Preview Agent",
         template="production",
         auth="jwt",
-        rate_limit="redis",
         non_interactive=True,
         dry_run=True,
     )
@@ -78,7 +77,6 @@ def test_production_dependencies_follow_the_answers(tmp_path: Path) -> None:
         agent_name="Secure Agent",
         template="production",
         auth="jwt",
-        rate_limit="redis",
         provider="openai",
         non_interactive=True,
     )
@@ -89,7 +87,7 @@ def test_production_dependencies_follow_the_answers(tmp_path: Path) -> None:
 
     config = json.loads((target / "10xgraph.json").read_text())
     assert config["cache_store"]["type"] == "redis"
-    assert config["cache_store"]["url"] == "${REDIS_URL}"
+    assert "url" not in config["cache_store"]
     assert set(config["cache_store"]["rate_limit"]) >= {"enabled", "requests", "window", "by"}
     assert config["cache_store"]["token_revocation"] is True
     assert not {"redis", "rate_limit", "token_revocation"} & set(config)
@@ -111,7 +109,7 @@ def test_production_without_jwt_installs_redis_but_not_jwt(tmp_path: Path) -> No
         agent_name="Open Agent",
         template="production",
         auth="custom",
-        rate_limit="memory",
+        cache_store="memory",
         provider="anthropic",
         non_interactive=True,
     )
@@ -197,18 +195,25 @@ def test_init_adds_secret_patterns_to_an_existing_gitignore(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
-    ("template", "auth", "rate_limit"),
+    ("template", "auth", "store", "rate_limit", "revocation"),
     [
-        ("quick-start", None, "none"),
-        ("production", "jwt", "none"),
-        ("production", "jwt", "memory"),
-        ("production", "jwt", "redis"),
-        ("production", "custom", "redis"),
-        ("production", "none", "redis"),
+        ("quick-start", None, None, None, None),
+        ("production", "jwt", "memory", False, False),
+        ("production", "jwt", "memory", True, True),
+        ("production", "jwt", "redis", True, True),
+        ("production", "jwt", "redis", False, False),
+        ("production", "custom", "redis", True, True),
+        ("production", "none", "redis", True, True),
     ],
 )
 def test_generated_config_loads_through_graph_config(
-    tmp_path: Path, monkeypatch, template: str, auth: str | None, rate_limit: str
+    tmp_path: Path,
+    monkeypatch,
+    template: str,
+    auth: str | None,
+    store: str | None,
+    rate_limit: bool | None,
+    revocation: bool | None,
 ) -> None:
     """Every init recipe writes a 10xgraph.json the server parses without a config error."""
     target = tmp_path / "agent"
@@ -217,7 +222,9 @@ def test_generated_config_loads_through_graph_config(
         agent_name="Agent",
         template=template,
         auth=auth,
+        cache_store=store,
         rate_limit=rate_limit,
+        token_revocation=revocation,
         non_interactive=True,
     )
     assert result == 0
@@ -232,25 +239,85 @@ def test_generated_config_loads_through_graph_config(
     config.websocket  # noqa: B018 - parsing is the check
     config.runs  # noqa: B018
     settings = config.cache_store
-    assert settings.type == ("memory" if rate_limit == "none" else rate_limit)
-    assert settings.type_set == (rate_limit != "none")
-    limit = config.rate_limit
-    assert (limit is not None) == (rate_limit != "none")
-    revocation = config.token_revocation
-    assert (revocation is not None) == (rate_limit == "redis" and auth in {"jwt", "custom"})
-    if rate_limit == "redis":
-        assert settings.expanded_url() == "redis://localhost:6379/0"
-    else:
+    assert settings.type == (store or "memory")
+    assert settings.type_set == (store is not None)
+    assert (config.rate_limit is not None) == bool(rate_limit)
+    assert (config.token_revocation is not None) == bool(revocation and auth != "none")
+    if store == "redis":
         assert settings.url is None
+        assert settings.expanded_url() == "redis://localhost:6379/0"
 
-    store, source = build_cache_store(config)
-    assert isinstance(store, RedisCacheStore if rate_limit == "redis" else InMemoryCacheStore)
+    built, source = build_cache_store(config)
+    assert isinstance(built, RedisCacheStore if store == "redis" else InMemoryCacheStore)
     assert (
         source
         == {
-            "redis": "cache_store.url",
+            "redis": "REDIS_URL",
             "memory": "cache_store.type",
-            "none": "cache_store not set",
-        }[rate_limit]
+            None: "cache_store not set",
+        }[store]
     )
-    asyncio.run(store.aclose())
+    asyncio.run(built.aclose())
+
+
+def _written(tmp_path: Path, **kwargs) -> dict:
+    import json
+
+    target = tmp_path / "agent"
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+    result = command.execute(
+        path=str(target), agent_name="Agent", template="production", non_interactive=True, **kwargs
+    )
+    assert result == 0
+    return json.loads((target / "10xgraph.json").read_text())
+
+
+def test_cache_store_choices(tmp_path: Path) -> None:
+    assert _written(tmp_path)["cache_store"]["type"] == "redis"
+    assert _written(tmp_path / "m", cache_store="memory")["cache_store"]["type"] == "memory"
+    assert "url" not in _written(tmp_path / "r", cache_store="redis")["cache_store"]
+
+
+def test_invalid_cache_store_lists_the_choices(tmp_path: Path) -> None:
+    stream = io.StringIO()
+    result = InitCommand(OutputFormatter(stream=stream)).execute(
+        path=str(tmp_path / "x"),
+        template="production",
+        cache_store="valkey",
+        non_interactive=True,
+    )
+    assert result != 0
+    assert "memory or redis" in stream.getvalue()
+
+
+def test_rate_limit_off_and_token_revocation_off(tmp_path: Path) -> None:
+    store = _written(tmp_path / "a", rate_limit=False, token_revocation=False)["cache_store"]
+    assert store == {"type": "redis"}
+    store = _written(tmp_path / "b", token_revocation=False)["cache_store"]
+    assert "token_revocation" not in store and store["rate_limit"]["enabled"] is True
+
+
+def test_token_revocation_is_ignored_without_auth(tmp_path: Path) -> None:
+    store = _written(tmp_path, auth="none", token_revocation=True)["cache_store"]
+    assert "token_revocation" not in store
+
+
+def test_quick_start_ignores_cache_flags(tmp_path: Path) -> None:
+    import json
+
+    target = tmp_path / "q"
+    result = InitCommand(OutputFormatter(stream=io.StringIO())).execute(
+        path=str(target), cache_store="redis", rate_limit=True, non_interactive=True
+    )
+    assert result == 0
+    assert "cache_store" not in json.loads((target / "10xgraph.json").read_text())
+
+
+def test_next_steps_point_to_config_for_every_template(tmp_path: Path) -> None:
+    for template in ("quick-start", "production"):
+        stream = io.StringIO()
+        InitCommand(OutputFormatter(stream=stream)).execute(
+            path=str(tmp_path / template), template=template, non_interactive=True
+        )
+        text = " ".join(stream.getvalue().split())
+        assert "Run 10xgraph config for full control" in text

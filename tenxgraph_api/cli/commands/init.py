@@ -49,6 +49,11 @@ _PROVIDERS: dict[str, dict[str, str]] = {
     },
 }
 _DEFAULT_PROVIDER = "google"
+_CACHE_STORES = ("memory", "redis")
+_CONFIG_HINT = (
+    "Run 10xgraph config for full control: WebSocket, AG-UI, ID generator, thread naming "
+    "and every other server setting."
+)
 
 
 def _escape_agent_name(name: str, filename: str) -> str:
@@ -120,7 +125,7 @@ def _template_vars(context: dict[str, Any]) -> dict[str, Any]:
     api_extras = []
     if context.get("auth") == "jwt":
         api_extras.append("jwt")
-    if is_prod or context.get("rate_limit") == "redis":
+    if is_prod or context.get("cache_store") == "redis":
         api_extras.append("redis")
     if context.get("websocket"):
         api_extras.append("websocket")
@@ -146,7 +151,9 @@ class InitCommand(BaseCommand):
         agent_name: str | None = None,
         template: str | None = None,
         auth: str | None = None,
-        rate_limit: str | None = None,
+        cache_store: str | None = None,
+        rate_limit: bool | None = None,
+        token_revocation: bool | None = None,
         provider: str | None = None,
         websocket: bool = False,
         yes: bool = False,
@@ -166,7 +173,9 @@ class InitCommand(BaseCommand):
                     agent_name=agent_name,
                     template=template,
                     auth=auth,
+                    cache_store=cache_store,
                     rate_limit=rate_limit,
+                    token_revocation=token_revocation,
                     provider=provider,
                     websocket=websocket,
                 )
@@ -259,21 +268,24 @@ class InitCommand(BaseCommand):
                 if is_prod
                 else ["10xgraph config to review the settings in your browser."]
             )
+            details: dict[str, Any] = {
+                "Location": base_path.resolve(),
+                "Template": "production" if is_prod else "quick-start",
+                "Auth": context["auth"],
+                "AI provider": provider_info["label"],
+            }
+            if context.get("websocket"):
+                details["WebSocket"] = "on"
             self.output.completion_screen(
                 "Project ready",
                 f'"{agent_name}" was created successfully',
-                details={
-                    "Location": base_path.resolve(),
-                    "Template": "production" if is_prod else "quick-start",
-                    "Auth": context["auth"],
-                    "AI provider": provider_info["label"],
-                    "WebSocket": "on" if context.get("websocket") else "off",
-                },
+                details=details,
                 next_steps=[
                     f"cd {base_path}",
                     *install_step,
                     f"Copy .env.example to .env and set {provider_info['api_key_env']}.",
                     *prod_steps,
+                    _CONFIG_HINT,
                     "10xgraph dev",
                 ],
             )
@@ -292,7 +304,9 @@ class InitCommand(BaseCommand):
         agent_name: str | None,
         template: str | None,
         auth: str | None,
-        rate_limit: str | None,
+        cache_store: str | None = None,
+        rate_limit: bool | None = None,
+        token_revocation: bool | None = None,
         provider: str | None = None,
         websocket: bool = False,
     ) -> dict[str, Any]:
@@ -322,13 +336,12 @@ class InitCommand(BaseCommand):
                 field="auth",
             )
 
-        resolved_rate_limit = (
-            (rate_limit or ("redis" if is_prod_template else "none")).strip().lower()
-        )
-        if resolved_rate_limit not in {"none", "memory", "redis"}:
+        resolved_cache_store = (cache_store or "redis").strip().lower()
+        if is_prod_template and resolved_cache_store not in _CACHE_STORES:
             raise ValidationError(
-                f"Invalid rate-limit mode '{resolved_rate_limit}'. Choose none, memory, or redis.",
-                field="rate_limit",
+                f"Invalid cache store '{resolved_cache_store}'. "
+                f"Choose {' or '.join(_CACHE_STORES)}.",
+                field="cache_store",
             )
 
         resolved_provider = (provider or _DEFAULT_PROVIDER).strip().lower()
@@ -338,26 +351,40 @@ class InitCommand(BaseCommand):
                 field="provider",
             )
 
-        if resolved_template == "quick-start" and (
-            resolved_auth != "none" or resolved_rate_limit != "none"
-        ):
-            raise ValidationError(
-                "--auth and --rate-limit require --template production.",
-                field="template",
-            )
+        if resolved_template == "quick-start" and auth is not None and resolved_auth != "none":
+            raise ValidationError("--auth requires --template production.", field="template")
 
+        if not is_prod_template:
+            # The cache store, rate limit and token revocation flags are production settings.
+            return {
+                "agent_name": resolved_name,
+                "agent_name_slug": slug,
+                "setup_type": "quick_start",
+                "provider": resolved_provider,
+                "websocket": websocket,
+                "auth": "none",
+                "cache_store": None,
+                "rate_limit": False,
+                "token_revocation": False,
+            }
+
+        auth_on = resolved_auth in {"jwt", "custom"}
         return {
             "agent_name": resolved_name,
             "agent_name_slug": slug,
-            "setup_type": "production" if resolved_template == "production" else "quick_start",
+            "setup_type": "production",
             "provider": resolved_provider,
             "websocket": websocket,
             "auth": resolved_auth,
-            "rate_limit": resolved_rate_limit,
+            "cache_store": resolved_cache_store,
+            "rate_limit": rate_limit is not False,
+            # Ignored with auth off: there is no token to revoke.
+            "token_revocation": auth_on and token_revocation is not False,
+            "id_generator": "uuid",
             "rl_requests": 100,
             "rl_window": 60,
             # With auth on, one budget per user; "ip" would share one budget behind a proxy.
-            "rl_by": "user" if resolved_auth in {"jwt", "custom"} else "ip",
+            "rl_by": "user" if auth_on else "ip",
             "rl_trusted_proxy": False,
         }
 
@@ -365,7 +392,7 @@ class InitCommand(BaseCommand):
     # Prompts
     # ------------------------------------------------------------------
 
-    def _prompt_user(self) -> dict | None:  # noqa: PLR0911
+    def _prompt_user(self) -> dict | None:
         prompts = self.output.prompts()
         prompts.require_interactive(
             field="template",
@@ -414,112 +441,15 @@ class InitCommand(BaseCommand):
         if provider is None:
             return None
 
-        websocket = prompts.confirm(
-            "Enable WebSocket streaming and realtime audio? "
-            "(/v1/graph/ws, /v1/graph/live; installs websockets)",
-            default=False,
+        # Nothing else is asked: Production writes the recommended setup, and
+        # `10xgraph config` (or the flags) changes any part of it.
+        return self._non_interactive_context(
+            path=".",
+            agent_name=agent_name,
+            template="production" if template == "production" else "quick-start",
+            auth=None,
+            provider=provider,
         )
-        if websocket is None:
-            return None
-
-        is_prod = template == "production"
-        context: dict[str, Any] = {
-            "agent_name": agent_name,
-            "agent_name_slug": _slugify(agent_name),
-            "setup_type": template,
-            "provider": provider,
-            "websocket": websocket,
-            "auth": "none",
-            "rate_limit": "none",
-        }
-
-        if not is_prod:
-            return context
-
-        # --- Production questions ---
-
-        auth = prompts.select(
-            "How should requests be authenticated?",
-            [
-                Choice("none", "None", "Open endpoints — development only"),
-                Choice("jwt", "JWT", "Requires JWT_SECRET_KEY and JWT_ALGORITHM"),
-                Choice("custom", "Custom", "Scaffolds a BaseAuth subclass under auth/"),
-            ],
-            default="jwt",
-        )
-        if auth is None:
-            return None
-        context["auth"] = auth
-
-        rate_limit = prompts.select(
-            "Rate limiting?",
-            [
-                Choice("none", "None", "No request throttling"),
-                Choice(
-                    "memory",
-                    "On, in-memory cache store",
-                    "Counters per process; single instance only",
-                ),
-                Choice(
-                    "redis",
-                    "On, Redis cache store",
-                    "Shared counters, locks and token revocation; URL from REDIS_URL",
-                ),
-            ],
-            default="redis",
-        )
-        if rate_limit is None:
-            return None
-        context["rate_limit"] = rate_limit
-
-        if rate_limit == "none":
-            return context
-
-        rl_requests = prompts.text(
-            "Max requests per window?",
-            default="100",
-            validate=lambda v: (v.isdigit() and int(v) > 0) or "Enter a positive integer",
-        )
-        if rl_requests is None:
-            return None
-        context["rl_requests"] = int(rl_requests)
-
-        rl_window = prompts.text(
-            "Window size (seconds)?",
-            default="60",
-            validate=lambda v: (v.isdigit() and int(v) > 0) or "Enter a positive integer",
-        )
-        if rl_window is None:
-            return None
-        context["rl_window"] = int(rl_window)
-
-        auth_on = context.get("auth") in ("jwt", "custom")
-        rl_by = prompts.select(
-            "Count requests per?",
-            [
-                Choice(
-                    "user",
-                    "Per user",
-                    "Recommended with auth — each signed-in user gets their own budget",
-                ),
-                Choice("ip", "Per IP", "Each client address gets its own budget"),
-                Choice("global", "Global", "One shared budget across all clients"),
-            ],
-            default="user" if auth_on else "ip",
-        )
-        if rl_by is None:
-            return None
-        context["rl_by"] = rl_by
-
-        rl_proxy = prompts.confirm(
-            "Behind a reverse proxy? (reads the real IP from forwarded headers)",
-            default=False,
-        )
-        if rl_proxy is None:
-            return None
-        context["rl_trusted_proxy"] = rl_proxy
-
-        return context
 
     # ------------------------------------------------------------------
     # Output helpers
@@ -534,16 +464,17 @@ class InitCommand(BaseCommand):
             ("Package name", context["agent_name_slug"]),
             ("Setup", setup_label),
             ("AI provider", _PROVIDERS[context.get("provider", _DEFAULT_PROVIDER)]["label"]),
-            ("WebSocket", "On" if context.get("websocket") else "Off"),
         ]
+        if context.get("websocket"):
+            rows.append(("WebSocket", "On"))
         if is_prod:
             auth = context["auth"]
             rows.append(("Auth", "None" if auth == "none" else auth.upper()))
 
-            rl = context["rate_limit"]
-            if rl == "none":
-                rows.append(("Rate limit", "None"))
-            else:
+            store = context.get("cache_store") or "memory"
+            rows.append(("Cache store", "Redis" if store == "redis" else "Memory"))
+            rows.append(("ID generator", str(context.get("id_generator", "uuid"))))
+            if context.get("rate_limit"):
                 rl_by = {"global": "Global", "user": "Per user"}.get(
                     str(context.get("rl_by")), "Per IP"
                 )
@@ -551,11 +482,15 @@ class InitCommand(BaseCommand):
                 rows.append(
                     (
                         "Rate limit",
-                        f"{'Redis cache store' if rl == 'redis' else 'Per process'} · "
                         f"{context.get('rl_requests', 100)} req / "
                         f"{context.get('rl_window', 60)}s · {rl_by}{proxy}",
                     )
                 )
+            else:
+                rows.append(("Rate limit", "Off"))
+            if auth != "none":
+                revocation = "On" if context.get("token_revocation") else "Off"
+                rows.append(("Token revocation", revocation))
 
         self.output.print_table(
             ["Setting", "Value"],
@@ -599,27 +534,24 @@ class InitCommand(BaseCommand):
 
         config["thread_name_generator"] = "graph.thread_name_generator:MyNameGenerator"
         config["injectq"] = "graph.agent:container"
+        config["id_generator"] = context.get("id_generator", "uuid")
 
-        rate_limit = context["rate_limit"]
-        if rate_limit == "none":
-            return config
         # The API's cache store: rate limit counters, run locks and caps, idempotency,
-        # ownership cache and token revocation. Redis is shared by every worker (its URL from
-        # REDIS_URL in .env); memory is per process.
-        cache_store: dict[str, Any] = {"type": rate_limit}
-        if rate_limit == "redis":
-            cache_store["url"] = "${REDIS_URL}"
-        cache_store["rate_limit"] = {
-            "enabled": True,
-            "requests": context.get("rl_requests", 100),
-            "window": context.get("rl_window", 60),
-            "by": context.get("rl_by", "user" if auth in ("jwt", "custom") else "ip"),
-            "trusted_proxy_headers": context.get("rl_trusted_proxy", False),
-            "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"],
-        }
-        if rate_limit == "redis" and auth in ("jwt", "custom"):
-            # The cache store is shared, so a leaked or logged-out token can be revoked for
-            # every worker. See `10xgraph revoke`.
+        # ownership cache and token revocation. Redis is shared by every worker (empty url:
+        # the URL comes from REDIS_URL in .env); memory is per process.
+        cache_store: dict[str, Any] = {"type": context.get("cache_store") or "memory"}
+        if context.get("rate_limit"):
+            cache_store["rate_limit"] = {
+                "enabled": True,
+                "requests": context.get("rl_requests", 100),
+                "window": context.get("rl_window", 60),
+                "by": context.get("rl_by", "user" if auth in ("jwt", "custom") else "ip"),
+                "trusted_proxy_headers": context.get("rl_trusted_proxy", False),
+                "fail_open": False,
+                "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"],
+            }
+        if auth in ("jwt", "custom") and context.get("token_revocation"):
+            # A leaked or logged-out token is rejected before it expires. See `10xgraph revoke`.
             cache_store["token_revocation"] = True
         config["cache_store"] = cache_store
 

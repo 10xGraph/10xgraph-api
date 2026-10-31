@@ -22,8 +22,11 @@ agentflow = tenxgraph_api.cli.main:legacy_main   # deprecated alias, removed in 
 `10xgraph init`
 
 - Scaffolds `10xgraph.json`, `graph/agent.py` and `.env.example`, and suggests `10xgraph skills` as a next step.
-- Asks for the template (quick-start or production), the AI provider (Google, OpenAI, Anthropic) and whether to enable WebSocket streaming / realtime audio; production also asks for auth and rate limiting.
-- Non-interactive options: `--path/-p`, `--force/-f`, `--name`, `--template` (quick-start|production), `--provider` (google|openai|anthropic), `--websocket/--no-websocket` (default off), `--auth` (none|jwt|custom), `--rate-limit` (none|memory|redis), `--yes/-y`, `--non-interactive`, `--dry-run`.
+- Asks three questions: agent name, template (quick-start or production) and AI provider (Google, OpenAI, Anthropic). Nothing else is asked.
+- Quick-start writes a minimal `10xgraph.json` (no `cache_store`: in-memory, no rate limit, no token revocation).
+- Production writes the recommended setup without asking: `"auth": "jwt"`, `"authorization": "ownership"`, `"id_generator": "uuid"`, and `"cache_store": {"type": "redis", "rate_limit": {...100 requests / 60 s by user, "fail_open": false...}, "token_revocation": true}` (no `url`, so it reads `REDIS_URL`). WebSocket and AG-UI stay off.
+- The summary table shows what was written; the next steps point to `10xgraph config` for WebSocket, AG-UI, ID generator, thread naming and every other setting.
+- Options (overrides for scripts): `--path/-p`, `--force/-f`, `--name`, `--template` (quick-start|production), `--provider` (google|openai|anthropic), `--auth` (none|jwt|custom), `--cache-store` (memory|redis), `--rate-limit/--no-rate-limit`, `--token-revocation/--no-token-revocation` (ignored with `--auth none`), `--websocket/--no-websocket` (default off), `--yes/-y`, `--non-interactive`, `--dry-run`.
 - Production adds `pyproject.toml` (dependencies follow the answers, e.g. `10xgraph[openai]`, `10xgraph-api[jwt,redis,websocket]`), `.pre-commit-config.yaml`, `tests/` and `evals/`.
 
 `10xgraph dev`
@@ -66,7 +69,9 @@ agentflow = tenxgraph_api.cli.main:legacy_main   # deprecated alias, removed in 
 
 `10xgraph config`
 
-- Opens a browser UI to edit and validate `10xgraph.json` (created on first save).
+- Opens a browser UI to edit and validate `10xgraph.json` (created on first save). The one place for every server setting.
+- Sidebar: Get running (Core); Before production: Authentication, Authorization, Cache store (rate limiting, token revocation), Observability, Graph introspection; Runs and streaming: Runs, WebSocket, AG-UI, Remote tools, Media; Project wiring: Checkpointer, ID generation, Thread naming, Memory store, Dependency injection; Developer tools: Test, Evaluation.
+- The Cache store page picks the store type (Memory, Redis with an optional URL, Custom `module:attr`), then has Rate limiting and Token revocation tabs with their on/off switches.
 - Options include `--config/-c`, `--port/-p` (default: any free port), and `--open/--no-open`.
 
 `10xgraph demo`

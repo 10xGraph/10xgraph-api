@@ -65,10 +65,13 @@ check no longer refuses to boot over a Redis that nothing configured needs.
   startup check only call `aping()` on the bound checkpointer, store and cache store; a
   component's `readiness_check()` hook and the probing of private checkpointer attributes are
   gone.
-- `10xgraph init --rate-limit redis` writes `"cache_store": {"type": "redis", "url":
-  "${REDIS_URL}", "rate_limit": {...}}`, plus `"token_revocation": true` inside with auth;
-  `--rate-limit memory` writes `{"type": "memory", "rate_limit": {...}}`; `none` writes no
-  `cache_store`. The production template uses the Redis form with both features.
+- `10xgraph init` asks only the agent name, template and AI provider. Production writes the
+  recommended setup: jwt auth, `"authorization": "ownership"`, `"id_generator": "uuid"` and
+  `"cache_store": {"type": "redis", "rate_limit": {...}, "token_revocation": true}` (no `url`:
+  Redis reads `REDIS_URL`); Quick Start writes no `cache_store`. The flags `--auth`,
+  `--cache-store memory|redis`, `--rate-limit/--no-rate-limit`,
+  `--token-revocation/--no-token-revocation` and `--websocket` override parts of it for scripts.
+  The summary lists the written choices and the next steps point to `10xgraph config`.
 - `thread_name_generator` takes `"random"` (the default), `"first_message"`, `"none"` or
   `"module:attr"`. With the key unset, new threads are now named (randomly) and the name is
   saved; before, the default name was generated and dropped. `GraphConfig.thread_name_generator_path`
