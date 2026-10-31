@@ -19,6 +19,10 @@ ownership cache entries) may be dropped before its TTL at the cap.
 
 Expired entries are swept in the background every ``SWEEP_EVERY_OPS`` operations or
 ``SWEEP_INTERVAL_SECONDS`` seconds, whichever comes first, in batches that yield to the loop.
+
+Expiries are kept on ``time.monotonic()``, the clock the event loop (and so the lease renewer)
+runs on: a wall clock jump (a host suspend, an NTP step) must not expire a held lock early.
+Only ``now()`` and ``SlotResult.oldest_expiry`` are epoch seconds, as the contract requires.
 """
 
 from __future__ import annotations
@@ -100,6 +104,8 @@ class InMemoryCacheStore(BaseCacheStore):
     SWEEP_INTERVAL_SECONDS = 60.0
     SWEEP_BATCH = 1000
     CAP_WARNING_INTERVAL = 60.0
+    # Re-read the wall clock offset when it moved this far against the monotonic clock.
+    EPOCH_RESYNC_SECONDS = 1.0
 
     def __init__(
         self,
@@ -119,6 +125,20 @@ class InMemoryCacheStore(BaseCacheStore):
         self._last_sweep = time.monotonic()
         self._sweep_task: asyncio.Task[None] | None = None
         self._last_cap_warning: dict[str, float] = {}
+        self._epoch_offset = time.time() - time.monotonic()
+
+    def _to_epoch(self, expiry: float | None) -> float | None:
+        """A monotonic expiry as epoch seconds (the store clock of ``now()``).
+
+        The offset is held steady, so one expiry always reports the same time, and is re-read
+        when the wall clock jumped (``EPOCH_RESYNC_SECONDS``), so it stays near ``now()``.
+        """
+        if expiry is None:
+            return None
+        current = time.time() - time.monotonic()
+        if abs(current - self._epoch_offset) > self.EPOCH_RESYNC_SECONDS:
+            self._epoch_offset = current
+        return expiry + self._epoch_offset
 
     def _stripe_lock(self, key: str) -> asyncio.Lock:
         return self._locks[hash(key) % _NUM_STRIPES]
@@ -146,7 +166,7 @@ class InMemoryCacheStore(BaseCacheStore):
                 await asyncio.sleep(0)
             slots = self._slots.get(key)
             if slots is not None:
-                slots.drop_expired(time.time())
+                slots.drop_expired(time.monotonic())
                 if not slots.expiries:
                     del self._slots[key]
                     removed += 1
@@ -154,7 +174,7 @@ class InMemoryCacheStore(BaseCacheStore):
             if index and index % self.SWEEP_BATCH == 0:
                 await asyncio.sleep(0)
             entry = self._values.get(key)
-            if entry is not None and entry[1] is not None and entry[1] <= time.time():
+            if entry is not None and entry[1] is not None and entry[1] <= time.monotonic():
                 del self._values[key]
                 removed += 1
         if removed:
@@ -215,7 +235,7 @@ class InMemoryCacheStore(BaseCacheStore):
         self._tick()
         async with self._stripe_lock(key):
             # No await below: the check and the add are one step.
-            now = time.time()
+            now = time.monotonic()
             slots = self._slots.get(key)
             if slots is not None:
                 slots.drop_expired(now)
@@ -225,19 +245,20 @@ class InMemoryCacheStore(BaseCacheStore):
                 if slots is not None and not slots.expiries:
                     del self._slots[key]
                     return SlotResult(False, 0, None, None)
-                return SlotResult(False, count, slots.oldest() if slots else None, None)
+                oldest = self._to_epoch(slots.oldest() if slots else None)
+                return SlotResult(False, count, oldest, None)
             if slots is None:
                 self._make_room_for_slots(now)
                 slots = self._slots[key] = _SlotSet()
             slot_id = uuid.uuid4().hex
             slots.put(slot_id, now + ttl)
-            return SlotResult(True, count + 1, slots.oldest(), slot_id)
+            return SlotResult(True, count + 1, self._to_epoch(slots.oldest()), slot_id)
 
     async def renew(self, key: str, slot_id: str, ttl: float) -> bool:
         _check_ttl(ttl)
         self._tick()
         async with self._stripe_lock(key):
-            now = time.time()
+            now = time.monotonic()
             slots = self._slots.get(key)
             if slots is None:
                 return False
@@ -265,7 +286,7 @@ class InMemoryCacheStore(BaseCacheStore):
             entry = self._values.get(key)
             if entry is None:
                 return None
-            if entry[1] is not None and entry[1] <= time.time():
+            if entry[1] is not None and entry[1] <= time.monotonic():
                 del self._values[key]
                 return None
             self._values.move_to_end(key)
@@ -288,7 +309,7 @@ class InMemoryCacheStore(BaseCacheStore):
             new_number = float(value)
         self._tick()
         async with self._stripe_lock(key):
-            now = time.time()
+            now = time.monotonic()
             entry = self._values.get(key)
             if entry is not None and entry[1] is not None and entry[1] <= now:
                 del self._values[key]

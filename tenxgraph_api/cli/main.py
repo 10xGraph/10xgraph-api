@@ -438,7 +438,7 @@ def revoke(
         DEFAULT_CONFIG_FILE, "--config", "-c", help="Project configuration file."
     ),
 ) -> None:
-    """Revoke a token or all of a user's tokens (needs "token_revocation": true)."""
+    """Revoke a token or all of a user's tokens (needs cache_store.token_revocation on)."""
     try:
         sys.exit(
             RevokeCommand(output).execute(
@@ -517,8 +517,8 @@ def init(  # noqa: PLR0913
         None,
         "--rate-limit",
         help=(
-            "Rate limiting: none (off), memory (on, no shared cache store), or redis (on, "
-            "Redis cache store from REDIS_URL, plus token revocation with auth)."
+            "Rate limiting: none (off), memory (on, in-memory cache store), or redis (on, "
+            "Redis cache store on ${REDIS_URL}, plus token revocation with auth)."
         ),
     ),
     provider: str | None = typer.Option(

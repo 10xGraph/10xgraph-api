@@ -5,23 +5,26 @@
     "method": "custom",
     "path": "auth.agent_auth:AgentAuth"
   },
-  "redis": "${REDIS_URL}",
-  "token_revocation": true,
   "remote_tools": [],
   "ag_ui": {
     "enabled": false
   },
   "thread_name_generator": "graph.thread_name_generator:MyNameGenerator",
   "injectq": "graph.agent:container",
-  "rate_limit": {
-    "enabled": true,
-    "requests": 100,
-    "window": 60,
-    "by": "user",
-    "trusted_proxy_headers": true,
-    "trusted_proxy_hops": 1,
-    "fail_open": false,
-    "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"]
+  "cache_store": {
+    "type": "redis",
+    "url": "${REDIS_URL}",
+    "rate_limit": {
+      "enabled": true,
+      "requests": 100,
+      "window": 60,
+      "by": "user",
+      "trusted_proxy_headers": true,
+      "trusted_proxy_hops": 1,
+      "fail_open": false,
+      "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"]
+    },
+    "token_revocation": true
   },
   "test": {
     "path": "tests",

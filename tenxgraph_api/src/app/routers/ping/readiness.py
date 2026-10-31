@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import weakref
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -85,24 +87,56 @@ def readiness_targets(container: Any) -> tuple[Any, Any, Any]:
     return bound(BaseCheckpointer), bound(BaseStore), bound(BaseCacheStore)
 
 
+# Per config object: (its raw auth / cache_store values, the answer).
+_required_by_memo: weakref.WeakKeyDictionary[Any, tuple[str, list[str]]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _required_by_key(graph_config: Any) -> str | None:
+    """The raw settings :func:`cache_required_by` reads; None when they cannot be read."""
+    data = getattr(graph_config, "data", None)
+    if not isinstance(data, dict):
+        return None
+    raw = [data.get(name) for name in ("auth", "cache_store")]
+    return json.dumps(raw, sort_keys=True, default=str)
+
+
 def cache_required_by(graph_config: Any) -> list[str]:
     """The configured features that fail closed without the cache store, by config key.
 
-    Token revocation answers 503 while it cannot read revocations, and a rate limiter with
-    ``fail_open`` off denies requests. Every other use of the cache store fails open.
+    Token revocation (``cache_store.token_revocation``) answers 503 while it cannot read
+    revocations, and a rate limiter (``cache_store.rate_limit``) with ``fail_open`` off denies
+    requests. Every other use of the cache store fails open. Token
+    revocation counts only with auth on: the loader does not enable it otherwise.
+
+    The readiness probe asks on every request, so the answer is kept per config object and
+    reused while its raw settings are unchanged; parsing ``rate_limit`` again would repeat its
+    config warnings on every probe.
     """
     if graph_config is None:
         return []
+    key = _required_by_key(graph_config)
+    if key is not None:
+        with contextlib.suppress(TypeError):  # an object that cannot be weakly referenced
+            memo = _required_by_memo.get(graph_config)
+            if memo is not None and memo[0] == key:
+                return list(memo[1])
     found = []
     # A bad value is reported by the config check at boot, not here.
     with contextlib.suppress(Exception):
-        if getattr(graph_config, "token_revocation", None) is not None:
+        if getattr(graph_config, "token_revocation", None) is not None and (
+            graph_config.auth_config()
+        ):
             found.append("token_revocation")
     with contextlib.suppress(Exception):
         limit = getattr(graph_config, "rate_limit", None)  # None when absent or disabled
         if limit is not None and getattr(limit, "fail_open", True) is False:
             found.append("rate_limit.fail_open=false")
-    return found
+    if key is not None:
+        with contextlib.suppress(TypeError):
+            _required_by_memo[graph_config] = (key, found)
+    return list(found)
 
 
 def cache_required(graph_config: Any) -> bool:

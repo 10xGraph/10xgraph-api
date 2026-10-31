@@ -35,7 +35,7 @@ Important variables include:
 - `ORIGINS`
 - `JWT_SECRET_KEY`
 - `JWT_ALGORITHM`
-- `REDIS_URL`
+- `REDIS_URL` when `10xgraph.json` names it (`"cache_store": {"type": "redis", "url": "${REDIS_URL}"}`)
 - `GRAPH_PATH`: path to `10xgraph.json`; defaults to `10xgraph.json`.
 
 Production should set `MODE=production`, configure CORS origins, and use real auth secrets.

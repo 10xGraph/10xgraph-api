@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import socket
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
@@ -24,6 +23,7 @@ from tenxgraph_api.src.app.core.cache_store import (
     RedisCacheStore,
 )
 from tenxgraph_api.src.app.core.cache_store.loader import (
+    CacheStoreSource,
     bind_cache_store,
     load_and_bind_cache_store,
 )
@@ -72,6 +72,15 @@ class _DownCache(InMemoryCacheStore):
         return "cache:6379"
 
 
+# Token revocation counts only with auth on; a custom backend is parsed, never loaded, here.
+AUTH = {"auth": {"method": "custom", "path": "auth.backend:auth"}}
+
+
+def _store(**settings) -> dict:
+    """``{"cache_store": {...}}``: the in-memory store unless ``type`` says otherwise."""
+    return {"cache_store": settings}
+
+
 def _config(tmp_path, data: dict) -> GraphConfig:
     path = tmp_path / "10xgraph.json"
     path.write_text(json.dumps({"agent": "graph.agent:app", **data}))
@@ -117,7 +126,7 @@ def _fresh_readiness():
 
 @pytest.fixture
 def unreachable_redis_url(monkeypatch):
-    """``REDIS_URL`` at a closed local port, with short client timeouts."""
+    """A Redis URL at a closed local port, with short client timeouts."""
     settings = get_settings()
     monkeypatch.setattr(settings, "REDIS_CONNECT_TIMEOUT", 0.5)
     monkeypatch.setattr(settings, "REDIS_SOCKET_TIMEOUT", 0.5)
@@ -140,16 +149,19 @@ def test_cache_is_optional_unless_a_fail_closed_feature_uses_it(tmp_path):
 
     assert not cache_target(None).required
     assert not cache_target(_config(tmp_path, {})).required
-    assert not cache_target(_config(tmp_path, {"rate_limit": {"enabled": True}})).required
+    assert not cache_target(_config(tmp_path, _store(rate_limit={"enabled": True}))).required
     assert not cache_target(
-        _config(tmp_path, {"rate_limit": {"enabled": False, "fail_open": False}})
+        _config(tmp_path, _store(rate_limit={"enabled": False, "fail_open": False}))
     ).required
-    assert not cache_target(_config(tmp_path, {"token_revocation": False})).required
+    assert not cache_target(_config(tmp_path, _store(token_revocation=False))).required
 
-    target = cache_target(_config(tmp_path, {"token_revocation": True}))
+    assert not cache_target(_config(tmp_path, _store(token_revocation=True))).required  # no auth
+    target = cache_target(_config(tmp_path, {**AUTH, **_store(token_revocation=True)}))
     assert target.required
     assert target.details[-1] == "required by token_revocation"
-    target = cache_target(_config(tmp_path, {"rate_limit": {"enabled": True, "fail_open": False}}))
+    target = cache_target(
+        _config(tmp_path, _store(rate_limit={"enabled": True, "fail_open": False}))
+    )
     assert target.required
     assert target.details[-1] == "required by rate_limit.fail_open=false"
 
@@ -159,13 +171,13 @@ def test_details_are_the_class_source_and_described_endpoint():
         checkpointer=_Pinged(where="db:5432"),
         store=_Pinged(),
         cache=_DownCache(),
-        source="from REDIS_URL",
+        source="cache_store.url",
     )
     by_name = {t.name: t.details for t in startup_targets(container)}
     assert by_name == {
         "checkpointer": ["_Pinged", "db:5432"],
         "store": ["_Pinged"],
-        "cache": ["_DownCache", "from REDIS_URL", "cache:6379"],
+        "cache": ["_DownCache", "cache_store.url", "cache:6379"],
     }
 
 
@@ -202,13 +214,14 @@ async def test_failed_checkpointer_names_component_and_class(caplog):
 @pytest.mark.asyncio
 async def test_unreachable_optional_cache_is_one_warning_and_boot_goes_on(caplog):
     checkpointer = _Pinged()
-    container = _container(checkpointer=checkpointer, cache=_DownCache(), source="from redis")
+    container = _container(checkpointer=checkpointer, cache=_DownCache(), source="cache_store.url")
     with caplog.at_level(logging.INFO, logger="tenxgraph_api.startup"):
         await check_backends_at_startup(container, timeout=0)
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert warnings[0].startswith(
-        "Startup check: cache store _DownCache (from redis, cache:6379) unreachable: locks and "
+        "Startup check: cache store _DownCache (cache_store.url, cache:6379) unreachable: locks "
+        "and "
         "caps fall back to per process"
     )
     assert "Startup check passed: checkpointer" in caplog.text
@@ -219,13 +232,13 @@ async def test_unreachable_optional_cache_is_one_warning_and_boot_goes_on(caplog
 async def test_required_cache_refuses_boot_naming_cache_and_source(tmp_path):
     container = _container(
         cache=_DownCache(),
-        source="from REDIS_URL",
-        config=_config(tmp_path, {"token_revocation": True}),
+        source="cache_store.url",
+        config=_config(tmp_path, {**AUTH, **_store(token_revocation=True)}),
     )
     with pytest.raises(StartupCheckError) as info:
         await check_backends_at_startup(container, timeout=0)
     assert (
-        "cache (_DownCache, from REDIS_URL, cache:6379, required by token_revocation): "
+        "cache (_DownCache, cache_store.url, cache:6379, required by token_revocation): "
         "ConnectionError" in str(info.value)
     )
 
@@ -289,10 +302,16 @@ async def test_component_without_aping_is_skipped_with_info(caplog):
 async def test_redis_cache_store_at_a_closed_port_names_the_endpoint_not_the_password(
     tmp_path, unreachable_redis_url, caplog
 ):
-    config = _config(tmp_path, {"rate_limit": {"enabled": True, "fail_open": False}})
+    config = _config(
+        tmp_path,
+        _store(
+            type="redis",
+            url=unreachable_redis_url,
+            rate_limit={"enabled": True, "fail_open": False},
+        ),
+    )
     container = _container(config=config)
-    settings = SimpleNamespace(REDIS_URL=unreachable_redis_url)
-    store = load_and_bind_cache_store(container, config, settings)
+    store = load_and_bind_cache_store(container, config)
     assert isinstance(store, RedisCacheStore)
     try:
         with caplog.at_level(logging.WARNING, logger="tenxgraph_api.startup"):
@@ -302,7 +321,7 @@ async def test_redis_cache_store_at_a_closed_port_names_the_endpoint_not_the_pas
         await store.aclose()
     message = str(info.value)
     port = unreachable_redis_url.rsplit(":", 1)[1].split("/")[0]
-    assert f"cache (RedisCacheStore, from REDIS_URL, 127.0.0.1:{port}" in message
+    assert f"cache (RedisCacheStore, cache_store.url, 127.0.0.1:{port}" in message
     assert "required by rate_limit.fail_open=false" in message
     assert "s3cret" not in message
     assert "s3cret" not in caplog.text
@@ -320,12 +339,12 @@ def _lifespan_patches(monkeypatch, container, attach=None):
     monkeypatch.setattr(app_main.settings, "STARTUP_CHECKS", True)
 
 
-def _attach_with_redis(config, redis_url, checkpointer=None):
+def _attach(config, checkpointer=None):
     """Stand-in for ``attach_all_modules``: bind what the real one binds for these tests."""
 
     async def attach(graph_config, container):
         container.bind_instance(BaseCheckpointer, checkpointer or InMemoryCheckpointer())
-        load_and_bind_cache_store(container, config, SimpleNamespace(REDIS_URL=redis_url))
+        load_and_bind_cache_store(container, config)
 
     return attach
 
@@ -353,25 +372,29 @@ async def test_startup_checks_false_skips_the_gate(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_leftover_redis_url_does_not_block_a_memory_only_server(
+async def test_redis_url_alone_does_not_select_redis(
     monkeypatch, tmp_path, unreachable_redis_url, caplog
 ):
-    """The rc3 bug: in-memory everything plus a stale REDIS_URL refused to boot in production."""
-    config = _config(tmp_path, {"rate_limit": {"enabled": True, "requests": 100, "window": 60}})
-    container = _container(config=config)
-    _lifespan_patches(
-        monkeypatch, container, attach=_attach_with_redis(config, unreachable_redis_url)
+    """The rc3 bug: a memory config plus a stale REDIS_URL refused to boot in production.
+
+    The store comes only from ``cache_store``, so REDIS_URL is never read: the server boots
+    on the in-memory store and says nothing about Redis.
+    """
+    monkeypatch.setenv("REDIS_URL", unreachable_redis_url)
+    config = _config(
+        tmp_path,
+        _store(type="memory", rate_limit={"enabled": True, "requests": 100, "window": 60}),
     )
+    container = _container(config=config)
+    _lifespan_patches(monkeypatch, container, attach=_attach(config))
     monkeypatch.setattr(app_main.settings, "MODE", "production")
     app = FastAPI()
-    with caplog.at_level(logging.WARNING, logger="tenxgraph_api.startup"):
+    with caplog.at_level(logging.INFO, logger="tenxgraph_api"):
         async with app_main.lifespan(app):
-            assert isinstance(container.get(BaseCacheStore), RedisCacheStore)
-            warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-            assert len(warnings) == 1
-            assert "cache store RedisCacheStore (from REDIS_URL, 127.0.0.1:" in warnings[0]
-            assert "locks and caps fall back to per process" in warnings[0]
-            assert "s3cret" not in caplog.text
+            assert isinstance(container.get(BaseCacheStore), InMemoryCacheStore)
+            assert container.get(CacheStoreSource).text == "cache_store.type"
+            assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+            assert "redis" not in caplog.text.lower()
 
             setup_fastapi(container, app)
             app.include_router(ping_router)
@@ -379,29 +402,56 @@ async def test_leftover_redis_url_does_not_block_a_memory_only_server(
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                 resp = await client.get("/health/ready")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ready", "checks": {"checkpointer": "ok", "cache": "fail"}}
+    assert resp.json() == {"status": "ready", "checks": {"checkpointer": "ok", "cache": "ok"}}
+
+
+@pytest.mark.asyncio
+async def test_token_revocation_with_auth_off_does_not_need_the_cache_store(
+    monkeypatch, tmp_path, unreachable_redis_url, caplog
+):
+    """The loader does not enable revocation without auth, so the cache store stays optional."""
+    config = _config(
+        tmp_path,
+        {"auth": None, **_store(type="redis", url=unreachable_redis_url, token_revocation=True)},
+    )
+    assert readiness.cache_required_by(config) == []
+    container = _container(config=config)
+    _lifespan_patches(monkeypatch, container, attach=_attach(config))
+    app = FastAPI()
+    with caplog.at_level(logging.WARNING, logger="tenxgraph_api.startup"):
+        async with app_main.lifespan(app):
+            warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+            assert len(warnings) == 1
+            assert "No configured feature needs it, so the server starts." in warnings[0]
+
+            setup_fastapi(container, app)
+            app.include_router(ping_router)
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.get("/health/ready")
+    assert resp.status_code == 200
+    assert resp.json()["checks"]["cache"] == "fail"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("data", "reason"),
     [
-        ({"token_revocation": True}, "required by token_revocation"),
+        ({**AUTH, "token_revocation": True}, "required by token_revocation"),
         ({"rate_limit": {"enabled": True, "fail_open": False}}, "rate_limit.fail_open=false"),
     ],
 )
 async def test_fail_closed_feature_with_unreachable_redis_refuses_boot(
     monkeypatch, tmp_path, unreachable_redis_url, data, reason
 ):
-    config = _config(tmp_path, data)
+    auth = {"auth": data.pop("auth")} if "auth" in data else {}
+    config = _config(tmp_path, {**auth, **_store(type="redis", url=unreachable_redis_url, **data)})
     container = _container(config=config)
-    _lifespan_patches(
-        monkeypatch, container, attach=_attach_with_redis(config, unreachable_redis_url)
-    )
+    _lifespan_patches(monkeypatch, container, attach=_attach(config))
     with pytest.raises(StartupCheckError) as info:
         async with app_main.lifespan(FastAPI()):
             pytest.fail("the app must not start serving")
     message = str(info.value)
-    assert "cache (RedisCacheStore, from REDIS_URL, 127.0.0.1:" in message
+    assert "cache (RedisCacheStore, cache_store.url, 127.0.0.1:" in message
     assert reason in message
     assert "s3cret" not in message

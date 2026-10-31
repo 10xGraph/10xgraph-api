@@ -26,10 +26,21 @@ REDIS_RATE_LIMIT = {
 READY = {
     "agent": "graph.react:app",
     "auth": "jwt",
-    "redis": "redis://x",
-    "rate_limit": REDIS_RATE_LIMIT,
-    "token_revocation": True,
+    "cache_store": {
+        "type": "redis",
+        "url": "redis://x",
+        "rate_limit": REDIS_RATE_LIMIT,
+        "token_revocation": True,
+    },
 }
+
+
+def _with(**changes: object) -> dict:
+    """READY with changes applied inside cache_store (None removes a key)."""
+    cache_store = {**READY["cache_store"], **changes}
+    return {**READY, "cache_store": {k: v for k, v in cache_store.items() if v is not None}}
+
+
 AUTH_OFF_TEXT = "Auth is off"
 
 
@@ -40,7 +51,7 @@ def _paths(issues: list[dict], level: str = "warning") -> list[str]:
 def test_validate_config_warns_when_auth_and_rate_limit_are_missing() -> None:
     paths = _paths(validate_config({"agent": "graph.react:app"}))
     assert "auth" in paths
-    assert "rate_limit" in paths
+    assert "cache_store.rate_limit" in paths
 
 
 def test_ready_config_has_no_readiness_warnings() -> None:
@@ -61,54 +72,59 @@ def test_safe_authorization_does_not_warn(value: str | None) -> None:
 
 
 def test_disabled_rate_limit_warns() -> None:
-    config = {**READY, "rate_limit": {"enabled": False}}
+    config = _with(rate_limit={"enabled": False})
     issues = production_readiness_warnings(config)
-    assert _paths(issues) == ["rate_limit"]
-    assert "a shared cache store" in issues[0]["message"]
+    assert _paths(issues) == ["cache_store.rate_limit"]
+    assert "redis or custom" in issues[0]["message"]
 
 
-def test_token_revocation_without_a_shared_cache_store_warns(monkeypatch) -> None:
-    monkeypatch.delenv("REDIS_URL", raising=False)
-    config = {key: value for key, value in READY.items() if key != "redis"}
+def test_memory_cache_store_with_rate_limit_or_revocation_warns() -> None:
+    config = _with(type=None, url=None)
     issues = validate_config(config)
-    assert _paths(issues) == ["token_revocation"]
-    assert "10xgraph revoke" in issues[0]["message"]
-    assert not _paths(validate_config({**config, "cache_store": "graph.cache:store"}))
+    assert _paths(issues) == ["cache_store.rate_limit", "cache_store.token_revocation"]
+    messages = {i["path"]: i["message"] for i in issues}
+    assert "per process" in messages["cache_store.rate_limit"]
+    assert (
+        "10xgraph revoke cannot reach an in-memory store"
+        in messages["cache_store.token_revocation"]
+    )
+    custom = _with(type="custom", url=None, path="graph.cache:store")
+    assert not _paths(validate_config(custom))
 
 
 @pytest.mark.parametrize("value", ["redis", "memory", "auth.revoke:Backend"])
-def test_old_token_revocation_strings_are_errors_naming_the_cache_store(value: str) -> None:
-    issues = validate_config({**READY, "token_revocation": value})
+def test_string_token_revocation_is_an_error(value: str) -> None:
+    issues = validate_config(_with(token_revocation=value))
     errors = [i for i in issues if i["level"] == "error"]
-    assert [i["path"] for i in errors] == ["token_revocation"]
-    assert "cache_store" in errors[0]["message"]
+    assert [i["path"] for i in errors] == ["cache_store"]
+    assert "token_revocation must be true, false" in errors[0]["message"]
 
 
 def test_token_revocation_object_form_is_valid() -> None:
     value = {"enabled": True, "token_lifetime": 3600, "user_ttl": None}
-    assert validate_config({**READY, "token_revocation": value}) == []
+    assert validate_config(_with(token_revocation=value)) == []
 
 
 @pytest.mark.parametrize("value", [False, {"enabled": False}])
 def test_token_revocation_turned_off_warns_with_auth(value: object) -> None:
-    issues = validate_config({**READY, "token_revocation": value})
-    assert _paths(issues) == ["token_revocation"]
+    issues = validate_config(_with(token_revocation=value))
+    assert _paths(issues) == ["cache_store.token_revocation"]
 
 
 def test_auth_without_token_revocation_warns() -> None:
-    config = {key: value for key, value in READY.items() if key != "token_revocation"}
-    assert _paths(production_readiness_warnings(config)) == ["token_revocation"]
+    config = _with(token_revocation=None)
+    assert _paths(production_readiness_warnings(config)) == ["cache_store.token_revocation"]
 
 
 def test_per_ip_rate_limit_with_auth_warns() -> None:
-    config = {**READY, "rate_limit": {**REDIS_RATE_LIMIT, "by": "ip"}}
-    assert _paths(production_readiness_warnings(config)) == ["rate_limit.by"]
+    config = _with(rate_limit={**REDIS_RATE_LIMIT, "by": "ip"})
+    assert _paths(production_readiness_warnings(config)) == ["cache_store.rate_limit.by"]
 
 
 def test_redoc_exclusion_with_the_wrong_path_warns() -> None:
     limit = {**REDIS_RATE_LIMIT, "exclude_paths": ["/ping", "/redoc"]}
-    issues = production_readiness_warnings({**READY, "rate_limit": limit})
-    assert _paths(issues) == ["rate_limit.exclude_paths"]
+    issues = production_readiness_warnings(_with(rate_limit=limit))
+    assert _paths(issues) == ["cache_store.rate_limit.exclude_paths"]
 
 
 def test_audit_reports_the_security_posture(tmp_path: Path, monkeypatch) -> None:

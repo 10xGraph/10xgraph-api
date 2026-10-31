@@ -30,9 +30,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [1.0.0rc4] - Unreleased
 
 The fourth release candidate of `10xgraph-api` 1.0. It requires `10xgraph` 1.0.0rc4
-(checkpointers have `aping()`). Everything the API shares between workers now lives in one
-`BaseCacheStore`, and the startup check no longer refuses to boot over a Redis that nothing
-configured needs. `10xgraph-client` stays at 1.0.0-rc.2.
+(checkpointers have `aping()`). Everything the API shares between workers lives in one
+`BaseCacheStore`, configured by one `cache_store` object in `10xgraph.json`, and the startup
+check no longer refuses to boot over a Redis that nothing configured needs.
+`10xgraph-client` stays at 1.0.0-rc.2.
 
 ### Breaking
 
@@ -42,51 +43,84 @@ configured needs. `10xgraph-client` stays at 1.0.0-rc.2.
   `MemoryRateLimitBackend`, `RedisRateLimitBackend` and the rate-limit factory). Run locks and
   caps, idempotency, the ownership cache, token revocation and rate limiting all use the bound
   `BaseCacheStore`; implement one to replace Redis.
-- `rate_limit.backend` and `rate_limit.redis` are removed. Either key is a config error naming
-  the replacement: the counters live in the cache store (`cache_store`, else `redis`, else
-  `REDIS_URL`, else in memory). Delete both keys; move a dedicated rate-limit Redis URL to
-  `redis` (one Redis now serves every feature).
-- `token_revocation` is `true`, `false`, `null` or `{"enabled": true, "token_lifetime": ...,
-  "user_ttl": ...}`. The string values (`"redis"`, `"memory"`, `"module:attr"`) are config
-  errors naming `cache_store`. Replace `"redis"` with `true` and set `redis` (or `REDIS_URL`).
+- `cache_store` is one object that holds the store and everything it backs:
+  `{"type": "memory" | "redis" | "custom", "url": "${REDIS_URL}", "path": "module:attr",
+  "rate_limit": {...}, "token_revocation": true}`. `url` goes with type `redis` (optional:
+  empty uses the `REDIS_URL` environment variable; `$VAR` / `${VAR}` expanded, an unset variable
+  is a config error) and `path` with type `custom`
+  (a `BaseCacheStore` instance or zero-argument factory). No `cache_store`, or no `type`, is the
+  in-memory store; `rate_limit` and `token_revocation` are off when absent. Unknown keys inside
+  `cache_store`, `rate_limit` and `token_revocation` are config errors listing the valid keys.
+- The top-level `redis`, `rate_limit` and `token_revocation` keys are config errors at load that
+  say where each setting goes; a leftover `rate_limit` can no longer turn rate limiting off
+  without a word. `rate_limit` inside `cache_store` has no `backend` or `redis` key.
+  `token_revocation` is `true`, `false`, `null` or `{"enabled", "token_lifetime", "user_ttl"}`.
+- `REDIS_URL` no longer selects the cache store, and `Settings.REDIS_URL` is gone: the store
+  comes only from `cache_store` (write `"url": "${REDIS_URL}"` to keep reading the variable).
+  This fixes rc3 refusing to boot an in-memory server in production with a stale `REDIS_URL`.
+- `cache_store.type` `"redis"` without the `redis` package refuses to boot with
+  `pip install "10xgraph-api[redis]"`; it never falls back to a per-process store.
 - `GET /health/ready`: the `redis` key in `checks` is renamed `cache` and reports the bound
   cache store (`{"checkpointer": "ok", "store": "ok", "cache": "ok"}`). Readiness and the
   startup check only call `aping()` on the bound checkpointer, store and cache store; a
   component's `readiness_check()` hook and the probing of private checkpointer attributes are
   gone.
-- `10xgraph init --rate-limit redis` writes `"redis": "${REDIS_URL}"` and, with auth,
-  `"token_revocation": true` (was `rate_limit.backend: "redis"`, `rate_limit.redis.url` and
-  `"token_revocation": "redis"`). `--rate-limit memory` turns rate limiting on without a
-  `redis` key.
+- `10xgraph init --rate-limit redis` writes `"cache_store": {"type": "redis", "url":
+  "${REDIS_URL}", "rate_limit": {...}}`, plus `"token_revocation": true` inside with auth;
+  `--rate-limit memory` writes `{"type": "memory", "rate_limit": {...}}`; `none` writes no
+  `cache_store`. The production template uses the Redis form with both features.
+- `thread_name_generator` takes `"random"` (the default), `"first_message"`, `"none"` or
+  `"module:attr"`. With the key unset, new threads are now named (randomly) and the name is
+  saved; before, the default name was generated and dropped. `GraphConfig.thread_name_generator_path`
+  is replaced by `GraphConfig.thread_name_generator`.
 
 ### Added
 
 - `BaseCacheStore` with `RedisCacheStore` (also Valkey, Dragonfly, KeyDB) and
   `InMemoryCacheStore`, exported from `tenxgraph_api`. A store has an abstract `aping()` and an
   optional `describe()` that names its endpoint (never credentials) in logs and startup errors.
-- `"cache_store": "module:attr"` in `10xgraph.json`: a `BaseCacheStore` instance or zero-argument
-  factory; wins over `redis` and `REDIS_URL`. One INFO line at boot names the store and its
-  source, for example `Cache store: RedisCacheStore (from REDIS_URL, localhost:6379)`.
+  One INFO line at boot names the store and the config key it came from, for example
+  `Cache store: RedisCacheStore (cache_store.url, localhost:6379)`.
 - A contract suite for custom cache stores in `tenxgraph_api.testing.cache_store_contract`.
-- The `redis` key expands `$VAR` and `${VAR}`; an unset variable is a config error.
-- `10xgraph config` edits `cache_store`, and token revocation as a section with `enabled`,
-  `token_lifetime` and `user_ttl`.
+- `id_generator` in `10xgraph.json`: `uuid`, `hex`, `short`, `int`, `bigint`, `timestamp`,
+  `snowflake` (`SnowFlakeIdGenerator`, needs the `snowflakekit` extra and reads the `SNOWFLAKE_*`
+  environment variables) or `"module:attr"` (a `BaseIDGenerator` instance, subclass or
+  zero-argument factory). The API binds it for the loaded graph, so new thread, message and
+  memory ids all come from it. Boot refuses when the graph is also compiled with its own
+  generator (`StateGraph(id_generator=...)`), and when a `PgCheckpointer`'s `id_type` cannot
+  hold its ids. Unset keeps the graph's own generator.
+- `thread_name_generator: "first_message"`: the user's first message, whitespace collapsed,
+  cut to at most 60 characters on a word boundary (`FirstMessageThreadNameGenerator`).
+- `10xgraph config` edits token revocation as a section with `enabled`, `token_lifetime` and
+  `user_ttl`.
 
 ### Changed
 
 - The startup check is fatal for the cache store only when a fail-closed feature uses it:
-  `token_revocation` on, or `rate_limit` with `fail_open: false`. Otherwise an unreachable
-  cache store is one WARNING (`... unreachable: locks and caps fall back to per process ...`)
-  and the server starts; `/health/ready` reports `cache: fail` and stays 200. This fixes rc3
-  refusing to boot an in-memory server with a leftover `REDIS_URL`. Startup errors name each
-  component's class, where its setting came from (`REDIS_URL`, `redis in 10xgraph.json`,
-  `cache_store`) and its `describe()` endpoint. The hint now reads "Start the backend, fix its
-  URL, or set STARTUP_CHECKS=false to skip this check."
-- `10xgraph revoke` writes to the cache store the server would pick (`cache_store`, `redis`,
-  `REDIS_URL`; `--redis-url` overrides) and refuses with a clear error when that is the
-  in-memory store.
+  `cache_store.token_revocation` on (with auth), or `cache_store.rate_limit` with
+  `fail_open: false`. Otherwise an unreachable cache store is one WARNING (`... unreachable:
+  locks and caps fall back to per process ...`) and the server starts; `/health/ready` reports
+  `cache: fail` and stays 200. Startup errors name each component's class, the config key of
+  the cache store (`cache_store.url`, `cache_store.path ...`) and its `describe()` endpoint.
+  The hint reads "Start the backend, fix its URL, or set STARTUP_CHECKS=false to skip this
+  check."
+- `10xgraph revoke` writes to the cache store `cache_store` selects (`--redis-url` overrides)
+  and refuses with a clear error when that is the in-memory store.
 - Shutdown closes the cache store once, after the graph and after pending lease releases. The
   authorization backend no longer closes a Redis client.
+- `token_revocation` makes the cache store required (startup check, `/health/ready`) only when
+  auth is on, the same rule the loader uses to enable it.
+- `cache_store` is parsed once per raw value, so its config warnings (such as
+  `trusted_proxy_headers` without `trusted_proxies`) are not repeated per readiness probe.
+- A rate-limit denial stays a 429 when reading the cache store clock for `Retry-After` fails;
+  it no longer turns into an allow or a 503.
+- The in-memory cache store keeps slot and key expiries on the monotonic clock, so a wall clock
+  jump (host suspend, NTP step) no longer expires a held thread lock early. `now()` and
+  `oldest_expiry` are still epoch seconds.
+- `revoke_user` stores the cutoff rounded up to the microsecond, so a token issued at the
+  cutoff itself is always revoked (it was rounded to the nearest).
+- Thread names from `thread_name_generator` get the user's messages first, then the replies
+  (before: the run's output messages only).
 
 ---
 

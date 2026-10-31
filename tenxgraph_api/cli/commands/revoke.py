@@ -1,17 +1,15 @@
 """Revoke a token or every token of a user: ``10xgraph revoke``.
 
-Writes to the cache store the server reads (``"token_revocation": true`` in 10xgraph.json),
-picked the same way the server picks it: ``cache_store``, else ``redis``, else ``REDIS_URL``.
-With a shared store (Redis) the revocation applies to every worker at once; the server needs
-no restart. ``--redis-url`` overrides the selection.
+Writes to the cache store the server reads (``cache_store.token_revocation`` in
+10xgraph.json), picked the same way the server picks it, from ``cache_store``. With a shared
+store (type ``redis`` or ``custom``) the revocation applies to every worker at once; the server
+needs no restart. ``--redis-url`` overrides the selection.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
-from types import SimpleNamespace
 from typing import Any
 
 from tenxgraph_api.cli.commands import BaseCommand
@@ -36,26 +34,24 @@ class RevokeCommand(BaseCommand):
         graph_config = GraphConfig(str(path)) if path.exists() else None
         user_ttl: float | None = DEFAULT_USER_REVOCATION_TTL
         if graph_config is not None:
-            settings = graph_config.token_revocation  # raises for a removed value
+            settings = graph_config.token_revocation  # raises for an invalid value
             if settings is not None:
                 user_ttl = settings.user_ttl
         if redis_url:
             return RedisCacheStore.from_url(redis_url), user_ttl
 
         if graph_config is not None:
-            # A ``cache_store: "module:attr"`` imports from the project, like the server does.
+            # A custom cache_store.path imports from the project, like the server does.
             root = str(path.resolve().parent)
             if root not in sys.path:
                 sys.path.insert(0, root)
-        # GraphConfig has loaded the project's env file, so REDIS_URL is read after it.
-        store, source = build_cache_store(
-            graph_config, SimpleNamespace(REDIS_URL=os.environ.get("REDIS_URL"))
-        )
+        # GraphConfig has loaded the project's env file, so cache_store.url expands after it.
+        store, source = build_cache_store(graph_config)
         if isinstance(store, InMemoryCacheStore):
             raise ValidationError(
                 f"The cache store is in-memory ({source}): a CLI process cannot reach the "
-                "server's memory. Set `redis` in 10xgraph.json, REDIS_URL or a `cache_store` "
-                "(the server must use the same one), or pass --redis-url.",
+                'server\'s memory. Set "cache_store": {"type": "redis", "url": ...} (or type '
+                "custom) in 10xgraph.json, the same store the server uses, or pass --redis-url.",
                 field="redis_url",
             )
         return store, user_ttl

@@ -85,7 +85,11 @@ def test_cache_outage_alone_stays_ready_unless_a_feature_fails_closed():
     assert readiness.is_ready(checks, cache_is_required=False)
     assert not readiness.is_ready(checks, cache_is_required=True)
     assert not readiness.is_ready({"checkpointer": "fail", "cache": "ok"}, cache_is_required=False)
-    assert readiness.cache_required(SimpleNamespace(token_revocation=object(), rate_limit=None))
+    assert readiness.cache_required(
+        SimpleNamespace(
+            token_revocation=object(), rate_limit=None, auth_config=lambda: {"method": "jwt"}
+        )
+    )
     assert readiness.cache_required(
         SimpleNamespace(token_revocation=None, rate_limit=SimpleNamespace(fail_open=False))
     )

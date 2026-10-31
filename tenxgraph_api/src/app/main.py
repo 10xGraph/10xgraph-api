@@ -175,9 +175,6 @@ async def _cleanup_temp_media_cache() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Load the cache
-    # RedisCacheBackend(settings.REDIS_URL)
-
     graph: CompiledGraph | None = await attach_all_modules(
         graph_config,
         container=container,

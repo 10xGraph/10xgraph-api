@@ -2,6 +2,8 @@ import importlib
 import inspect
 import logging
 import os
+import weakref
+from collections.abc import Callable
 from pathlib import Path
 
 from injectq import InjectQ
@@ -9,6 +11,17 @@ from tenxgraph.core import CompiledGraph
 from tenxgraph.core.graph.remote_tool import RemoteToolConfig as CoreRemoteToolConfig
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.storage.store import BaseStore
+from tenxgraph.utils.id_generator import (
+    BaseIDGenerator,
+    BigIntIDGenerator,
+    DefaultIDGenerator,
+    HexIDGenerator,
+    IDType,
+    IntIDGenerator,
+    ShortIDGenerator,
+    TimestampIDGenerator,
+    UUIDGenerator,
+)
 
 from tenxgraph_api import BaseAuth
 from tenxgraph_api.src.app.core.auth.authorization import (
@@ -21,7 +34,11 @@ from tenxgraph_api.src.app.core.auth.authorization import (
 from tenxgraph_api.src.app.core.cache_store.base import BaseCacheStore
 from tenxgraph_api.src.app.core.cache_store.loader import load_and_bind_cache_store
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
-from tenxgraph_api.src.app.utils.thread_name_generator import ThreadNameGenerator
+from tenxgraph_api.src.app.utils.thread_name_generator import (
+    DefaultThreadNameGenerator,
+    FirstMessageThreadNameGenerator,
+    ThreadNameGenerator,
+)
 
 
 logger = logging.getLogger("tenxgraph_api.loader")
@@ -292,6 +309,168 @@ def load_thread_name_generator(path: str | None) -> ThreadNameGenerator | None:
     return thread_name_generator
 
 
+def resolve_thread_name_generator(choice: str) -> ThreadNameGenerator | None:
+    """The generator for a ``thread_name_generator`` choice; None for ``none`` (no names)."""
+    if choice == "none":
+        return None
+    if choice == "random":
+        return DefaultThreadNameGenerator()
+    if choice == "first_message":
+        return FirstMessageThreadNameGenerator()
+    return load_thread_name_generator(choice)
+
+
+def _snowflake_id_generator() -> BaseIDGenerator:
+    from tenxgraph_api.src.app.utils import snowflake_id_generator
+
+    if not snowflake_id_generator.HAS_SNOWFLAKE:
+        raise ValueError(
+            'id_generator "snowflake" needs the snowflakekit package: '
+            'pip install "10xgraph-api[snowflakekit]"'
+        )
+    return snowflake_id_generator.SnowFlakeIdGenerator()
+
+
+# ``id_generator`` names in 10xgraph.json (graph_config.ID_GENERATOR_NAMES): the concrete core
+# generators, plus the API's Snowflake one (reads the SNOWFLAKE_* environment variables).
+BUILTIN_ID_GENERATORS: dict[str, Callable[[], BaseIDGenerator]] = {
+    "uuid": UUIDGenerator,
+    "hex": HexIDGenerator,
+    "short": ShortIDGenerator,
+    "int": IntIDGenerator,
+    "bigint": BigIntIDGenerator,
+    "timestamp": TimestampIDGenerator,
+    "snowflake": _snowflake_id_generator,
+}
+
+
+def load_id_generator(value: str) -> BaseIDGenerator:
+    """The generator for an ``id_generator`` value: a built-in name or ``"module:attr"``.
+
+    ``module:attr`` may name a ``BaseIDGenerator`` instance, a subclass, or a zero-argument
+    factory returning one.
+    """
+    builtin = BUILTIN_ID_GENERATORS.get(value)
+    if builtin is not None:
+        return builtin()
+    if ":" not in value:
+        raise ValueError(
+            f"id_generator must be one of {', '.join(BUILTIN_ID_GENERATORS)} or "
+            f'"module:attr"; got {value!r}'
+        )
+    module_name, attr = value.split(":", 1)
+    try:
+        target = getattr(importlib.import_module(module_name), attr)
+    except (ImportError, AttributeError) as exc:
+        raise ValueError(f"id_generator {value!r} cannot be loaded: {exc}") from exc
+    generator = target if isinstance(target, BaseIDGenerator) else None
+    if generator is None and callable(target):
+        generator = target()
+    if not isinstance(generator, BaseIDGenerator):
+        raise TypeError(
+            f"id_generator {value!r} is not a BaseIDGenerator instance, subclass or factory "
+            "returning one"
+        )
+    return generator
+
+
+# PgCheckpointer ``id_type`` -> what its thread and message id columns hold.
+_PG_INTEGER_ID_TYPES = {"int": "integer", "bigint": "bigint"}
+
+
+def _check_checkpointer_id_type(
+    generator: BaseIDGenerator, name: str, checkpointer: object
+) -> None:
+    """Refuse a generator whose ids the checkpointer's id columns cannot store.
+
+    Only ``PgCheckpointer`` declares its column type (``id_type``: ``string`` makes VARCHAR
+    columns, ``int`` INTEGER, ``bigint`` BIGINT); other checkpointers store any id.
+    """
+    try:
+        from tenxgraph.storage.checkpointer.pg_checkpointer import PgCheckpointer
+    except ImportError:  # pragma: no cover - the module imports without its drivers
+        return
+    if not isinstance(checkpointer, PgCheckpointer):
+        return
+    raw = getattr(checkpointer, "id_type", "string")
+    column = _PG_INTEGER_ID_TYPES.get(str(getattr(raw, "value", raw)), "string")
+    makes = generator.id_type
+    if makes == IDType.STRING and column != "string":
+        fix = 'id_type="string"'
+    elif (makes != IDType.STRING and column == "string") or (
+        makes == IDType.BIGINT and column == "integer"
+    ):
+        fix = 'id_type="bigint"'
+    else:
+        return
+    raise ValueError(
+        f"id_generator {name!r} makes {makes.value} ids but the PgCheckpointer stores "
+        f"{column} ids (its id_type is {str(getattr(raw, 'value', raw))!r}). Pass {fix} to "
+        "PgCheckpointer(...), or pick an id_generator whose ids its columns hold."
+    )
+
+
+# Generators apply_id_generator put on a graph; see there.
+_applied_id_generators: weakref.WeakSet[BaseIDGenerator] = weakref.WeakSet()
+
+
+def apply_id_generator(
+    graph: CompiledGraph, config: GraphConfig, container: InjectQ
+) -> BaseIDGenerator | None:
+    """Use ``id_generator`` from 10xgraph.json for the loaded graph; None when it is not set.
+
+    Core binds the graph's generator in the graph's InjectQ container as ``BaseIDGenerator``,
+    ``"generated_id_type"`` and the ``"generated_id"`` factory, and reads them back from
+    ``InjectQ.get_instance()`` for thread, message and memory ids; the API reads
+    ``"generated_id"`` for new thread ids. All three are rebound in the graph's container, the
+    API's container and the active one, so every id comes from the configured generator. A
+    ``PgCheckpointer`` whose ``id_type`` cannot hold the generator's ids refuses the boot.
+    A graph compiled with its own (non-default) generator refuses the setting, so the
+    generator lives in one place.
+    """
+    name = config.id_generator
+    if name is None:
+        return None
+    state_graph = getattr(graph, "_state_graph", None)
+    compiled_with = getattr(state_graph, "_id_generator", None)
+    if (
+        compiled_with is not None
+        and type(compiled_with) is not DefaultIDGenerator
+        and compiled_with not in _applied_id_generators
+    ):
+        raise ValueError(
+            f"The graph is compiled with {type(compiled_with).__name__} "
+            f"(StateGraph(id_generator=...)) and 10xgraph.json sets id_generator {name!r}. "
+            "Set the generator in one place: remove one of them."
+        )
+    generator = load_id_generator(name)
+
+    containers: list[InjectQ] = []
+    for candidate in (getattr(state_graph, "_container", None), container, InjectQ.get_instance()):
+        if isinstance(candidate, InjectQ) and all(candidate is not c for c in containers):
+            containers.append(candidate)
+    checkpointer = next(
+        (c.try_get(BaseCheckpointer) for c in containers if BaseCheckpointer in c), None
+    )
+    _check_checkpointer_id_type(generator, name, checkpointer)
+
+    # Factories, not instances: InjectQ keeps a resolved instance binding in its singleton
+    # cache, so a rebound instance would not be seen; a factory is looked up first and called
+    # on every resolve (core rebinds "get_node" the same way in CompiledGraph.override_node).
+    id_type = generator.id_type
+    for target in containers:
+        target.bind_factory(BaseIDGenerator, lambda: generator)
+        target.bind_factory("generated_id_type", lambda: id_type)
+        target.bind_factory("generated_id", generator.generate)
+    if state_graph is not None:
+        # GET /v1/graph reports the generator from here. Remembered, so loading the same graph
+        # object again (a second app in one process) is not mistaken for a compiled-in one.
+        state_graph._id_generator = generator
+        _applied_id_generators.add(generator)
+    logger.info("ID generator: %s (id_generator %s)", type(generator).__name__, name)
+    return generator
+
+
 def load_and_bind_auth(container: InjectQ, auth_config: dict) -> None:
     """Bind the authentication backend described by ``GraphConfig.auth_config()``.
 
@@ -488,8 +667,8 @@ def _enable_token_revocation(container: InjectQ, config: GraphConfig, auth_enabl
         logger.warning(
             "token_revocation is on with an in-memory cache store (workers=%d): a revocation "
             "reaches only the process that recorded it, and `10xgraph revoke` cannot reach it "
-            "at all. Set `redis` in 10xgraph.json (or REDIS_URL, or a `cache_store`) to share "
-            "revocations between workers.",
+            'at all. Set "cache_store": {"type": "redis", "url": ...} (or type custom) to '
+            "share revocations between workers.",
             workers,
         )
 
@@ -532,8 +711,8 @@ def warn_per_process_state(container: InjectQ) -> None:
             "The cache store is in-memory: the per-thread run lock, run and WebSocket caps, "
             "idempotency records and in-memory rate limits are counted per process "
             "(workers=%d). With more than one worker or replica each limit multiplies and two "
-            "processes can run the same thread at once. Set `redis` in 10xgraph.json (or "
-            "REDIS_URL, or a `cache_store`) for a shared view.",
+            'processes can run the same thread at once. Set "cache_store": {"type": "redis", '
+            '"url": ...} (or type custom) for a shared view.',
             workers,
         )
 
@@ -554,6 +733,9 @@ async def attach_all_modules(
         for node_name, schemas in grouped.items():
             graph.attach_remote_tools(schemas, node_name)
         logger.info("Attached %d configured remote tools", len(remote_tools))
+
+    if graph is not None:
+        apply_id_generator(graph, config, container)
 
     logger.info("All modules attached successfully")
 
@@ -608,18 +790,16 @@ async def attach_all_modules(
         # bind None
         container.bind_instance(BaseAuth, None, allow_none=True)
 
-    # load thread name generator
-    thread_name_generator_path = config.thread_name_generator_path
-    if thread_name_generator_path:
-        thread_name_generator = load_thread_name_generator(thread_name_generator_path)
-        container.bind_instance(ThreadNameGenerator, thread_name_generator)
-    else:
-        # bind None if not configured
-        container.bind_instance(ThreadNameGenerator, None, allow_none=True)
+    # Thread names: random by default; None (``"none"``) leaves new threads unnamed.
+    container.bind_instance(
+        ThreadNameGenerator,
+        resolve_thread_name_generator(config.thread_name_generator),
+        allow_none=True,
+    )
 
     # The cache store first: the ownership cache, token revocation and the rate limiter read
     # it from the container.
-    load_and_bind_cache_store(container, config, get_settings())
+    load_and_bind_cache_store(container, config)
 
     # load authorization backend. The ownership cache's shared L2 tier is the cache store
     # (L1 only when it is in-memory).

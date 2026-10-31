@@ -16,7 +16,9 @@ from typing import Any
 
 from tenxgraph_api.cli.config_editor.schema import (
     BUILTIN_AUTHORIZATION,
+    ID_GENERATOR_NAMES,
     KNOWN_TOP_LEVEL_KEYS,
+    THREAD_NAME_CHOICES,
     section_for_key,
 )
 
@@ -27,6 +29,8 @@ _IMPORT_PATH = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_][\w.]*$")
 _OBSERVABILITY_LEVELS = ("spans", "standard", "full")
 _USER_ID_MODES = ("raw", "hash", "mask")
 _MAX_PERCENT = 100
+# Settings that live inside cache_store; at the top level the server refuses them.
+_CACHE_STORE_SETTINGS = ("redis", "rate_limit", "token_revocation")
 # Built-in authorization names that skip the per-thread ownership check.
 _OPEN_AUTHORIZATION = tuple(name for name in BUILTIN_AUTHORIZATION if name != "ownership")
 
@@ -70,22 +74,21 @@ def validate_config(config: Any, base_dir: Path | None = None) -> list[Issue]:
     _check_env(config, out, base_dir)
     _check_auth(config, out, base_dir)
     _check_authorization(config, out, base_dir)
-    _check_token_revocation(config, out, base_dir)
+    _check_cache_store(config, out, base_dir)
     _check_graph_introspection(config, out)
-    _check_rate_limit(config, out)
     _check_websocket(config, out)
     _check_runs(config, out)
     _check_ag_ui(config, out)
     _check_media(config, out)
     _check_observability(config, out)
-    _check_plugins(config, out, base_dir)
+    _check_wiring(config, out, base_dir)
     _check_remote_tools(config, out)
     _check_test(config, out)
     _check_evaluation(config, out)
     out.issues.extend(production_readiness_warnings(config))
 
     for key in config:
-        if key not in KNOWN_TOP_LEVEL_KEYS:
+        if key not in KNOWN_TOP_LEVEL_KEYS and key not in _CACHE_STORE_SETTINGS:
             out.warning(key, f"'{key}' is not read by 10xGraph. It is kept as-is.")
     return out.issues
 
@@ -113,37 +116,53 @@ def production_readiness_warnings(config: dict) -> list[Issue]:
                 'Use "ownership" or a custom backend in production.',
             )
 
-    rate_limit = config.get("rate_limit")
+    cache_store = config.get("cache_store")
+    cache_store = cache_store if isinstance(cache_store, dict) else {}
+    store_type = cache_store.get("type", "memory")
+    rate_limit = cache_store.get("rate_limit")
     if rate_limit is None or (isinstance(rate_limit, dict) and rate_limit.get("enabled") is False):
         out.warning(
-            "rate_limit",
-            "Rate limiting is off, so one caller can exhaust the service. Enable it, with a "
-            "shared cache store (redis, REDIS_URL or cache_store) for more than one worker, "
-            "before production.",
+            "cache_store.rate_limit",
+            "Rate limiting is off, so one caller can exhaust the service. Turn it on under "
+            "cache_store.rate_limit, with a redis or custom cache store for more than one "
+            "worker, before production.",
         )
-    elif isinstance(rate_limit, dict) and rate_limit.get("enabled") is not False:
+    elif isinstance(rate_limit, dict):
+        if store_type == "memory":
+            out.warning(
+                "cache_store.rate_limit",
+                "The memory cache store counts requests per process, so with more than one "
+                "worker each worker has its own budget. Use redis or custom to share counts.",
+            )
         if auth and rate_limit.get("by", "ip") == "ip":
             out.warning(
-                "rate_limit.by",
+                "cache_store.rate_limit.by",
                 "Counting requests per IP with auth on shares one budget between users behind a "
                 'proxy. Use "by": "user", or set trusted_proxy_headers behind your proxy.',
             )
         exclude = rate_limit.get("exclude_paths")
         if isinstance(exclude, list) and "/redoc" in exclude and "/redocs" not in exclude:
             out.warning(
-                "rate_limit.exclude_paths",
+                "cache_store.rate_limit.exclude_paths",
                 'The ReDoc page is served at /redocs, not /redoc; "/redoc" excludes nothing.',
             )
 
-    revocation = config.get("token_revocation")
-    if auth and (
-        not revocation or (isinstance(revocation, dict) and revocation.get("enabled") is False)
-    ):
+    revocation = cache_store.get("token_revocation")
+    revocation_off = not revocation or (
+        isinstance(revocation, dict) and revocation.get("enabled") is False
+    )
+    if auth and revocation_off:
         out.warning(
-            "token_revocation",
+            "cache_store.token_revocation",
             "Token revocation is off, so a leaked or logged-out token works until it expires. "
-            'Set "token_revocation": true with a shared cache store (redis, REDIS_URL or '
-            "cache_store) and revoke with `10xgraph revoke`.",
+            'Set "token_revocation": true under cache_store, with a redis or custom cache store, '
+            "and revoke with `10xgraph revoke`.",
+        )
+    elif revocation and not revocation_off and store_type == "memory":
+        out.warning(
+            "cache_store.token_revocation",
+            "10xgraph revoke cannot reach an in-memory store; use redis or custom to share "
+            "revocations.",
         )
     return out.issues
 
@@ -238,20 +257,6 @@ def _check_rbac(value: dict, out: _Collector) -> None:
         out.error("authorization.isolation", "isolation must be 'owner' or 'none'.")
 
 
-def _check_rate_limit(config: dict, out: _Collector) -> None:
-    data = config.get("rate_limit")
-    if data is None:
-        return
-    if not isinstance(data, dict):
-        out.error("rate_limit", "rate_limit must be an object.")
-        return
-
-    from tenxgraph_api.src.app.core.config.graph_config import RateLimitConfig
-
-    # rate_limit.backend and rate_limit.redis were removed: the parser names the replacement.
-    _quietly(lambda: RateLimitConfig.from_dict(data), out, "rate_limit")
-
-
 def _check_websocket(config: dict, out: _Collector) -> None:
     data = config.get("websocket")
     if data is None:
@@ -261,26 +266,46 @@ def _check_websocket(config: dict, out: _Collector) -> None:
     _quietly(lambda: WebSocketConfig.from_dict(data), out, "websocket")
 
 
-def _check_token_revocation(config: dict, out: _Collector, base_dir: Path | None) -> None:
-    if config.get("token_revocation") is None:
-        return
-    from tenxgraph_api.src.app.core.config.graph_config import TokenRevocationConfig
-
-    # The old string values (redis, memory, module:attr) are errors naming the replacement.
-    parsed = _quietly(
-        lambda: TokenRevocationConfig.parse(config.get("token_revocation")),
-        out,
-        "token_revocation",
+def _check_cache_store(config: dict, out: _Collector, base_dir: Path | None) -> None:
+    from tenxgraph_api.src.app.core.config.graph_config import (
+        CacheStoreConfig,
+        check_cache_store_settings,
     )
-    if parsed is None:
+
+    # Top-level redis, rate_limit and token_revocation: the parser names where they go.
+    for key in _CACHE_STORE_SETTINGS:
+        if key in config:
+            _quietly(lambda key=key: check_cache_store_settings({key: config[key]}), out, key)
+
+    data = config.get("cache_store")
+    if data is None:
         return
-    if not config.get("auth"):
-        out.warning("token_revocation", "Auth is off, so there are no tokens to revoke.")
-    elif not (config.get("redis") or config.get("cache_store") or os.environ.get("REDIS_URL")):
+    errors = len(out.issues)
+    parsed = _quietly(lambda: CacheStoreConfig.parse(data), out, "cache_store")
+    if parsed is None:
+        # Point an error at the field it names, so the page shows it beside the input.
+        for issue in out.issues[errors:]:
+            for field in ("url", "path", "type"):
+                if issue["message"].startswith(f"cache_store.{field}"):
+                    issue["path"] = f"cache_store.{field}"
+        return
+    if parsed.type == "custom":
+        _check_import_path("cache_store.path", parsed.path, out, base_dir)
+    if parsed.type == "redis" and parsed.url is None and not os.environ.get("REDIS_URL"):
         out.warning(
-            "token_revocation",
-            "No shared cache store (redis, REDIS_URL or cache_store): a revocation reaches "
-            "only the process that recorded it, and `10xgraph revoke` cannot reach it.",
+            "cache_store.url",
+            "Empty, so the server uses REDIS_URL, which is not set in this shell. Make sure it "
+            "is set when the API runs, or set the URL here.",
+        )
+    if parsed.url and _has_unresolved_env(parsed.url):
+        # The server expands $VAR at startup; it is fine for it to be unset while editing.
+        out.warning(
+            "cache_store.url",
+            f"{parsed.url} is not set in this shell. Make sure it is set when the API runs.",
+        )
+    if parsed.token_revocation is not None and not config.get("auth"):
+        out.warning(
+            "cache_store.token_revocation", "Auth is off, so there are no tokens to revoke."
         )
 
 
@@ -360,8 +385,8 @@ def _check_observability(config: dict, out: _Collector) -> None:
         )
 
 
-def _check_plugins(config: dict, out: _Collector, base_dir: Path | None) -> None:
-    for key in ("injectq", "store", "checkpointer", "thread_name_generator", "cache_store"):
+def _check_wiring(config: dict, out: _Collector, base_dir: Path | None) -> None:
+    for key in ("injectq", "store", "checkpointer"):
         value = config.get(key)
         if value is None or value == "":
             continue
@@ -369,20 +394,24 @@ def _check_plugins(config: dict, out: _Collector, base_dir: Path | None) -> None
     if config.get("checkpointer"):
         out.warning(
             "checkpointer",
-            "The API server does not apply this key yet. Pass the checkpointer to "
-            "graph.compile() instead.",
+            "The server uses the checkpointer passed to graph.compile(); this key is "
+            "informational.",
         )
+    _check_choice("id_generator", config, ID_GENERATOR_NAMES, out, base_dir)
+    _check_choice("thread_name_generator", config, THREAD_NAME_CHOICES, out, base_dir)
 
-    redis = config.get("redis")
-    if redis is None or redis == "":
+
+def _check_choice(
+    key: str, config: dict, names: tuple[str, ...], out: _Collector, base_dir: Path | None
+) -> None:
+    """A built-in name or ``module:attr``; unset and empty mean the default."""
+    value = config.get(key)
+    if value is None or value == "" or value in names:
         return
-    if not isinstance(redis, str):
-        out.error("redis", "redis must be a URL string.")
-    elif _has_unresolved_env(redis):
-        # The server expands $VAR at startup; it is fine for it to be unset while editing.
-        out.warning(
-            "redis", f"{redis} is not set in this shell. Make sure it is set when the API runs."
-        )
+    if not isinstance(value, str) or ":" not in value:
+        out.error(key, f"{key} must be one of {', '.join(names)} or module:attribute.")
+        return
+    _check_import_path(key, value, out, base_dir)
 
 
 def _check_remote_tools(config: dict, out: _Collector) -> None:

@@ -102,8 +102,13 @@ def test_cache_counts_only_when_a_fail_closed_feature_needs_it():
     assert not readiness.is_ready({"checkpointer": "fail", "cache": "ok"}, cache_is_required=False)
     assert not readiness.is_ready({"store": "fail"}, cache_is_required=False)
 
-    on = SimpleNamespace(token_revocation=object(), rate_limit=None)
+    on = SimpleNamespace(
+        token_revocation=object(), rate_limit=None, auth_config=lambda: {"method": "jwt"}
+    )
     assert readiness.cache_required_by(on) == ["token_revocation"]
+    # With auth off the loader does not enable revocation, so nothing needs the cache store.
+    auth_off = SimpleNamespace(token_revocation=object(), rate_limit=None, auth_config=lambda: None)
+    assert readiness.cache_required_by(auth_off) == []
     strict = SimpleNamespace(token_revocation=None, rate_limit=SimpleNamespace(fail_open=False))
     assert readiness.cache_required_by(strict) == ["rate_limit.fail_open=false"]
     lenient = SimpleNamespace(token_revocation=None, rate_limit=SimpleNamespace(fail_open=True))
@@ -154,9 +159,36 @@ def test_cache_outage_is_reported_and_fails_only_when_required(tmp_path):
     assert resp.get("/health/ready").json()["checks"]["cache"] == "fail"
 
     readiness.reset_cache()
-    path.write_text(json.dumps({"agent": "graph.agent:app", "token_revocation": True}))
+    auth = {"method": "custom", "path": "auth.backend:auth"}
+    revocation = {"cache_store": {"token_revocation": True}}
+    path.write_text(json.dumps({"agent": "graph.agent:app", **revocation}))
+    resp = _client(InMemoryCheckpointer(), cache=_DownCache(), config=GraphConfig(str(path)))
+    assert resp.get("/health/ready").status_code == 200  # auth off: revocation is not enabled
+
+    readiness.reset_cache()
+    path.write_text(json.dumps({"agent": "graph.agent:app", "auth": auth, **revocation}))
     resp = _client(InMemoryCheckpointer(), cache=_DownCache(), config=GraphConfig(str(path)))
     assert resp.get("/health/ready").status_code == 503
+
+
+def test_readiness_parses_rate_limit_once_not_per_probe(tmp_path, caplog, monkeypatch):
+    """The production template's rate_limit warns when parsed; probes must not repeat it."""
+    monkeypatch.setattr(logging.getLogger("tenxgraph_api"), "propagate", True)
+    path = tmp_path / "10xgraph.json"
+    rate_limit = {"enabled": True, "trusted_proxy_headers": True, "fail_open": False}
+    path.write_text(
+        json.dumps({"agent": "graph.agent:app", "cache_store": {"rate_limit": rate_limit}})
+    )
+    client = _client(
+        InMemoryCheckpointer(), cache=InMemoryCacheStore(), config=GraphConfig(str(path))
+    )
+    with caplog.at_level(logging.WARNING, logger="tenxgraph_api"):
+        for _ in range(3):
+            readiness.reset_cache()
+            assert client.get("/health/ready").status_code == 200
+    # By record identity: a handler another test left on the logger can capture one twice.
+    warned = {id(r) for r in caplog.records if "trusted_proxy_headers" in r.getMessage()}
+    assert len(warned) == 1  # the first probe parses it; the next two reuse the answer
 
 
 def test_endpoint_is_503_when_a_dependency_fails():

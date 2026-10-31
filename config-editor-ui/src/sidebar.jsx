@@ -29,11 +29,14 @@ function NavLink({ id }) {
       href={`#${id}`} aria-current={current ? "page" : undefined}
       onClick={(e) => { e.preventDefault(); go(id); }}
       ref={(el) => { if (el && current && window.innerWidth < 1024) el.scrollIntoView({ block: "nearest", inline: "nearest" }); }}
-      class={`focus-ring flex min-h-10 items-center gap-2.5 rounded-lg px-3 font-medium transition-colors duration-150 max-lg:min-h-11 max-lg:shrink-0 max-lg:whitespace-nowrap ${current
+      class={`focus-ring flex min-h-10 items-center gap-2.5 rounded-lg px-3 py-1.5 font-medium transition-colors duration-150 max-lg:min-h-11 max-lg:shrink-0 max-lg:whitespace-nowrap ${current
         ? "bg-brand-soft text-ink" : "text-muted hover:bg-raised hover:text-ink"}`}
     >
       <Icon name={SECTION_ICONS[id] || "box"} class={`size-[18px] ${current ? "text-brand" : ""}`} />
-      <span class="min-w-0 flex-1 truncate">{item.title}</span>
+      <span class="min-w-0 flex-1">
+        <span class="block truncate">{item.title}</span>
+        {item.subtitle ? <span class="block truncate text-xs font-normal text-faint max-lg:hidden">{item.subtitle}</span> : null}
+      </span>
       <Markers id={id} />
     </a>
   );

@@ -435,7 +435,7 @@ def setup_middleware(
         - CORS: Configured based on settings.ORIGINS.
         - TrustedHost: Configured with allowed hosts from settings.ALLOWED_HOST.
         - GZip: Applied with a minimum size of 1000 bytes (excludes streaming endpoints).
-        - RateLimit: Applied when ``rate_limit`` is configured in ``10xgraph.json``.
+        - RateLimit: Applied when ``cache_store.rate_limit`` is set in ``10xgraph.json``.
     """
     settings = get_settings()
 

@@ -119,9 +119,7 @@ def _graph(checkpointer: BaseCheckpointer) -> CompiledGraph:
 
 
 class _Config:
-    """GraphConfig stand-in: auth on, no thread name generator."""
-
-    thread_name_generator_path = None
+    """GraphConfig stand-in: auth on."""
 
     def __init__(self, allow_client_tools: bool = True, runs: Any = None) -> None:
         from tenxgraph_api.src.app.core.config.graph_config import AgUiConfig

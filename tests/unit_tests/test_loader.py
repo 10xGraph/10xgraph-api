@@ -362,11 +362,11 @@ async def test_attach_all_modules():
     config = MagicMock(spec=GraphConfig)
     config.graph_path = "mod:graph"
     config.auth_config.return_value = {"method": "none", "path": "path.py:auth"}
-    config.thread_name_generator_path = "mod:generator"
+    config.thread_name_generator = "mod:generator"
+    config.id_generator = None
     config.authorization_path = "mod:authorization"
     config.store_path = None
     config.cache_store = None
-    config.redis_url = None
     config.remote_tools = [
         RemoteToolConfig(
             node="tools",
@@ -402,11 +402,13 @@ async def test_attach_all_modules():
         )
         # verify bindings
         container.bind_instance.assert_any_call(BaseAuth, None, allow_none=True)
-        container.bind_instance.assert_any_call(ThreadNameGenerator, mock_generator)
+        container.bind_instance.assert_any_call(
+            ThreadNameGenerator, mock_generator, allow_none=True
+        )
         container.bind_instance.assert_any_call(AuthorizationBackend, mock_auth_backend)
 
         # Test branch where config has no thread name generator and no auth config
-        config.thread_name_generator_path = None
+        config.thread_name_generator = "none"
         config.auth_config.return_value = None
         config.remote_tools = []
 
@@ -436,10 +438,10 @@ async def test_attach_refuses_ownership_without_owner_lookup(auth_on):
     config = MagicMock(spec=GraphConfig)
     config.graph_path = "mod:graph"
     config.auth_config.return_value = {"method": "jwt"} if auth_on else None
-    config.thread_name_generator_path = None
+    config.thread_name_generator = "none"
+    config.id_generator = None
     config.authorization_path = "ownership"
     config.store_path = None
-    config.redis_url = None
     config.cache_store = None
     config.remote_tools = []
 

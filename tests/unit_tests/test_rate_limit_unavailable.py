@@ -92,7 +92,9 @@ def test_app_wiring_with_fail_open_false_and_a_failing_cache_store_answers_503(t
     from tenxgraph_api.src.app.core.config.setup_middleware import setup_middleware
 
     path = tmp_path / "10xgraph.json"
-    path.write_text('{"agent": "g:app", "rate_limit": {"requests": 2, "fail_open": false}}')
+    path.write_text(
+        '{"agent": "g:app", "cache_store": {"rate_limit": {"requests": 2, "fail_open": false}}}'
+    )
     graph_config = GraphConfig(str(path))
     container = InjectQ()
     app = FastAPI()
@@ -122,3 +124,21 @@ async def test_outage_logs_one_traceback_then_one_line_per_error(caplog):
         store.healed = True
         assert (await limiter.check(store, "client", 2, 60, fail_open=False)).allowed is True
     assert "recovered" in caplog.records[-1].getMessage()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_open", [True, False])
+async def test_denial_stays_429_when_the_clock_read_after_it_fails(fail_open):
+    """acquire denied, then now() failed: still the limit hit, never allow or 503."""
+
+    class DeniesThenClockFails(InMemoryCacheStore):
+        async def acquire(self, key: str, limit: int, ttl: float) -> SlotResult:
+            return SlotResult(granted=False, count=limit, oldest_expiry=1e12, slot_id=None)
+
+        async def now(self) -> float:
+            raise ConnectionError("Connection reset by peer")
+
+    decision = await limiter.check(DeniesThenClockFails(), "client", 2, 60.5, fail_open=fail_open)
+    assert decision.allowed is False
+    assert decision.unavailable is False
+    assert decision.reset_after == 61  # ceil(window)

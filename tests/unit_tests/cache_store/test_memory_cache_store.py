@@ -217,3 +217,27 @@ def test_defaults_match_the_old_caps():
     assert memory_store.DEFAULT_MAX_SLOT_KEYS == 50_000
     assert memory_store.DEFAULT_MAX_VALUES == 10_000  # the old in-memory idempotency cap
     assert InMemoryCacheStore().describe() is None
+
+
+@pytest.mark.asyncio
+async def test_wall_clock_jump_does_not_expire_live_slots_or_keys(monkeypatch):
+    """A host suspend moves wall time but not the monotonic clock the lease renewer runs on."""
+    store = InMemoryCacheStore()
+    held = await store.acquire("concurrency:runs:thread:1", 1, 30)
+    assert held.granted
+    await store.set("idempotency:k", b"v", 30)
+
+    real_time = memory_store.time.time
+    monkeypatch.setattr(memory_store.time, "time", lambda: real_time() + 3600)
+
+    # The lock is still held: a second run on the same thread is refused.
+    assert not (await store.acquire("concurrency:runs:thread:1", 1, 30)).granted
+    assert await store.renew("concurrency:runs:thread:1", held.slot_id, 30)
+    assert await store.get("idempotency:k") == b"v"
+    await store._sweep()
+    assert "concurrency:runs:thread:1" in store._slots
+    assert "idempotency:k" in store._values
+
+    # Reported times follow the store clock: epoch seconds, about now() + ttl.
+    denied = await store.acquire("concurrency:runs:thread:1", 1, 30)
+    assert abs(denied.oldest_expiry - (await store.now() + 30)) < 1.5

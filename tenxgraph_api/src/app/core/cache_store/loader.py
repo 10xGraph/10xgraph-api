@@ -1,12 +1,13 @@
-"""Pick the API's cache store from 10xgraph.json and the environment, and bind it.
+"""Pick the API's cache store from ``cache_store`` in 10xgraph.json, and bind it.
 
-Selection order (the first one set wins):
+``cache_store.type`` decides, and nothing else (no environment variable picks a store):
 
-1. ``"cache_store": "module:attr"`` in 10xgraph.json: a ``BaseCacheStore`` instance, or a
-   zero-argument factory (a class or function) that returns one.
-2. ``"redis"`` in 10xgraph.json: ``RedisCacheStore.from_url(...)``.
-3. ``REDIS_URL`` in the environment: ``RedisCacheStore.from_url(...)``.
-4. Otherwise ``InMemoryCacheStore()``: correct for one process, not shared between workers.
+- ``custom``: ``cache_store.path`` (``"module:attr"``), a ``BaseCacheStore`` instance or a
+  zero-argument factory (a class or function) that returns one.
+- ``redis``: ``RedisCacheStore.from_url(cache_store.url)``. Without the ``redis`` package the
+  boot stops: the config asks for Redis, so a per-process store would be a silent change.
+- ``memory``, or no ``cache_store`` / no ``type``: ``InMemoryCacheStore()``, correct for one
+  process, not shared between workers.
 
 The store is bound in the InjectQ container as ``BaseCacheStore`` together with the
 ``LeaseManager`` that the run locks, run and WebSocket caps and idempotency use.
@@ -16,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from .base import BaseCacheStore
 from .memory_store import InMemoryCacheStore
@@ -32,47 +33,42 @@ if TYPE_CHECKING:
 logger = logging.getLogger("tenxgraph_api.cache_store")
 
 
-def build_cache_store(
-    graph_config: GraphConfig | None, settings: Any
-) -> tuple[BaseCacheStore, str]:
-    """The configured cache store and where it came from (for logs; never credentials).
+def build_cache_store(graph_config: GraphConfig | None) -> tuple[BaseCacheStore, str]:
+    """The configured cache store and the config key it came from (for logs; no credentials).
 
-    ``graph_config`` may be None (no 10xgraph.json). ``settings`` supplies ``REDIS_URL``.
+    ``graph_config`` may be None (no 10xgraph.json): then the in-memory store.
     """
-    path = graph_config.cache_store if graph_config is not None else None
-    if path:
+    settings = graph_config.cache_store if graph_config is not None else None
+    if settings is None or settings.type == "memory":
+        source = "cache_store.type" if settings is not None and settings.type_set else None
+        return InMemoryCacheStore(), source or "cache_store not set"
+
+    if settings.type == "custom":
         from tenxgraph_api.src.app.loader import load_cache_store
 
-        return load_cache_store(path), f"from cache_store {path}"
+        path = str(settings.path)
+        return load_cache_store(path), f"cache_store.path {path}"
 
-    redis_url = graph_config.redis_url if graph_config is not None else None
-    source = "redis in 10xgraph.json"
-    if not redis_url:
-        redis_url = getattr(settings, "REDIS_URL", None)
-        source = "REDIS_URL"
-    if redis_url:
-        try:
-            return RedisCacheStore.from_url(redis_url), f"from {source}"
-        except ImportError:
-            logger.warning(
-                "%s is set but the 'redis' package is not installed; the cache store is "
-                "in-memory (per process). Install the redis extra to share it across workers.",
-                source,
-            )
-            return InMemoryCacheStore(), f"{source} set but the redis package is missing"
-
-    return InMemoryCacheStore(), "no cache_store, redis or REDIS_URL set"
+    url = settings.expanded_url()
+    try:
+        return RedisCacheStore.from_url(str(url)), settings.url_source
+    except ImportError:
+        raise RuntimeError(
+            'cache_store.type is "redis" but the redis package is not installed. Install the '
+            'redis extra: pip install "10xgraph-api[redis]"'
+        ) from None
 
 
 @dataclass(frozen=True)
 class CacheStoreSource:
-    """Where the bound cache store came from (``from REDIS_URL``), for the startup check."""
+    """The config key the bound cache store came from (``cache_store.url``), for the startup
+    check."""
 
     text: str | None = None
 
 
 def describe_cache_store(store: BaseCacheStore, source: str | None = None) -> str:
-    """``RedisCacheStore (from REDIS_URL, localhost:6379)``: the store, its source, endpoint.
+    """``RedisCacheStore (cache_store.url, localhost:6379)``: the store, its source, endpoint.
 
     The endpoint is the store's ``describe()``; without one (or without a source) only what is
     known is named, at least the class.
@@ -96,10 +92,10 @@ def bind_cache_store(container: InjectQ, store: BaseCacheStore, source: str | No
 
 
 def load_and_bind_cache_store(
-    container: InjectQ, graph_config: GraphConfig | None, settings: Any
+    container: InjectQ, graph_config: GraphConfig | None
 ) -> BaseCacheStore:
     """Build the cache store (see the module docstring), bind it and log one INFO line."""
-    store, source = build_cache_store(graph_config, settings)
+    store, source = build_cache_store(graph_config)
     bind_cache_store(container, store, source)
     logger.info("Cache store: %s", describe_cache_store(store, source))
     return store

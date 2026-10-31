@@ -350,9 +350,12 @@ async def test_websocket_caps_hold_per_process_without_a_shared_store(monkeypatc
 
 
 class _Config:
-    def __init__(self, cache_store=None, redis_url=None):
-        self.cache_store = cache_store
-        self.redis_url = redis_url
+    """A GraphConfig stand-in: only ``cache_store``, parsed from keyword arguments."""
+
+    def __init__(self, **cache_store):
+        from tenxgraph_api.src.app.core.config.graph_config import CacheStoreConfig
+
+        self.cache_store = CacheStoreConfig.parse(cache_store or None)
 
 
 @pytest.fixture
@@ -377,73 +380,96 @@ def cache_module(tmp_path, monkeypatch):
     sys.modules.pop("my_cache", None)
 
 
-def test_selection_order(cache_module):
-    redis_url = "redis://:hunter2@config-host:6380/0"
-    env = SimpleNamespace(REDIS_URL="redis://:hunter2@env-host:6379/1")
+def test_selection_comes_from_cache_store_type_only(cache_module, monkeypatch):
+    monkeypatch.setenv("REDIS_URL", "redis://:hunter2@env-host:6379/1")  # never read
     store, source = cache_loader.build_cache_store(
-        _Config(cache_store=f"{cache_module}:instance", redis_url=redis_url), env
+        _Config(type="custom", path=f"{cache_module}:instance")
     )
     assert isinstance(store, RecordingStore)
-    assert source == f"from cache_store {cache_module}:instance"
+    assert source == f"cache_store.path {cache_module}:instance"
 
-    store, source = cache_loader.build_cache_store(_Config(redis_url=redis_url), env)
-    assert isinstance(store, RedisCacheStore) and source == "from redis in 10xgraph.json"
+    redis_url = "redis://:hunter2@config-host:6380/0"
+    store, source = cache_loader.build_cache_store(_Config(type="redis", url=redis_url))
+    assert isinstance(store, RedisCacheStore) and source == "cache_store.url"
     assert store.describe() == "config-host:6380"
 
-    store, source = cache_loader.build_cache_store(_Config(), env)
-    assert isinstance(store, RedisCacheStore) and source == "from REDIS_URL"
-    assert store.describe() == "env-host:6379"
+    store, source = cache_loader.build_cache_store(_Config(type="memory"))
+    assert isinstance(store, InMemoryCacheStore) and source == "cache_store.type"
 
-    store, source = cache_loader.build_cache_store(_Config(), SimpleNamespace(REDIS_URL=None))
-    assert isinstance(store, InMemoryCacheStore)
-    assert source == "no cache_store, redis or REDIS_URL set"
-    assert cache_loader.build_cache_store(None, SimpleNamespace(REDIS_URL=None))[1] == source
+    store, source = cache_loader.build_cache_store(_Config())
+    assert isinstance(store, InMemoryCacheStore) and source == "cache_store not set"
+    store, source = cache_loader.build_cache_store(_Config(rate_limit={"requests": 5}))
+    assert isinstance(store, InMemoryCacheStore) and source == "cache_store not set"
+    assert cache_loader.build_cache_store(None)[1] == "cache_store not set"
+
+
+def test_redis_url_expands_when_the_store_is_built(monkeypatch):
+    monkeypatch.setenv("TG_TEST_CACHE_URL", "redis://cache:6379/0")
+    store, _ = cache_loader.build_cache_store(_Config(type="redis", url="${TG_TEST_CACHE_URL}"))
+    assert store.describe() == "cache:6379"
+
+    monkeypatch.delenv("TG_TEST_CACHE_URL")
+    with pytest.raises(
+        ValueError, match="cache_store.url: .* environment variable that is not set"
+    ):
+        cache_loader.build_cache_store(_Config(type="redis", url="${TG_TEST_CACHE_URL}"))
 
 
 def test_cache_store_factory_and_bad_paths(cache_module):
-    env = SimpleNamespace(REDIS_URL=None)
-    store, _ = cache_loader.build_cache_store(_Config(cache_store=f"{cache_module}:factory"), env)
+    store, _ = cache_loader.build_cache_store(
+        _Config(type="custom", path=f"{cache_module}:factory")
+    )
     assert isinstance(store, RecordingStore)
     with pytest.raises(Exception, match="not a BaseCacheStore"):
-        cache_loader.build_cache_store(_Config(cache_store=f"{cache_module}:not_a_store"), env)
+        cache_loader.build_cache_store(_Config(type="custom", path=f"{cache_module}:not_a_store"))
     with pytest.raises(Exception, match="missing"):
-        cache_loader.build_cache_store(_Config(cache_store=f"{cache_module}:missing"), env)
+        cache_loader.build_cache_store(_Config(type="custom", path=f"{cache_module}:missing"))
 
 
-def test_graph_config_cache_store_key(tmp_path):
-    from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
+def _redis_package_missing(monkeypatch):
+    def from_url(*args, **kwargs):
+        raise ImportError("No module named 'redis'")
 
-    path = tmp_path / "10xgraph.json"
-    path.write_text('{"agent": "a:b", "cache_store": "my_cache:instance"}')
-    assert GraphConfig(str(path)).cache_store == "my_cache:instance"
-    path.write_text('{"agent": "a:b"}')
-    assert GraphConfig(str(path)).cache_store is None
-    path.write_text('{"agent": "a:b", "cache_store": "redis"}')
-    with pytest.raises(ValueError, match="module:attr"):
-        _ = GraphConfig(str(path)).cache_store
+    monkeypatch.setattr(cache_loader.RedisCacheStore, "from_url", from_url)
+
+
+@pytest.mark.parametrize(
+    "inside",
+    [{}, {"token_revocation": True}, {"rate_limit": {"enabled": True, "fail_open": False}}],
+)
+def test_redis_type_without_the_redis_package_refuses_boot(monkeypatch, inside):
+    """The config asks for Redis, so a per-process store instead would be a silent change."""
+    _redis_package_missing(monkeypatch)
+    config = _Config(type="redis", url="redis://:hunter2@cache:6379/0", **inside)
+    with pytest.raises(RuntimeError) as info:
+        cache_loader.build_cache_store(config)
+    message = str(info.value)
+    assert message.startswith('cache_store.type is "redis" but the redis package is not installed')
+    assert 'pip install "10xgraph-api[redis]"' in message
+    assert "hunter2" not in message
 
 
 def test_boot_logs_one_info_line_without_credentials(caplog):
     container = InjectQ()
-    env = SimpleNamespace(REDIS_URL="redis://user:hunter2@cache.internal:6379/0")
+    config = _Config(type="redis", url="redis://user:hunter2@cache.internal:6379/0")
     with caplog.at_level(logging.INFO, logger="tenxgraph_api.cache_store"):
-        store = cache_loader.load_and_bind_cache_store(container, _Config(), env)
+        store = cache_loader.load_and_bind_cache_store(container, config)
     lines = [r.getMessage() for r in caplog.records if r.name == "tenxgraph_api.cache_store"]
-    assert lines == ["Cache store: RedisCacheStore (from REDIS_URL, cache.internal:6379)"]
+    assert lines == ["Cache store: RedisCacheStore (cache_store.url, cache.internal:6379)"]
     assert "hunter2" not in caplog.text and "user" not in lines[0]
     assert container.try_get(BaseCacheStore) is store
 
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="tenxgraph_api.cache_store"):
-        cache_loader.load_and_bind_cache_store(InjectQ(), _Config(), SimpleNamespace())
+        cache_loader.load_and_bind_cache_store(InjectQ(), _Config())
     assert caplog.records[-1].getMessage() == (
-        "Cache store: InMemoryCacheStore (no cache_store, redis or REDIS_URL set)"
+        "Cache store: InMemoryCacheStore (cache_store not set)"
     )
 
 
 @pytest.mark.asyncio
 async def test_custom_cache_store_backs_locks_caps_and_idempotency(cache_module, monkeypatch):
-    """A ``cache_store: "module:attr"`` store is what every lease and record goes through."""
+    """A custom ``cache_store`` is what every lease and record goes through."""
     from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
     from tenxgraph_api.src.app.routers.graph import idempotency
     from tenxgraph_api.src.app.routers.graph.run_guard import acquire_run_guard
@@ -451,7 +477,7 @@ async def test_custom_cache_store_backs_locks_caps_and_idempotency(cache_module,
     container = InjectQ()
     monkeypatch.setattr(InjectQ, "get_instance", classmethod(lambda cls: container))
     store = cache_loader.load_and_bind_cache_store(
-        container, _Config(cache_store=f"{cache_module}:factory"), SimpleNamespace()
+        container, _Config(type="custom", path=f"{cache_module}:factory")
     )
     assert isinstance(store, RecordingStore)
 
@@ -488,7 +514,7 @@ async def test_custom_cache_store_backs_ownership_revocation_and_rate_limits(cac
 
     container = InjectQ()
     store = cache_loader.load_and_bind_cache_store(
-        container, _Config(cache_store=f"{cache_module}:factory"), SimpleNamespace()
+        container, _Config(type="custom", path=f"{cache_module}:factory")
     )
     assert isinstance(store, RecordingStore)
 

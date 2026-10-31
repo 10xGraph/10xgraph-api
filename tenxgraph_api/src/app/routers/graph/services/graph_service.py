@@ -59,7 +59,7 @@ from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import
     resolve_media_policy,
 )
 from tenxgraph_api.src.app.routers.graph.thread_lock import acquire_thread_lock
-from tenxgraph_api.src.app.utils import DefaultThreadNameGenerator, ThreadNameGenerator
+from tenxgraph_api.src.app.utils import ThreadNameGenerator
 from tenxgraph_api.src.app.utils.run_trace import (
     event_summary,
     reconstruct_run,
@@ -430,19 +430,27 @@ class GraphService:
         """Reject external media URLs the graph's fetch policy blocks (400, no network)."""
         check_external_media_urls(messages, self.media_policy)
 
+    @property
+    def names_threads(self) -> bool:
+        """Whether new threads get a generated name (``thread_name_generator`` is not none)."""
+        return self.thread_name_generator is not None
+
+    @staticmethod
+    def naming_texts(user_messages: list[Any], replies: list[Any] | None = None) -> list[str]:
+        """The texts a thread name is made from: the user's messages first, then the replies."""
+        texts = [m.text() for m in user_messages if getattr(m, "role", None) == "user"]
+        texts.extend(m.text() for m in replies or [] if getattr(m, "role", None) != "user")
+        return texts
+
     async def _save_thread_name(
         self,
         config: dict[str, Any],
         thread_id: int,
         messages: list[str],
-    ) -> str:
-        """
-        Save the generated thread name to the database.
-        """
-        if not self.thread_name_generator:
-            thread_name = await DefaultThreadNameGenerator().generate_name([])
-            logger.debug("No thread name generator configured, using default generator.")
-            return thread_name
+    ) -> str | None:
+        """Generate the thread's name and save it on the thread; None when naming is off."""
+        if self.thread_name_generator is None:
+            return None
 
         thread_name = await self.thread_name_generator.generate_name(messages)
 
@@ -997,11 +1005,13 @@ class GraphService:
             # Extract context information using helper method
             context, context_summary = self._extract_context_info(raw_state, result)
 
-            if meta["is_new_thread"] and self.config.thread_name_generator_path:
-                # Naming is an extra model call; the caller should not wait for it. The name
-                # is saved on the thread (GET /v1/threads) once it is ready.
+            if meta["is_new_thread"] and self.names_threads:
+                # Naming can be an extra model call; the caller should not wait for it. The
+                # name is saved on the thread (GET /v1/threads) once it is ready.
                 self._name_thread_in_background(
-                    dict(config), config["thread_id"], [msg.text() for msg in messages]
+                    dict(config),
+                    config["thread_id"],
+                    self.naming_texts(input_data["messages"], messages),
                 )
 
             return GraphInvokeOutputSchema(
@@ -1197,7 +1207,7 @@ class GraphService:
                     run_status = "error"
                 yield chunk
                 if (
-                    self.config.thread_name_generator_path
+                    self.names_threads
                     and meta["is_new_thread"]
                     and chunk.event == StreamEvent.MESSAGE
                     and chunk.message
@@ -1216,8 +1226,12 @@ class GraphService:
             if self.telemetry:
                 self.telemetry.finish_run(thread_id, run_id, datetime.now().timestamp(), run_status)
 
-            if meta["is_new_thread"] and self.config.thread_name_generator_path:
-                naming = (dict(config), config["thread_id"], messages_str)
+            if meta["is_new_thread"] and self.names_threads:
+                naming = (
+                    dict(config),
+                    config["thread_id"],
+                    self.naming_texts(input_data["messages"]) + messages_str,
+                )
 
         except Exception as e:
             # Never raise HTTPException from inside an async generator that is

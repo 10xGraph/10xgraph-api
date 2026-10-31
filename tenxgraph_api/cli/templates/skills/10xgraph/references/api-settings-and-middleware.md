@@ -18,7 +18,8 @@ Important variables:
 - `ROOT_PATH`
 - `DOCS_PATH`
 - `REDOCS_PATH`
-- `REDIS_URL`
+- `REDIS_SOCKET_TIMEOUT`, `REDIS_CONNECT_TIMEOUT`, `REDIS_MAX_CONNECTIONS`, `REDIS_KEY_PREFIX`
+  (the Redis client of a `cache_store` type `redis`; its URL is `cache_store.url`)
 - `STARTUP_CHECKS`
 - `STARTUP_CHECK_TIMEOUT_SECONDS`
 - `SENTRY_DSN`
@@ -49,10 +50,11 @@ Active middleware areas:
 - Request ID assignment.
 - Selective gzip behavior; streaming endpoints should avoid gzip buffering when configured.
 - Worker middleware where used by deployment.
-- Rate limiting: sliding-window limiter controlled by the `rate_limit` block in `10xgraph.json`.
-  Uses an in-process `memory` backend by default; use the `redis` backend (requires
-  `pip install "10xgraph-api[redis]"`) for multi-worker or multi-instance deployments.
-  Excluded paths, identity mode (`ip` or `global`), and `fail_open` behavior are all configurable.
+- Rate limiting: sliding-window limiter controlled by `cache_store.rate_limit` in
+  `10xgraph.json`. Counters live in the cache store: in-process with `"type": "memory"` (the
+  default), shared with `"type": "redis"` (requires `pip install "10xgraph-api[redis]"`) for
+  multi-worker or multi-instance deployments. Excluded paths, identity mode (`ip`, `user` or
+  `global`), and `fail_open` behavior are all configurable.
   See `references/rate-limiting.md` for the full option reference.
 
 ## Production Warnings
@@ -69,10 +71,11 @@ default in production (`STRICT_PRODUCTION_CHECKS=false` downgrades them to warni
 ## Startup Checks
 
 In every mode, the server refuses to start while a configured backend is unreachable: the
-checkpointer's Postgres and Redis, the store (when it has `aping`/`ping`), `REDIS_URL` (or
-`redis` in `10xgraph.json`) and the rate limiter's Redis. It retries for
-`STARTUP_CHECK_TIMEOUT_SECONDS` (30) first, then exits with each failed component, its
-`host:port` and the error. `STARTUP_CHECKS=false` skips the check.
+checkpointer and the store (each through its `aping()`), and the cache store from
+`cache_store` when a fail-closed feature needs it (`token_revocation` with auth, or
+`rate_limit` with `fail_open: false`; otherwise an unreachable cache store is one warning). It
+retries for `STARTUP_CHECK_TIMEOUT_SECONDS` (30) first, then exits with each failed component,
+its `host:port` and the error. `STARTUP_CHECKS=false` skips the check.
 
 ## Sentry
 

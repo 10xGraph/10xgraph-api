@@ -71,7 +71,6 @@ class Settings(BaseSettings):
 
         ORIGINS (str): CORS allowed origins.
         ALLOWED_HOST (str): CORS allowed hosts.
-        REDIS_URL (str): The URL for the Redis server.
 
         SENTRY_DSN (str): The DSN for Sentry error tracking.
 
@@ -144,11 +143,9 @@ class Settings(BaseSettings):
     ###### REDIS Config ##########
     #################################
     # The API's cache store (run locks and caps, idempotency, rate limit, token revocation,
-    # ownership cache) is a RedisCacheStore on this URL when 10xgraph.json sets neither
-    # `cache_store` nor `redis`. Unset (and neither key set): an in-memory store, per process.
-    REDIS_URL: str | None = None
-    # Limits for the Redis client of a RedisCacheStore built from `redis` or REDIS_URL (and
-    # of `10xgraph revoke`). Without them a Redis that stops
+    # ownership cache) comes from `cache_store` in 10xgraph.json; a Redis one names its URL
+    # there (`"url": "${REDIS_URL}"`). Limits for the Redis client of a RedisCacheStore (and
+    # of `10xgraph revoke`) follow. Without them a Redis that stops
     # answering (not refusing) would hang each request that touches it. Seconds; 0 turns the
     # timeout off. REDIS_MAX_CONNECTIONS bounds each client's pool; a request waits up to
     # REDIS_POOL_TIMEOUT for a free connection. 0 means no bound.

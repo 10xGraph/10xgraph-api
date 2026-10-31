@@ -308,10 +308,10 @@ async def test_attach_binds_ownership_when_auth_is_on_in_development(monkeypatch
     config = MagicMock(spec=GraphConfig)
     config.graph_path = "mod:graph"
     config.auth_config.return_value = {"method": "jwt"}
-    config.thread_name_generator_path = None
+    config.thread_name_generator = "none"
+    config.id_generator = None
     config.authorization_path = None
     config.store_path = None
-    config.redis_url = None
     config.cache_store = None
     config.remote_tools = []
     config.runs = RunsConfig()

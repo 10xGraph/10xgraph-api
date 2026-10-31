@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import io
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -89,9 +88,11 @@ def test_production_dependencies_follow_the_answers(tmp_path: Path) -> None:
     import json
 
     config = json.loads((target / "10xgraph.json").read_text())
-    assert config["redis"] == "${REDIS_URL}"
-    assert set(config["rate_limit"]) >= {"enabled", "requests", "window", "by"}
-    assert "redis" not in config["rate_limit"]
+    assert config["cache_store"]["type"] == "redis"
+    assert config["cache_store"]["url"] == "${REDIS_URL}"
+    assert set(config["cache_store"]["rate_limit"]) >= {"enabled", "requests", "window", "by"}
+    assert config["cache_store"]["token_revocation"] is True
+    assert not {"redis", "rate_limit", "token_revocation"} & set(config)
 
     agent_py = (target / "graph" / "agent.py").read_text()
     assert 'model="gpt-4o-mini"' in agent_py
@@ -230,16 +231,26 @@ def test_generated_config_loads_through_graph_config(
     config.auth_config()
     config.websocket  # noqa: B018 - parsing is the check
     config.runs  # noqa: B018
-    assert config.cache_store is None
+    settings = config.cache_store
+    assert settings.type == ("memory" if rate_limit == "none" else rate_limit)
+    assert settings.type_set == (rate_limit != "none")
     limit = config.rate_limit
     assert (limit is not None) == (rate_limit != "none")
     revocation = config.token_revocation
     assert (revocation is not None) == (rate_limit == "redis" and auth in {"jwt", "custom"})
     if rate_limit == "redis":
-        assert config.redis_url == "redis://localhost:6379/0"
+        assert settings.expanded_url() == "redis://localhost:6379/0"
     else:
-        assert config.redis_url is None
+        assert settings.url is None
 
-    store, _ = build_cache_store(config, SimpleNamespace(REDIS_URL=None))
+    store, source = build_cache_store(config)
     assert isinstance(store, RedisCacheStore if rate_limit == "redis" else InMemoryCacheStore)
+    assert (
+        source
+        == {
+            "redis": "cache_store.url",
+            "memory": "cache_store.type",
+            "none": "cache_store not set",
+        }[rate_limit]
+    )
     asyncio.run(store.aclose())

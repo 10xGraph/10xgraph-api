@@ -4,12 +4,15 @@
   "store": "graph.dummy_store:store",
   "env": ".env",
   "auth": null,
-  "rate_limit": {
-    "enabled": true,
-    "requests": 100,
-    "window": 60,
-    "by": "ip",
-    "trusted_proxy_headers": false,
-    "exclude_paths": ["/health", "/docs", "/redoc", "/openapi.json"]
+  "cache_store": {
+    "type": "memory",
+    "rate_limit": {
+      "enabled": true,
+      "requests": 100,
+      "window": 60,
+      "by": "ip",
+      "trusted_proxy_headers": false,
+      "exclude_paths": ["/health", "/docs", "/redoc", "/openapi.json"]
+    }
   }
 }

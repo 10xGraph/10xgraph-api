@@ -7,9 +7,9 @@
 // are pages of their own rather than schema sections.
 export const NAV = [
   { label: null, items: ["get-running"] },
-  { label: "Before production", items: ["auth", "authorization", "rate_limit", "observability", "token_revocation", "graph_introspection"] },
+  { label: "Before production", items: ["auth", "authorization", "cache_store", "observability", "graph_introspection"] },
   { label: "Runs and streaming", items: ["runs", "websocket", "ag_ui", "remote_tools", "media"] },
-  { label: "Project wiring", items: ["plugins"] },
+  { label: "Project wiring", items: ["checkpointer", "id_generator", "thread_name_generator", "store", "injectq"] },
   { label: "Developer tools", items: ["test", "evaluation"] },
   { label: "Reference", items: ["environment"] },
 ];
@@ -108,6 +108,9 @@ export function setPath(obj, path, value) {
   target[path[path.length - 1]] = value;
 }
 
+// Features that stay on when their last setting is reset: an empty object means "on, all defaults".
+const KEEP_EMPTY = new Set(["cache_store.rate_limit", "cache_store.token_revocation"]);
+
 export function deletePath(obj, path) {
   const parents = [];
   let target = obj;
@@ -120,6 +123,7 @@ export function deletePath(obj, path) {
   // Drop nested objects left empty, but never the section key itself.
   for (let i = parents.length - 1; i >= 1; i--) {
     const [parent, k] = parents[i];
+    if (KEEP_EMPTY.has(path.slice(0, i + 1).join("."))) break;
     if (isObject(parent[k]) && Object.keys(parent[k]).length === 0) delete parent[k];
     else break;
   }
@@ -167,6 +171,8 @@ export function unmetHint(f) {
 }
 export const navItem = (id) => {
   const sec = section(id);
-  return PAGES[id] ? { id, ...PAGES[id] } : sec ? { id, title: sec.title, description: sec.description, icon: null } : null;
+  return PAGES[id]
+    ? { id, ...PAGES[id] }
+    : sec ? { id, title: sec.title, subtitle: sec.subtitle, description: sec.description, icon: null } : null;
 };
 export const isAgentReady = () => /^[\w.]+:[\w.]+$/.test(String(store.config.agent || ""));

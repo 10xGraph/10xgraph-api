@@ -137,58 +137,147 @@ def test_number_field_extensions() -> None:
         assert fields[path]["unlimited_value"] == 0
 
 
-def test_rate_limit_seed_does_not_claim_a_server_default_for_excluded_paths() -> None:
-    section = next(s for s in build_schema()["sections"] if s["id"] == "rate_limit")
-    assert "exclude_paths" not in section["default"]
-    assert _fields()["rate_limit.exclude_paths"]["label"] == "Extra paths to skip"
+def _section(section_id: str) -> dict:
+    return next(s for s in build_schema()["sections"] if s["id"] == section_id)
 
 
-def test_rate_limit_has_no_backend_fields_and_the_cache_store_is_wired() -> None:
+def test_sections_for_the_cache_store_and_wiring_replace_plugins() -> None:
+    ids = [s["id"] for s in build_schema()["sections"]]
+    for removed in ("rate_limit", "token_revocation", "plugins"):
+        assert removed not in ids
+    for present in (
+        "cache_store",
+        "checkpointer",
+        "id_generator",
+        "thread_name_generator",
+        "store",
+        "injectq",
+    ):
+        assert present in ids
+    assert _section("cache_store")["subtitle"] == "rate limiting, token revocation"
+    assert not {"redis", "rate_limit", "token_revocation"} & KNOWN_TOP_LEVEL_KEYS
+    assert "id_generator" in KNOWN_TOP_LEVEL_KEYS
+
+
+def test_cache_store_fields_sit_under_cache_store() -> None:
     fields = _fields()
-    assert not [
-        path for path in fields if path.startswith(("rate_limit.backend", "rate_limit.redis"))
-    ]
-    rate_limit = next(s for s in build_schema()["sections"] if s["id"] == "rate_limit")
-    assert "backend" not in rate_limit["default"]
-    assert fields["cache_store"]["group"] == fields["redis"]["group"] == "Cache store"
-    assert "cache_store" in KNOWN_TOP_LEVEL_KEYS
-
-
-def test_token_revocation_section_writes_true_and_takes_its_settings() -> None:
-    section = next(s for s in build_schema()["sections"] if s["id"] == "token_revocation")
-    assert section["key"] == "token_revocation"
-    assert section["default"] is True
-    paths = [".".join(f["path"]) for f in section["fields"]]
-    assert paths == [
-        "token_revocation.enabled",
-        "token_revocation.token_lifetime",
-        "token_revocation.user_ttl",
-    ]
-    assert _fields()["token_revocation.user_ttl"]["default"] == DEFAULT_USER_REVOCATION_TTL
-    config = {"agent": "a:b", "auth": "jwt", "redis": "redis://x"}
-    for value in (True, {"token_lifetime": 3600}, {"enabled": True, "user_ttl": None}):
-        issues = validate_config({**config, "token_revocation": value})
-        assert not [i for i in issues if i["path"].startswith("token_revocation")]
-
-
-def test_redis_key_expands_env_vars_and_warns_when_unset(monkeypatch) -> None:
-    monkeypatch.delenv("AF_TEST_REDIS_URL", raising=False)
-    issues = validate_config({"agent": "a:b", "redis": "${AF_TEST_REDIS_URL}"})
-    assert _levels(issues, "redis") == ["warning"]
-    monkeypatch.setenv("AF_TEST_REDIS_URL", "redis://x")
-    assert (
-        _levels(validate_config({"agent": "a:b", "redis": "${AF_TEST_REDIS_URL}"}), "redis") == []
+    assert {"cache_store.type", "cache_store.url", "cache_store.path"} <= set(fields)
+    assert "REDIS_URL" in fields["cache_store.url"]["placeholder"]
+    assert fields["cache_store.type"]["options"] == ["memory", "redis", "custom"]
+    rate_limit = [p for p in fields if p.startswith("cache_store.rate_limit.")]
+    assert sorted(p.rsplit(".", 1)[1] for p in rate_limit) == sorted(
+        [
+            "requests",
+            "window",
+            "by",
+            "fail_open",
+            "trusted_proxy_headers",
+            "trusted_proxy_hops",
+            "trusted_proxies",
+            "exclude_paths",
+        ]
     )
+    assert fields["cache_store.rate_limit.exclude_paths"]["label"] == "Extra paths to skip"
+    assert fields["cache_store.token_revocation.user_ttl"]["default"] == DEFAULT_USER_REVOCATION_TTL
+    assert all(fields[p].get("managed") for p in fields if p.startswith("cache_store."))
+    for text in (f["help"] for f in fields.values() if "help" in f):
+        assert "Plugins" not in text
 
 
-def test_cache_store_must_be_an_import_path() -> None:
-    assert _levels(validate_config({"agent": "a:b", "cache_store": "nope"}), "cache_store") == [
+def test_choice_sections_mirror_the_server_names() -> None:
+    from tenxgraph_api.cli.config_editor.schema import ID_GENERATOR_NAMES, THREAD_NAME_CHOICES
+    from tenxgraph_api.src.app.core.config import graph_config
+
+    assert ID_GENERATOR_NAMES == graph_config.ID_GENERATOR_NAMES
+    assert THREAD_NAME_CHOICES == graph_config.THREAD_NAME_CHOICES
+    assert [c[0] for c in _section("id_generator")["choices"]] == list(ID_GENERATOR_NAMES)
+    assert [c[0] for c in _section("thread_name_generator")["choices"]] == list(THREAD_NAME_CHOICES)
+
+
+def test_checkpointer_section_lists_its_environment() -> None:
+    names = [e["name"] for e in _section("checkpointer").get("env", [])]
+    assert names == ["DATABASE_URL", "REDIS_URL"]
+
+
+def test_cache_store_values_the_editor_writes_are_valid() -> None:
+    base = {"agent": "a:b", "auth": "jwt"}
+    for cache_store in (
+        {},
+        {"type": "memory"},
+        {"type": "redis", "url": "redis://x", "token_revocation": True},
+        {"type": "custom", "path": "pkg.mod:store"},
+        {
+            "type": "redis",
+            "url": "redis://x",
+            "rate_limit": {"requests": 100, "window": 60, "by": "ip"},
+            "token_revocation": {"enabled": True, "token_lifetime": 3600, "user_ttl": None},
+        },
+    ):
+        issues = validate_config({**base, "cache_store": cache_store})
+        assert not [i for i in issues if i["level"] == "error"], cache_store
+
+
+def test_cache_store_type_errors_point_at_the_field() -> None:
+    base = {"agent": "a:b"}
+    # No url is fine (the server uses REDIS_URL); only a bad one is an error.
+    assert _levels(
+        validate_config({**base, "cache_store": {"type": "redis", "url": ""}}), "cache_store.url"
+    ) == ["error"]
+    assert _levels(
+        validate_config({**base, "cache_store": {"type": "custom"}}), "cache_store.path"
+    ) == ["error"]
+    assert _levels(
+        validate_config({**base, "cache_store": {"type": "memory", "url": "redis://x"}}),
+        "cache_store.url",
+    ) == ["error"]
+    assert _levels(validate_config({**base, "cache_store": {"type": "x"}}), "cache_store.type") == [
         "error"
     ]
-    assert (
-        _levels(validate_config({"agent": "a:b", "cache_store": "pkg.mod:store"}), "cache_store")
-        == []
-    )
+    assert _levels(validate_config({**base, "cache_store": "nope"}), "cache_store") == ["error"]
+
+
+def test_cache_store_custom_path_must_be_an_import_path() -> None:
+    config = {"agent": "a:b", "cache_store": {"type": "custom", "path": "pkg.mod:store"}}
+    assert _levels(validate_config(config), "cache_store.path") == []
+
+
+def test_cache_store_url_expands_env_vars_and_warns_when_unset(monkeypatch) -> None:
+    config = {"agent": "a:b", "cache_store": {"type": "redis", "url": "${AF_TEST_REDIS_URL}"}}
+    monkeypatch.delenv("AF_TEST_REDIS_URL", raising=False)
+    assert _levels(validate_config(config), "cache_store.url") == ["warning"]
+    monkeypatch.setenv("AF_TEST_REDIS_URL", "redis://x")
+    assert _levels(validate_config(config), "cache_store.url") == []
+
+
+@pytest.mark.parametrize("key", ["redis", "rate_limit", "token_revocation"])
+def test_settings_that_belong_in_cache_store_are_errors_at_the_top_level(key: str) -> None:
+    issues = validate_config({"agent": "a:b", key: {} if key != "redis" else "redis://x"})
+    assert _levels(issues, key) == ["error"]
+    assert "cache_store" in next(i["message"] for i in issues if i["path"] == key)
+
+
+def test_rate_limit_inside_cache_store_uses_server_parser() -> None:
+    config = {"agent": "a:b", "cache_store": {"rate_limit": {"by": "country"}}}
+    issues = validate_config(config)
+    assert _levels(issues, "cache_store") == ["error"]
+    config = {"agent": "a:b", "cache_store": {"rate_limit": {"backend": "memory"}}}
+    issues = validate_config(config)
+    assert "unknown keys" in next(i["message"] for i in issues if i["path"] == "cache_store")
+
+
+@pytest.mark.parametrize(
+    ("key", "good", "bad"),
+    [
+        ("id_generator", "snowflake", "nope"),
+        ("thread_name_generator", "first_message", "nope"),
+    ],
+)
+def test_choice_keys_take_a_name_or_an_import_path(key: str, good: str, bad: str) -> None:
+    base = {"agent": "a:b"}
+    assert _levels(validate_config({**base, key: good}), key) == []
+    assert _levels(validate_config({**base, key: "pkg.mod:thing"}), key) == []
+    assert _levels(validate_config({**base, key: ""}), key) == []
+    assert _levels(validate_config({**base, key: bad}), key) == ["error"]
 
 
 def test_unlimited_values_are_accepted_by_the_server() -> None:
@@ -283,19 +372,6 @@ def test_authorization_variants(authorization: object, path: str, expected: list
     assert _levels(issues, path) == expected
 
 
-def test_rate_limit_uses_server_parser() -> None:
-    issues = validate_config({"agent": "graph.react:app", "rate_limit": {"by": "country"}})
-    assert _levels(issues, "rate_limit") == ["error"]
-    assert "rate_limit.by" in next(i["message"] for i in issues if i["path"] == "rate_limit")
-
-
-@pytest.mark.parametrize("removed", [{"backend": "memory"}, {"redis": {"url": "redis://x"}}])
-def test_removed_rate_limit_keys_are_errors_naming_the_cache_store(removed) -> None:
-    issues = validate_config({"agent": "graph.react:app", "rate_limit": removed})
-    assert _levels(issues, "rate_limit") == ["error"]
-    assert "cache_store" in next(i["message"] for i in issues if i["path"] == "rate_limit")
-
-
 def test_websocket_rejects_negative_limit() -> None:
     issues = validate_config({"agent": "graph.react:app", "websocket": {"max_connections": -1}})
     assert _levels(issues, "websocket") == ["error"]
@@ -356,7 +432,7 @@ def test_unknown_keys_are_warnings_on_core_section() -> None:
     assert issue["section"] == "core"
 
 
-def test_plugins_and_checkpointer_warning() -> None:
+def test_wiring_keys_and_checkpointer_warning() -> None:
     issues = validate_config(
         {"agent": "graph.react:app", "store": "not a path", "checkpointer": "graph.deps:cp"}
     )

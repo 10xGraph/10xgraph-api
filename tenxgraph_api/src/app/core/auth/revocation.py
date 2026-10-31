@@ -22,9 +22,10 @@ cutoff timestamp). A newer ``revoke_user`` cutoff is never replaced by an older 
 agree. From your own code call :func:`revoke_token` / :func:`revoke_user` with the app's
 cache store; from a shell use ``10xgraph revoke``.
 
-Enable it in ``10xgraph.json`` with ``"token_revocation": true`` (or an object with
-``token_lifetime`` / ``user_ttl``, see ``TokenRevocationConfig``). With a shared cache store
-(Redis) a revocation reaches every worker at once; with the in-memory store only this process.
+Enable it in ``10xgraph.json`` with ``"cache_store": {"type": ..., "token_revocation": true}``
+(or an object with ``token_lifetime`` / ``user_ttl``, see ``TokenRevocationConfig``). With a
+shared cache store (type ``redis`` or ``custom``) a revocation reaches every worker at once;
+with the in-memory store only this process.
 
 A cache store error fails closed: the request is refused with 503 rather than served with a
 token that might have been revoked.
@@ -34,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from decimal import ROUND_CEILING, Decimal
 from typing import TYPE_CHECKING, Any
 
 from tenxgraph_api.src.app.core.config.graph_config import (
@@ -48,6 +50,8 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("tenxgraph_api.revocation")
+
+_MICROSECOND = Decimal("0.000001")
 
 __all__ = [
     "DEFAULT_USER_REVOCATION_TTL",
@@ -126,7 +130,10 @@ async def revoke_user(
     stored changes nothing (nor its TTL).
     """
     cutoff = await cache.now() if before is None else float(before)
-    await cache.set(user_key(user_id), b"%.6f" % cutoff, ttl, mode="if_greater")
+    # Stored to the microsecond, rounded up: rounding down would let a token issued at the
+    # cutoff itself through.
+    text = Decimal(cutoff).quantize(_MICROSECOND, rounding=ROUND_CEILING)
+    await cache.set(user_key(user_id), f"{text:f}".encode(), ttl, mode="if_greater")
 
 
 async def _none() -> None:

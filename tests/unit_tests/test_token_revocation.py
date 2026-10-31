@@ -238,7 +238,7 @@ def test_graph_config_token_revocation(tmp_path):
     path = tmp_path / "10xgraph.json"
 
     def parsed(value):
-        path.write_text(f'{{"agent": "g:app", "token_revocation": {value}}}')
+        path.write_text(f'{{"agent": "g:app", "cache_store": {{"token_revocation": {value}}}}}')
         return GraphConfig(str(path)).token_revocation
 
     assert parsed("true") == TokenRevocationConfig()
@@ -256,30 +256,33 @@ def test_graph_config_token_revocation(tmp_path):
 
 
 @pytest.mark.parametrize("value", ['"redis"', '"memory"', '"my.mod:backend"'])
-def test_removed_token_revocation_strings_name_the_replacement(tmp_path, value):
+def test_string_token_revocation_is_a_config_error(tmp_path, value):
     from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 
     path = tmp_path / "10xgraph.json"
-    path.write_text(f'{{"agent": "g:app", "token_revocation": {value}}}')
-    with pytest.raises(ValueError, match="cache_store") as exc:
+    path.write_text(f'{{"agent": "g:app", "cache_store": {{"token_revocation": {value}}}}}')
+    with pytest.raises(
+        ValueError,
+        match="token_revocation must be true, false, or an object with enabled, "
+        "token_lifetime, user_ttl",
+    ):
         _ = GraphConfig(str(path)).token_revocation
-    assert '"token_revocation": true' in str(exc.value)
 
 
 def test_config_editor_validates_token_revocation(monkeypatch):
     from tenxgraph_api.cli.config_editor import validate_config
 
     monkeypatch.delenv("REDIS_URL", raising=False)
-    base = {"agent": "graph:app", "auth": "jwt", "redis": "redis://cache:6379/0"}
-    issues = validate_config({**base, "token_revocation": True})
-    assert not [i for i in issues if i["path"].startswith("token_revocation")]
-    for removed in ("memory", "redis", "bad path"):
+    store = {"type": "redis", "url": "redis://cache:6379/0"}
+    base = {"agent": "graph:app", "auth": "jwt"}
+    issues = validate_config({**base, "cache_store": {**store, "token_revocation": True}})
+    assert not [i for i in issues if i["level"] == "error"]
+    for bad in ("memory", "redis", "bad path"):
         errors = [
             i
-            for i in validate_config({**base, "token_revocation": removed})
+            for i in validate_config({**base, "cache_store": {**store, "token_revocation": bad}})
             if i["level"] == "error"
         ]
-        assert [i["path"] for i in errors] == ["token_revocation"]
-        assert "cache_store" in errors[0]["message"]
-    warn = validate_config({"agent": "graph:app", "token_revocation": True})
-    assert [i["level"] for i in warn if i["path"] == "token_revocation"] == ["warning"]
+        assert errors and "token_revocation must be true, false" in errors[0]["message"]
+    warn = validate_config({"agent": "graph:app", "cache_store": {"token_revocation": True}})
+    assert "warning" in [i["level"] for i in warn if "token_revocation" in i["path"]]

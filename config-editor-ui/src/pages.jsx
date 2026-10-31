@@ -2,11 +2,13 @@ import { copyCommand, go, setSection } from "./actions.js";
 import { Field, fieldGroups } from "./fields.jsx";
 import { SECTION_ICONS } from "./icons.js";
 import {
-  PAGES, WIDGET_FIELD_IDS, getPath, isAgentReady, isOn, issuesFor, navItem, section, store,
+  PAGES, WIDGET_FIELD_IDS, isAgentReady, isObject, isOn, issuesFor, navItem, section, store,
   valueOrDefault,
 } from "./store.js";
 import { Callout, Icon, IssueCallout, Segmented } from "./ui.jsx";
-import { AuthWidget, AuthorizationWidget, RemoteToolsWidget } from "./widgets.jsx";
+import {
+  AuthWidget, AuthorizationWidget, CacheStoreWidget, ChoiceWidget, RemoteToolsWidget,
+} from "./widgets.jsx";
 
 const Heading = ({ children, code }) => (
   <h1 id="page-title" tabindex={-1} class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-2xl font-semibold tracking-tight text-ink focus:outline-none">
@@ -52,17 +54,17 @@ function authSummary() {
   return { text: String(a) };
 }
 
-function rateSummary() {
-  const r = store.config.rate_limit;
-  if (r === undefined || r === null) return { text: offText("rate_limit") };
-  const v = (k) => valueOrDefault(["rate_limit", k]);
-  if (v("enabled") === false) return { text: "Settings kept, not enforced." };
-  const by = { ip: "per IP", user: "per user", global: "across all clients" }[v("by")] || v("by");
-  const custom = ["requests", "window", "by"].some((k) => getPath(store.config, ["rate_limit", k]) !== undefined
-    && getPath(store.config, ["rate_limit", k]) !== store.fields.get(`rate_limit.${k}`)?.default);
-  return {
-    text: `${v("requests")} requests per ${v("window")} s, ${by}${custom ? "" : " (default)"}.`,
-  };
+function cacheSummary() {
+  const c = isObject(store.config.cache_store) ? store.config.cache_store : {};
+  const parts = [`${c.type || "memory"} store`];
+  const rate = c.rate_limit;
+  if (isObject(rate) && rate.enabled !== false) {
+    const by = { ip: "per IP", user: "per user", global: "across all clients" }[rate.by ?? "ip"] || rate.by;
+    parts.push(`${rate.requests ?? 100} requests per ${rate.window ?? 60} s, ${by}`);
+  }
+  const revoke = c.token_revocation;
+  if (revoke === true || (isObject(revoke) && revoke.enabled !== false)) parts.push("token revocation on");
+  return { text: `${parts.join("; ")}.` };
 }
 
 function traceSummary() {
@@ -79,7 +81,7 @@ function GetRunning() {
   const core = section("core");
   const ready = isAgentReady();
   const general = core ? issuesFor("core").filter((i) => !core.fields.some((f) => f.path.join(".") === i.path)) : [];
-  const rows = [["auth", authSummary()], ["rate_limit", rateSummary()], ["observability", traceSummary()]];
+  const rows = [["auth", authSummary()], ["cache_store", cacheSummary()], ["observability", traceSummary()]];
   const all = store.nav.flatMap((g) => g.items).filter((id) => id !== "get-running");
   return (
     <>
@@ -151,13 +153,16 @@ function SectionWidget({ sec }) {
   if (sec.widget === "auth") return <AuthWidget />;
   if (sec.widget === "authorization") return <AuthorizationWidget sec={sec} />;
   if (sec.widget === "remote_tools") return <RemoteToolsWidget />;
+  if (sec.widget === "cache_store") return <CacheStoreWidget sec={sec} />;
+  if (sec.widget === "id_generator" || sec.widget === "thread_name_generator") return <ChoiceWidget sec={sec} />;
   return null;
 }
 
 // Issues that no rendered field or widget shows inline.
 export function generalIssues(sec) {
   const inline = new Set([...sec.fields.map((f) => f.path.join(".")), ...Object.keys(WIDGET_FIELD_IDS)]);
-  return issuesFor(sec.id).filter((i) => !inline.has(i.path));
+  const tabbed = new Set(["cache_store.rate_limit", "cache_store.token_revocation"]);
+  return issuesFor(sec.id).filter((i) => !inline.has(i.path) && !(sec.id === "cache_store" && tabbed.has(i.path)));
 }
 
 // Fields and widget of a section, no heading. Shared by the page and search results.
@@ -168,7 +173,7 @@ export function SectionFields({ sec }) {
     <>
       {widget ? <div class="mt-6"><SectionWidget sec={sec} /></div> : null}
       <div class={sec.optional && !on ? "opacity-80" : ""}>
-        {fieldGroups(sec.fields).map((g, i) => (
+        {fieldGroups(sec.fields.filter((f) => !f.managed)).map((g, i) => (
           <div key={g.name}>
             {g.name ? (
               <h3 class={`eyebrow ${i === 0 ? "mt-6" : "mt-8 border-t border-line pt-4"}`}>{g.name}</h3>
@@ -239,9 +244,11 @@ function search(terms) {
   const results = [];
   for (const sec of store.sections) {
     const secHit = hit(`${sec.title} ${sec.description} ${sec.key || ""}`);
-    const fields = sec.fields.filter((f) => secHit || hit(`${f.label} ${f.help || ""} ${f.path.join(".")}`));
+    const matches = (f) => secHit || hit(`${f.label} ${f.help || ""} ${f.path.join(".")}`);
+    // Fields the widget draws are found through the widget.
+    const fields = sec.fields.filter((f) => !f.managed && matches(f));
     const env = (sec.env || []).filter((v) => hit(`${v.name} ${v.purpose}`));
-    const widget = !!sec.widget && secHit;
+    const widget = !!sec.widget && (secHit || sec.fields.some((f) => f.managed && matches(f)));
     if (fields.length || env.length || widget) results.push({ id: sec.id, sec, fields, env, widget });
   }
   const envGroups = (store.schema.environment || [])

@@ -457,13 +457,13 @@ class InitCommand(BaseCommand):
                 Choice("none", "None", "No request throttling"),
                 Choice(
                     "memory",
-                    "On, no shared cache",
-                    "Counters per process unless REDIS_URL is set; single instance only",
+                    "On, in-memory cache store",
+                    "Counters per process; single instance only",
                 ),
                 Choice(
                     "redis",
                     "On, Redis cache store",
-                    "Shared counters, locks and token revocation; requires REDIS_URL",
+                    "Shared counters, locks and token revocation; URL from REDIS_URL",
                 ),
             ],
             default="redis",
@@ -601,23 +601,27 @@ class InitCommand(BaseCommand):
         config["injectq"] = "graph.agent:container"
 
         rate_limit = context["rate_limit"]
+        if rate_limit == "none":
+            return config
+        # The API's cache store: rate limit counters, run locks and caps, idempotency,
+        # ownership cache and token revocation. Redis is shared by every worker (its URL from
+        # REDIS_URL in .env); memory is per process.
+        cache_store: dict[str, Any] = {"type": rate_limit}
         if rate_limit == "redis":
-            # The API's cache store (rate limit counters, run locks and caps, idempotency,
-            # ownership cache, token revocation), resolved from REDIS_URL in .env.
-            config["redis"] = "${REDIS_URL}"
-        if rate_limit != "none":
-            config["rate_limit"] = {
-                "enabled": True,
-                "requests": context.get("rl_requests", 100),
-                "window": context.get("rl_window", 60),
-                "by": context.get("rl_by", "user" if auth in ("jwt", "custom") else "ip"),
-                "trusted_proxy_headers": context.get("rl_trusted_proxy", False),
-                "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"],
-            }
+            cache_store["url"] = "${REDIS_URL}"
+        cache_store["rate_limit"] = {
+            "enabled": True,
+            "requests": context.get("rl_requests", 100),
+            "window": context.get("rl_window", 60),
+            "by": context.get("rl_by", "user" if auth in ("jwt", "custom") else "ip"),
+            "trusted_proxy_headers": context.get("rl_trusted_proxy", False),
+            "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"],
+        }
         if rate_limit == "redis" and auth in ("jwt", "custom"):
             # The cache store is shared, so a leaked or logged-out token can be revoked for
-            # every worker. See `10xgraph revoke` and the token_revocation docs.
-            config["token_revocation"] = True
+            # every worker. See `10xgraph revoke`.
+            cache_store["token_revocation"] = True
+        config["cache_store"] = cache_store
 
         return config
 

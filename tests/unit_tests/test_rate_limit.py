@@ -94,10 +94,10 @@ def test_rate_limit_config_parses_boolean_strings():
         {"redis": "redis://localhost:6379/0"},
     ],
 )
-def test_removed_rate_limit_keys_name_the_cache_store(removed):
-    with pytest.raises(ValueError, match="cache_store") as exc:
+def test_store_keys_inside_rate_limit_are_unknown_keys(removed):
+    with pytest.raises(ValueError, match="rate_limit: unknown keys") as exc:
         RateLimitConfig.from_dict(removed)
-    assert "`redis`" in str(exc.value)
+    assert "valid keys: enabled, requests, window" in str(exc.value)
 
 
 def test_rate_limit_fail_open_defaults_to_true():

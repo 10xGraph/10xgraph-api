@@ -6,14 +6,17 @@ configuration key only needs a new entry here (plus a rule in ``validation``).
 Section shape::
 
     {
-        "id": "rate_limit",  # stable id, used by validation issues
-        "title": "Rate limiting",
+        "id": "observability",  # stable id, used by validation issues
+        "title": "Observability",
+        "subtitle": "...",  # optional second line in the sidebar
         "description": "...",
-        "key": "rate_limit",  # top-level key, or None for root-level fields
+        "key": "observability",  # top-level key, or None for root-level fields
         "optional": True,  # renders an on/off toggle for the whole key
         "off_summary": "...",  # what happens while the key is absent
         "default": {...},  # value written when the toggle is switched on
-        "widget": None,  # custom renderer: "auth", "authorization", "remote_tools"
+        "widget": None,  # custom renderer: "auth", "authorization", "remote_tools",
+        # "cache_store", "id_generator", "thread_name_generator"
+        "choices": [["value", "Label", "One line of help"]],  # widget sections with a dropdown
         "fields": [...],  # generic fields, paths are relative to the root
         "notes": ["..."],  # extra hints (secrets that belong in .env, ...)
         "env": [{"name": "REDIS_URL", "purpose": "..."}],  # related variables, read-only
@@ -22,8 +25,8 @@ Section shape::
 Field shape::
 
     {
-        "path": ["rate_limit", "requests"],
-        "label": "Requests per window",
+        "path": ["runs", "timeout"],
+        "label": "Timeout",
         "type": "text" | "number" | "bool" | "select" | "list",
         "help": "...",
         "placeholder": "...",
@@ -38,6 +41,7 @@ Field shape::
         "null_label": "No limit",  # number only: a choice that writes JSON null
         "exclusive_min": 0,  # number only: the value must be greater than this
         "group": "Limits",  # fields sharing a group render together
+        "managed": False,  # True: only the section's widget renders it
         "show_if": {"path": [...], "equals": value},
     }
 
@@ -78,6 +82,18 @@ AUTHORIZATION_SCOPES: tuple[str, ...] = (
 
 BUILTIN_AUTHORIZATION: tuple[str, ...] = ("ownership", "allow_all", "default", "none")
 
+# Mirrors graph_config.ID_GENERATOR_NAMES and THREAD_NAME_CHOICES; kept in sync by a unit test.
+ID_GENERATOR_NAMES: tuple[str, ...] = (
+    "uuid",
+    "hex",
+    "short",
+    "int",
+    "bigint",
+    "timestamp",
+    "snowflake",
+)
+THREAD_NAME_CHOICES: tuple[str, ...] = ("random", "first_message", "none")
+
 # Keys read by the CLI or the API server. Anything else is preserved but flagged.
 KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
     {
@@ -85,10 +101,9 @@ KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
         "env",
         "auth",
         "authorization",
-        "token_revocation",
         "graph_introspection",
         "cache_store",
-        "rate_limit",
+        "id_generator",
         "websocket",
         "runs",
         "ag_ui",
@@ -98,7 +113,6 @@ KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
         "store",
         "checkpointer",
         "thread_name_generator",
-        "redis",
         "remote_tools",
         "test",
         "evaluation",
@@ -182,38 +196,158 @@ _SECTIONS: list[dict[str, Any]] = [
         "scopes": list(AUTHORIZATION_SCOPES),
     },
     {
-        "id": "token_revocation",
-        "title": "Token revocation",
+        "id": "cache_store",
+        "title": "Cache store",
+        "subtitle": "rate limiting, token revocation",
         "description": (
-            "Reject revoked tokens (10xgraph revoke) before they expire. Revocations live in "
-            "the API's cache store."
+            "Shared state between workers: run locks, idempotency, ownership cache, rate limits "
+            "and token revocations."
         ),
-        "key": "token_revocation",
-        "optional": True,
-        "off_summary": "Tokens are accepted until they expire.",
-        "default": True,
+        "key": "cache_store",
+        "optional": False,
+        "widget": "cache_store",
         "fields": [
             {
-                "path": ["token_revocation", "enabled"],
-                "default": True,
-                "label": "Enabled",
-                "type": "bool",
-                "help": "Turn off to keep the settings without checking revocations.",
+                "path": ["cache_store", "type"],
+                "managed": True,
+                "default": "memory",
+                "label": "Type",
+                "type": "select",
+                "options": ["memory", "redis", "custom"],
+                "help": (
+                    "memory keeps state in this process. redis and custom share it between "
+                    "workers."
+                ),
             },
             {
-                "path": ["token_revocation", "token_lifetime"],
+                "path": ["cache_store", "url"],
+                "managed": True,
+                "label": "Redis URL",
+                "type": "text",
+                "placeholder": "Empty: uses REDIS_URL",
+                "help": (
+                    "Leave empty to use the REDIS_URL environment variable. To use a different "
+                    "Redis, set the URL here, as a value or a variable such as "
+                    "${CACHE_REDIS_URL}. Works with Redis, Valkey, Dragonfly and KeyDB."
+                ),
+            },
+            {
+                "path": ["cache_store", "path"],
+                "managed": True,
+                "label": "Cache store class",
+                "type": "text",
+                "required": True,
+                "placeholder": "graph.dependencies:cache_store",
+                "help": ("module:attr of a BaseCacheStore instance or a zero-argument factory."),
+            },
+            {
+                "path": ["cache_store", "rate_limit", "requests"],
+                "managed": True,
+                "group": "Limits",
+                "label": "Requests per window",
+                "type": "number",
+                "min": 1,
+                "step": 1,
+                "placeholder": "100",
+            },
+            {
+                "path": ["cache_store", "rate_limit", "window"],
+                "managed": True,
+                "group": "Limits",
+                "label": "Window (seconds)",
+                "type": "number",
+                "min": 1,
+                "step": 1,
+                "placeholder": "60",
+            },
+            {
+                "path": ["cache_store", "rate_limit", "by"],
+                "managed": True,
+                "group": "Limits",
+                "default": "ip",
+                "label": "Limit by",
+                "type": "select",
+                "options": ["ip", "user", "global"],
+                "help": "Count requests per client IP, per authenticated user, or all together.",
+            },
+            {
+                "path": ["cache_store", "rate_limit", "fail_open"],
+                "managed": True,
+                "group": "Limits",
+                "default": True,
+                "label": "Fail open",
+                "type": "bool",
+                "help": (
+                    "Allow requests while the cache store errors. Off means deny them with 503 "
+                    "RATE_LIMIT_UNAVAILABLE, and the server refuses to start without it."
+                ),
+            },
+            {
+                "path": ["cache_store", "rate_limit", "trusted_proxy_headers"],
+                "managed": True,
+                "group": "Proxy",
+                "default": False,
+                "label": "Trust X-Forwarded-For",
+                "type": "bool",
+                "help": "Only when the app sits behind a proxy you control.",
+            },
+            {
+                "path": ["cache_store", "rate_limit", "trusted_proxy_hops"],
+                "managed": True,
+                "group": "Proxy",
+                "label": "Trusted proxy hops",
+                "type": "number",
+                "min": 1,
+                "step": 1,
+                "placeholder": "1",
+                "show_if": {
+                    "path": ["cache_store", "rate_limit", "trusted_proxy_headers"],
+                    "equals": True,
+                },
+            },
+            {
+                "path": ["cache_store", "rate_limit", "trusted_proxies"],
+                "managed": True,
+                "group": "Proxy",
+                "label": "Trusted proxy networks",
+                "type": "list",
+                "placeholder": "10.0.0.0/8",
+                "help": (
+                    "IPs or CIDR ranges your proxy connects from. X-Forwarded-For is ignored "
+                    "for anyone else, so clients that reach the app directly cannot spoof it. "
+                    "Empty means loopback and private networks only."
+                ),
+                "show_if": {
+                    "path": ["cache_store", "rate_limit", "trusted_proxy_headers"],
+                    "equals": True,
+                },
+            },
+            {
+                "path": ["cache_store", "rate_limit", "exclude_paths"],
+                "managed": True,
+                "group": "Excluded paths",
+                "label": "Extra paths to skip",
+                "type": "list",
+                "placeholder": "/docs",
+                "help": (
+                    "Paths that are never rate limited. /ping and /health/ready are always "
+                    "skipped. API docs paths (/docs, /redocs, /openapi.json) are limited unless "
+                    "listed here. The server default is an empty list."
+                ),
+            },
+            {
+                "path": ["cache_store", "token_revocation", "token_lifetime"],
+                "managed": True,
                 "label": "Token lifetime (seconds)",
                 "type": "number",
                 "exclusive_min": 0,
                 "step": 1,
                 "placeholder": "3600",
-                "help": (
-                    "The longest lifetime of the tokens you issue. Dates a token that has no "
-                    "iat claim from its exp, for user revocations."
-                ),
+                "help": "Longest lifetime of the tokens you issue.",
             },
             {
-                "path": ["token_revocation", "user_ttl"],
+                "path": ["cache_store", "token_revocation", "user_ttl"],
+                "managed": True,
                 "default": 2592000,
                 "label": "User revocation kept (seconds)",
                 "type": "number",
@@ -223,17 +357,11 @@ _SECTIONS: list[dict[str, Any]] = [
                 "help": "How long a revoke --user entry is kept by default.",
             },
         ],
-        "notes": [
-            "Fails closed: while the cache store is unreachable, authenticated requests get "
-            "503, and the server refuses to start.",
-            "Share revocations between workers with a shared cache store (redis, REDIS_URL or "
-            "cache_store under Plugins). With the in-memory store a revocation reaches "
-            "one process only, and 10xgraph revoke cannot reach it.",
-        ],
         "env": [
             {
                 "name": "REDIS_URL",
-                "purpose": "Redis for the cache store when neither redis nor cache_store is set.",
+                "purpose": "The Redis URL when the cache store type is redis and "
+                "cache_store.url is empty. It does not select a store on its own.",
             },
         ],
     },
@@ -254,121 +382,6 @@ _SECTIONS: list[dict[str, Any]] = [
                     "Who may read the graph structure, tool schemas and state schema. scoped "
                     "requires the graph:read scope."
                 ),
-            },
-        ],
-    },
-    {
-        "id": "rate_limit",
-        "title": "Rate limiting",
-        "description": "Sliding-window request limits applied to every REST call.",
-        "key": "rate_limit",
-        "optional": True,
-        "off_summary": "Requests are not rate limited.",
-        "default": {
-            "enabled": True,
-            "requests": 100,
-            "window": 60,
-            "by": "ip",
-        },
-        "fields": [
-            {
-                "path": ["rate_limit", "enabled"],
-                "group": "Limits",
-                "default": True,
-                "label": "Enabled",
-                "type": "bool",
-                "help": "Turn off to keep the settings without enforcing them.",
-            },
-            {
-                "path": ["rate_limit", "requests"],
-                "group": "Limits",
-                "label": "Requests per window",
-                "type": "number",
-                "min": 1,
-                "step": 1,
-                "placeholder": "100",
-            },
-            {
-                "path": ["rate_limit", "window"],
-                "group": "Limits",
-                "label": "Window (seconds)",
-                "type": "number",
-                "min": 1,
-                "step": 1,
-                "placeholder": "60",
-            },
-            {
-                "path": ["rate_limit", "by"],
-                "group": "Limits",
-                "default": "ip",
-                "label": "Limit by",
-                "type": "select",
-                "options": ["ip", "user", "global"],
-                "help": "Count requests per client IP, per authenticated user, or all together.",
-            },
-            {
-                "path": ["rate_limit", "fail_open"],
-                "group": "Limits",
-                "default": True,
-                "label": "Fail open",
-                "type": "bool",
-                "help": (
-                    "Allow requests while the cache store errors. Off means deny them with 503 "
-                    "RATE_LIMIT_UNAVAILABLE, and the server refuses to start without it."
-                ),
-            },
-            {
-                "path": ["rate_limit", "trusted_proxy_headers"],
-                "group": "Proxy",
-                "default": False,
-                "label": "Trust X-Forwarded-For",
-                "type": "bool",
-                "help": "Only when the app sits behind a proxy you control.",
-            },
-            {
-                "path": ["rate_limit", "trusted_proxy_hops"],
-                "group": "Proxy",
-                "label": "Trusted proxy hops",
-                "type": "number",
-                "min": 1,
-                "step": 1,
-                "placeholder": "1",
-                "show_if": {"path": ["rate_limit", "trusted_proxy_headers"], "equals": True},
-            },
-            {
-                "path": ["rate_limit", "trusted_proxies"],
-                "group": "Proxy",
-                "label": "Trusted proxy networks",
-                "type": "list",
-                "placeholder": "10.0.0.0/8",
-                "help": (
-                    "IPs or CIDR ranges your proxy connects from. X-Forwarded-For is ignored "
-                    "for anyone else, so clients that reach the app directly cannot spoof it. "
-                    "Empty means loopback and private networks only."
-                ),
-                "show_if": {"path": ["rate_limit", "trusted_proxy_headers"], "equals": True},
-            },
-            {
-                "path": ["rate_limit", "exclude_paths"],
-                "group": "Excluded paths",
-                "label": "Extra paths to skip",
-                "type": "list",
-                "placeholder": "/docs",
-                "help": (
-                    "Paths that are never rate limited. /ping and /health/ready are always "
-                    "skipped. API docs paths (/docs, /redocs, /openapi.json) are limited unless "
-                    "listed here. The server default is an empty list."
-                ),
-            },
-        ],
-        "notes": [
-            "Counters live in the API's cache store: shared between workers with redis, "
-            "REDIS_URL or cache_store (see Plugins), per process otherwise.",
-        ],
-        "env": [
-            {
-                "name": "REDIS_URL",
-                "purpose": "Redis for the cache store when neither redis nor cache_store is set.",
             },
         ],
     },
@@ -809,74 +822,161 @@ _SECTIONS: list[dict[str, Any]] = [
         ],
     },
     {
-        "id": "plugins",
-        "title": "Plugins",
-        "description": "Optional objects loaded by import path. Leave a field empty to skip it.",
+        "id": "checkpointer",
+        "title": "Checkpointer",
+        "description": "Where thread state and messages are saved.",
+        "key": None,
+        "optional": False,
+        "fields": [
+            {
+                "path": ["checkpointer"],
+                "label": "Checkpointer",
+                "type": "text",
+                "placeholder": "graph.dependencies:checkpointer",
+                "help": (
+                    "module:attr of a BaseCheckpointer, for reference. The server uses the "
+                    "checkpointer passed to graph.compile()."
+                ),
+            },
+        ],
+        "notes": [
+            "PgCheckpointer needs a Postgres connection (postgres_dsn, usually from "
+            "DATABASE_URL) and a Redis connection for its hot cache (redis_url, usually from "
+            'REDIS_URL). Pass id_type="bigint" or "int" for integer ids.',
+            "SqliteCheckpointer needs a database file path (db_path). It defaults to a file in "
+            "the 10xgraph home directory.",
+            "InMemoryCheckpointer needs nothing and loses state when the process stops.",
+        ],
+        "env": [
+            {
+                "name": "DATABASE_URL",
+                "purpose": "Postgres connection string you pass to PgCheckpointer as postgres_dsn.",
+            },
+            {
+                "name": "REDIS_URL",
+                "purpose": "Redis connection string you pass to PgCheckpointer as redis_url.",
+            },
+        ],
+    },
+    {
+        "id": "id_generator",
+        "title": "ID generation",
+        "description": "How thread, message and memory ids are made.",
+        "key": None,
+        "optional": False,
+        "widget": "id_generator",
+        "choices": [
+            ["uuid", "uuid", "UUID version 4 strings."],
+            ["hex", "hex", "32-character hexadecimal strings."],
+            ["short", "short", "8-character alphanumeric strings."],
+            ["int", "int", "32-bit random integers."],
+            ["bigint", "bigint", "Big integers from the current time in nanoseconds."],
+            ["timestamp", "timestamp", "Integers from the current time in microseconds."],
+            [
+                "snowflake",
+                "snowflake",
+                "Time-ordered 64-bit integers that are unique across machines.",
+            ],
+        ],
+        "fields": [
+            {
+                "path": ["id_generator"],
+                "managed": True,
+                "label": "ID generator",
+                "type": "text",
+                "placeholder": "graph.ids:MyIdGenerator",
+                "help": (
+                    "module:attr of a BaseIDGenerator instance, subclass or zero-argument factory."
+                ),
+            },
+        ],
+        "notes": [
+            "snowflake needs the snowflakekit extra and reads the SNOWFLAKE_* variables.",
+            "Integer ids (int, bigint, snowflake, timestamp) need PgCheckpointer with "
+            'id_type="bigint" or "int".',
+        ],
+        "env": [
+            {"name": "SNOWFLAKE_EPOCH", "purpose": "Epoch in milliseconds for Snowflake ids."},
+            {
+                "name": "SNOWFLAKE_NODE_ID",
+                "purpose": "Node id for Snowflake ids. Give each machine a different one.",
+            },
+            {
+                "name": "SNOWFLAKE_WORKER_ID",
+                "purpose": "Worker id for Snowflake ids. Make it unique per process on a node.",
+            },
+            {
+                "name": "SNOWFLAKE_TIME_BITS",
+                "purpose": "Bits for the timestamp part of a Snowflake id.",
+            },
+            {"name": "SNOWFLAKE_NODE_BITS", "purpose": "Bits for the node part of a Snowflake id."},
+            {
+                "name": "SNOWFLAKE_WORKER_BITS",
+                "purpose": "Bits for the worker part of a Snowflake id.",
+            },
+            {
+                "name": "SNOWFLAKE_TOTAL_BITS",
+                "purpose": "Total bits in a Snowflake id. Defaults to 64.",
+            },
+        ],
+    },
+    {
+        "id": "thread_name_generator",
+        "title": "Thread naming",
+        "description": "How a new thread gets its title after its first run.",
+        "key": None,
+        "optional": False,
+        "widget": "thread_name_generator",
+        "choices": [
+            [
+                "random",
+                "random",
+                "A random two-word name such as thoughtful-dialogue. This is the default.",
+            ],
+            ["first_message", "first_message", "The user's first message, cut to 60 characters."],
+            ["none", "none", "Threads stay unnamed but are saved."],
+        ],
+        "fields": [
+            {
+                "path": ["thread_name_generator"],
+                "managed": True,
+                "default": "random",
+                "label": "Thread name generator",
+                "type": "text",
+                "placeholder": "graph.thread_name_generator:MyNameGenerator",
+                "help": "module:attr of a ThreadNameGenerator subclass or instance.",
+            },
+        ],
+    },
+    {
+        "id": "store",
+        "title": "Memory store",
+        "description": "Long-term memory shared across threads.",
+        "key": None,
+        "optional": False,
+        "fields": [
+            {
+                "path": ["store"],
+                "label": "Memory store",
+                "type": "text",
+                "placeholder": "graph.dependencies:store",
+                "help": "module:attr of a BaseStore instance.",
+            },
+        ],
+    },
+    {
+        "id": "injectq",
+        "title": "Dependency injection",
+        "description": "Your own InjectQ container for tools and nodes.",
         "key": None,
         "optional": False,
         "fields": [
             {
                 "path": ["injectq"],
-                "group": "Import paths",
                 "label": "InjectQ container",
                 "type": "text",
                 "placeholder": "graph.dependencies:container",
-            },
-            {
-                "path": ["store"],
-                "group": "Import paths",
-                "label": "Memory store",
-                "type": "text",
-                "placeholder": "graph.dependencies:store",
-                "help": "A BaseStore instance for long-term memory.",
-            },
-            {
-                "path": ["checkpointer"],
-                "group": "Import paths",
-                "label": "Checkpointer",
-                "type": "text",
-                "placeholder": "graph.dependencies:checkpointer",
-                "help": (
-                    "Not applied by the API server yet. Pass the checkpointer to "
-                    "graph.compile() instead."
-                ),
-            },
-            {
-                "path": ["thread_name_generator"],
-                "group": "Import paths",
-                "label": "Thread name generator",
-                "type": "text",
-                "placeholder": "graph.thread_name_generator:MyNameGenerator",
-            },
-            {
-                "path": ["redis"],
-                "group": "Cache store",
-                "label": "Redis URL",
-                "type": "text",
-                "placeholder": "${REDIS_URL}",
-                "help": (
-                    "The API's cache store (run locks and caps, idempotency, rate limits, "
-                    "ownership cache, token revocation) on Redis, Valkey, Dragonfly or KeyDB. "
-                    "Supports $VAR and ${VAR}. Empty falls back to REDIS_URL, then to an "
-                    "in-memory store per process."
-                ),
-            },
-            {
-                "path": ["cache_store"],
-                "group": "Cache store",
-                "label": "Custom cache store",
-                "type": "text",
-                "placeholder": "graph.dependencies:cache_store",
-                "help": (
-                    "module:attr of a BaseCacheStore instance or zero-argument factory. Wins "
-                    "over the Redis URL."
-                ),
-            },
-        ],
-        "env": [
-            {
-                "name": "REDIS_URL",
-                "purpose": "Redis for the cache store when neither redis nor cache_store is set.",
+                "help": "module:attr of an InjectQ container.",
             },
         ],
     },

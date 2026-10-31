@@ -42,7 +42,6 @@ def _naming_service(generate_name):
 
     graph.astream = astream
     service = _service(graph, timeout=None)
-    service.config.thread_name_generator_path = "pkg:namer"
     service.checkpointer.aget_thread_owner = AsyncMock(return_value=None)
     service.thread_name_generator = MagicMock()
     service.thread_name_generator.generate_name = generate_name

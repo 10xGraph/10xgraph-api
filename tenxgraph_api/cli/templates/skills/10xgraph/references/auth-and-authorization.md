@@ -56,7 +56,7 @@ Configured via the `authorization` key; separate from `auth`. Values:
 - `{ "backend": "rbac", ... }`: role-based access control (below).
 
 Ownership is scalable: ownership is immutable, so it is cached (in-process LRU + the shared
-cache store when it is not in-memory: `cache_store`, `redis` or `REDIS_URL`) via
+cache store when it is not in-memory: `cache_store` type `redis` or `custom`) via
 `ThreadOwnershipResolver` over
 `BaseCheckpointer.aget_thread_owner`. After the first lookup a check is an in-memory hit, not a
 per-request DB call; the cache is evicted on thread deletion. Ownership needs a persistent
@@ -64,14 +64,16 @@ checkpointer (pg/sqlite/in-memory); with none, requests pass through.
 
 ### Token revocation
 
-`"token_revocation": true` (or `{"enabled": true, "token_lifetime": 3600, "user_ttl": 2592000}`)
-rejects revoked tokens with 401 before they expire: by `jti` (`10xgraph revoke --jti`) or every
+`"cache_store": {"type": "redis", "url": "${REDIS_URL}", "token_revocation": true}` (or
+`"token_revocation": {"enabled": true, "token_lifetime": 3600, "user_ttl": 2592000}` inside
+`cache_store`) rejects revoked tokens with 401 before they expire: by `jti` (`10xgraph revoke --jti`) or every
 token of a user issued before a cutoff (`10xgraph revoke --user`). Revocations live in the API's
-cache store, so share them between workers with `redis`, `REDIS_URL` or a custom
-`cache_store`; with the in-memory store a revocation reaches one process and `10xgraph revoke`
-refuses to run. It fails closed: while the cache store is unreachable, authenticated requests
-get 503 and the server refuses to start. The old string values (`"redis"`, `"memory"`,
-`module:attr`) are config errors naming `cache_store`.
+cache store, so share them between workers with `cache_store` type `redis` or `custom`; with
+the in-memory store a revocation reaches one process and `10xgraph revoke` refuses to run
+(`--redis-url` points it at a Redis directly). It fails closed: while the cache store is
+unreachable, authenticated requests get 503 and the server refuses to start. The value is
+`true`, `false`, `null` or the object above; a string or a top-level `token_revocation` is a
+config error. It only applies with auth on.
 
 ### Custom backend interface
 

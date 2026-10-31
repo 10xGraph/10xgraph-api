@@ -64,24 +64,12 @@ async def check(
     """Count one request for ``key`` against ``limit`` per ``window`` seconds.
 
     On a cache store error the request is allowed (``fail_open``) or denied as unavailable
-    (answered 503, never the 429 of a real limit hit).
+    (answered 503, never the 429 of a real limit hit). Once ``acquire`` has denied, the answer
+    is a 429 even when reading the clock for ``reset_after`` then fails.
     """
     global _failing  # noqa: PLW0603 - one outage state per process
     try:
         result = await cache.acquire(store_key(key), limit, ttl=window)
-        if result.granted:
-            decision = RateLimitDecision(
-                allowed=True,
-                remaining=max(0, limit - result.count),
-                reset_after=math.ceil(window),
-            )
-        else:
-            reset_after = math.ceil(window)
-            if result.oldest_expiry is not None:
-                reset_after = math.ceil(result.oldest_expiry - await cache.now())
-            decision = RateLimitDecision(
-                allowed=False, remaining=0, reset_after=max(1, reset_after)
-            )
     except Exception as exc:
         _log_error(exc, fail_open)
         if fail_open:
@@ -90,7 +78,19 @@ async def check(
     if _failing:
         _failing = False
         logger.info("Rate-limit cache store recovered")
-    return decision
+    if result.granted:
+        return RateLimitDecision(
+            allowed=True,
+            remaining=max(0, limit - result.count),
+            reset_after=math.ceil(window),
+        )
+    reset_after = math.ceil(window)
+    if result.oldest_expiry is not None:
+        try:
+            reset_after = math.ceil(result.oldest_expiry - await cache.now())
+        except Exception as exc:  # the limit was hit: keep the 429, with the full window
+            logger.debug("Rate-limit cache store clock unavailable: %s", exc)
+    return RateLimitDecision(allowed=False, remaining=0, reset_after=max(1, reset_after))
 
 
 def _log_error(exc: Exception, fail_open: bool) -> None:

@@ -165,7 +165,8 @@ class TestHandshakeRateLimit:
 
     def test_allowed_handshake_passes(self):
         backend = _FakeRateBackend(allowed=True)
-        config = _StubConfig(_RL(), None)
+        # A cap, so the socket holds a slot (an unlimited cap takes no lease).
+        config = _StubConfig(_RL(), 5)
         app = _build_app(config, rate_backend=backend)
         client = TestClient(app)
         with client.websocket_connect("/ws") as conn:

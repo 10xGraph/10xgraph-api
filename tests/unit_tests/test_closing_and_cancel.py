@@ -55,7 +55,6 @@ def _service(graph) -> GraphService:
     service = GraphService.__new__(GraphService)
     service._graph = graph
     service.config = SimpleNamespace(runs=RunsConfig(max_concurrent_per_user=1))
-    service.config.thread_name_generator_path = None
     service.checkpointer = graph._checkpointer
     service.thread_name_generator = None
     service._media_service = None

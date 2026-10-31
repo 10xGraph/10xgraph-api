@@ -393,7 +393,7 @@ def _graph_service(astream):
     graph.is_realtime = lambda: False
     service = GraphService.__new__(GraphService)
     service._graph = graph
-    service.config = SimpleNamespace(runs=RunsConfig(), thread_name_generator_path=None)
+    service.config = SimpleNamespace(runs=RunsConfig())
     service.checkpointer = MagicMock()
     service.checkpointer.aput_thread = AsyncMock(return_value=True)
     service.checkpointer.aget_state = AsyncMock(return_value=None)

@@ -195,9 +195,7 @@ async def test_stream_route_refuses_before_streaming(fresh_slots):
 def _service(graph, timeout):
     service = GraphService.__new__(GraphService)
     service._graph = graph
-    service.config = SimpleNamespace(
-        runs=RunsConfig(timeout=timeout), thread_name_generator_path=None
-    )
+    service.config = SimpleNamespace(runs=RunsConfig(timeout=timeout))
     service.checkpointer = MagicMock()
     service.checkpointer.aput_thread = AsyncMock(return_value=True)
     service.checkpointer.aget_state = AsyncMock(return_value=None)

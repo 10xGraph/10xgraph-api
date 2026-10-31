@@ -92,10 +92,10 @@ def test_production_template_defaults_to_recommended_setup(tmp_path: Path) -> No
     config = json.loads((target / "10xgraph.json").read_text())
     assert config["auth"] == "jwt"
     assert config["authorization"] == "ownership"
-    assert config["rate_limit"]["enabled"] is True
-    assert "backend" not in config["rate_limit"]
-    assert config["redis"] == "${REDIS_URL}"
-    assert config["token_revocation"] is True
+    assert config["cache_store"]["type"] == "redis"
+    assert config["cache_store"]["url"] == "${REDIS_URL}"
+    assert config["cache_store"]["rate_limit"]["enabled"] is True
+    assert config["cache_store"]["token_revocation"] is True
 
     agent_py = (target / "graph" / "agent.py").read_text()
     assert "PgCheckpointer(" in agent_py

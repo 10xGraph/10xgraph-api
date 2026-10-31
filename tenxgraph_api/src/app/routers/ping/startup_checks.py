@@ -10,7 +10,7 @@ where its setting came from and its endpoint when the component describes one (n
 credentials). ``STARTUP_CHECKS=false`` turns the gate off.
 
 The cache store is fatal only when a configured feature fails closed without it
-(``token_revocation``, or ``rate_limit`` with ``fail_open: false``; see
+(``cache_store.token_revocation``, or ``cache_store.rate_limit`` with ``fail_open: false``; see
 ``readiness.cache_required_by``). Otherwise it is checked once and an unreachable one logs one
 WARNING: the run locks and caps fall back to this process, and the server starts.
 
@@ -188,7 +188,7 @@ async def wait_for_backends(
 
 
 def _label(target: Target) -> str:
-    """``RedisCacheStore (from REDIS_URL, localhost:6379)``: the class, then the rest."""
+    """``RedisCacheStore (cache_store.url, localhost:6379)``: the class, then the rest."""
     if not target.details:
         return target.name
     first, *rest = target.details

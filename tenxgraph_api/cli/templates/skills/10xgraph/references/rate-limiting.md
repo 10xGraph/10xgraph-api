@@ -4,20 +4,22 @@ Use this when adding, configuring, or debugging 10xGraph's built-in sliding-wind
 
 ## Overview
 
-10xGraph provides a sliding-window rate limiter configured via the `rate_limit` block in
-`10xgraph.json`. The limiter is disabled by default; add the block to activate it.
+10xGraph provides a sliding-window rate limiter configured by the `rate_limit` block inside
+`cache_store` in `10xgraph.json`. The limiter is off by default; add the block to turn it on.
 
 ## Quick Start
 
 ```json
 {
   "agent": "graph.react:app",
-  "rate_limit": {
-    "enabled": true,
-    "requests": 100,
-    "window": 60,
-    "by": "ip",
-    "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"]
+  "cache_store": {
+    "rate_limit": {
+      "enabled": true,
+      "requests": 100,
+      "window": 60,
+      "by": "ip",
+      "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"]
+    }
   }
 }
 ```
@@ -28,40 +30,45 @@ Each client IP may make `requests` calls every `window` seconds.
 
 The counters live in the API's cache store (`BaseCacheStore`), the same one that holds the run
 locks and caps, idempotency records, the ownership cache and token revocation. There is no
-separate rate-limit backend. The store is chosen once at boot:
+separate rate-limit backend. `cache_store.type` picks the store once at boot:
 
-1. `"cache_store": "module:attr"` in `10xgraph.json` (your own `BaseCacheStore`).
-2. Else `"redis"` in `10xgraph.json` (supports `${ENV_VAR}`), else `REDIS_URL`:
-   `RedisCacheStore` (also Valkey, Dragonfly, KeyDB). Needs `pip install "10xgraph-api[redis]"`.
-3. Else `InMemoryCacheStore`: counters per process, fine for one worker.
+1. `"memory"`, or no `type`: `InMemoryCacheStore`, counters per process, fine for one worker.
+2. `"redis"` with `"url"` (supports `${ENV_VAR}`): `RedisCacheStore` (also Valkey, Dragonfly,
+   KeyDB). Needs `pip install "10xgraph-api[redis]"`.
+3. `"custom"` with `"path": "module:attr"`: your own `BaseCacheStore`.
+
+`REDIS_URL` alone selects nothing; write `"url": "${REDIS_URL}"` to use it.
 
 Shared counters across workers, containers or servers:
 
 ```json
 {
   "agent": "graph.react:app",
-  "redis": "${REDIS_URL}",
-  "rate_limit": {
-    "enabled": true,
-    "requests": 1000,
-    "window": 60,
-    "by": "ip",
-    "trusted_proxy_headers": true,
-    "exclude_paths": ["/ping", "/metrics", "/docs", "/redocs", "/openapi.json"],
-    "fail_open": true
+  "cache_store": {
+    "type": "redis",
+    "url": "${REDIS_URL}",
+    "rate_limit": {
+      "enabled": true,
+      "requests": 1000,
+      "window": 60,
+      "by": "ip",
+      "trusted_proxy_headers": true,
+      "exclude_paths": ["/ping", "/metrics", "/docs", "/redocs", "/openapi.json"],
+      "fail_open": true
+    }
   }
 }
 ```
 
 Check and record are one atomic store operation (a Lua script on Redis), so concurrent requests
-cannot race past the limit. `rate_limit.backend` and `rate_limit.redis` were removed in
-1.0.0rc4: either key is a config error naming `cache_store`.
+cannot race past the limit. A key not in the table below is a config error listing the valid
+keys, and a top-level `rate_limit` (outside `cache_store`) is a config error too.
 
 ## Configuration Reference
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `enabled` | boolean | `true` | Enables the middleware when the `rate_limit` block exists. |
+| `enabled` | boolean | `true` | Enables the middleware when the `cache_store.rate_limit` block exists. |
 | `requests` | integer | `100` | Maximum requests allowed in each window. |
 | `window` | integer | `60` | Window size in seconds. |
 | `by` | string | `"ip"` | Limit by client IP (`"ip"`), verified user (`"user"`) or one shared quota (`"global"`). |
@@ -74,13 +81,13 @@ cannot race past the limit. `rate_limit.backend` and `rate_limit.redis` were rem
 Per-IP limit (most public APIs):
 
 ```json
-{ "rate_limit": { "requests": 100, "window": 60, "by": "ip" } }
+{ "cache_store": { "rate_limit": { "requests": 100, "window": 60, "by": "ip" } } }
 ```
 
 Global limit (one shared quota for the whole service):
 
 ```json
-{ "rate_limit": { "requests": 5000, "window": 60, "by": "global" } }
+{ "cache_store": { "rate_limit": { "requests": 5000, "window": 60, "by": "global" } } }
 ```
 
 Only enable `trusted_proxy_headers` when your app sits behind a trusted proxy that strips
@@ -138,11 +145,11 @@ limit hit:
 
 | Scenario | Cache store |
 | --- | --- |
-| Local development, tests, demos | in-memory (set nothing) |
-| Single-process production | in-memory |
-| Gunicorn/Uvicorn with multiple workers | Redis (`redis` or `REDIS_URL`) |
-| Docker / Kubernetes (multiple replicas) | Redis (`redis` or `REDIS_URL`) |
-| Storage that does not speak Redis | `cache_store` (your own `BaseCacheStore`) |
+| Local development, tests, demos | `"type": "memory"` (or no `type`) |
+| Single-process production | `"type": "memory"` |
+| Gunicorn/Uvicorn with multiple workers | `"type": "redis"`, `"url": "${REDIS_URL}"` |
+| Docker / Kubernetes (multiple replicas) | `"type": "redis"`, `"url": "${REDIS_URL}"` |
+| Storage that does not speak Redis | `"type": "custom"`, `"path": "module:attr"` (your own `BaseCacheStore`) |
 
 ## Rules
 
@@ -150,7 +157,7 @@ limit hit:
 - Always add health-check and observability paths to `exclude_paths`.
 - Set `fail_open: false` only when hard enforcement is required; otherwise `true` prevents availability issues during cache store outages.
 - A Redis cache store requires the `redis` extra: `pip install "10xgraph-api[redis]"`.
-- The `redis` value supports `${ENV_VAR}` expansion; keep secrets out of committed config.
+- `cache_store.url` supports `${ENV_VAR}` expansion; keep secrets out of committed config.
 
 ## Source Map
 
