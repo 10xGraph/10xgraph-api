@@ -8,36 +8,36 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from tenxgraph_api.src.app.core.cache_store import BaseCacheStore, InMemoryCacheStore, SlotResult
 from tenxgraph_api.src.app.core.config.graph_config import RateLimitConfig
-from tenxgraph_api.src.app.core.middleware.rate_limit import (
-    BaseRateLimitBackend,
-    MemoryRateLimitBackend,
-    RateLimitDecision,
-    RateLimitMiddleware,
-    RedisRateLimitBackend,
-)
+from tenxgraph_api.src.app.core.middleware.rate_limit import RateLimitMiddleware, limiter
+
+
+@pytest.fixture(autouse=True)
+def _no_outage_in_progress(monkeypatch):
+    monkeypatch.setattr(limiter, "_failing", False)
 
 
 def _config(**overrides) -> RateLimitConfig:
-    data = {"enabled": True, "backend": "memory", "requests": 2, "window": 60, "by": "ip"}
+    data = {"enabled": True, "requests": 2, "window": 60, "by": "ip"}
     data.update(overrides)
     return RateLimitConfig.from_dict(data)
 
 
-def _broken_redis_backend(*, fail_open: bool) -> RedisRateLimitBackend:
-    async def failing_script(*, keys, args):
-        raise ConnectionError("Error 111 connecting to localhost:6379. Connection refused.")
+class _BrokenStore(InMemoryCacheStore):
+    """A cache store whose backend is down, until ``healed``."""
 
-    backend = object.__new__(RedisRateLimitBackend)
-    backend._prefix = "10xgraph:test"
-    backend._fail_open = fail_open
-    backend._script = failing_script
-    return backend
+    healed = False
+
+    async def acquire(self, key: str, limit: int, ttl: float) -> SlotResult:
+        if not self.healed:
+            raise ConnectionError("Error 111 connecting to localhost:6379. Connection refused.")
+        return await super().acquire(key, limit, ttl)
 
 
-def _client(backend: BaseRateLimitBackend, **overrides) -> TestClient:
+def _client(cache: BaseCacheStore, **overrides) -> TestClient:
     app = FastAPI()
-    app.add_middleware(RateLimitMiddleware, config=_config(**overrides), backend=backend)
+    app.add_middleware(RateLimitMiddleware, config=_config(**overrides), cache=cache)
 
     @app.get("/")
     def root():
@@ -47,7 +47,7 @@ def _client(backend: BaseRateLimitBackend, **overrides) -> TestClient:
 
 
 def test_backend_error_with_fail_open_false_answers_503():
-    resp = _client(_broken_redis_backend(fail_open=False)).get("/")
+    resp = _client(_BrokenStore(), fail_open=False).get("/")
     assert resp.status_code == 503
     assert resp.headers["Retry-After"] == "5"
     error = resp.json()["error"]
@@ -57,13 +57,13 @@ def test_backend_error_with_fail_open_false_answers_503():
 
 
 def test_backend_error_with_fail_open_true_allows_the_request():
-    resp = _client(_broken_redis_backend(fail_open=True)).get("/")
+    resp = _client(_BrokenStore(), fail_open=True).get("/")
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
 
 
 def test_real_limit_still_answers_429():
-    client = _client(MemoryRateLimitBackend())
+    client = _client(InMemoryCacheStore())
     assert client.get("/").status_code == 200
     assert client.get("/").status_code == 200
     resp = client.get("/")
@@ -72,46 +72,53 @@ def test_real_limit_still_answers_429():
     assert "Retry-After" in resp.headers
 
 
-def test_custom_backend_can_signal_unavailable():
-    class Down(BaseRateLimitBackend):
-        async def check(self, key: str, *, limit: int, window: int) -> RateLimitDecision:
-            return RateLimitDecision.backend_unavailable(retry_after=7)
+def test_plain_denial_from_a_custom_store_is_still_429():
+    class Full(InMemoryCacheStore):
+        async def acquire(self, key: str, limit: int, ttl: float) -> SlotResult:
+            return SlotResult(
+                granted=False, count=limit, oldest_expiry=await self.now() + 2.5, slot_id=None
+            )
 
-        async def close(self) -> None:
-            return None
-
-    resp = _client(Down()).get("/")
-    assert resp.status_code == 503
-    assert resp.headers["Retry-After"] == "7"
-
-
-def test_plain_denial_from_a_custom_backend_is_still_429():
-    class Deny(BaseRateLimitBackend):
-        async def check(self, key: str, *, limit: int, window: int) -> RateLimitDecision:
-            return RateLimitDecision(allowed=False, remaining=0, reset_after=3)
-
-        async def close(self) -> None:
-            return None
-
-    resp = _client(Deny()).get("/")
+    resp = _client(Full()).get("/")
     assert resp.status_code == 429
     assert resp.headers["Retry-After"] == "3"
 
 
+def test_app_wiring_with_fail_open_false_and_a_failing_cache_store_answers_503(tmp_path):
+    """The startup check off, the bound cache store down: 503 RATE_LIMIT_UNAVAILABLE, not 429."""
+    from injectq import InjectQ
+
+    from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
+    from tenxgraph_api.src.app.core.config.setup_middleware import setup_middleware
+
+    path = tmp_path / "10xgraph.json"
+    path.write_text('{"agent": "g:app", "rate_limit": {"requests": 2, "fail_open": false}}')
+    graph_config = GraphConfig(str(path))
+    container = InjectQ()
+    app = FastAPI()
+    setup_middleware(app, graph_config=graph_config, container=container)
+    container.bind_instance(BaseCacheStore, _BrokenStore())  # bound at startup, after setup
+
+    @app.get("/")
+    def root():
+        return {"ok": True}
+
+    resp = TestClient(app).get("/", headers={"host": "localhost"})
+    assert resp.status_code == 503
+    assert resp.json()["error"]["code"] == "RATE_LIMIT_UNAVAILABLE"
+
+
 @pytest.mark.asyncio
 async def test_outage_logs_one_traceback_then_one_line_per_error(caplog):
-    backend = _broken_redis_backend(fail_open=False)
+    store = _BrokenStore()
     with caplog.at_level(logging.INFO, logger="tenxgraph_api.rate_limit"):
         for _ in range(3):
-            decision = await backend.check("client", limit=2, window=60)
+            decision = await limiter.check(store, "client", 2, 60, fail_open=False)
             assert decision.unavailable is True
         records = [r for r in caplog.records if r.name == "tenxgraph_api.rate_limit"]
         assert [r.exc_info is not None for r in records] == [True, False, False]
         assert "Connection refused" in records[1].getMessage()
 
-        async def working_script(*, keys, args):
-            return [1, 1, 60]
-
-        backend._script = working_script
-        assert (await backend.check("client", limit=2, window=60)).allowed is True
+        store.healed = True
+        assert (await limiter.check(store, "client", 2, 60, fail_open=False)).allowed is True
     assert "recovered" in caplog.records[-1].getMessage()

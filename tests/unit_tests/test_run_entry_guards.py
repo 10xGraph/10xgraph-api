@@ -4,8 +4,6 @@
 lock and per-user run slot, hold them until the run is really over, and cancel cleanly.
 """
 
-# ruff: noqa: S101
-
 import asyncio
 import json
 import sys
@@ -15,8 +13,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException, WebSocketDisconnect
 
-from tenxgraph_api.src.app.core.concurrency import MemoryConcurrencyLimiter
+from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
 from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+from tenxgraph_api.src.app.core.leases import LeaseManager
 from tenxgraph_api.src.app.routers.graph import run_limits, thread_lock
 from tenxgraph_api.src.app.routers.graph.router import (
     realtime_graph_ws,
@@ -40,9 +39,9 @@ def _router():
 @pytest.fixture(autouse=True)
 def limiter(monkeypatch):
     """One in-process limiter behind both the thread lock and the run slot."""
-    shared = MemoryConcurrencyLimiter()
-    monkeypatch.setattr(thread_lock, "concurrency_limiter", lambda: shared)
-    monkeypatch.setattr(run_limits, "concurrency_limiter", lambda: shared)
+    shared = LeaseManager(InMemoryCacheStore())
+    monkeypatch.setattr(thread_lock, "lease_manager", lambda: shared)
+    monkeypatch.setattr(run_limits, "lease_manager", lambda: shared)
     monkeypatch.setattr(thread_lock, "THREAD_BUSY_WAIT_SECONDS", 0.2)
     router = _router()
     monkeypatch.setattr(router, "ws_identity_still_valid", lambda ws, user: True)

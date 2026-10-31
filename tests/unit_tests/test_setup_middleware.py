@@ -415,12 +415,13 @@ class MockSettings:
 
 
 def test_setup_middleware_all():
+    from tenxgraph_api.src.app.core.middleware.rate_limit import RateLimitMiddleware
+
     app = FastAPI()
     settings = MockSettings()
 
     graph_config = MagicMock()
     rate_limit_config = MagicMock()
-    rate_limit_config.backend = "memory"
     rate_limit_config.requests = 100
     rate_limit_config.window = 60
     rate_limit_config.by = "ip"
@@ -435,10 +436,6 @@ def test_setup_middleware_all():
             "tenxgraph_api.src.app.core.config.setup_middleware.get_settings", return_value=settings
         ),
         patch("tenxgraph_api.src.app.core.config.setup_middleware.init_sentry") as mock_init_sentry,
-        patch(
-            "tenxgraph_api.src.app.core.config.setup_middleware.build_backend",
-            return_value="mock_backend",
-        ) as mock_build_backend,
         patch("tenxgraph_api.src.app.core.config.setup_middleware._setup_otel") as mock_setup_otel,
         patch(
             "tenxgraph_api.src.app.core.config.setup_middleware._attach_otel_publisher"
@@ -447,8 +444,10 @@ def test_setup_middleware_all():
         setup_middleware(app, graph_config=graph_config, container=container)
 
         mock_init_sentry.assert_called_once_with(settings)
-        mock_build_backend.assert_called_once_with(rate_limit_config, container=container)
-        assert app.state.rate_limit_backend == "mock_backend"
+        rate_limit = [m for m in app.user_middleware if m.cls is RateLimitMiddleware]
+        assert len(rate_limit) == 1
+        assert rate_limit[0].kwargs == {"config": rate_limit_config, "container": container}
+        assert not hasattr(app.state, "rate_limit_backend")
         mock_setup_otel.assert_called_once_with(app, settings)
         mock_attach.assert_called_once_with(container, settings, graph_config)
 

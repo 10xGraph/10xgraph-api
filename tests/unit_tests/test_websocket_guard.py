@@ -2,12 +2,13 @@
 
 Covers what middleware cannot, because rate-limit / request-size middleware are HTTP-only:
   - the global rate limit applied at the WS handshake (shared backend/bucket with REST),
-  - the per-process concurrent-connection cap (websocket.max_connections),
+  - the concurrent-connection cap (websocket.max_connections),
   - bearer token via the Sec-WebSocket-Protocol sentinel (kept out of URLs/logs).
 
 These drive the guard through FastAPI's real DI on a @app.websocket route.
 """
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -25,8 +26,9 @@ from tenxgraph_api.src.app.core.auth.permissions import (
     RequirePermission,
     ws_bearer_subprotocol,
 )
+from tenxgraph_api.src.app.core.cache_store import BaseCacheStore, InMemoryCacheStore, SlotResult
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, WebSocketConfig
-from tenxgraph_api.src.app.core.middleware.rate_limit.base import RateLimitDecision
+from tenxgraph_api.src.app.core.leases import LeaseManager
 from tenxgraph_api.src.app.routers.graph import realtime_guard
 from tenxgraph_api.src.app.routers.graph.realtime_guard import realtime_connection_guard
 
@@ -44,17 +46,23 @@ class _AllowAuthz(AuthorizationBackend):
         return True
 
 
-class _FakeRateBackend:
+class _FakeRateBackend(InMemoryCacheStore):
+    """A cache store whose rate-limit windows always grant (or always deny)."""
+
     def __init__(self, allowed: bool):
+        super().__init__()
         self._allowed = allowed
         self.calls = 0
 
-    async def check(self, key, *, limit, window):
+    async def acquire(self, key, limit, ttl):
+        if not key.startswith("ratelimit:"):
+            return await super().acquire(key, limit, ttl)
         self.calls += 1
-        return RateLimitDecision(allowed=self._allowed, remaining=0, reset_after=5)
-
-    async def close(self):
-        pass
+        if self._allowed:
+            return SlotResult(granted=True, count=1, oldest_expiry=None, slot_id="s")
+        return SlotResult(
+            granted=False, count=limit, oldest_expiry=await self.now() + 5, slot_id=None
+        )
 
 
 class _StubConfig:
@@ -81,10 +89,11 @@ def _build_app(config, rate_backend=None, *, auth=False):
     container.bind_instance(BaseAuth, _FakeAuth(), allow_none=True)
     container.bind_instance(AuthorizationBackend, _AllowAuthz(), allow_none=True)
 
+    if rate_backend is not None:
+        container.bind_instance(BaseCacheStore, rate_backend)
+
     app = FastAPI()
     setup_fastapi(container, app)
-    if rate_backend is not None:
-        app.state.rate_limit_backend = rate_backend
 
     deps = [Depends(realtime_connection_guard)]
     if auth:
@@ -99,17 +108,19 @@ def _build_app(config, rate_backend=None, *, auth=False):
         user: dict[str, Any] = (deps[1] if auth else Depends(lambda: {})),  # noqa: PIE807
     ):
         await websocket.accept(subprotocol=ws_bearer_subprotocol(websocket))
-        await websocket.send_json({"active": realtime_guard._registry.active, "user": user})
+        active = realtime_guard.lease_manager().held("ws:all")
+        await websocket.send_json({"active": active, "user": user})
         await websocket.close()
 
     return app
 
 
 @pytest.fixture(autouse=True)
-def _reset_registry():
-    realtime_guard._registry._active = 0
-    yield
-    realtime_guard._registry._active = 0
+def leases(monkeypatch):
+    """A fresh in-process lease manager behind the connection cap."""
+    manager = LeaseManager(InMemoryCacheStore())
+    monkeypatch.setattr(realtime_guard, "lease_manager", lambda: manager)
+    return manager
 
 
 class TestConcurrencyCap:
@@ -127,11 +138,12 @@ class TestConcurrencyCap:
         for _ in range(2):
             with client.websocket_connect("/ws") as conn:
                 assert conn.receive_json()["active"] == 1
-        assert realtime_guard._registry.active == 0
+        assert realtime_guard.lease_manager().held("ws:all") == 0
 
-    def test_over_cap_rejected(self):
+    def test_over_cap_rejected(self, leases):
         app = _build_app(_StubConfig(None, 1))
-        realtime_guard._registry._active = 1  # simulate one already-active connection
+        # Simulate one already-active connection (held by another worker, or another socket).
+        asyncio.run(leases.cache.acquire("concurrency:ws:all", 1, 60))
         client = TestClient(app)
         with pytest.raises(WebSocketDisconnect) as exc:
             with client.websocket_connect("/ws") as conn:
@@ -168,6 +180,7 @@ class _RL:
     requests = 100
     window = 60
     trusted_proxy_headers = False
+    fail_open = True
 
 
 class TestSubprotocolToken:

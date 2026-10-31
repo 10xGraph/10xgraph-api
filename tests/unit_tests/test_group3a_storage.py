@@ -1,7 +1,5 @@
 """Group 3a (storage) API fixes: G-97 write guard, G-123 partial delete, G-40 keys, G-42 boot."""
 
-# ruff: noqa: S101
-
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -11,9 +9,10 @@ from tenxgraph.core.state import ImageBlock, MediaRef, Message
 
 from tenxgraph_api.src.app import main as app_main
 from tenxgraph_api.src.app.core import redis_client
+from tenxgraph_api.src.app.core.auth import revocation
 from tenxgraph_api.src.app.core.auth.ownership_resolver import ThreadOwnershipResolver
-from tenxgraph_api.src.app.core.auth.revocation import RedisTokenRevocation
-from tenxgraph_api.src.app.core.concurrency import MemoryConcurrencyLimiter, RedisConcurrencyLimiter
+from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore, RedisCacheStore
+from tenxgraph_api.src.app.core.leases import LeaseManager
 from tenxgraph_api.src.app.routers.checkpointer import router as cp_router
 from tenxgraph_api.src.app.routers.checkpointer.services.checkpointer_service import (
     CheckpointerService,
@@ -23,16 +22,14 @@ from tenxgraph_api.src.app.routers.graph.router import fix_graph
 from tenxgraph_api.src.app.routers.graph.run_limits import run_slot_key
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import FixGraphRequestSchema
 
-from .test_concurrency_limiter import _FakeRedis
-
 
 USER = {"user_id": "alice"}
 
 
 @pytest.fixture(autouse=True)
 def fresh_locks(monkeypatch):
-    limiter = MemoryConcurrencyLimiter()
-    monkeypatch.setattr(thread_lock, "concurrency_limiter", lambda: limiter)
+    limiter = LeaseManager(InMemoryCacheStore())
+    monkeypatch.setattr(thread_lock, "lease_manager", lambda: limiter)
     return limiter
 
 
@@ -149,21 +146,22 @@ def key_prefix(monkeypatch):
 
 
 def test_prefix_is_applied_to_every_api_redis_key(key_prefix):
-    resolver = ThreadOwnershipResolver(AsyncMock(), redis=MagicMock())
-    assert resolver._redis_key("t:1").startswith("prod-eu:af:authz:owner:id:")
-    assert ":" not in resolver._redis_key("t:1").split(":id:", 1)[1]
-    assert resolver._tombstone_key("t1").startswith("prod-eu:af:authz:owner:tomb:")
-    revocation = RedisTokenRevocation(client=MagicMock())
-    assert revocation._jti_key("j").startswith("prod-eu:10xgraph:revoked:jti:")
-    assert revocation._user_key("u:1") == "prod-eu:10xgraph:revoked:user:u%3A1"
-    limiter = RedisConcurrencyLimiter(_FakeRedis())
-    assert limiter._key("runs:thread:t1").startswith("prod-eu:10xgraph:concurrency:")
+    store = RedisCacheStore(client=MagicMock())
+    owner_key = store.redis_key(ThreadOwnershipResolver._owner_key("t:1"))
+    assert owner_key.startswith("prod-eu:af:authz:owner:id:")
+    assert ":" not in owner_key.split(":id:", 1)[1]
+    tomb_key = store.redis_key(ThreadOwnershipResolver._tombstone_key("t1"))
+    assert tomb_key.startswith("prod-eu:af:authz:owner:tomb:")
+    assert store.redis_key(revocation.jti_key("j")).startswith("prod-eu:10xgraph:revoked:jti:")
+    assert store.redis_key(revocation.user_key("u:1")) == "prod-eu:10xgraph:revoked:user:u%3A1"
+    lease_key = "concurrency:" + thread_lock.thread_lock_key("t1")
+    assert store.redis_key(lease_key).startswith("prod-eu:10xgraph:concurrency:")
 
 
 def test_no_prefix_keeps_the_existing_keys():
-    resolver = ThreadOwnershipResolver(AsyncMock(), redis=MagicMock())
-    assert resolver._redis_key("t1") == "af:authz:owner:id:t1"
-    assert RedisTokenRevocation(client=MagicMock())._jti_key("j") == "10xgraph:revoked:jti:j"
+    store = RedisCacheStore(client=MagicMock())
+    assert store.redis_key(ThreadOwnershipResolver._owner_key("t1")) == "af:authz:owner:id:t1"
+    assert store.redis_key(revocation.jti_key("j")) == "10xgraph:revoked:jti:j"
 
 
 # ---------------------------------------------------------------------------

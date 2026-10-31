@@ -20,10 +20,10 @@ Other frameworks give you the graph. 10xGraph gives you the graph and the server
 - **Authentication.** `"auth": "jwt"`, or your own `BaseAuth` subclass.
 - **Scoped authorization on every endpoint.** Routes require `resource:action` scopes such as `graph:invoke`, `graph:stream` or `checkpointer:read`, checked by a pluggable `AuthorizationBackend`. The server refuses to start if any non-public route has no guard.
 - **Owner-only threads.** In production mode a thread is readable and writable only by the user who created it, on every step that touches it. Ownership checks are cached in-process and optionally in Redis, so they do not hit the database on each request.
-- **Rate limiting.** Sliding-window limits with a memory, Redis or custom backend.
+- **Rate limiting.** Sliding-window limits kept in the API's cache store: in memory, on Redis, or in your own `BaseCacheStore`.
 - **Production hardening.** Request size limits (10 MB default), security headers, error and log sanitization, startup warnings for insecure settings, and Snowflake IDs for multi-node deployments.
 - **Deployment files.** `10xgraph build --docker-compose --k8s` writes a `Dockerfile`, `.dockerignore`, `docker-compose.yml` and `k8s.yaml`.
-- **A secure-by-default scaffold.** `10xgraph init --yes --template production --auth jwt --rate-limit redis` writes a project with JWT auth, owner-only thread access, a Redis rate limit, a prompt-injection validator, evals, tests, `.env.example` and a pre-commit config.
+- **A secure-by-default scaffold.** `10xgraph init --yes --template production --auth jwt --rate-limit redis` writes a project with JWT auth, owner-only thread access, a Redis cache store for rate limits and token revocation, a prompt-injection validator, evals, tests, `.env.example` and a pre-commit config.
 
 Not built in: automatic per-tool permissions (user A may call `refund`, user B may not). Tools receive the caller's verified scopes and can check them with `tenxgraph.core.authz.has_scope`.
 
@@ -86,7 +86,7 @@ pip install 10xgraph-api
 Optional extras; install only what you configure:
 
 ```bash
-pip install "10xgraph-api[redis]"   # Redis rate-limit / cache backend
+pip install "10xgraph-api[redis]"   # Redis cache store (locks, rate limits, revocation)
 pip install "10xgraph-api[jwt]"     # JWT authentication
 pip install "10xgraph-api[media]"   # Document text extraction (multimodal)
 pip install "10xgraph-api[images]"  # Image resize / EXIF / format conversion (Pillow)
@@ -323,7 +323,9 @@ The configuration file (`10xgraph.json`) defines your agent, authentication, and
 | `injectq` | string \| null | Path to an InjectQ container |
 | `store` | string \| null | Path to a data store |
 | `remote_tools` | array | Trusted schemas for tools executed by clients; attached at startup |
-| `redis` | string \| null | Redis connection URL |
+| `redis` | string \| null | Redis URL of the API's cache store (`${VAR}` expanded); falls back to `REDIS_URL` |
+| `cache_store` | string \| null | Path to your own `BaseCacheStore`; wins over `redis` |
+| `token_revocation` | bool \| object \| null | `true` rejects revoked tokens (`10xgraph revoke`); kept in the cache store |
 | `rate_limit` | object \| null | Sliding-window rate limiting configuration |
 | `thread_name_generator` | string \| null | Path to a custom thread name generator |
 | `ag_ui` | object | `{"enabled": true}` mounts `POST /v1/ag-ui` (needs the `ag-ui` extra) |

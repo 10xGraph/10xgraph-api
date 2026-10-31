@@ -14,7 +14,7 @@ from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from tenxgraph_api.src.app.core.exceptions.server_errors import UnhandledErrorMiddleware
-from tenxgraph_api.src.app.core.middleware.rate_limit import RateLimitMiddleware, build_backend
+from tenxgraph_api.src.app.core.middleware.rate_limit import RateLimitMiddleware
 from tenxgraph_api.src.app.core.middleware.request_limits import RequestSizeLimitMiddleware
 from tenxgraph_api.src.app.core.middleware.security_headers import SecurityHeadersMiddleware
 
@@ -481,23 +481,21 @@ def setup_middleware(
     if graph_config is not None:
         rate_limit_config = graph_config.rate_limit
         if rate_limit_config is not None:
-            backend = build_backend(rate_limit_config, container=container)
-            # Store on app.state so lifespan can close it cleanly
-            app.state.rate_limit_backend = backend
+            # The counters live in the cache store, bound in the container at startup.
             app.add_middleware(
                 RateLimitMiddleware,
                 config=rate_limit_config,
-                backend=backend,
+                container=container,
             )
             logger.info(
-                "Rate limiting enabled: backend=%s, %d req/%ds, by=%s, "
-                "exclude_paths=%s, trusted_proxy_headers=%s",
-                rate_limit_config.backend,
+                "Rate limiting enabled: %d req/%ds, by=%s, exclude_paths=%s, "
+                "trusted_proxy_headers=%s, fail_open=%s",
                 rate_limit_config.requests,
                 rate_limit_config.window,
                 rate_limit_config.by,
                 rate_limit_config.exclude_paths or "(none)",
                 "on" if rate_limit_config.trusted_proxy_headers else "off",
+                rate_limit_config.fail_open,
             )
 
     app.add_middleware(

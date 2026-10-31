@@ -117,8 +117,9 @@ def production_readiness_warnings(config: dict) -> list[Issue]:
     if rate_limit is None or (isinstance(rate_limit, dict) and rate_limit.get("enabled") is False):
         out.warning(
             "rate_limit",
-            "Rate limiting is off, so one caller can exhaust the service. Enable it, with the "
-            "redis backend for more than one worker, before production.",
+            "Rate limiting is off, so one caller can exhaust the service. Enable it, with a "
+            "shared cache store (redis, REDIS_URL or cache_store) for more than one worker, "
+            "before production.",
         )
     elif isinstance(rate_limit, dict) and rate_limit.get("enabled") is not False:
         if auth and rate_limit.get("by", "ip") == "ip":
@@ -134,11 +135,15 @@ def production_readiness_warnings(config: dict) -> list[Issue]:
                 'The ReDoc page is served at /redocs, not /redoc; "/redoc" excludes nothing.',
             )
 
-    if auth and not config.get("token_revocation"):
+    revocation = config.get("token_revocation")
+    if auth and (
+        not revocation or (isinstance(revocation, dict) and revocation.get("enabled") is False)
+    ):
         out.warning(
             "token_revocation",
             "Token revocation is off, so a leaked or logged-out token works until it expires. "
-            'Set "token_revocation": "redis" and revoke with `10xgraph revoke`.',
+            'Set "token_revocation": true with a shared cache store (redis, REDIS_URL or '
+            "cache_store) and revoke with `10xgraph revoke`.",
         )
     return out.issues
 
@@ -243,33 +248,8 @@ def _check_rate_limit(config: dict, out: _Collector) -> None:
 
     from tenxgraph_api.src.app.core.config.graph_config import RateLimitConfig
 
-    probe = dict(data)
-    redis_value = probe.get("redis")
-    redis_url = redis_value.get("url") if isinstance(redis_value, dict) else redis_value
-    if isinstance(redis_url, str) and _has_unresolved_env(redis_url):
-        # The server expands $VAR at startup; it is fine for it to be unset while editing.
-        out.warning(
-            "rate_limit.redis.url",
-            f"{redis_url} is not set in this shell. Make sure it is set when the API runs.",
-        )
-        placeholder = "redis://placeholder"
-        probe["redis"] = (
-            {**redis_value, "url": placeholder} if isinstance(redis_value, dict) else placeholder
-        )
-
-    config_obj = _quietly(lambda: RateLimitConfig.from_dict(probe), out, "rate_limit")
-    if config_obj is None:
-        return
-    if config_obj.backend == "redis" and not redis_url:
-        out.warning(
-            "rate_limit.redis.url",
-            "The redis backend needs a URL unless a Redis client is bound in InjectQ.",
-        )
-    if config_obj.enabled and config_obj.backend == "memory":
-        out.warning(
-            "rate_limit.backend",
-            "The memory backend counts per process. Use redis with more than one worker.",
-        )
+    # rate_limit.backend and rate_limit.redis were removed: the parser names the replacement.
+    _quietly(lambda: RateLimitConfig.from_dict(data), out, "rate_limit")
 
 
 def _check_websocket(config: dict, out: _Collector) -> None:
@@ -282,17 +262,26 @@ def _check_websocket(config: dict, out: _Collector) -> None:
 
 
 def _check_token_revocation(config: dict, out: _Collector, base_dir: Path | None) -> None:
-    value = config.get("token_revocation")
-    if value is None or value in ("", "redis", "memory"):
-        if value == "redis" and not (config.get("redis") or os.environ.get("REDIS_URL")):
-            out.warning("token_revocation", "redis needs the redis key or REDIS_URL.")
-        if value and not config.get("auth"):
-            out.warning("token_revocation", "Auth is off, so there are no tokens to revoke.")
+    if config.get("token_revocation") is None:
         return
-    if not isinstance(value, str):
-        out.error("token_revocation", "token_revocation must be redis, memory or module:attr.")
+    from tenxgraph_api.src.app.core.config.graph_config import TokenRevocationConfig
+
+    # The old string values (redis, memory, module:attr) are errors naming the replacement.
+    parsed = _quietly(
+        lambda: TokenRevocationConfig.parse(config.get("token_revocation")),
+        out,
+        "token_revocation",
+    )
+    if parsed is None:
         return
-    _check_import_path("token_revocation", value, out, base_dir)
+    if not config.get("auth"):
+        out.warning("token_revocation", "Auth is off, so there are no tokens to revoke.")
+    elif not (config.get("redis") or config.get("cache_store") or os.environ.get("REDIS_URL")):
+        out.warning(
+            "token_revocation",
+            "No shared cache store (redis, REDIS_URL or cache_store): a revocation reaches "
+            "only the process that recorded it, and `10xgraph revoke` cannot reach it.",
+        )
 
 
 def _check_graph_introspection(config: dict, out: _Collector) -> None:
@@ -372,7 +361,7 @@ def _check_observability(config: dict, out: _Collector) -> None:
 
 
 def _check_plugins(config: dict, out: _Collector, base_dir: Path | None) -> None:
-    for key in ("injectq", "store", "checkpointer", "thread_name_generator"):
+    for key in ("injectq", "store", "checkpointer", "thread_name_generator", "cache_store"):
         value = config.get(key)
         if value is None or value == "":
             continue
@@ -389,8 +378,11 @@ def _check_plugins(config: dict, out: _Collector, base_dir: Path | None) -> None
         return
     if not isinstance(redis, str):
         out.error("redis", "redis must be a URL string.")
-    elif "$" in redis:
-        out.warning("redis", "Top-level redis is used as-is; $VAR is not expanded.")
+    elif _has_unresolved_env(redis):
+        # The server expands $VAR at startup; it is fine for it to be unset while editing.
+        out.warning(
+            "redis", f"{redis} is not set in this shell. Make sure it is set when the API runs."
+        )
 
 
 def _check_remote_tools(config: dict, out: _Collector) -> None:
@@ -459,8 +451,8 @@ def _check_import_path(path: str, value: Any, out: _Collector, base_dir: Path | 
 def _quietly(parse: Callable[[], Any], out: _Collector, path: str) -> Any:
     """Run a server-side parser, turning its exceptions into an error issue.
 
-    The parsers log operational warnings (for example about the memory rate-limit
-    backend); those are reported as issues here, so the logger is muted meanwhile.
+    The parsers may log operational warnings; those are reported as issues here, so the
+    logger is muted meanwhile.
     """
     api_logger = logging.getLogger("tenxgraph_api")
     previous = api_logger.disabled

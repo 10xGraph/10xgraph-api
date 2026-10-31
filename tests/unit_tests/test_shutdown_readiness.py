@@ -17,6 +17,7 @@ from tenxgraph.storage.checkpointer import BaseCheckpointer, InMemoryCheckpointe
 from tenxgraph_api.cli.templates import defaults
 from tenxgraph_api.src.app import uvicorn_worker
 from tenxgraph_api.src.app.core import shutdown
+from tenxgraph_api.src.app.core.cache_store import BaseCacheStore, InMemoryCacheStore
 from tenxgraph_api.src.app.routers.ping import readiness
 from tenxgraph_api.src.app.routers.ping.router import router as ping_router
 
@@ -52,12 +53,10 @@ def test_dockerfile_and_compose_use_the_draining_worker():
 # ---------------------------------------------------------------- readiness
 
 
-def _client(monkeypatch, draining=False):
-    from tenxgraph_api.src.app.core.config import settings as settings_mod
-
-    monkeypatch.setattr(settings_mod, "get_settings", lambda: SimpleNamespace(REDIS_URL=None))
+def _client(draining=False):
     container = InjectQ()
     container.bind_instance(BaseCheckpointer, InMemoryCheckpointer())
+    container.bind_instance(BaseCacheStore, InMemoryCacheStore())
     app = FastAPI()
     setup_fastapi(container, app)
     app.include_router(ping_router)
@@ -74,28 +73,24 @@ def _fresh():
     shutdown.reset()
 
 
-def test_draining_app_is_not_ready(monkeypatch):
-    assert _client(monkeypatch).get("/health/ready").status_code == 200
-    resp = _client(monkeypatch, draining=True).get("/health/ready")
+def test_draining_app_is_not_ready():
+    assert _client().get("/health/ready").status_code == 200
+    resp = _client(draining=True).get("/health/ready")
     assert resp.status_code == 503
     assert resp.json()["status"] == "draining"
 
 
-def test_redis_outage_alone_stays_ready_unless_a_feature_fails_closed():
-    checks = {"checkpointer": "ok", "redis": "fail"}
-    assert readiness.is_ready(checks, redis_is_required=False)
-    assert not readiness.is_ready(checks, redis_is_required=True)
-    assert not readiness.is_ready({"checkpointer": "fail", "redis": "ok"}, redis_is_required=False)
-    assert readiness.redis_required(SimpleNamespace(token_revocation="redis", rate_limit=None))
-    assert readiness.redis_required(
-        SimpleNamespace(
-            token_revocation=None, rate_limit=SimpleNamespace(backend="redis", fail_open=False)
-        )
+def test_cache_outage_alone_stays_ready_unless_a_feature_fails_closed():
+    checks = {"checkpointer": "ok", "cache": "fail"}
+    assert readiness.is_ready(checks, cache_is_required=False)
+    assert not readiness.is_ready(checks, cache_is_required=True)
+    assert not readiness.is_ready({"checkpointer": "fail", "cache": "ok"}, cache_is_required=False)
+    assert readiness.cache_required(SimpleNamespace(token_revocation=object(), rate_limit=None))
+    assert readiness.cache_required(
+        SimpleNamespace(token_revocation=None, rate_limit=SimpleNamespace(fail_open=False))
     )
-    assert not readiness.redis_required(
-        SimpleNamespace(
-            token_revocation="memory", rate_limit=SimpleNamespace(backend="redis", fail_open=True)
-        )
+    assert not readiness.cache_required(
+        SimpleNamespace(token_revocation=None, rate_limit=SimpleNamespace(fail_open=True))
     )
 
 

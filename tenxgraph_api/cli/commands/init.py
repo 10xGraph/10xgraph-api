@@ -107,8 +107,8 @@ def _template_vars(context: dict[str, Any]) -> dict[str, Any]:
 
     The production pyproject.toml lists only what the answers need: the provider SDK
     and the Postgres + Redis checkpointer (``pg_checkpoint``) through the core extras,
-    PyJWT for JWT auth, redis (always, the checkpointer and the default rate limiter use
-    it), and websockets for WebSocket streaming / realtime. The generated Dockerfile
+    PyJWT for JWT auth, redis (always, the checkpointer and the API's cache store use it),
+    and websockets for WebSocket streaming / realtime. The generated Dockerfile
     installs exactly this list. Quick-start has no Postgres or Redis, so its core
     requirement is the provider extra alone.
     """
@@ -327,8 +327,7 @@ class InitCommand(BaseCommand):
         )
         if resolved_rate_limit not in {"none", "memory", "redis"}:
             raise ValidationError(
-                f"Invalid rate-limit mode '{resolved_rate_limit}'. "
-                "Choose none, memory, or redis.",
+                f"Invalid rate-limit mode '{resolved_rate_limit}'. Choose none, memory, or redis.",
                 field="rate_limit",
             )
 
@@ -453,11 +452,19 @@ class InitCommand(BaseCommand):
         context["auth"] = auth
 
         rate_limit = prompts.select(
-            "Rate limiting backend?",
+            "Rate limiting?",
             [
                 Choice("none", "None", "No request throttling"),
-                Choice("memory", "Memory", "Per-process counters — single instance only"),
-                Choice("redis", "Redis", "Shared counters — requires REDIS_URL"),
+                Choice(
+                    "memory",
+                    "On, no shared cache",
+                    "Counters per process unless REDIS_URL is set; single instance only",
+                ),
+                Choice(
+                    "redis",
+                    "On, Redis cache store",
+                    "Shared counters, locks and token revocation; requires REDIS_URL",
+                ),
             ],
             default="redis",
         )
@@ -544,7 +551,8 @@ class InitCommand(BaseCommand):
                 rows.append(
                     (
                         "Rate limit",
-                        f"{rl.capitalize()} · {context.get('rl_requests', 100)} req / "
+                        f"{'Redis cache store' if rl == 'redis' else 'Per process'} · "
+                        f"{context.get('rl_requests', 100)} req / "
                         f"{context.get('rl_window', 60)}s · {rl_by}{proxy}",
                     )
                 )
@@ -593,24 +601,23 @@ class InitCommand(BaseCommand):
         config["injectq"] = "graph.agent:container"
 
         rate_limit = context["rate_limit"]
+        if rate_limit == "redis":
+            # The API's cache store (rate limit counters, run locks and caps, idempotency,
+            # ownership cache, token revocation), resolved from REDIS_URL in .env.
+            config["redis"] = "${REDIS_URL}"
         if rate_limit != "none":
             config["rate_limit"] = {
                 "enabled": True,
-                "backend": rate_limit,
                 "requests": context.get("rl_requests", 100),
                 "window": context.get("rl_window", 60),
                 "by": context.get("rl_by", "user" if auth in ("jwt", "custom") else "ip"),
                 "trusted_proxy_headers": context.get("rl_trusted_proxy", False),
                 "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"],
             }
-            if rate_limit == "redis":
-                # Resolved from REDIS_URL in .env; the redis backend refuses to start
-                # without a URL or a Redis client bound in InjectQ.
-                config["rate_limit"]["redis"] = {"url": "${REDIS_URL}"}
-                if auth in ("jwt", "custom"):
-                    # Redis is configured, so a leaked or logged-out token can be revoked
-                    # for every worker. See `10xgraph revoke` and the token_revocation docs.
-                    config["token_revocation"] = "redis"  # noqa: S105 - a backend name, not a secret  # nosec B105
+        if rate_limit == "redis" and auth in ("jwt", "custom"):
+            # The cache store is shared, so a leaked or logged-out token can be revoked for
+            # every worker. See `10xgraph revoke` and the token_revocation docs.
+            config["token_revocation"] = True
 
         return config
 

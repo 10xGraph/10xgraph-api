@@ -40,7 +40,7 @@ export const ICONS = {
 
 export const SECTION_ICONS = {
   "get-running": "flag", environment: "terminal",
-  core: "flag", auth: "lock", authorization: "shield", token_revocation: "key", rate_limit: "gauge",
+  core: "flag", auth: "lock", authorization: "shield", token_revocation: "key", graph_introspection: "code", rate_limit: "gauge",
   observability: "activity", runs: "play", websocket: "bolt", ag_ui: "external", remote_tools: "wrench",
   media: "file", plugins: "layers", test: "flask", evaluation: "target",
 };

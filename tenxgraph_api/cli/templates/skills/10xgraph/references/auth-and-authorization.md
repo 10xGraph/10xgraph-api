@@ -34,32 +34,44 @@ and takes three args:
 def authenticate(self, request, response, credential) -> dict | None: ...
 ```
 
-- `request` may be a `Request` or a `WebSocket` (both are `HTTPConnection`) — read
+- `request` may be a `Request` or a `WebSocket` (both are `HTTPConnection`): read
   `request.headers`, do not assume Request-only APIs.
 - `credential` is the parsed bearer token (`HTTPAuthorizationCredentials | None`). For
   API-key/cookie schemes, ignore it and read headers directly.
 - Return a dict with at least `user_id` (keys flow into `config["user"]`); `{}`/`None` = anonymous;
   raise `UserAccountError`/`HTTPException` to reject (401 HTTP, 1008 close on WebSocket).
 - `user_id` must not start with `"__system__"` (`SYSTEM_USER_PREFIX` in core): `system_user_id(name)` = `"__system__:<name>"` owns shared data (each agent's memory, RAG knowledge bases). The API refuses any identity whose id starts with that prefix, from any auth backend, with 401 "This user id is reserved" (WebSocket close 1008) and a warning in the log. Auth-off development still uses `"anonymous"`.
-- Do NOT declare it `async def` — an un-awaited coroutine breaks auth silently.
+- Do NOT declare it `async def`: an un-awaited coroutine breaks auth silently.
 - Include `roles` / `scopes` in the returned dict to feed authorization.
 
 ## Authorization
 
 Configured via the `authorization` key; separate from `auth`. Values:
 
-- `null` (unset): mode-based default — `"ownership"` in production, `"allow_all"` in development.
+- `null` (unset): mode-based default: `"ownership"` in production, `"allow_all"` in development.
 - `"ownership"`: owner-only. A thread is readable/runnable/deletable only by its creator; a
   foreign `invoke`/`stream` is rejected up front (403). Enforced on every thread-touching step.
 - `"allow_all"` (aliases `"default"`, `"none"`): any authenticated user may do anything.
 - `"module:attr"`: custom `AuthorizationBackend`.
 - `{ "backend": "rbac", ... }`: role-based access control (below).
 
-Ownership is scalable: ownership is immutable, so it is cached (in-process LRU + optional shared
-Redis when `redis`/`REDIS_URL` is set) via `ThreadOwnershipResolver` over
+Ownership is scalable: ownership is immutable, so it is cached (in-process LRU + the shared
+cache store when it is not in-memory: `cache_store`, `redis` or `REDIS_URL`) via
+`ThreadOwnershipResolver` over
 `BaseCheckpointer.aget_thread_owner`. After the first lookup a check is an in-memory hit, not a
 per-request DB call; the cache is evicted on thread deletion. Ownership needs a persistent
 checkpointer (pg/sqlite/in-memory); with none, requests pass through.
+
+### Token revocation
+
+`"token_revocation": true` (or `{"enabled": true, "token_lifetime": 3600, "user_ttl": 2592000}`)
+rejects revoked tokens with 401 before they expire: by `jti` (`10xgraph revoke --jti`) or every
+token of a user issued before a cutoff (`10xgraph revoke --user`). Revocations live in the API's
+cache store, so share them between workers with `redis`, `REDIS_URL` or a custom
+`cache_store`; with the in-memory store a revocation reaches one process and `10xgraph revoke`
+refuses to run. It fails closed: while the cache store is unreachable, authenticated requests
+get 503 and the server refuses to start. The old string values (`"redis"`, `"memory"`,
+`module:attr`) are config errors naming `cache_store`.
 
 ### Custom backend interface
 
@@ -115,7 +127,7 @@ API checks decide access; the storage layer (checkpointer, store) enforces isola
 trusted policy. After a successful check, `RequirePermission` stamps
 `user["authz"] = {user_id, scope, scopes}` where `scope` = backend `isolation_scope()`. Services
 copy the trusted `user` into `config["user"]`, so the core library reads `config["user"]["authz"]`
-and scopes rows to the caller (`owner`) or not (`none`). Set server-side only — not client-forgeable.
+and scopes rows to the caller (`owner`) or not (`none`). Set server-side only; not client-forgeable.
 
 Server-owned config keys (`RESERVED_CONFIG_KEYS` in `core/auth/request_config.py`: `authz`, `user`, `user_id`, `remote_tools`, `file_tool_root`, `workspace_root`, `tool_timeout`, `node_timeout`, `max_parallel_tool_calls`, `collection`, plus any `_`-prefixed key) are dropped from client config by `client_config` on every route. They are ignored, not refused (debug log). A client never picks a Qdrant `collection`; see memory-and-store.md.
 

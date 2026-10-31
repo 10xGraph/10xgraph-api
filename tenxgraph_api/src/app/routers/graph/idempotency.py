@@ -12,10 +12,11 @@ instead, per user and key:
 - the same key with a different request body: 422;
 - a run that failed stores nothing, so the same key may be retried.
 
-No header, no change. Records live in Redis when it is configured (the client of the shared
-concurrency limiter, keys under ``REDIS_KEY_PREFIX``), else in this process. The running state
-is the same kind of lease the thread lock uses, so a crashed worker's key frees itself. A Redis
-error is logged and the request runs without idempotency, as the concurrency limiter fails open.
+No header, no change. Records live in the cache store (``idempotency:<user>:<key>`` with a
+ttl of ``IDEMPOTENCY_TTL_SECONDS``): shared between workers with Redis, else in this process.
+The running state is the same kind of lease the thread lock uses (``runs:idem:<user>:<key>``),
+so a crashed worker's key frees itself. A cache store error is logged and the request runs
+without idempotency, as the leases fail open.
 """
 
 from __future__ import annotations
@@ -23,7 +24,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import time
 import weakref
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -33,13 +33,9 @@ from fastapi import HTTPException
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
-from tenxgraph_api.src.app.core.concurrency import (
-    Lease,
-    RedisConcurrencyLimiter,
-    concurrency_limiter,
-)
 from tenxgraph_api.src.app.core.config.settings import get_settings
-from tenxgraph_api.src.app.core.redis_client import key_part, prefixed
+from tenxgraph_api.src.app.core.leases import Lease, lease_manager
+from tenxgraph_api.src.app.core.redis_client import key_part
 
 
 IDEMPOTENCY_HEADER = "Idempotency-Key"
@@ -47,7 +43,6 @@ KEY_PATTERN = re.compile(r"^[\x21-\x7e]{1,255}$")
 RETRY_AFTER_SECONDS = 5
 # A result larger than this is not stored; the key then answers 409 instead of replaying.
 MAX_STORED_BYTES = 1024 * 1024
-MAX_MEMORY_RECORDS = 10_000
 
 HTTP_CONFLICT = 409
 HTTP_UNPROCESSABLE = 422
@@ -88,34 +83,12 @@ class IdempotencyMismatch(HTTPException):
         )
 
 
-_memory: dict[str, tuple[float, str]] = {}
-
-
-def _redis_client() -> Any | None:
-    try:
-        from tenxgraph_api.src.app.core.concurrency import shared_concurrency_limiter
-
-        limiter = shared_concurrency_limiter()
-    except Exception:
-        return None
-    return limiter.client if isinstance(limiter, RedisConcurrencyLimiter) else None
-
-
 async def _load(name: str) -> dict[str, Any] | None:
-    client = _redis_client()
-    raw: Any = None
-    if client is not None:
-        try:
-            raw = await client.get(name)
-        except Exception as exc:
-            logger.warning("Idempotency lookup failed; running without it: %s", exc)
-            return None
-    else:
-        entry = _memory.get(name)
-        if entry and entry[0] > time.monotonic():
-            raw = entry[1]
-        elif entry:
-            _memory.pop(name, None)
+    try:
+        raw = await lease_manager().cache.get(name)
+    except Exception as exc:
+        logger.warning("Idempotency lookup failed; running without it: %s", exc)
+        return None
     if raw is None:
         return None
     try:
@@ -128,20 +101,10 @@ async def _load(name: str) -> dict[str, Any] | None:
 async def _save(name: str, record: dict[str, Any]) -> None:
     text = json.dumps(record, separators=(",", ":"), default=str)
     ttl = get_settings().IDEMPOTENCY_TTL_SECONDS
-    client = _redis_client()
-    if client is not None:
-        try:
-            await client.set(name, text, ex=ttl)
-        except Exception as exc:
-            logger.warning("Idempotency record could not be stored: %s", exc)
-        return
-    now = time.monotonic()
-    if len(_memory) >= MAX_MEMORY_RECORDS:
-        for stale in [k for k, (exp, _) in _memory.items() if exp <= now]:
-            _memory.pop(stale, None)
-        while len(_memory) >= MAX_MEMORY_RECORDS:  # still full: drop the oldest
-            _memory.pop(next(iter(_memory)))
-    _memory[name] = (now + ttl, text)
+    try:
+        await lease_manager().cache.set(name, text.encode(), ttl=ttl)
+    except Exception as exc:
+        logger.warning("Idempotency record could not be stored: %s", exc)
 
 
 @dataclass
@@ -181,7 +144,7 @@ async def check(
         raise ClientInputError(problem)
     user_id = user.get("user_id") if isinstance(user, dict) else None
     ident = f"{key_part(user_id or 'anonymous')}:{key_part(key)}"
-    name = f"{prefixed('10xgraph:idempotency')}:{ident}"
+    name = f"idempotency:{ident}"
     fp = fingerprint(kind, body)
 
     def _answer(record: dict[str, Any]) -> tuple[None, dict[str, Any]]:
@@ -191,7 +154,7 @@ async def check(
 
     if (record := await _load(name)) is not None:
         return _answer(record)
-    lease = await concurrency_limiter().acquire(f"runs:idem:{ident}", 1)
+    lease = await lease_manager().acquire(f"runs:idem:{ident}", 1)
     if lease is None:
         raise IdempotencyConflict("a request with this Idempotency-Key is still running")
     if (record := await _load(name)) is not None:  # finished while we took the lease

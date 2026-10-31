@@ -1,7 +1,5 @@
 """A run refused while the graph closes (BF3), client disconnect (BF6), cancelled run (BF7)."""
 
-# ruff: noqa: S101
-
 import asyncio
 import json
 from types import SimpleNamespace
@@ -14,8 +12,9 @@ from tenxgraph.core.state import AgentState, Message
 from tenxgraph.storage.checkpointer import InMemoryCheckpointer
 from tenxgraph.utils.constants import END
 
-from tenxgraph_api.src.app.core.concurrency import MemoryConcurrencyLimiter
+from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
 from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+from tenxgraph_api.src.app.core.leases import LeaseManager
 from tenxgraph_api.src.app.routers.graph import run_limits, thread_lock
 from tenxgraph_api.src.app.routers.graph.router import (
     WS_SERVICE_RESTART,
@@ -33,9 +32,9 @@ MSG = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
 
 @pytest.fixture(autouse=True)
 def limiters(monkeypatch):
-    locks, slots = MemoryConcurrencyLimiter(), MemoryConcurrencyLimiter()
-    monkeypatch.setattr(thread_lock, "concurrency_limiter", lambda: locks)
-    monkeypatch.setattr(run_limits, "concurrency_limiter", lambda: slots)
+    locks, slots = LeaseManager(InMemoryCacheStore()), LeaseManager(InMemoryCacheStore())
+    monkeypatch.setattr(thread_lock, "lease_manager", lambda: locks)
+    monkeypatch.setattr(run_limits, "lease_manager", lambda: slots)
     monkeypatch.setattr(thread_lock, "THREAD_BUSY_WAIT_SECONDS", 0.3)
     return SimpleNamespace(locks=locks, slots=slots)
 

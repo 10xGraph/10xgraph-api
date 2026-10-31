@@ -7,7 +7,11 @@ to add resource-level access control to their 10xGraph applications.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+
+if TYPE_CHECKING:
+    from tenxgraph_api.src.app.core.cache_store import BaseCacheStore
 
 
 logger = logging.getLogger("tenxgraph_api.authorization")
@@ -235,8 +239,9 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
 
     Ownership is resolved through a :class:`ThreadOwnershipResolver` in front of
     :meth:`BaseCheckpointer.aget_thread_owner`. Ownership is immutable, so the resolver
-    caches it (in-process, plus optional shared Redis) -- after the first lookup a check is
-    an in-memory hit, not a database round-trip per request.
+    caches it (in-process, plus the shared cache store when one is configured) -- after the
+    first lookup a check is an in-memory hit, not a database round-trip per request. Pass the
+    API's ``BaseCacheStore`` as ``cache``; the backend uses it but never closes it.
 
     This backend fails closed: with no checkpointer, or one that cannot resolve ownership
     (``aget_thread_owner`` raises ``NotImplementedError``), every thread-scoped request is
@@ -269,12 +274,12 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
         checkpointer: Any | None = None,
         *,
         resolver: Any | None = None,
-        redis: object | None = None,
+        cache: "BaseCacheStore | None" = None,
         server_thread_ids: bool = False,
     ) -> None:
         self._checkpointer = checkpointer
         self._resolver = resolver
-        self._redis = redis
+        self._cache = cache
         self._resolver_built = resolver is not None
         # ``runs.thread_ids == "server"``: a request may only name a thread that exists.
         self.server_thread_ids = server_thread_ids
@@ -308,7 +313,7 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
                 ThreadOwnershipResolver,
             )
 
-            self._resolver = ThreadOwnershipResolver(cp.aget_thread_owner, redis=self._redis)
+            self._resolver = ThreadOwnershipResolver(cp.aget_thread_owner, cache=self._cache)
         return self._resolver
 
     def evict(self, thread_id: str | int, owner: str | int | None = None) -> Any:
@@ -322,15 +327,6 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
         if resolver is None:
             return None
         return resolver.evict(thread_id, owner)
-
-    async def aclose(self) -> None:
-        """Close the L2 Redis client this backend created (called on app shutdown)."""
-        client = self._redis
-        if client is not None and hasattr(client, "aclose"):
-            try:
-                await client.aclose()
-            except Exception as exc:  # pragma: no cover - best-effort shutdown
-                logger.debug("Ownership Redis client close failed: %s", exc)
 
     async def authorize(
         self,
@@ -513,13 +509,13 @@ class RoleBasedAuthorizationBackend(OwnershipAuthorizationBackend):
         isolation: str = "owner",
         checkpointer: Any | None = None,
         resolver: Any | None = None,
-        redis: object | None = None,
+        cache: "BaseCacheStore | None" = None,
         server_thread_ids: bool = False,
     ) -> None:
         super().__init__(
             checkpointer=checkpointer,
             resolver=resolver,
-            redis=redis,
+            cache=cache,
             server_thread_ids=server_thread_ids,
         )
         self._role_scopes = {str(r): list(s) for r, s in (role_scopes or {}).items()}

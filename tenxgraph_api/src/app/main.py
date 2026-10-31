@@ -106,10 +106,12 @@ async def _prepare_checkpointer() -> None:
 
 
 async def _check_backends(app: FastAPI) -> None:
-    """Refuse to start while a configured backend (Postgres, Redis, store) is unreachable.
+    """Refuse to start while the checkpointer, the store or a required cache store is down.
 
-    Retries for ``STARTUP_CHECK_TIMEOUT_SECONDS``, then raises ``StartupCheckError``, which
-    stops uvicorn and gunicorn with the failed components in the log. Off with
+    Calls ``aping()`` on each, retrying for ``STARTUP_CHECK_TIMEOUT_SECONDS``, then raises
+    ``StartupCheckError``, which stops uvicorn and gunicorn with the failed components in the
+    log. The cache store is required only by fail-closed features (token revocation, a rate
+    limiter with ``fail_open: false``); otherwise an outage is one warning. Off with
     ``STARTUP_CHECKS=false``.
     """
     if not settings.STARTUP_CHECKS:
@@ -120,11 +122,29 @@ async def _check_backends(app: FastAPI) -> None:
         return
     from tenxgraph_api.src.app.routers.ping.startup_checks import check_backends_at_startup
 
-    await check_backends_at_startup(
-        container,
-        timeout=settings.STARTUP_CHECK_TIMEOUT_SECONDS,
-        rate_limit_backend=getattr(app.state, "rate_limit_backend", None),
-    )
+    await check_backends_at_startup(container, timeout=settings.STARTUP_CHECK_TIMEOUT_SECONDS)
+
+
+async def _close_cache_store() -> None:
+    """Give back the leases whose releases are still running, then close the cache store.
+
+    A release that can no longer reach the store leaves its slot (a run lock, a cap) held
+    until the lease ttl, so the next pod would answer 409 for that thread meanwhile.
+    """
+    try:
+        from tenxgraph_api.src.app.core.cache_store import BaseCacheStore
+        from tenxgraph_api.src.app.core.leases import LeaseManager, wait_for_releases
+
+        leases = container.try_get(LeaseManager)
+        if leases is not None:
+            await leases.aclose()
+        else:
+            await wait_for_releases()
+        cache_store = container.try_get(BaseCacheStore)
+        if cache_store is not None:
+            await cache_store.aclose()
+    except Exception as exc:
+        logger.debug("Cache store close failed: %s", exc)
 
 
 async def _cleanup_temp_media_cache() -> None:
@@ -211,32 +231,11 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Graph close did not finish cleanly: %s", exc)
 
-    # Close rate-limit backend (e.g. Redis connection pool)
-    backend = getattr(app.state, "rate_limit_backend", None)
-    if backend is not None:
-        await backend.close()
+    # The rate limiter, ownership cache and token revocation share the cache store: closed
+    # once here.
+    await _close_cache_store()
 
-    # Close the shared concurrency limiter (its Redis client), if one is bound.
-    try:
-        from tenxgraph_api.src.app.core.concurrency import ConcurrencyLimiter
-
-        limiter = container.try_get(ConcurrencyLimiter)
-        if limiter is not None:
-            await limiter.aclose()
-    except Exception as exc:
-        logger.debug("Concurrency limiter close failed: %s", exc)
-
-    # Close the token revocation backend (its Redis client), if one is bound.
-    try:
-        from tenxgraph_api.src.app.core.auth.revocation import TokenRevocationBackend
-
-        revocation = container.try_get(TokenRevocationBackend)
-        if revocation is not None:
-            await revocation.aclose()
-    except Exception as exc:
-        logger.debug("Token revocation backend close failed: %s", exc)
-
-    # Close the authorization backend's L2 Redis client, if it created one.
+    # A custom authorization backend may hold its own clients.
     try:
         from tenxgraph_api.src.app.core.auth.authorization import AuthorizationBackend
 

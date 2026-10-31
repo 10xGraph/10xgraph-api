@@ -102,7 +102,7 @@ Some protections keep state per process. With more than one worker or instance:
   expiring leases, so the cap holds across workers and a crashed worker's slots free up on
   their own within a minute. Without Redis each process counts its own, so the real cap is
   the limit times the number of workers.
-- **Rate limiting.** Use `"backend": "redis"` in `rate_limit`; the memory backend counts per
-  process.
+- **Rate limiting.** The counters live in the cache store: set `redis` (or `REDIS_URL`, or a
+  `cache_store`) to share them; the in-memory store counts per process.
 - **Media extraction cache.** Extracted document text is cached per process. This only costs
   repeated extraction work, not correctness.

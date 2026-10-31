@@ -143,9 +143,12 @@ class Settings(BaseSettings):
     #################################
     ###### REDIS Config ##########
     #################################
+    # The API's cache store (run locks and caps, idempotency, rate limit, token revocation,
+    # ownership cache) is a RedisCacheStore on this URL when 10xgraph.json sets neither
+    # `cache_store` nor `redis`. Unset (and neither key set): an in-memory store, per process.
     REDIS_URL: str | None = None
-    # Limits for every Redis client the API opens (run locks, caps, rate limit, token
-    # revocation, ownership cache, readiness probe). Without them a Redis that stops
+    # Limits for the Redis client of a RedisCacheStore built from `redis` or REDIS_URL (and
+    # of `10xgraph revoke`). Without them a Redis that stops
     # answering (not refusing) would hang each request that touches it. Seconds; 0 turns the
     # timeout off. REDIS_MAX_CONNECTIONS bounds each client's pool; a request waits up to
     # REDIS_POOL_TIMEOUT for a free connection. 0 means no bound.
@@ -154,19 +157,21 @@ class Settings(BaseSettings):
     REDIS_MAX_CONNECTIONS: int = Field(default=50, ge=0)
     REDIS_POOL_TIMEOUT: float = Field(default=5.0, ge=0.0)
     REDIS_HEALTH_CHECK_INTERVAL: float = Field(default=30.0, ge=0.0)
-    # Put in front of every key the API writes to Redis (run locks and caps, ownership cache,
-    # token revocation), so two deployments that share one Redis cannot read each other's
-    # entries. Empty means no prefix. Give the core checkpointer the same value through its
-    # ``redis_key_prefix`` option so its cache keys are separated too.
+    # Put in front of every key a RedisCacheStore writes (run locks and caps, idempotency,
+    # rate limit, ownership cache, token revocation), so two deployments that share one Redis
+    # cannot read each other's entries. Empty means no prefix. Give the core checkpointer the
+    # same value through its ``redis_key_prefix`` option so its cache keys are separated too.
     REDIS_KEY_PREFIX: str = ""
 
     #################################
     ###### Startup checks ###########
     #################################
-    # At startup, before serving, ping every configured backend (the checkpointer's Postgres
-    # and Redis, the store, the API's Redis, the rate limiter's Redis) and refuse to start when
-    # one stays unreachable. Applies in development and production, so a wrong connection
-    # string fails the boot (and the deploy) instead of the first request. False skips it.
+    # At startup, before serving, call aping() on the checkpointer, the store and the cache
+    # store, and refuse to start when one stays unreachable. The cache store counts only when
+    # a fail-closed feature uses it (token_revocation, or rate_limit with fail_open false);
+    # otherwise an unreachable one is one warning. Applies in development and production, so
+    # a wrong connection string fails the boot (and the deploy) instead of the first request.
+    # False skips it.
     STARTUP_CHECKS: bool = True
     # How long, in seconds, startup keeps retrying a failing backend (with a short backoff)
     # before it gives up, so services started together (docker compose) can come up in any

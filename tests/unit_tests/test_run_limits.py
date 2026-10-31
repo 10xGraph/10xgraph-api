@@ -1,7 +1,5 @@
 """Per-user run cap and run timeout for graph runs."""
 
-# ruff: noqa: S101
-
 import asyncio
 import gc
 from types import SimpleNamespace
@@ -11,8 +9,9 @@ import pytest
 from fastapi import HTTPException
 from tenxgraph.core.state import StreamChunk, StreamEvent
 
-from tenxgraph_api.src.app.core.concurrency import MemoryConcurrencyLimiter
+from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
 from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+from tenxgraph_api.src.app.core.leases import LeaseManager
 from tenxgraph_api.src.app.routers.graph import run_limits
 from tenxgraph_api.src.app.routers.graph.run_limits import (
     acquire_run_slot,
@@ -30,7 +29,10 @@ from tenxgraph_api.src.app.routers.graph.services.graph_service import (
 ALICE = {"user_id": "alice"}
 
 
-class _Slots(MemoryConcurrencyLimiter):
+class _Slots(LeaseManager):
+    def __init__(self):
+        super().__init__(InMemoryCacheStore())
+
     def held(self, user_id):  # tests count by user id
         return super().held(run_limits.run_slot_key(user_id))
 
@@ -38,7 +40,7 @@ class _Slots(MemoryConcurrencyLimiter):
 @pytest.fixture(autouse=True)
 def fresh_slots(monkeypatch):
     slots = _Slots()
-    monkeypatch.setattr(run_limits, "concurrency_limiter", lambda: slots)
+    monkeypatch.setattr(run_limits, "lease_manager", lambda: slots)
     return slots
 
 

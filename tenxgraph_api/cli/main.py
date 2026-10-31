@@ -48,8 +48,7 @@ def _lazy_command(module_name: str, class_name: str) -> type:
                     f"The {feature} command could not load its required dependencies: {exc}",
                     hints=(
                         "Run `10xgraph audit` to inspect installed package compatibility.",
-                        "Upgrade with `python -m pip install --upgrade "
-                        '"10xgraph>=1.0.0rc3,<2"`.',
+                        'Upgrade with `python -m pip install --upgrade "10xgraph>=1.0.0rc3,<2"`.',
                     ),
                 ) from exc
             implementation = getattr(module, class_name)
@@ -431,13 +430,15 @@ def revoke(
         None, "--expires-at", help="With --jti: the token's exp (epoch seconds), to drop the entry."
     ),
     redis_url: str | None = typer.Option(
-        None, "--redis-url", help="Redis URL (default: REDIS_URL, then `redis` in 10xgraph.json)."
+        None,
+        "--redis-url",
+        help="Redis URL to write to instead of the cache store the server uses.",
     ),
     config_file: str = typer.Option(
         DEFAULT_CONFIG_FILE, "--config", "-c", help="Project configuration file."
     ),
 ) -> None:
-    """Revoke a token or all of a user's tokens (needs "token_revocation": "redis")."""
+    """Revoke a token or all of a user's tokens (needs "token_revocation": true)."""
     try:
         sys.exit(
             RevokeCommand(output).execute(
@@ -515,7 +516,10 @@ def init(  # noqa: PLR0913
     rate_limit: str | None = typer.Option(
         None,
         "--rate-limit",
-        help="Rate limiting: none, memory, or redis.",
+        help=(
+            "Rate limiting: none (off), memory (on, no shared cache store), or redis (on, "
+            "Redis cache store from REDIS_URL, plus token revocation with auth)."
+        ),
     ),
     provider: str | None = typer.Option(
         None,

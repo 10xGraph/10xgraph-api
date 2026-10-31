@@ -21,15 +21,14 @@ from tenxgraph_api.cli.core.output import OutputFormatter
 
 REDIS_RATE_LIMIT = {
     "enabled": True,
-    "backend": "redis",
-    "redis": {"url": "redis://x"},
     "by": "user",
 }
 READY = {
     "agent": "graph.react:app",
     "auth": "jwt",
+    "redis": "redis://x",
     "rate_limit": REDIS_RATE_LIMIT,
-    "token_revocation": "redis",
+    "token_revocation": True,
 }
 AUTH_OFF_TEXT = "Auth is off"
 
@@ -63,7 +62,37 @@ def test_safe_authorization_does_not_warn(value: str | None) -> None:
 
 def test_disabled_rate_limit_warns() -> None:
     config = {**READY, "rate_limit": {"enabled": False}}
-    assert _paths(production_readiness_warnings(config)) == ["rate_limit"]
+    issues = production_readiness_warnings(config)
+    assert _paths(issues) == ["rate_limit"]
+    assert "a shared cache store" in issues[0]["message"]
+
+
+def test_token_revocation_without_a_shared_cache_store_warns(monkeypatch) -> None:
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    config = {key: value for key, value in READY.items() if key != "redis"}
+    issues = validate_config(config)
+    assert _paths(issues) == ["token_revocation"]
+    assert "10xgraph revoke" in issues[0]["message"]
+    assert not _paths(validate_config({**config, "cache_store": "graph.cache:store"}))
+
+
+@pytest.mark.parametrize("value", ["redis", "memory", "auth.revoke:Backend"])
+def test_old_token_revocation_strings_are_errors_naming_the_cache_store(value: str) -> None:
+    issues = validate_config({**READY, "token_revocation": value})
+    errors = [i for i in issues if i["level"] == "error"]
+    assert [i["path"] for i in errors] == ["token_revocation"]
+    assert "cache_store" in errors[0]["message"]
+
+
+def test_token_revocation_object_form_is_valid() -> None:
+    value = {"enabled": True, "token_lifetime": 3600, "user_ttl": None}
+    assert validate_config({**READY, "token_revocation": value}) == []
+
+
+@pytest.mark.parametrize("value", [False, {"enabled": False}])
+def test_token_revocation_turned_off_warns_with_auth(value: object) -> None:
+    issues = validate_config({**READY, "token_revocation": value})
+    assert _paths(issues) == ["token_revocation"]
 
 
 def test_auth_without_token_revocation_warns() -> None:

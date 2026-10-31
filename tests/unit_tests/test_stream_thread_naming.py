@@ -1,7 +1,5 @@
 """Thread naming on the stream path stays off the critical path (G-102)."""
 
-# ruff: noqa: S101
-
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,7 +8,8 @@ from injectq import InjectQ
 from tenxgraph.core.state import Message, StreamChunk, StreamEvent
 from tenxgraph.core.state.message_block import TextBlock
 
-from tenxgraph_api.src.app.core.concurrency import MemoryConcurrencyLimiter
+from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
+from tenxgraph_api.src.app.core.leases import LeaseManager
 from tenxgraph_api.src.app.routers.graph import thread_lock
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import GraphInputSchema
 from tenxgraph_api.src.app.routers.graph.services import graph_service
@@ -27,8 +26,8 @@ def no_task_manager(monkeypatch):
 
 @pytest.fixture
 def locks(monkeypatch):
-    limiter = MemoryConcurrencyLimiter()
-    monkeypatch.setattr(thread_lock, "concurrency_limiter", lambda: limiter)
+    limiter = LeaseManager(InMemoryCacheStore())
+    monkeypatch.setattr(thread_lock, "lease_manager", lambda: limiter)
     return limiter
 
 

@@ -1,14 +1,20 @@
-"""Startup gate: refuse to serve while a configured backend cannot be reached.
+"""Startup gate: refuse to serve while a backend the server needs cannot be reached.
 
-A server whose Redis, Postgres or vector store is down still answers ``/ping``, and before
-this gate it served every other request with an error (a fail-closed rate limiter answered
-429 to everything). The lifespan now runs the readiness probes (``readiness.py``) for each
-configured backend before the app serves, retrying with a short backoff for
+A server whose checkpointer or store is down still answers ``/ping``, and before this gate it
+served every other request with an error. The lifespan now calls ``aping()`` on what is bound
+(the checkpointer, the store and the API's cache store, as readiness does in
+``readiness.py``) before the app serves, retrying with a short backoff for
 ``STARTUP_CHECK_TIMEOUT_SECONDS`` so services started together can come up in any order. When
-one still fails, :class:`StartupCheckError` stops the boot and names each component, its
-``host:port`` (never credentials) and the error. ``STARTUP_CHECKS=false`` turns the gate off.
+one still fails, :class:`StartupCheckError` stops the boot and names each component, its class,
+where its setting came from and its endpoint when the component describes one (never
+credentials). ``STARTUP_CHECKS=false`` turns the gate off.
 
-Unlike readiness, a Redis outage is not tolerated here: a configured backend that is wrong at
+The cache store is fatal only when a configured feature fails closed without it
+(``token_revocation``, or ``rate_limit`` with ``fail_open: false``; see
+``readiness.cache_required_by``). Otherwise it is checked once and an unreachable one logs one
+WARNING: the run locks and caps fall back to this process, and the server starts.
+
+Unlike readiness, a required backend's outage is not tolerated here: a backend that is wrong at
 boot is a deployment mistake, not a transient outage.
 """
 
@@ -19,18 +25,18 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlsplit
 
+from tenxgraph_api.src.app.core.cache_store.loader import CacheStoreSource
+from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.core.utils.log_sanitizer import redact_text
 
 from .readiness import (
     CHECK_TIMEOUT_SECONDS,
     FAIL,
     OK,
-    check_checkpointer,
+    cache_required_by,
     check_outcome,
-    check_redis,
-    check_store,
+    ping_component,
     readiness_targets,
 )
 
@@ -39,107 +45,75 @@ logger = logging.getLogger("tenxgraph_api.startup")
 
 FIRST_RETRY_DELAY_SECONDS = 0.5
 MAX_RETRY_DELAY_SECONDS = 5.0
-HINT = "Start Redis/Postgres/Qdrant, or set STARTUP_CHECKS=false to skip this check."
+HINT = "Start the backend, fix its URL, or set STARTUP_CHECKS=false to skip this check."
 
 
 class StartupCheckError(RuntimeError):
-    """A configured backend stayed unreachable for the whole startup window."""
+    """A required backend stayed unreachable for the whole startup window."""
 
 
 @dataclass
 class Target:
-    """One configured backend to check: a name, its probe and where it lives."""
+    """One bound backend to check: a name, its probe and what to call it in messages."""
 
     name: str
     check: Callable[[], Awaitable[None]]
-    endpoints: list[str] = field(default_factory=list)
+    details: list[str] = field(default_factory=list)
+    required: bool = True
 
 
-def host_port(url: Any) -> str | None:
-    """``host:port`` of a URL or DSN, without user, password, path or query; None if unknown."""
-    if not isinstance(url, str) or "://" not in url:
-        return None
-    try:
-        parts = urlsplit(url)
-        host = parts.hostname
-        port = parts.port
-    except ValueError:
-        return None
-    if not host:
-        return None
-    if ":" in host:
-        host = f"[{host}]"
-    return f"{host}:{port}" if port else host
+def _component_details(component: Any) -> list[str]:
+    """The class name and, when the component has a ``describe()``, its endpoint."""
+    details = [type(component).__name__]
+    describe = getattr(component, "describe", None)
+    if callable(describe):
+        try:
+            where = describe()
+        except Exception:  # a custom component's describe must not break boot
+            where = None
+        if isinstance(where, str) and where:
+            details.append(where)
+    return details
 
 
-def _redis_client_endpoint(client: Any) -> str | None:
-    """``host:port`` a redis-py client connects to, from its pool's connection settings."""
-    kwargs = getattr(getattr(client, "connection_pool", None), "connection_kwargs", None)
-    if not isinstance(kwargs, dict) or not kwargs.get("host"):
-        return None
-    return f"{kwargs['host']}:{kwargs.get('port', 6379)}"
+def _cache_source(container: Any) -> str | None:
+    found = container.try_get(CacheStoreSource) if CacheStoreSource in container else None
+    return getattr(found, "text", None)
 
 
-def _checkpointer_endpoints(checkpointer: Any) -> list[str]:
-    """Best effort: the Postgres and Redis a ``PgCheckpointer`` uses."""
-    found = []
-    pool_config = getattr(checkpointer, "_pg_pool_config", None)
-    dsn = pool_config.get("postgres_dsn") if isinstance(pool_config, dict) else None
-    if (where := host_port(dsn)) is not None:
-        found.append(f"postgres {where}")
-    if (where := _redis_client_endpoint(getattr(checkpointer, "redis", None))) is not None:
-        found.append(f"redis {where}")
-    return found
+def _graph_config(container: Any) -> Any:
+    return container.try_get(GraphConfig) if GraphConfig in container else None
 
 
-def _store_endpoints(store: Any) -> list[str]:
-    """Best effort: the server a ``QdrantStore`` talks to (its client's REST address)."""
-    remote = getattr(getattr(store, "client", None), "_client", None)
-    where = host_port(getattr(remote, "rest_uri", None))
-    return [where] if where else []
-
-
-def startup_targets(container: Any, rate_limit_backend: Any = None) -> list[Target]:
-    """Every configured backend, as readiness sees it, plus the rate limiter's own Redis.
-
-    Components that are not configured are left out. The rate limiter's Redis is added only
-    when it was built from its own URL and that URL differs from the API's Redis.
-    """
-    checkpointer, store, redis_url = readiness_targets(container)
+def startup_targets(container: Any) -> list[Target]:
+    """The checkpointer, store and cache store bound in ``container``; unbound ones left out."""
+    checkpointer, store, cache = readiness_targets(container)
     targets = []
     if checkpointer is not None:
         targets.append(
             Target(
                 "checkpointer",
-                lambda: check_checkpointer(checkpointer),
-                _checkpointer_endpoints(checkpointer),
+                lambda: ping_component(checkpointer),
+                _component_details(checkpointer),
             )
         )
     if store is not None:
-        targets.append(Target("store", lambda: check_store(store), _store_endpoints(store)))
-    if redis_url:
+        targets.append(Target("store", lambda: ping_component(store), _component_details(store)))
+    if cache is not None:
+        details = _component_details(cache)
+        if source := _cache_source(container):
+            details.insert(1, source)
+        required_by = cache_required_by(_graph_config(container))
+        if required_by:
+            details.append(f"required by {' and '.join(required_by)}")
         targets.append(
-            Target("redis", lambda: check_redis(redis_url), [host_port(redis_url) or "?"])
-        )
-    limiter_url = getattr(rate_limit_backend, "redis_url", None)
-    if isinstance(limiter_url, str) and limiter_url and limiter_url != redis_url:
-        targets.append(
-            Target(
-                "rate_limit redis",
-                lambda: check_redis(limiter_url),
-                [host_port(limiter_url) or "?"],
-            )
-        )
-    elif hasattr(rate_limit_backend, "redis_url") and not limiter_url:
-        logger.info(
-            "Startup check: the rate limiter uses a Redis client bound in the container; "
-            "it is not checked at startup."
+            Target("cache", lambda: ping_component(cache), details, required=bool(required_by))
         )
     return targets
 
 
 def _describe(target: Target) -> str:
-    return f"{target.name} ({', '.join(target.endpoints)})" if target.endpoints else target.name
+    return f"{target.name} ({', '.join(target.details)})" if target.details else target.name
 
 
 def _error_text(error: BaseException | None, timeout: float) -> str:
@@ -160,7 +134,7 @@ async def wait_for_backends(
 
     Each round checks the components still failing, concurrently, each bounded by
     ``attempt_timeout``. There is always at least one round. A component with nothing to check
-    (a store without ``aping``/``ping``) is skipped with an INFO line.
+    (no ``aping``) is skipped with an INFO line.
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
@@ -205,8 +179,7 @@ async def wait_for_backends(
     raise StartupCheckError(
         "\n".join(
             [
-                f"Refusing to start: {len(pending)} configured backend(s) unreachable after "
-                f"{timeout:g}s:",
+                f"Refusing to start: {len(pending)} backend(s) unreachable after {timeout:g}s:",
                 *lines,
                 HINT,
             ]
@@ -214,18 +187,47 @@ async def wait_for_backends(
     )
 
 
+def _label(target: Target) -> str:
+    """``RedisCacheStore (from REDIS_URL, localhost:6379)``: the class, then the rest."""
+    if not target.details:
+        return target.name
+    first, *rest = target.details
+    return f"{first} ({', '.join(rest)})" if rest else first
+
+
+async def _check_optional(target: Target, attempt_timeout: float) -> bool:
+    """One attempt at a backend the server can run without; one WARNING when it fails."""
+    result, error = await check_outcome(target.check, attempt_timeout)
+    if result != FAIL:
+        return True
+    logger.warning(
+        "Startup check: cache store %s unreachable: locks and caps fall back to per process "
+        "until it answers (%s). No configured feature needs it, so the server starts.",
+        _label(target),
+        _error_text(error, attempt_timeout),
+    )
+    return False
+
+
 async def check_backends_at_startup(
-    container: Any, *, timeout: float, rate_limit_backend: Any = None
+    container: Any, *, timeout: float, attempt_timeout: float = CHECK_TIMEOUT_SECONDS
 ) -> None:
     """Run the startup gate for the app's container; log and raise when it fails."""
-    targets = startup_targets(container, rate_limit_backend)
+    targets = startup_targets(container)
     if not targets:
         logger.debug("Startup check: no backends configured")
         return
+    required = [target for target in targets if target.required]
+    reachable = list(required)
+    for target in targets:
+        if not target.required and await _check_optional(target, attempt_timeout):
+            reachable.append(target)
     try:
-        await wait_for_backends(targets, timeout=timeout)
+        await wait_for_backends(required, timeout=timeout, attempt_timeout=attempt_timeout)
     except StartupCheckError as exc:
         # The text as the format string: an argument would have its line breaks escaped.
         logger.critical(str(exc))
         raise
-    logger.info("Startup check passed: %s", ", ".join(target.name for target in targets))
+    logger.info(
+        "Startup check passed: %s", ", ".join(target.name for target in reachable) or "nothing"
+    )

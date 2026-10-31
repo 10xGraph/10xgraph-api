@@ -1,13 +1,17 @@
 """Revoke a token or every token of a user: ``10xgraph revoke``.
 
-Writes to the same Redis the server reads (``token_revocation: "redis"`` in 10xgraph.json),
-so the revocation applies to every worker at once. The server needs no restart.
+Writes to the cache store the server reads (``"token_revocation": true`` in 10xgraph.json),
+picked the same way the server picks it: ``cache_store``, else ``redis``, else ``REDIS_URL``.
+With a shared store (Redis) the revocation applies to every worker at once; the server needs
+no restart. ``--redis-url`` overrides the selection.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import sys
+from types import SimpleNamespace
 from typing import Any
 
 from tenxgraph_api.cli.commands import BaseCommand
@@ -19,23 +23,42 @@ from tenxgraph_api.cli.exceptions import ValidationError
 class RevokeCommand(BaseCommand):
     """Revoke one token (``--jti``) or all of a user's older tokens (``--user``)."""
 
-    def _redis_url(self, redis_url: str | None, config: str) -> str:
-        if redis_url:
-            return redis_url
-        env_url = os.environ.get("REDIS_URL")
-        if env_url:
-            return env_url
-        path = resolve_default_config(config)
-        if path.exists():
-            from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
-
-            configured = GraphConfig(str(path)).redis_url
-            if isinstance(configured, str) and configured and "${" not in configured:
-                return configured
-        raise ValidationError(
-            "No Redis URL. Pass --redis-url, set REDIS_URL, or set `redis` in 10xgraph.json.",
-            field="redis_url",
+    def _cache_store(self, redis_url: str | None, config: str) -> tuple[Any, float | None]:
+        """The cache store to write to and the default ``user_ttl`` from the project config."""
+        from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore, RedisCacheStore
+        from tenxgraph_api.src.app.core.cache_store.loader import build_cache_store
+        from tenxgraph_api.src.app.core.config.graph_config import (
+            DEFAULT_USER_REVOCATION_TTL,
+            GraphConfig,
         )
+
+        path = resolve_default_config(config)
+        graph_config = GraphConfig(str(path)) if path.exists() else None
+        user_ttl: float | None = DEFAULT_USER_REVOCATION_TTL
+        if graph_config is not None:
+            settings = graph_config.token_revocation  # raises for a removed value
+            if settings is not None:
+                user_ttl = settings.user_ttl
+        if redis_url:
+            return RedisCacheStore.from_url(redis_url), user_ttl
+
+        if graph_config is not None:
+            # A ``cache_store: "module:attr"`` imports from the project, like the server does.
+            root = str(path.resolve().parent)
+            if root not in sys.path:
+                sys.path.insert(0, root)
+        # GraphConfig has loaded the project's env file, so REDIS_URL is read after it.
+        store, source = build_cache_store(
+            graph_config, SimpleNamespace(REDIS_URL=os.environ.get("REDIS_URL"))
+        )
+        if isinstance(store, InMemoryCacheStore):
+            raise ValidationError(
+                f"The cache store is in-memory ({source}): a CLI process cannot reach the "
+                "server's memory. Set `redis` in 10xgraph.json, REDIS_URL or a `cache_store` "
+                "(the server must use the same one), or pass --redis-url.",
+                field="redis_url",
+            )
+        return store, user_ttl
 
     def execute(
         self,
@@ -50,19 +73,18 @@ class RevokeCommand(BaseCommand):
         try:
             if bool(user) == bool(jti):
                 raise ValidationError("Pass exactly one of --user or --jti.", field="user")
-            url = self._redis_url(redis_url, config)
+            store, user_ttl = self._cache_store(redis_url, config)
 
-            from tenxgraph_api.src.app.core.auth.revocation import RedisTokenRevocation
+            from tenxgraph_api.src.app.core.auth import revocation
 
             async def run() -> None:
-                backend = RedisTokenRevocation(url)
                 try:
                     if user:
-                        await backend.revoke_user(user, before=before)
+                        await revocation.revoke_user(store, user, before=before, ttl=user_ttl)
                     else:
-                        await backend.revoke_token(str(jti), expires_at=expires_at)
+                        await revocation.revoke_token(store, str(jti), expires_at=expires_at)
                 finally:
-                    await backend.aclose()
+                    await store.aclose()
 
             asyncio.run(run())
             if user:

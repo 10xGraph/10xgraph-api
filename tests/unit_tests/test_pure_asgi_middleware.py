@@ -10,17 +10,15 @@ from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
 from tenxgraph_api.src.app.core.config.graph_config import RateLimitConfig
 from tenxgraph_api.src.app.core.config.setup_middleware import RequestIDMiddleware
-from tenxgraph_api.src.app.core.middleware.rate_limit import (
-    MemoryRateLimitBackend,
-    RateLimitMiddleware,
-)
+from tenxgraph_api.src.app.core.middleware.rate_limit import RateLimitMiddleware
 from tenxgraph_api.src.app.core.middleware.security_headers import SecurityHeadersMiddleware
 
 
 def _rate_limit_config(**overrides) -> RateLimitConfig:
-    data = {"enabled": True, "backend": "memory", "requests": 5, "window": 60}
+    data = {"enabled": True, "requests": 5, "window": 60}
     data.update(overrides)
     return RateLimitConfig.from_dict(data)
 
@@ -48,9 +46,7 @@ def _app() -> FastAPI:
 
         return StreamingResponse(body(), media_type="text/plain")
 
-    app.add_middleware(
-        RateLimitMiddleware, config=_rate_limit_config(), backend=MemoryRateLimitBackend()
-    )
+    app.add_middleware(RateLimitMiddleware, config=_rate_limit_config(), cache=InMemoryCacheStore())
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestIDMiddleware)
     return app
@@ -85,7 +81,7 @@ def test_rate_limited_response_still_carries_request_id_and_security_headers():
     app.add_middleware(
         RateLimitMiddleware,
         config=_rate_limit_config(requests=1),
-        backend=MemoryRateLimitBackend(),
+        cache=InMemoryCacheStore(),
     )
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestIDMiddleware)
@@ -108,7 +104,7 @@ def test_websocket_scopes_pass_straight_through():
         await websocket.close()
 
     app.add_middleware(
-        RateLimitMiddleware, config=_rate_limit_config(requests=1), backend=MemoryRateLimitBackend()
+        RateLimitMiddleware, config=_rate_limit_config(requests=1), cache=InMemoryCacheStore()
     )
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestIDMiddleware)

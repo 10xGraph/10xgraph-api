@@ -26,7 +26,7 @@ def _app(allowed_host: str = "testserver", max_size: int = 10 * 1024 * 1024) -> 
         _env_file=None,
     )
     graph_config = SimpleNamespace(
-        rate_limit=RateLimitConfig.from_dict({"backend": "memory", "requests": 1, "window": 60}),
+        rate_limit=RateLimitConfig.from_dict({"requests": 1, "window": 60}),
         observability=None,
     )
     app = FastAPI()

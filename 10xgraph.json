@@ -6,7 +6,6 @@
   "auth": null,
   "rate_limit": {
     "enabled": true,
-    "backend": "memory",
     "requests": 100,
     "window": 60,
     "by": "ip",

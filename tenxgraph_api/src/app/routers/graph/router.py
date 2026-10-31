@@ -29,7 +29,7 @@ from tenxgraph_api.src.app.core.auth.revocation import (
     TokenRevocationUnavailableError,
     token_revoked,
 )
-from tenxgraph_api.src.app.core.concurrency import Lease
+from tenxgraph_api.src.app.core.leases import Lease
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe, summarize_validation_error
 from tenxgraph_api.src.app.routers.graph import idempotency
 from tenxgraph_api.src.app.routers.graph.realtime_guard import (

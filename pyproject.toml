@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "10xgraph-api"
-version = "1.0.0rc3"
+version = "1.0.0rc4"
 description = "Production server for 10xGraph agents (formerly 10xscale-agentflow-cli). Serves a compiled graph over REST, SSE, WebSocket, realtime audio and AG-UI with JWT or custom auth, scoped authorization on every endpoint, owner-only threads and rate limiting, and generates Docker Compose and Kubernetes files. Includes the 10xgraph CLI. MIT licensed, self-hosted."
 readme = "README.md"
 license = "MIT"

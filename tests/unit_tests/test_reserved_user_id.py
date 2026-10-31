@@ -27,12 +27,9 @@ from tenxgraph_api.src.app.core.auth.reserved_identity import (
     identity_is_reserved,
     is_reserved_user_id,
 )
+from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RateLimitConfig
-from tenxgraph_api.src.app.core.middleware.rate_limit import (
-    MemoryRateLimitBackend,
-    RateLimitMiddleware,
-    keying,
-)
+from tenxgraph_api.src.app.core.middleware.rate_limit import RateLimitMiddleware, keying
 from tenxgraph_api.src.app.routers.graph.realtime_guard import ws_identity_still_valid
 
 
@@ -79,9 +76,9 @@ def _app(auth: BaseAuth, *, rate_limit_by_user: bool = False) -> tuple[FastAPI, 
     app = FastAPI()
     if rate_limit_by_user:
         config = RateLimitConfig.from_dict(
-            {"enabled": True, "backend": "memory", "requests": 100, "window": 60, "by": "user"}
+            {"enabled": True, "requests": 100, "window": 60, "by": "user"}
         )
-        app.add_middleware(RateLimitMiddleware, config=config, backend=MemoryRateLimitBackend())
+        app.add_middleware(RateLimitMiddleware, config=config, cache=InMemoryCacheStore())
     setup_fastapi(container, app)
 
     @app.get("/v1/threads")

@@ -2,7 +2,7 @@ import { copyCommand, go, setSection } from "./actions.js";
 import { Field, fieldGroups } from "./fields.jsx";
 import { SECTION_ICONS } from "./icons.js";
 import {
-  PAGES, WIDGET_FIELD_IDS, getPath, isAgentReady, isOn, issueAt, issuesFor, navItem, section, store,
+  PAGES, WIDGET_FIELD_IDS, getPath, isAgentReady, isOn, issuesFor, navItem, section, store,
   valueOrDefault,
 } from "./store.js";
 import { Callout, Icon, IssueCallout, Segmented } from "./ui.jsx";
@@ -58,12 +58,10 @@ function rateSummary() {
   const v = (k) => valueOrDefault(["rate_limit", k]);
   if (v("enabled") === false) return { text: "Settings kept, not enforced." };
   const by = { ip: "per IP", user: "per user", global: "across all clients" }[v("by")] || v("by");
-  const warn = issueAt("rate_limit.backend")?.level === "warning";
   const custom = ["requests", "window", "by"].some((k) => getPath(store.config, ["rate_limit", k]) !== undefined
     && getPath(store.config, ["rate_limit", k]) !== store.fields.get(`rate_limit.${k}`)?.default);
   return {
-    text: `${v("requests")} requests per ${v("window")} s, ${by}${custom ? "" : " (default)"}.${warn ? " The memory backend counts per process." : ""}`,
-    warn,
+    text: `${v("requests")} requests per ${v("window")} s, ${by}${custom ? "" : " (default)"}.`,
   };
 }
 

@@ -18,7 +18,13 @@ from tenxgraph_api.src.app.core.auth.authorization import (
 )
 from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
 from tenxgraph_api.src.app.core.auth.jwt_auth import JwtAuth
-from tenxgraph_api.src.app.core.auth.revocation import InMemoryTokenRevocation, token_revoked
+from tenxgraph_api.src.app.core.auth.revocation import (
+    TokenRevocationConfig,
+    revoke_token,
+    revoke_user,
+    token_revoked,
+)
+from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.exceptions.user_exception import UserAccountError
 from tenxgraph_api.src.app.routers.checkpointer.router import router as checkpointer_router
@@ -74,19 +80,19 @@ def test_string_user_id_is_unchanged():
 
 @pytest.mark.asyncio
 async def test_jti_revocation_is_checked_with_an_odd_user_id():
-    backend = InMemoryTokenRevocation()
-    backend.revoke_token("t-1")
+    store, on = InMemoryCacheStore(), TokenRevocationConfig()
+    await revoke_token(store, "t-1")
     for odd in (None, "", 0, ["x"], {"a": 1}):
-        assert await token_revoked({"user_id": odd, "jti": "t-1"}, backend) is True
-    assert await token_revoked({"user_id": "", "jti": "other"}, backend) is False
+        assert await token_revoked({"user_id": odd, "jti": "t-1"}, store, on) is True
+    assert await token_revoked({"user_id": "", "jti": "other"}, store, on) is False
 
 
 @pytest.mark.asyncio
 async def test_user_revocation_still_applies_to_a_valid_user_id():
-    backend = InMemoryTokenRevocation()
-    backend.revoke_user("alice", before=100)
-    assert await token_revoked({"user_id": "alice", "iat": 50}, backend) is True
-    assert await token_revoked({"user_id": "bob", "iat": 50}, backend) is False
+    store, on = InMemoryCacheStore(), TokenRevocationConfig()
+    await revoke_user(store, "alice", before=100)
+    assert await token_revoked({"user_id": "alice", "iat": 50}, store, on) is True
+    assert await token_revoked({"user_id": "bob", "iat": 50}, store, on) is False
 
 
 # ---------------------------------------------------------------------------

@@ -22,8 +22,8 @@ Section shape::
 Field shape::
 
     {
-        "path": ["rate_limit", "redis", "url"],
-        "label": "Redis URL",
+        "path": ["rate_limit", "requests"],
+        "label": "Requests per window",
         "type": "text" | "number" | "bool" | "select" | "list",
         "help": "...",
         "placeholder": "...",
@@ -37,7 +37,7 @@ Field shape::
         "unlimited_value": 0,  # number only: an "Unlimited" checkbox that writes this value
         "null_label": "No limit",  # number only: a choice that writes JSON null
         "exclusive_min": 0,  # number only: the value must be greater than this
-        "group": "Backend",  # fields sharing a group render together
+        "group": "Limits",  # fields sharing a group render together
         "show_if": {"path": [...], "equals": value},
     }
 
@@ -87,6 +87,7 @@ KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
         "authorization",
         "token_revocation",
         "graph_introspection",
+        "cache_store",
         "rate_limit",
         "websocket",
         "runs",
@@ -182,8 +183,64 @@ _SECTIONS: list[dict[str, Any]] = [
     },
     {
         "id": "token_revocation",
-        "title": "Access extras",
-        "description": "Who may read graph internals, and rejecting revoked tokens early.",
+        "title": "Token revocation",
+        "description": (
+            "Reject revoked tokens (10xgraph revoke) before they expire. Revocations live in "
+            "the API's cache store."
+        ),
+        "key": "token_revocation",
+        "optional": True,
+        "off_summary": "Tokens are accepted until they expire.",
+        "default": True,
+        "fields": [
+            {
+                "path": ["token_revocation", "enabled"],
+                "default": True,
+                "label": "Enabled",
+                "type": "bool",
+                "help": "Turn off to keep the settings without checking revocations.",
+            },
+            {
+                "path": ["token_revocation", "token_lifetime"],
+                "label": "Token lifetime (seconds)",
+                "type": "number",
+                "exclusive_min": 0,
+                "step": 1,
+                "placeholder": "3600",
+                "help": (
+                    "The longest lifetime of the tokens you issue. Dates a token that has no "
+                    "iat claim from its exp, for user revocations."
+                ),
+            },
+            {
+                "path": ["token_revocation", "user_ttl"],
+                "default": 2592000,
+                "label": "User revocation kept (seconds)",
+                "type": "number",
+                "exclusive_min": 0,
+                "step": 1,
+                "null_label": "Until deleted",
+                "help": "How long a revoke --user entry is kept by default.",
+            },
+        ],
+        "notes": [
+            "Fails closed: while the cache store is unreachable, authenticated requests get "
+            "503, and the server refuses to start.",
+            "Share revocations between workers with a shared cache store (redis, REDIS_URL or "
+            "cache_store under Plugins). With the in-memory store a revocation reaches "
+            "one process only, and 10xgraph revoke cannot reach it.",
+        ],
+        "env": [
+            {
+                "name": "REDIS_URL",
+                "purpose": "Redis for the cache store when neither redis nor cache_store is set.",
+            },
+        ],
+    },
+    {
+        "id": "graph_introspection",
+        "title": "Graph introspection",
+        "description": "Who may read the graph structure, tool schemas and state schema.",
         "key": None,
         "optional": False,
         "fields": [
@@ -198,22 +255,6 @@ _SECTIONS: list[dict[str, Any]] = [
                     "requires the graph:read scope."
                 ),
             },
-            {
-                "path": ["token_revocation"],
-                "label": "Revocation list",
-                "type": "text",
-                "placeholder": "redis",
-                "help": (
-                    "redis (shared, uses the redis key or REDIS_URL), memory (one process), "
-                    "or module:attr for your own TokenRevocationBackend. Empty means off."
-                ),
-            },
-        ],
-        "env": [
-            {
-                "name": "REDIS_URL",
-                "purpose": "Redis for the revocation list when no redis key is set.",
-            },
         ],
     },
     {
@@ -225,7 +266,6 @@ _SECTIONS: list[dict[str, Any]] = [
         "off_summary": "Requests are not rate limited.",
         "default": {
             "enabled": True,
-            "backend": "memory",
             "requests": 100,
             "window": 60,
             "by": "ip",
@@ -267,43 +307,14 @@ _SECTIONS: list[dict[str, Any]] = [
                 "help": "Count requests per client IP, per authenticated user, or all together.",
             },
             {
-                "path": ["rate_limit", "backend"],
-                "group": "Backend",
-                "default": "memory",
-                "label": "Backend",
-                "type": "select",
-                "options": ["memory", "redis", "custom"],
-                "help": (
-                    "memory counts per process. Use redis for multiple workers. custom "
-                    "expects a BaseRateLimitBackend bound in InjectQ."
-                ),
-            },
-            {
-                "path": ["rate_limit", "redis", "url"],
-                "group": "Backend",
-                "label": "Redis URL",
-                "type": "text",
-                "placeholder": "${REDIS_URL}",
-                "help": "Supports $VAR and ${VAR}. Not needed if Redis is bound in InjectQ.",
-                "show_if": {"path": ["rate_limit", "backend"], "equals": "redis"},
-            },
-            {
-                "path": ["rate_limit", "redis", "prefix"],
-                "group": "Backend",
-                "label": "Redis key prefix",
-                "type": "text",
-                "placeholder": "10xgraph:rate-limit",
-                "show_if": {"path": ["rate_limit", "backend"], "equals": "redis"},
-            },
-            {
                 "path": ["rate_limit", "fail_open"],
-                "group": "Backend",
+                "group": "Limits",
                 "default": True,
                 "label": "Fail open",
                 "type": "bool",
                 "help": (
-                    "Allow requests when the backend errors. Off means deny them with 503 "
-                    "RATE_LIMIT_UNAVAILABLE."
+                    "Allow requests while the cache store errors. Off means deny them with 503 "
+                    "RATE_LIMIT_UNAVAILABLE, and the server refuses to start without it."
                 ),
             },
             {
@@ -350,13 +361,14 @@ _SECTIONS: list[dict[str, Any]] = [
                 ),
             },
         ],
+        "notes": [
+            "Counters live in the API's cache store: shared between workers with redis, "
+            "REDIS_URL or cache_store (see Plugins), per process otherwise.",
+        ],
         "env": [
             {
                 "name": "REDIS_URL",
-                "purpose": (
-                    "Not read by rate limiting itself. Reference it as ${REDIS_URL} in "
-                    "rate_limit.redis.url; required then when the backend is redis."
-                ),
+                "purpose": "Redis for the cache store when neither redis nor cache_store is set.",
             },
         ],
     },
@@ -364,14 +376,14 @@ _SECTIONS: list[dict[str, Any]] = [
         "id": "websocket",
         "title": "WebSocket",
         "description": (
-            "WebSocket streaming and realtime audio, and per-process caps on concurrent "
-            "connections."
+            "WebSocket streaming and realtime audio, and caps on concurrent connections "
+            "(shared between workers with a shared cache store, per process otherwise)."
         ),
         "key": "websocket",
         "optional": True,
         "off_summary": (
             "/v1/graph/ws and /v1/graph/live stay mounted with the default caps "
-            "(1000 per process, 10 per user)."
+            "(1000 connections, 10 per user)."
         ),
         "default": {"max_connections": 1000, "max_connections_per_user": 10},
         "fields": [
@@ -397,7 +409,10 @@ _SECTIONS: list[dict[str, Any]] = [
                 "step": 1,
                 "placeholder": "1000",
                 "unlimited_value": 0,
-                "help": "Per worker process. Defaults to 1000; 0 or null means unlimited.",
+                "help": (
+                    "Per worker process unless the cache store is shared. Defaults to 1000; 0 "
+                    "or null means unlimited."
+                ),
             },
             {
                 "path": ["websocket", "max_connections_per_user"],
@@ -487,7 +502,10 @@ _SECTIONS: list[dict[str, Any]] = [
                 "placeholder": "10",
                 "default": 10,
                 "unlimited_value": 0,
-                "help": "HTTP runs in flight per user, per process. 0 or null means unlimited.",
+                "help": (
+                    "HTTP runs in flight per user (per process unless the cache store is "
+                    "shared). 0 or null means unlimited."
+                ),
             },
             {
                 "path": ["runs", "timeout"],
@@ -832,20 +850,33 @@ _SECTIONS: list[dict[str, Any]] = [
             },
             {
                 "path": ["redis"],
-                "group": "Connections",
+                "group": "Cache store",
                 "label": "Redis URL",
                 "type": "text",
-                "placeholder": "redis://localhost:6379/0",
+                "placeholder": "${REDIS_URL}",
                 "help": (
-                    "Shared cache for ownership checks. Used as-is: $VAR is not expanded "
-                    "here, so leave it empty to fall back to REDIS_URL."
+                    "The API's cache store (run locks and caps, idempotency, rate limits, "
+                    "ownership cache, token revocation) on Redis, Valkey, Dragonfly or KeyDB. "
+                    "Supports $VAR and ${VAR}. Empty falls back to REDIS_URL, then to an "
+                    "in-memory store per process."
+                ),
+            },
+            {
+                "path": ["cache_store"],
+                "group": "Cache store",
+                "label": "Custom cache store",
+                "type": "text",
+                "placeholder": "graph.dependencies:cache_store",
+                "help": (
+                    "module:attr of a BaseCacheStore instance or zero-argument factory. Wins "
+                    "over the Redis URL."
                 ),
             },
         ],
         "env": [
             {
                 "name": "REDIS_URL",
-                "purpose": "Redis for the ownership cache when the redis key above is empty.",
+                "purpose": "Redis for the cache store when neither redis nor cache_store is set.",
             },
         ],
     },
@@ -955,8 +986,10 @@ _ENVIRONMENT: list[dict[str, Any]] = [
             {
                 "name": "STARTUP_CHECKS",
                 "purpose": (
-                    "Refuse to start while a configured Postgres, Redis or store is unreachable, "
-                    "in development and production. Defaults to true; false skips the check."
+                    "Refuse to start while the checkpointer, the store or a required cache store "
+                    "is unreachable (the cache store only for token_revocation or rate_limit "
+                    "with fail_open false), in development and production. Defaults to true; "
+                    "false skips the check."
                 ),
             },
             {

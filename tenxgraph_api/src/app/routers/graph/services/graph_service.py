@@ -33,8 +33,8 @@ from tenxgraph_api.src.app.core.auth.request_config import (
     tool_result_ids,
     unanswered_tool_calls,
 )
-from tenxgraph_api.src.app.core.concurrency import Lease
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RunsConfig
+from tenxgraph_api.src.app.core.leases import Lease
 from tenxgraph_api.src.app.core.shutdown import (
     KEEPALIVE_SECONDS,
     cancel_and_wait,

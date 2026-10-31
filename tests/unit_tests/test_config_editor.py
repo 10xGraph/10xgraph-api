@@ -21,6 +21,7 @@ from tenxgraph_api.cli.config_editor import (
 )
 from tenxgraph_api.cli.config_editor.schema import AUTHORIZATION_SCOPES, KNOWN_TOP_LEVEL_KEYS
 from tenxgraph_api.cli.config_editor.server import TOKEN_HEADER
+from tenxgraph_api.src.app.core.config.graph_config import DEFAULT_USER_REVOCATION_TTL
 
 
 def _levels(issues: list[dict], path: str) -> list[str]:
@@ -142,6 +143,54 @@ def test_rate_limit_seed_does_not_claim_a_server_default_for_excluded_paths() ->
     assert _fields()["rate_limit.exclude_paths"]["label"] == "Extra paths to skip"
 
 
+def test_rate_limit_has_no_backend_fields_and_the_cache_store_is_wired() -> None:
+    fields = _fields()
+    assert not [
+        path for path in fields if path.startswith(("rate_limit.backend", "rate_limit.redis"))
+    ]
+    rate_limit = next(s for s in build_schema()["sections"] if s["id"] == "rate_limit")
+    assert "backend" not in rate_limit["default"]
+    assert fields["cache_store"]["group"] == fields["redis"]["group"] == "Cache store"
+    assert "cache_store" in KNOWN_TOP_LEVEL_KEYS
+
+
+def test_token_revocation_section_writes_true_and_takes_its_settings() -> None:
+    section = next(s for s in build_schema()["sections"] if s["id"] == "token_revocation")
+    assert section["key"] == "token_revocation"
+    assert section["default"] is True
+    paths = [".".join(f["path"]) for f in section["fields"]]
+    assert paths == [
+        "token_revocation.enabled",
+        "token_revocation.token_lifetime",
+        "token_revocation.user_ttl",
+    ]
+    assert _fields()["token_revocation.user_ttl"]["default"] == DEFAULT_USER_REVOCATION_TTL
+    config = {"agent": "a:b", "auth": "jwt", "redis": "redis://x"}
+    for value in (True, {"token_lifetime": 3600}, {"enabled": True, "user_ttl": None}):
+        issues = validate_config({**config, "token_revocation": value})
+        assert not [i for i in issues if i["path"].startswith("token_revocation")]
+
+
+def test_redis_key_expands_env_vars_and_warns_when_unset(monkeypatch) -> None:
+    monkeypatch.delenv("AF_TEST_REDIS_URL", raising=False)
+    issues = validate_config({"agent": "a:b", "redis": "${AF_TEST_REDIS_URL}"})
+    assert _levels(issues, "redis") == ["warning"]
+    monkeypatch.setenv("AF_TEST_REDIS_URL", "redis://x")
+    assert (
+        _levels(validate_config({"agent": "a:b", "redis": "${AF_TEST_REDIS_URL}"}), "redis") == []
+    )
+
+
+def test_cache_store_must_be_an_import_path() -> None:
+    assert _levels(validate_config({"agent": "a:b", "cache_store": "nope"}), "cache_store") == [
+        "error"
+    ]
+    assert (
+        _levels(validate_config({"agent": "a:b", "cache_store": "pkg.mod:store"}), "cache_store")
+        == []
+    )
+
+
 def test_unlimited_values_are_accepted_by_the_server() -> None:
     for value in (0, None):
         config = {
@@ -235,28 +284,16 @@ def test_authorization_variants(authorization: object, path: str, expected: list
 
 
 def test_rate_limit_uses_server_parser() -> None:
-    issues = validate_config(
-        {"agent": "graph.react:app", "rate_limit": {"by": "country", "backend": "redis"}}
-    )
+    issues = validate_config({"agent": "graph.react:app", "rate_limit": {"by": "country"}})
     assert _levels(issues, "rate_limit") == ["error"]
     assert "rate_limit.by" in next(i["message"] for i in issues if i["path"] == "rate_limit")
 
 
-def test_rate_limit_unset_env_var_is_only_a_warning(monkeypatch) -> None:
-    monkeypatch.delenv("AF_TEST_REDIS_URL", raising=False)
-    issues = validate_config(
-        {
-            "agent": "graph.react:app",
-            "rate_limit": {"backend": "redis", "redis": {"url": "${AF_TEST_REDIS_URL}"}},
-        }
-    )
-    assert _levels(issues, "rate_limit") == []
-    assert _levels(issues, "rate_limit.redis.url") == ["warning"]
-
-
-def test_rate_limit_memory_backend_warns() -> None:
-    issues = validate_config({"agent": "graph.react:app", "rate_limit": {"backend": "memory"}})
-    assert _levels(issues, "rate_limit.backend") == ["warning"]
+@pytest.mark.parametrize("removed", [{"backend": "memory"}, {"redis": {"url": "redis://x"}}])
+def test_removed_rate_limit_keys_are_errors_naming_the_cache_store(removed) -> None:
+    issues = validate_config({"agent": "graph.react:app", "rate_limit": removed})
+    assert _levels(issues, "rate_limit") == ["error"]
+    assert "cache_store" in next(i["message"] for i in issues if i["path"] == "rate_limit")
 
 
 def test_websocket_rejects_negative_limit() -> None:

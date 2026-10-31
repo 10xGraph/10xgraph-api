@@ -8,8 +8,9 @@ A slot is taken before the response starts, so an over-cap request still gets a 
 For a streaming response the slot is held until the stream ends, the client disconnects, or
 the stream object is discarded without ever being iterated.
 
-Slots come from :func:`~tenxgraph_api.src.app.core.concurrency.concurrency_limiter`: shared
-through Redis when it is configured, otherwise counted per process (size the cap per worker).
+Slots are leases from :func:`~tenxgraph_api.src.app.core.leases.lease_manager`: shared between
+workers when the cache store is (Redis), otherwise counted per process (size the cap per
+worker).
 """
 
 from __future__ import annotations
@@ -22,8 +23,8 @@ from typing import Any
 from fastapi import HTTPException
 
 from tenxgraph_api.src.app.core import logger
-from tenxgraph_api.src.app.core.concurrency import Lease, concurrency_limiter
 from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+from tenxgraph_api.src.app.core.leases import Lease, lease_manager
 from tenxgraph_api.src.app.core.redis_client import key_part
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 
@@ -50,7 +51,7 @@ async def acquire_run_slot(user: dict[str, Any], runs: RunsConfig) -> Lease:
     limit = runs.max_concurrent_per_user
     if not user_id or limit is None:
         return Lease(None)
-    lease = await concurrency_limiter().acquire(run_slot_key(str(user_id)), limit)
+    lease = await lease_manager().acquire(run_slot_key(str(user_id)), limit)
     if lease is None:
         logger.warning(
             "Concurrent run limit reached for user %s (max=%s)", log_safe(user_id), limit

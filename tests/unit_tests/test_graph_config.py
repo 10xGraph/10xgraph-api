@@ -102,3 +102,17 @@ def test_default_config_path_prefers_10xgraph_json(tmp_path: Path, monkeypatch):
     (tmp_path / "10xgraph.json").write_text(json.dumps({"agent": "new:app"}))
     assert default_config_path() == "10xgraph.json"
     assert GraphConfig().graph_path == "new:app"
+
+
+def test_redis_key_expands_env_vars(tmp_path: Path, monkeypatch):
+    cfg_path = tmp_path / "cfg.json"
+    cfg_path.write_text(json.dumps({"agent": "mod:func", "redis": "${TG_TEST_REDIS}"}))
+    monkeypatch.setenv("TG_TEST_REDIS", "redis://cache:6379/0")
+    assert GraphConfig(str(cfg_path)).redis_url == "redis://cache:6379/0"
+
+    monkeypatch.delenv("TG_TEST_REDIS")
+    with pytest.raises(ValueError, match="redis: Unresolved environment variable"):
+        _ = GraphConfig(str(cfg_path)).redis_url
+
+    cfg_path.write_text(json.dumps({"agent": "mod:func", "redis": ""}))
+    assert GraphConfig(str(cfg_path)).redis_url is None

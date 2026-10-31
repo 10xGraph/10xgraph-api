@@ -7,7 +7,7 @@
 // are pages of their own rather than schema sections.
 export const NAV = [
   { label: null, items: ["get-running"] },
-  { label: "Before production", items: ["auth", "authorization", "rate_limit", "observability", "token_revocation"] },
+  { label: "Before production", items: ["auth", "authorization", "rate_limit", "observability", "token_revocation", "graph_introspection"] },
   { label: "Runs and streaming", items: ["runs", "websocket", "ag_ui", "remote_tools", "media"] },
   { label: "Project wiring", items: ["plugins"] },
   { label: "Developer tools", items: ["test", "evaluation"] },

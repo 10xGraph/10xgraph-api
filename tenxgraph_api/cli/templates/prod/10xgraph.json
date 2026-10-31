@@ -5,7 +5,8 @@
     "method": "custom",
     "path": "auth.agent_auth:AgentAuth"
   },
-  "token_revocation": "redis",
+  "redis": "${REDIS_URL}",
+  "token_revocation": true,
   "remote_tools": [],
   "ag_ui": {
     "enabled": false
@@ -14,11 +15,6 @@
   "injectq": "graph.agent:container",
   "rate_limit": {
     "enabled": true,
-    "backend": "redis",
-    "redis": {
-      "url": "${REDIS_URL}",
-      "prefix": "10xgraph:rate-limit"
-    },
     "requests": 100,
     "window": 60,
     "by": "user",

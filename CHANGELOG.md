@@ -27,6 +27,69 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.0.0rc4] - Unreleased
+
+The fourth release candidate of `10xgraph-api` 1.0. It requires `10xgraph` 1.0.0rc4
+(checkpointers have `aping()`). Everything the API shares between workers now lives in one
+`BaseCacheStore`, and the startup check no longer refuses to boot over a Redis that nothing
+configured needs. `10xgraph-client` stays at 1.0.0-rc.2.
+
+### Breaking
+
+- Removed, with no deprecation aliases (release candidates): `ConcurrencyLimiter` and
+  `core/concurrency.py`, `TokenRevocationBackend` (with `InMemoryTokenRevocation`,
+  `RedisTokenRevocation`, `build_token_revocation`), `BaseRateLimitBackend` (with
+  `MemoryRateLimitBackend`, `RedisRateLimitBackend` and the rate-limit factory). Run locks and
+  caps, idempotency, the ownership cache, token revocation and rate limiting all use the bound
+  `BaseCacheStore`; implement one to replace Redis.
+- `rate_limit.backend` and `rate_limit.redis` are removed. Either key is a config error naming
+  the replacement: the counters live in the cache store (`cache_store`, else `redis`, else
+  `REDIS_URL`, else in memory). Delete both keys; move a dedicated rate-limit Redis URL to
+  `redis` (one Redis now serves every feature).
+- `token_revocation` is `true`, `false`, `null` or `{"enabled": true, "token_lifetime": ...,
+  "user_ttl": ...}`. The string values (`"redis"`, `"memory"`, `"module:attr"`) are config
+  errors naming `cache_store`. Replace `"redis"` with `true` and set `redis` (or `REDIS_URL`).
+- `GET /health/ready`: the `redis` key in `checks` is renamed `cache` and reports the bound
+  cache store (`{"checkpointer": "ok", "store": "ok", "cache": "ok"}`). Readiness and the
+  startup check only call `aping()` on the bound checkpointer, store and cache store; a
+  component's `readiness_check()` hook and the probing of private checkpointer attributes are
+  gone.
+- `10xgraph init --rate-limit redis` writes `"redis": "${REDIS_URL}"` and, with auth,
+  `"token_revocation": true` (was `rate_limit.backend: "redis"`, `rate_limit.redis.url` and
+  `"token_revocation": "redis"`). `--rate-limit memory` turns rate limiting on without a
+  `redis` key.
+
+### Added
+
+- `BaseCacheStore` with `RedisCacheStore` (also Valkey, Dragonfly, KeyDB) and
+  `InMemoryCacheStore`, exported from `tenxgraph_api`. A store has an abstract `aping()` and an
+  optional `describe()` that names its endpoint (never credentials) in logs and startup errors.
+- `"cache_store": "module:attr"` in `10xgraph.json`: a `BaseCacheStore` instance or zero-argument
+  factory; wins over `redis` and `REDIS_URL`. One INFO line at boot names the store and its
+  source, for example `Cache store: RedisCacheStore (from REDIS_URL, localhost:6379)`.
+- A contract suite for custom cache stores in `tenxgraph_api.testing.cache_store_contract`.
+- The `redis` key expands `$VAR` and `${VAR}`; an unset variable is a config error.
+- `10xgraph config` edits `cache_store`, and token revocation as a section with `enabled`,
+  `token_lifetime` and `user_ttl`.
+
+### Changed
+
+- The startup check is fatal for the cache store only when a fail-closed feature uses it:
+  `token_revocation` on, or `rate_limit` with `fail_open: false`. Otherwise an unreachable
+  cache store is one WARNING (`... unreachable: locks and caps fall back to per process ...`)
+  and the server starts; `/health/ready` reports `cache: fail` and stays 200. This fixes rc3
+  refusing to boot an in-memory server with a leftover `REDIS_URL`. Startup errors name each
+  component's class, where its setting came from (`REDIS_URL`, `redis in 10xgraph.json`,
+  `cache_store`) and its `describe()` endpoint. The hint now reads "Start the backend, fix its
+  URL, or set STARTUP_CHECKS=false to skip this check."
+- `10xgraph revoke` writes to the cache store the server would pick (`cache_store`, `redis`,
+  `REDIS_URL`; `--redis-url` overrides) and refuses with a clear error when that is the
+  in-memory store.
+- Shutdown closes the cache store once, after the graph and after pending lease releases. The
+  authorization backend no longer closes a Redis client.
+
+---
+
 ## [1.0.0rc3] - 2026-10-30
 
 The third release candidate of `10xgraph-api` 1.0. It requires `10xgraph` 1.0.0rc3 (stores have

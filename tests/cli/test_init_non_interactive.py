@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from tenxgraph_api.cli.commands.init import InitCommand
 from tenxgraph_api.cli.core.output import OutputFormatter
+from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore, RedisCacheStore
+from tenxgraph_api.src.app.core.cache_store.loader import build_cache_store
+from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 
 
 def test_dry_run_does_not_create_target(tmp_path: Path) -> None:
@@ -82,7 +89,9 @@ def test_production_dependencies_follow_the_answers(tmp_path: Path) -> None:
     import json
 
     config = json.loads((target / "10xgraph.json").read_text())
-    assert config["rate_limit"]["redis"] == {"url": "${REDIS_URL}"}
+    assert config["redis"] == "${REDIS_URL}"
+    assert set(config["rate_limit"]) >= {"enabled", "requests", "window", "by"}
+    assert "redis" not in config["rate_limit"]
 
     agent_py = (target / "graph" / "agent.py").read_text()
     assert 'model="gpt-4o-mini"' in agent_py
@@ -184,3 +193,53 @@ def test_init_adds_secret_patterns_to_an_existing_gitignore(tmp_path: Path) -> N
     content = (tmp_path / ".gitignore").read_text(encoding="utf-8")
     assert content.startswith("node_modules/\n")
     assert ".env\n" in content
+
+
+@pytest.mark.parametrize(
+    ("template", "auth", "rate_limit"),
+    [
+        ("quick-start", None, "none"),
+        ("production", "jwt", "none"),
+        ("production", "jwt", "memory"),
+        ("production", "jwt", "redis"),
+        ("production", "custom", "redis"),
+        ("production", "none", "redis"),
+    ],
+)
+def test_generated_config_loads_through_graph_config(
+    tmp_path: Path, monkeypatch, template: str, auth: str | None, rate_limit: str
+) -> None:
+    """Every init recipe writes a 10xgraph.json the server parses without a config error."""
+    target = tmp_path / "agent"
+    result = InitCommand(OutputFormatter(stream=io.StringIO())).execute(
+        path=str(target),
+        agent_name="Agent",
+        template=template,
+        auth=auth,
+        rate_limit=rate_limit,
+        non_interactive=True,
+    )
+    assert result == 0
+    monkeypatch.chdir(target)  # the config names ".env": never load one from elsewhere
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("JWT_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("JWT_ALGORITHM", "HS256")
+
+    config = GraphConfig(str(target / "10xgraph.json"))
+    assert config.graph_path == "graph.agent:app"
+    config.auth_config()
+    config.websocket  # noqa: B018 - parsing is the check
+    config.runs  # noqa: B018
+    assert config.cache_store is None
+    limit = config.rate_limit
+    assert (limit is not None) == (rate_limit != "none")
+    revocation = config.token_revocation
+    assert (revocation is not None) == (rate_limit == "redis" and auth in {"jwt", "custom"})
+    if rate_limit == "redis":
+        assert config.redis_url == "redis://localhost:6379/0"
+    else:
+        assert config.redis_url is None
+
+    store, _ = build_cache_store(config, SimpleNamespace(REDIS_URL=None))
+    assert isinstance(store, RedisCacheStore if rate_limit == "redis" else InMemoryCacheStore)
+    asyncio.run(store.aclose())

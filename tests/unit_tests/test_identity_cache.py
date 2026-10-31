@@ -20,11 +20,9 @@ from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
 from tenxgraph_api.src.app.core.auth.identity_cache import recall_identity, remember_identity
 from tenxgraph_api.src.app.core.auth.jwt_auth import JwtAuth
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
+from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RateLimitConfig
-from tenxgraph_api.src.app.core.middleware.rate_limit import (
-    MemoryRateLimitBackend,
-    RateLimitMiddleware,
-)
+from tenxgraph_api.src.app.core.middleware.rate_limit import RateLimitMiddleware
 
 
 class _CountingAuthBase(BaseAuth):
@@ -128,9 +126,9 @@ def _client(auth: _CountingAuthBase) -> TestClient:
 
     app = FastAPI()
     config = RateLimitConfig.from_dict(
-        {"enabled": True, "backend": "memory", "requests": 100, "window": 60, "by": "user"}
+        {"enabled": True, "requests": 100, "window": 60, "by": "user"}
     )
-    app.add_middleware(RateLimitMiddleware, config=config, backend=MemoryRateLimitBackend())
+    app.add_middleware(RateLimitMiddleware, config=config, cache=InMemoryCacheStore())
     setup_fastapi(container, app)
 
     @app.get("/v1/threads")

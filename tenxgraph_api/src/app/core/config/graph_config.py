@@ -139,62 +139,33 @@ def _parse_networks(raw: object) -> tuple[str, ...]:
 class RateLimitConfig:
     """Rate limit configuration parsed from 10xgraph.json.
 
-    Example (memory backend, default)::
+    Example::
 
         "rate_limit": {
             "enabled": true,
-            "backend": "memory",
             "requests": 100,
             "window": 60,
             "by": "ip",
             "trusted_proxy_headers": false,
-            "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"]
-        }
-
-    Example (Redis backend)::
-
-        "rate_limit": {
-            "enabled": true,
-            "backend": "redis",
-            "requests": 100,
-            "window": 60,
-            "by": "ip",
-            "trusted_proxy_headers": true,
-            "exclude_paths": ["/ping"],
-            "redis": {
-                "url": "redis://localhost:6379/0",
-                "prefix": "10xgraph:rate-limit"
-            },
+            "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"],
             "fail_open": true
         }
 
-    Example (custom backend)::
-
-        "rate_limit": {
-            "enabled": true,
-            "backend": "custom",
-            "requests": 100,
-            "window": 60,
-            "by": "ip"
-        }
-
-    For custom backends, bind a ``BaseRateLimitBackend`` instance in InjectQ.
+    The counters live in the API's cache store (``cache_store``, else ``redis`` /
+    ``REDIS_URL``, else in this process), like the run locks and caps.
     """
 
     enabled: bool
     requests: int
     window: int
     by: str  # "ip" | "user" | "global"
-    backend: str  # "memory" | "redis" | "custom"
-    redis_url: str | None
-    redis_prefix: str
     exclude_paths: tuple[str, ...]
     trusted_proxy_headers: bool  # honour X-Forwarded-For only when True
     # Number of proxies you control in front of the app. Only this many entries,
     # counted from the RIGHT of X-Forwarded-For, were appended by your own
     # infrastructure; anything further left came from the caller and is forgeable.
     trusted_proxy_hops: int = 1
-    fail_open: bool = True  # on backend error: True=allow, False=deny
+    fail_open: bool = True  # on a cache store error: True=allow, False=deny with 503
     # Networks your proxies connect from. X-Forwarded-For is honoured only for requests
     # whose peer address is in one of them, so a client that reaches the app directly
     # (bypassing the proxy) cannot pick its own address. Empty means
@@ -205,12 +176,18 @@ class RateLimitConfig:
     def from_dict(cls, data: dict) -> "RateLimitConfig":
         if not isinstance(data, dict):
             raise ValueError("rate_limit must be an object")
+        for removed in ("backend", "redis"):
+            if removed in data:
+                raise ValueError(
+                    f"rate_limit.{removed} was removed: rate limits are kept in the API's "
+                    "cache store. Delete it and set `redis` in 10xgraph.json (or REDIS_URL) to "
+                    "share the counters between workers, or `cache_store` for your own store."
+                )
 
         enabled = _parse_bool(data.get("enabled", True), field="rate_limit.enabled")
         requests = int(data.get("requests", 100))
         window = int(data.get("window", 60))
         by = data.get("by", "ip")
-        backend = data.get("backend", "memory")
         trusted_proxy_headers = _parse_bool(
             data.get("trusted_proxy_headers", False),
             field="rate_limit.trusted_proxy_headers",
@@ -220,18 +197,6 @@ class RateLimitConfig:
             raise ValueError("rate_limit.exclude_paths must be a list of paths")
         exclude_paths = tuple(str(path) for path in exclude_paths_raw)
         fail_open = _parse_bool(data.get("fail_open", True), field="rate_limit.fail_open")
-
-        # Redis sub-object: {"url": "...", "prefix": "..."}
-        redis_obj = data.get("redis") or {}
-        if isinstance(redis_obj, str):
-            # Allow shorthand: "redis": "redis://..."
-            redis_url: str | None = _expand_env(redis_obj)
-            redis_prefix = "10xgraph:rate-limit"
-        elif isinstance(redis_obj, dict):
-            redis_url = _expand_env(redis_obj.get("url") or None)
-            redis_prefix = str(redis_obj.get("prefix", "10xgraph:rate-limit"))
-        else:
-            raise ValueError("rate_limit.redis must be an object or Redis URL string")
 
         # How many proxies of YOUR OWN sit in front of the app and append to
         # X-Forwarded-For. Only that many entries, counted from the right, were
@@ -243,10 +208,6 @@ class RateLimitConfig:
         # Validation
         if by not in ("ip", "global", "user"):
             raise ValueError(f"rate_limit.by must be 'ip', 'user', or 'global', got '{by}'")
-        if backend not in ("memory", "redis", "custom"):
-            raise ValueError(
-                f"rate_limit.backend must be 'memory', 'redis', or 'custom', got '{backend}'"
-            )
         if requests <= 0:
             raise ValueError("rate_limit.requests must be a positive integer")
         if window <= 0:
@@ -261,29 +222,86 @@ class RateLimitConfig:
                 "can reach the app except through it)."
             )
 
-        # The memory backend counts per PROCESS. Under gunicorn with N workers the
-        # effective limit therefore becomes requests x N, and it resets whenever a
-        # worker restarts -- so it does not really limit anything in production.
-        if enabled and backend == "memory":
-            logger.warning(
-                "Rate limiting uses the in-memory backend. It counts per process, so "
-                "with N workers the real limit is requests x N and it resets on every "
-                "worker restart. Use the 'redis' backend for any multi-worker deployment."
-            )
-
         return cls(
             enabled=enabled,
             requests=requests,
             window=window,
             by=by,
-            backend=backend,
-            redis_url=redis_url,
-            redis_prefix=redis_prefix,
             exclude_paths=exclude_paths,
             trusted_proxy_headers=trusted_proxy_headers,
             trusted_proxy_hops=trusted_proxy_hops,
             fail_open=fail_open,
             trusted_proxies=trusted_proxies,
+        )
+
+
+# A revoke_user entry is kept this long unless told otherwise. It has to outlive the longest
+# token you issue, or an old token comes back to life when the entry goes.
+DEFAULT_USER_REVOCATION_TTL = 30 * 24 * 3600
+
+
+def _positive_seconds(value: object, *, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not value > 0:
+        raise ValueError(f"{field} must be a positive number of seconds, got {value!r}")
+    return float(value)
+
+
+@dataclass(frozen=True)
+class TokenRevocationConfig:
+    """``token_revocation`` in 10xgraph.json: ``true``, or an object with its settings.
+
+    Example::
+
+        "token_revocation": {"enabled": true, "token_lifetime": 3600, "user_ttl": 2592000}
+
+    Revocations live in the API's cache store (``cache_store``, else ``redis`` /
+    ``REDIS_URL``, else in this process). ``token_lifetime`` is the longest lifetime of the
+    tokens you issue, in seconds; it dates a token that has no ``iat`` from its ``exp``.
+    ``user_ttl`` is how long a ``revoke_user`` entry is kept by default (``null`` keeps it
+    until deleted).
+    """
+
+    token_lifetime: float | None = None
+    user_ttl: float | None = DEFAULT_USER_REVOCATION_TTL
+
+    @classmethod
+    def parse(cls, value: object) -> "TokenRevocationConfig | None":
+        """The settings for ``value``; None when token revocation is off."""
+        if value is None or value is False:
+            return None
+        if value is True:
+            return cls()
+        if isinstance(value, str):
+            raise ValueError(
+                f"token_revocation {value!r} is no longer supported: revocations are kept in "
+                'the API\'s cache store. Use "token_revocation": true (or an object '
+                '{"enabled": true, "token_lifetime": ..., "user_ttl": ...}) and set `redis` in '
+                "10xgraph.json (or REDIS_URL) to share them between workers, or `cache_store` "
+                "for your own store."
+            )
+        if not isinstance(value, dict):
+            raise ValueError("token_revocation must be true, false, null or an object")
+        unknown = set(value) - {"enabled", "token_lifetime", "user_ttl"}
+        if unknown:
+            raise ValueError(
+                f"token_revocation: unknown keys {sorted(unknown)}; use enabled, "
+                "token_lifetime and user_ttl"
+            )
+        if not _parse_bool(value.get("enabled", True), field="token_revocation.enabled"):
+            return None
+        lifetime = value.get("token_lifetime")
+        user_ttl = value.get("user_ttl", DEFAULT_USER_REVOCATION_TTL)
+        return cls(
+            token_lifetime=(
+                None
+                if lifetime is None
+                else _positive_seconds(lifetime, field="token_revocation.token_lifetime")
+            ),
+            user_ttl=(
+                None
+                if user_ttl is None
+                else _positive_seconds(user_ttl, field="token_revocation.user_ttl")
+            ),
         )
 
 
@@ -311,11 +329,12 @@ class WebSocketConfig:
             "realtime_client_overrides": ["voice", "modalities", "vad"]
         }
 
-    ``max_connections`` caps the concurrent WebSocket connections this server *process*
-    accepts (realtime ``/v1/graph/live`` + streaming ``/v1/graph/ws``).
+    ``max_connections`` caps the concurrent WebSocket connections the server accepts
+    (realtime ``/v1/graph/live`` + streaming ``/v1/graph/ws``).
     ``max_connections_per_user`` caps how many of those one verified user may hold, so a
-    single account cannot take every slot. Both are per process, like the in-memory
-    rate-limit backend; size them per worker.
+    single account cannot take every slot. Both are counted in the API's cache store: across
+    workers with a shared one (``redis``, ``REDIS_URL`` or ``cache_store``), per process with
+    the in-memory one (then size them per worker).
 
     A missing key gets a finite default (1000 and 10). Set a key to ``0`` or ``null`` to make
     it unlimited. WebSocket handshakes, and every graph run started over ``/v1/graph/ws``, also
@@ -641,7 +660,30 @@ class GraphConfig:
 
     @property
     def redis_url(self) -> str | None:
-        return self.data.get("redis", None)
+        """``redis`` key: the Redis URL of the API's cache store; ``$VAR`` / ``${VAR}`` expand.
+
+        An unset variable is a config error, not a silent fall back to the in-memory store.
+        """
+        value = self.data.get("redis", None)
+        if value is None or value == "":
+            return None
+        if not isinstance(value, str):
+            raise ValueError(f"redis must be a URL string, got {type(value).__name__}")
+        try:
+            return _expand_env(value)
+        except ValueError as exc:
+            raise ValueError(f"redis: {exc}") from None
+
+    @property
+    def cache_store(self) -> str | None:
+        """``cache_store`` key: ``"module:attr"`` resolving to a ``BaseCacheStore`` (an instance
+        or a zero-argument factory), or None to pick one from ``redis`` / ``REDIS_URL``."""
+        value = self.data.get("cache_store", None)
+        if value is None or value == "":
+            return None
+        if not isinstance(value, str) or ":" not in value:
+            raise ValueError(f"cache_store must be a 'module:attr' string, got {value!r}")
+        return value
 
     @property
     def thread_name_generator_path(self) -> str | None:
@@ -793,12 +835,13 @@ class GraphConfig:
         return self.graph_introspection == "scoped"
 
     @property
-    def token_revocation(self) -> str | None:
-        """``token_revocation`` key: ``"redis"``, ``"memory"``, ``"module:attr"`` or None."""
-        value = self.data.get("token_revocation", None)
-        if value is not None and not isinstance(value, str):
-            raise ValueError("token_revocation must be 'redis', 'memory', 'module:attr' or null")
-        return value or None
+    def token_revocation(self) -> TokenRevocationConfig | None:
+        """``token_revocation`` key: its settings when on (``true`` or an object), else None.
+
+        See :class:`TokenRevocationConfig`. The old string values (``"redis"``, ``"memory"``,
+        ``"module:attr"``) raise ``ValueError`` naming the replacement.
+        """
+        return TokenRevocationConfig.parse(self.data.get("token_revocation", None))
 
     @property
     def runs(self) -> RunsConfig:

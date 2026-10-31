@@ -1,7 +1,5 @@
 """Per-thread run lock on invoke, stream, WebSocket and AG-UI, and production error chunks."""
 
-# ruff: noqa: S101
-
 import asyncio
 import gc
 import json
@@ -13,8 +11,9 @@ from fastapi import HTTPException, WebSocketDisconnect
 from pydantic import ValidationError
 from tenxgraph.core.state import StreamChunk, StreamEvent
 
-from tenxgraph_api.src.app.core.concurrency import MemoryConcurrencyLimiter, RedisConcurrencyLimiter
+from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
 from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+from tenxgraph_api.src.app.core.leases import LeaseManager
 from tenxgraph_api.src.app.routers.graph import thread_lock
 from tenxgraph_api.src.app.routers.graph.router import invoke_graph, stream_graph, websocket_graph
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
@@ -22,8 +21,6 @@ from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     WsGraphInputSchema,
 )
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
-
-from .test_concurrency_limiter import _FakeRedis
 
 
 ALICE = {"user_id": "alice"}
@@ -33,8 +30,8 @@ MSG = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
 
 @pytest.fixture(autouse=True)
 def fresh_locks(monkeypatch):
-    limiter = MemoryConcurrencyLimiter()
-    monkeypatch.setattr(thread_lock, "concurrency_limiter", lambda: limiter)
+    limiter = LeaseManager(InMemoryCacheStore())
+    monkeypatch.setattr(thread_lock, "lease_manager", lambda: limiter)
     monkeypatch.setattr(thread_lock, "THREAD_BUSY_WAIT_SECONDS", 0.3)
     return limiter
 
@@ -224,8 +221,8 @@ async def test_stream_lock_is_released_on_disconnect(fresh_locks):
 async def test_stream_slot_refusal_gives_the_thread_back(fresh_locks, monkeypatch):
     from tenxgraph_api.src.app.routers.graph import run_limits
 
-    slots = MemoryConcurrencyLimiter()
-    monkeypatch.setattr(run_limits, "concurrency_limiter", lambda: slots)
+    slots = LeaseManager(InMemoryCacheStore())
+    monkeypatch.setattr(run_limits, "lease_manager", lambda: slots)
     service = _service(None)
     service.runs_policy.return_value = RunsConfig(max_concurrent_per_user=1)
     service.stream_graph = MagicMock(side_effect=lambda *a, **k: _items("a"))
@@ -342,22 +339,22 @@ async def test_ag_ui_busy_thread_answers_409_and_waits_by_default(fresh_locks):
 
 
 # ---------------------------------------------------------------------------
-# Redis-backed lock
+# Lock shared through the cache store
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_lock_is_shared_between_workers_through_redis(monkeypatch):
-    redis = _FakeRedis()
-    worker_a = RedisConcurrencyLimiter(redis, lease_ttl=60)
-    worker_b = RedisConcurrencyLimiter(redis, lease_ttl=60)
+    shared = InMemoryCacheStore()  # one store behind two workers, as Redis is
+    worker_a = LeaseManager(shared, lease_ttl=60)
+    worker_b = LeaseManager(shared, lease_ttl=60)
     monkeypatch.setattr(thread_lock, "THREAD_BUSY_WAIT_SECONDS", 0.2)
 
-    monkeypatch.setattr(thread_lock, "concurrency_limiter", lambda: worker_a)
+    monkeypatch.setattr(thread_lock, "lease_manager", lambda: worker_a)
     lease = await thread_lock.acquire_thread_lock("t1")
-    assert list(redis.zsets) == ["10xgraph:concurrency:runs:thread:t1"]
+    assert list(shared._slots) == ["concurrency:runs:thread:t1"]
 
-    monkeypatch.setattr(thread_lock, "concurrency_limiter", lambda: worker_b)
+    monkeypatch.setattr(thread_lock, "lease_manager", lambda: worker_b)
     with pytest.raises(HTTPException) as exc:
         await thread_lock.acquire_thread_lock("t1")
     assert exc.value.status_code == 409
@@ -373,12 +370,11 @@ async def test_lock_is_shared_between_workers_through_redis(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_crashed_worker_lock_expires(monkeypatch):
-    redis = _FakeRedis()
-    limiter = RedisConcurrencyLimiter(redis, lease_ttl=0.2)
-    monkeypatch.setattr(thread_lock, "concurrency_limiter", lambda: limiter)
+    limiter = LeaseManager(InMemoryCacheStore(), lease_ttl=0.2)
+    monkeypatch.setattr(thread_lock, "lease_manager", lambda: limiter)
     monkeypatch.setattr(thread_lock, "THREAD_BUSY_WAIT_SECONDS", 2)
     lease = await thread_lock.acquire_thread_lock("t1")
-    for task in list(limiter._refreshers):  # the worker dies: nothing renews the lease
+    for task in list(limiter._renewers):  # the worker dies: nothing renews the lease
         task.cancel()
     again = await thread_lock.acquire_thread_lock("t1")
     again.release()
@@ -534,8 +530,8 @@ async def test_busy_409_and_run_cap_429_carry_retry_after(fresh_locks, monkeypat
 
     from tenxgraph_api.src.app.routers.graph import run_limits
 
-    limiter = MemoryConcurrencyLimiter()
-    monkeypatch.setattr(run_limits, "concurrency_limiter", lambda: limiter)
+    limiter = LeaseManager(InMemoryCacheStore())
+    monkeypatch.setattr(run_limits, "lease_manager", lambda: limiter)
     slot = await run_limits.acquire_run_slot(ALICE, RunsConfig(max_concurrent_per_user=1))
     with pytest.raises(HTTPException) as capped:
         await run_limits.acquire_run_slot(ALICE, RunsConfig(max_concurrent_per_user=1))
