@@ -275,7 +275,7 @@ def _check_cache_store(config: dict, out: _Collector, base_dir: Path | None) -> 
     # Top-level redis, rate_limit and token_revocation: the parser names where they go.
     for key in _CACHE_STORE_SETTINGS:
         if key in config:
-            _quietly(lambda key=key: check_cache_store_settings({key: config[key]}), out, key)
+            _quietly(lambda key=key: check_cache_store_settings({key: config[key]}), out, key)  # type: ignore[misc]
 
     data = config.get("cache_store")
     if data is None:
