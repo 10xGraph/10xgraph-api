@@ -27,7 +27,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [1.0.0rc4] - Unreleased
+## [1.0.0rc4] - 2026-11-01
 
 The fourth release candidate of `10xgraph-api` 1.0. It requires `10xgraph` 1.0.0rc4
 (checkpointers have `aping()`). Everything the API shares between workers lives in one

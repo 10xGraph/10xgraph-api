@@ -11,7 +11,7 @@ for the monorepo overview see the workspace-root `CLAUDE.md`.
 - Requires: Python >= 3.12 · Status: `5 - Production/Stable`
 - Console entry points: `10xgraph = tenxgraph_api.cli.main:main`, plus the deprecated alias
   `agentflow = tenxgraph_api.cli.main:legacy_main` (prints a notice to stderr; removed in 2.0)
-- Depends on the core framework: `10xgraph>=1.0.0rc3,<2.0` (import `tenxgraph`). Must not be
+- Depends on the core framework: `10xgraph>=1.0.0rc4,<2.0` (import `tenxgraph`). Must not be
   installed alongside the old `10xscale-agentflow`: both provide an `agentflow` module.
 
 ## Rename compatibility (kept until 2.0)

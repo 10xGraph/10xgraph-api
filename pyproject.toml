@@ -60,7 +60,7 @@ classifiers = [
 dependencies = [
     # This release needs core 1.0 (import `tenxgraph`). The explicit rc in the
     # specifier lets pip and uv pick the core pre-release until 1.0.0 is out.
-    "10xgraph>=1.0.0rc3,<2.0",
+    "10xgraph>=1.0.0rc4,<2.0",
     # Pre-1.0 and major-version-risky deps are capped; floors are the versions
     # the suite is verified against.
     "fastapi>=0.116,<1.0",
@@ -105,7 +105,7 @@ media = [
 # Pillow for image resize / EXIF / format conversion in core's media processor.
 # Without it, uploaded images pass through unchanged.
 images = [
-    "10xgraph[images]>=1.0.0rc3,<2.0",
+    "10xgraph[images]>=1.0.0rc4,<2.0",
 ]
 gcloud = [
     "google-cloud-logging",
@@ -376,7 +376,7 @@ ENVIRONMENT = "pytest"
 
 [dependency-groups]
 dev = [
-    "10xgraph>=1.0.0rc3",
+    "10xgraph>=1.0.0rc4",
     "snowflakekit",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
