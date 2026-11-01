@@ -1,4 +1,50 @@
-# 10xgraph-api 1.0.0rc3
+# 10xgraph-api 1.0.0rc4
+
+The fourth 1.0 release candidate: the `1.0.0rc3` code plus one `BaseCacheStore` behind everything the API shares between workers (run locks, caps, idempotency, token revocation, rate limiting), configured by one `cache_store` object in `10xgraph.json`, a lighter `10xgraph init`, and a startup check that no longer refuses to boot over a Redis nothing needs.
+
+```bash
+pip install -U --pre "10xgraph-api==1.0.0rc4"
+```
+
+This pulls `10xgraph` 1.0.0rc4. `10xgraph-client` stays at 1.0.0-rc.2 (no client changes).
+
+## Before you upgrade (changes in rc4)
+
+- **`BaseCacheStore` replaces three extension points.** `ConcurrencyLimiter`, `TokenRevocationBackend` (with its in-memory and Redis variants and `build_token_revocation`) and `BaseRateLimitBackend` (with its memory and Redis variants) are removed, with no aliases. If you wrote your own, implement `BaseCacheStore` instead.
+- **`cache_store` is one object** in `10xgraph.json`: `{"type": "memory" | "redis" | "custom", "url": "${REDIS_URL}", "path": "module:attr", "rate_limit": {...}, "token_revocation": true}`. No `cache_store` means the in-memory store.
+- **Top-level `redis`, `rate_limit` and `token_revocation` keys are config errors.** The error says where each setting goes: inside `cache_store`.
+- **`REDIS_URL` no longer selects the store.** Write `"cache_store": {"type": "redis"}`; with no `url` it reads `REDIS_URL`. Type `redis` without the `redis` package refuses to boot with `pip install "10xgraph-api[redis]"`.
+- **`/health/ready` reports `cache`, not `redis`.** Update monitors that read `checks.redis`.
+- **Rate-limit counters reset once.** The Redis keys moved to the `10xgraph:ratelimit2` namespace. Other Redis key layouts are unchanged.
+- **`10xgraph init` asks only the agent name, template and AI provider.** Production writes the recommended setup (jwt auth, ownership authorization, uuid ids, a Redis `cache_store` with rate limiting and token revocation); Quick Start writes no `cache_store`. Flags such as `--auth` and `--cache-store` override parts of it for scripts.
+- **`thread_name_generator` takes `"random"` (the default), `"first_message"`, `"none"` or `"module:attr"`.** With the key unset, new threads are now named and the name is saved. `GraphConfig.thread_name_generator_path` is replaced by `GraphConfig.thread_name_generator`.
+- **Requires `10xgraph` 1.0.0rc4.** A custom checkpointer must implement `aping()`.
+
+## What changed in rc4
+
+**Added**
+- `BaseCacheStore`, `RedisCacheStore` (also Valkey, Dragonfly, KeyDB) and `InMemoryCacheStore`, exported from `tenxgraph_api`, plus a contract suite for custom stores in `tenxgraph_api.testing.cache_store_contract`.
+- `id_generator` in `10xgraph.json` (`uuid`, `hex`, `short`, `int`, `bigint`, `timestamp`, `snowflake` or `"module:attr"`), used for new thread, message and memory ids.
+- `thread_name_generator: "first_message"`, and a token revocation section in `10xgraph config`.
+- One INFO line at boot names the cache store and the config key it came from.
+
+**Changed**
+- The startup check is fatal for the cache store only when a fail-closed feature uses it (token revocation with auth, or rate limiting with `fail_open: false`). Otherwise an unreachable cache store logs one warning, the server starts, and `/health/ready` reports `cache: fail` with status 200.
+- Readiness and the startup check only call `aping()` on the bound checkpointer, store and cache store.
+- `10xgraph revoke` writes to the cache store `cache_store` selects and refuses when it is the in-memory store.
+- Shutdown closes the cache store once, after the graph and pending lease releases.
+- The in-memory cache store keeps expiries on the monotonic clock, so a wall clock jump no longer expires a held thread lock early.
+
+**Fixed**
+- A leftover `REDIS_URL` no longer blocks boot when nothing configured needs Redis (rc3 refused to start an in-memory server in production with a stale `REDIS_URL`).
+- A rate-limit denial stays a 429 when reading the cache store clock for `Retry-After` fails.
+- `revoke_user` rounds the cutoff up to the microsecond, so a token issued at the cutoff itself is always revoked.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full list. The rc3 notes follow.
+
+---
+
+## 10xgraph-api 1.0.0rc3
 
 The third 1.0 release candidate: the `1.0.0rc2` code plus a startup check for every configured backend, a clear 503 when the rate limiter's backend is down, and a CORS fix so the hosted playground can reach a local `10xgraph dev` server.
 

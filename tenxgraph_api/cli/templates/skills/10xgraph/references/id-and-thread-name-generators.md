@@ -17,13 +17,25 @@ Built-ins:
 - `ShortIDGenerator`
 - `AsyncIDGenerator`
 
-Pass to `StateGraph(id_generator=...)`.
+Pass to `StateGraph(id_generator=...)`, or name one in `10xgraph.json` (not both: the server
+refuses to start when the graph is compiled with its own generator and the config sets one):
+
+```json
+{
+  "id_generator": "bigint"
+}
+```
+
+Names: `uuid`, `hex`, `short`, `int`, `bigint`, `timestamp`, `snowflake`, or a `module:attr`
+import path to a `BaseIDGenerator` instance, subclass or zero-argument factory. Unset keeps the
+graph's own generator. The server uses it for new thread ids, message ids and memory ids. With a
+`PgCheckpointer`, its `id_type` must hold the ids (`id_type="bigint"` for integer generators,
+`"string"` for the others); a mismatch refuses to start.
 
 ## API Snowflake ID Generator
 
-The API package includes a Snowflake-style ID generator for server-side/generated IDs.
-
-Environment/config variables:
+The API package includes a Snowflake-style ID generator (`"id_generator": "snowflake"`, needs
+`pip install "10xgraph-api[snowflakekit]"`). It reads these environment variables:
 
 - `SNOWFLAKE_EPOCH`
 - `SNOWFLAKE_NODE_ID`
@@ -40,11 +52,20 @@ Configure in `10xgraph.json`:
 
 ```json
 {
-  "thread_name_generator": "graph.thread_name_generator:MyNameGenerator"
+  "thread_name_generator": "first_message"
 }
 ```
 
-The API uses the configured generator when creating or naming threads. If no generator is configured, a dummy/default generator may be used.
+- `"random"` (the default when unset): a random readable name such as `deep-dive`.
+- `"first_message"`: the user's first message, whitespace collapsed, cut to at most 60
+  characters on a word boundary; random when there is no text.
+- `"none"`: new threads stay unnamed (the thread itself is saved).
+- `"module:attr"`: your `ThreadNameGenerator` subclass or instance
+  (`async def generate_name(self, messages: list[str]) -> str`). `messages` holds the user's
+  message texts first, then the replies.
+
+The name is generated after the first run on a new thread, in the background, and saved on the
+thread (`GET /v1/threads`).
 
 Keep thread name generation:
 

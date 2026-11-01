@@ -48,8 +48,7 @@ def _lazy_command(module_name: str, class_name: str) -> type:
                     f"The {feature} command could not load its required dependencies: {exc}",
                     hints=(
                         "Run `10xgraph audit` to inspect installed package compatibility.",
-                        "Upgrade with `python -m pip install --upgrade "
-                        '"10xgraph>=1.0.0rc3,<2"`.',
+                        'Upgrade with `python -m pip install --upgrade "10xgraph>=1.0.0rc4,<2"`.',
                     ),
                 ) from exc
             implementation = getattr(module, class_name)
@@ -431,13 +430,15 @@ def revoke(
         None, "--expires-at", help="With --jti: the token's exp (epoch seconds), to drop the entry."
     ),
     redis_url: str | None = typer.Option(
-        None, "--redis-url", help="Redis URL (default: REDIS_URL, then `redis` in 10xgraph.json)."
+        None,
+        "--redis-url",
+        help="Redis URL to write to instead of the cache store the server uses.",
     ),
     config_file: str = typer.Option(
         DEFAULT_CONFIG_FILE, "--config", "-c", help="Project configuration file."
     ),
 ) -> None:
-    """Revoke a token or all of a user's tokens (needs "token_revocation": "redis")."""
+    """Revoke a token or all of a user's tokens (needs cache_store.token_revocation on)."""
     try:
         sys.exit(
             RevokeCommand(output).execute(
@@ -512,10 +513,20 @@ def init(  # noqa: PLR0913
         "--auth",
         help="Production authentication: none, jwt, or custom.",
     ),
-    rate_limit: str | None = typer.Option(
+    cache_store: str | None = typer.Option(
         None,
-        "--rate-limit",
-        help="Rate limiting: none, memory, or redis.",
+        "--cache-store",
+        help="Production cache store: memory or redis (default redis, URL from REDIS_URL).",
+    ),
+    rate_limit: bool | None = typer.Option(
+        None,
+        "--rate-limit/--no-rate-limit",
+        help="Production rate limiting (default on).",
+    ),
+    token_revocation: bool | None = typer.Option(
+        None,
+        "--token-revocation/--no-token-revocation",
+        help="Production token revocation (default on with jwt or custom auth).",
     ),
     provider: str | None = typer.Option(
         None,
@@ -571,7 +582,9 @@ def init(  # noqa: PLR0913
             agent_name=name,
             template=template,
             auth=auth,
+            cache_store=cache_store,
             rate_limit=rate_limit,
+            token_revocation=token_revocation,
             provider=provider,
             websocket=websocket,
             yes=yes,

@@ -22,9 +22,6 @@ def _cfg(**overrides) -> RateLimitConfig:
         "requests": 100,
         "window": 60,
         "by": "ip",
-        "backend": "redis",
-        "redis_url": None,
-        "redis_prefix": "p",
         "exclude_paths": (),
         "trusted_proxy_headers": True,
         "trusted_proxy_hops": 1,
@@ -103,7 +100,7 @@ class TestByUser:
 
 class TestConfigValidation:
     def test_by_user_is_accepted(self):
-        cfg = RateLimitConfig.from_dict({"by": "user", "backend": "redis"})
+        cfg = RateLimitConfig.from_dict({"by": "user"})
         assert cfg.by == "user"
 
     def test_invalid_by_rejected(self):
@@ -141,13 +138,12 @@ class TestDefaultTrustedProxies:
 
     def test_parsing_warns_when_headers_are_trusted_without_a_list(self, caplog):
         with caplog.at_level("WARNING", logger="tenxgraph_api"):
-            RateLimitConfig.from_dict({"backend": "redis", "trusted_proxy_headers": True})
+            RateLimitConfig.from_dict({"trusted_proxy_headers": True})
         assert "without rate_limit.trusted_proxies" in caplog.text
         caplog.clear()
         with caplog.at_level("WARNING", logger="tenxgraph_api"):
             RateLimitConfig.from_dict(
                 {
-                    "backend": "redis",
                     "trusted_proxy_headers": True,
                     "trusted_proxies": ["10.0.0.0/8"],
                 }

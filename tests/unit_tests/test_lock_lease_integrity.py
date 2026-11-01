@@ -1,96 +1,120 @@
-"""Lease integrity of the shared limiter behind the thread lock (G-91, G-94)."""
-
-# ruff: noqa: S101
+"""Lease integrity behind the thread lock (G-91, G-94)."""
 
 import asyncio
 
 import pytest
 
-from tenxgraph_api.src.app.core import concurrency
-from tenxgraph_api.src.app.core.concurrency import RedisConcurrencyLimiter
+from tenxgraph_api.src.app.core import leases
+from tenxgraph_api.src.app.core.leases import LeaseManager
 
-from .test_concurrency_limiter import _FakeRedis
-
-
-KEY = "10xgraph:concurrency:runs:thread:t1"
+from .test_concurrency_limiter import RecordingStore
 
 
-class _SlowPipeRedis(_FakeRedis):
-    """A Redis whose transaction takes a while, so a caller can be cancelled inside it."""
-
-    def pipeline(self, transaction=True):
-        pipe = super().pipeline(transaction)
-        execute = pipe.execute
-
-        async def slow_execute():
-            results = await execute()  # the server applied it ...
-            await asyncio.sleep(10)  # ... but the reply is slow
-            return results
-
-        pipe.execute = slow_execute
-        return pipe
+KEY = "concurrency:runs:thread:t1"
 
 
-class _StrictCloseRedis(_FakeRedis):
-    """Refuses commands once closed, like a real client."""
+class _SlowAcquireStore(RecordingStore):
+    """A store that grants the slot, then takes a while to answer, so a caller can be
+    cancelled after the slot was taken."""
 
-    async def zrem(self, key, member):
+    async def acquire(self, key, limit, ttl):
+        result = await super().acquire(key, limit, ttl)  # the server applied it ...
+        await asyncio.sleep(0.2)  # ... but the reply is slow
+        return result
+
+
+class _StrictCloseStore(RecordingStore):
+    """Refuses calls once closed, like a real client."""
+
+    async def release(self, key, slot_id):
         await asyncio.sleep(0.01)
         if self.closed:
             raise ConnectionError("client closed")
-        await super().zrem(key, member)
+        await super().release(key, slot_id)
 
 
 @pytest.mark.asyncio
-async def test_redis_outage_keeps_one_run_per_thread_in_this_process():
-    redis = _FakeRedis()
-    redis.fail = True
-    limiter = RedisConcurrencyLimiter(redis)
-    first = await limiter.acquire("runs:thread:t1", 1)
+async def test_cache_store_outage_keeps_one_run_per_thread_in_this_process():
+    store = RecordingStore()
+    store.fail = True
+    manager = LeaseManager(store)
+    first = await manager.acquire("runs:thread:t1", 1)
     assert first is not None
-    assert await limiter.acquire("runs:thread:t1", 1) is None
+    assert await manager.acquire("runs:thread:t1", 1) is None
     first.release()
-    assert await limiter.acquire("runs:thread:t1", 1) is not None
-    await limiter.aclose()
+    assert await manager.acquire("runs:thread:t1", 1) is not None
+    await manager.aclose()
 
 
 @pytest.mark.asyncio
 async def test_lost_lease_is_detected_and_restored():
-    redis = _FakeRedis()
-    limiter = RedisConcurrencyLimiter(redis, lease_ttl=0.06)
-    lease = await limiter.acquire("runs:thread:t1", 1)
+    store = RecordingStore()
+    manager = LeaseManager(store, lease_ttl=0.06)
+    lease = await manager.acquire("runs:thread:t1", 1)
     assert lease is not None and not lease.lost
-    redis.zsets[KEY].clear()  # evicted, or expired during a stall
+    await store.inner.delete(KEY)  # evicted, or expired during a stall
     await asyncio.sleep(0.05)
     assert lease.lost
-    assert len(redis.zsets[KEY]) == 1  # held again, so a second run is still refused
-    assert await limiter.acquire("runs:thread:t1", 1) is None
+    assert store.slots(KEY) == 1  # held again, so a second run is still refused
+    other = LeaseManager(store, lease_ttl=0.06)
+    assert await other.acquire("runs:thread:t1", 1) is None
     lease.release()
-    await limiter.aclose()
+    await asyncio.sleep(0.01)
+    assert store.slots(KEY) == 0  # the slot taken again is the one released
+    await manager.aclose()
 
 
 @pytest.mark.asyncio
 async def test_a_cancelled_waiter_leaves_no_ghost_lease():
-    redis = _SlowPipeRedis()
-    limiter = RedisConcurrencyLimiter(redis, lease_ttl=60)
-    waiter = asyncio.create_task(limiter.acquire("runs:thread:t1", 1))
+    store = _SlowAcquireStore()
+    manager = LeaseManager(store, lease_ttl=60)
+    waiter = asyncio.create_task(manager.acquire("runs:thread:t1", 1))
+    await asyncio.sleep(0.05)
+    assert store.slots(KEY) == 1  # granted on the server, the reply still on its way
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    await asyncio.sleep(0.3)
+    assert store.slots(KEY) == 0
+    assert manager._held == {}
+    await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_a_cancelled_waiters_release():
+    store = _SlowAcquireStore()
+    manager = LeaseManager(store, lease_ttl=60)
+    waiter = asyncio.create_task(manager.acquire("runs:thread:t1", 1))
     await asyncio.sleep(0.05)
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
         await waiter
-    await asyncio.sleep(0.05)
-    assert redis.zsets.get(KEY, {}) == {}
-    await limiter.aclose()
+    await manager.aclose()  # the release of the late grant runs before the store closes
+    assert store.slots(KEY) == 0
+    assert not leases._pending_releases
 
 
 @pytest.mark.asyncio
-async def test_aclose_waits_for_pending_releases_before_closing_the_client():
-    redis = _StrictCloseRedis()
-    limiter = RedisConcurrencyLimiter(redis, lease_ttl=60)
-    lease = await limiter.acquire("runs:thread:t1", 1)
+async def test_aclose_waits_for_pending_releases_before_closing_the_store():
+    store = _StrictCloseStore()
+    manager = LeaseManager(store, lease_ttl=60)
+    lease = await manager.acquire("runs:thread:t1", 1)
     assert lease is not None
     lease.release()  # scheduled, not yet run
-    await limiter.aclose()
-    assert redis.zsets[KEY] == {}
-    assert redis.closed
-    assert not concurrency._pending_releases
+    await manager.aclose()
+    await store.aclose()  # what the lifespan does next
+    assert store.slots(KEY) == 0
+    assert store.closed
+    assert not leases._pending_releases
+    assert not manager._renewers
+
+
+@pytest.mark.asyncio
+async def test_aclose_stops_renewing_leases_still_held():
+    store = RecordingStore()
+    manager = LeaseManager(store, lease_ttl=0.06)
+    assert await manager.acquire("runs:thread:t1", 1) is not None
+    await manager.aclose()
+    renewals = len(store.ops("renew"))
+    await asyncio.sleep(0.05)
+    assert len(store.ops("renew")) == renewals

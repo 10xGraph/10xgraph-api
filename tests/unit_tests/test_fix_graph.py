@@ -37,9 +37,7 @@ class TestFixGraph:
     @pytest.fixture
     def mock_config(self):
         """Create a mock GraphConfig."""
-        config = MagicMock()
-        config.thread_name_generator_path = None
-        return config
+        return MagicMock()
 
     @pytest.fixture
     def graph_service(self, mock_graph, mock_checkpointer, mock_config):

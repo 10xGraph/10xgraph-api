@@ -25,7 +25,7 @@ def test_agent_name_with_quotes_does_not_break_pyproject(tmp_path: Path) -> None
         agent_name='My "Agent" \\ x',
         template="production",
         auth="jwt",
-        rate_limit="memory",
+        cache_store="memory",
     )
     template = Path(__file__).parents[2] / "tenxgraph_api/cli/templates/prod/pyproject.toml"
     rendered = cmd._render(template, context, True)
@@ -38,7 +38,7 @@ def test_agent_name_with_quotes_does_not_break_pyproject(tmp_path: Path) -> None
 def test_agent_name_with_control_characters_is_refused(name: str) -> None:
     with pytest.raises(ValidationError):
         InitCommand(output=_out())._non_interactive_context(
-            path=".", agent_name=name, template="production", auth="jwt", rate_limit="memory"
+            path=".", agent_name=name, template="production", auth="jwt", cache_store="memory"
         )
 
 

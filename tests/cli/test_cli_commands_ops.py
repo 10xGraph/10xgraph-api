@@ -169,7 +169,7 @@ def test_init_command_basic(monkeypatch, tmp_path, silent_output):
         "agent_name_slug": "my-agent",
         "setup_type": "quick_start",
         "auth": "none",
-        "rate_limit": "none",
+        "rate_limit": False,
     }
     monkeypatch.setattr(InitCommand, "_prompt_user", lambda self: ctx)
     cmd = InitCommand(output=silent_output)
@@ -186,7 +186,7 @@ def test_init_command_prod(monkeypatch, tmp_path, silent_output):
         "agent_name_slug": "my-agent",
         "setup_type": "production",
         "auth": "none",
-        "rate_limit": "none",
+        "rate_limit": False,
     }
     monkeypatch.setattr(InitCommand, "_prompt_user", lambda self: ctx)
     monkeypatch.setattr(InitCommand, "_should_skip", _skip_binary(InitCommand._should_skip))
@@ -206,7 +206,7 @@ def test_init_command_existing_without_force(monkeypatch, tmp_path, silent_outpu
         "agent_name_slug": "my-agent",
         "setup_type": "quick_start",
         "auth": "none",
-        "rate_limit": "none",
+        "rate_limit": False,
     }
     monkeypatch.setattr(InitCommand, "_prompt_user", lambda self: ctx)
     cfg = tmp_path / "10xgraph.json"
@@ -280,7 +280,7 @@ def test_init_command_force_overwrite(monkeypatch, tmp_path, silent_output):
         "agent_name_slug": "my-agent",
         "setup_type": "quick_start",
         "auth": "none",
-        "rate_limit": "none",
+        "rate_limit": False,
     }
     monkeypatch.setattr(InitCommand, "_prompt_user", lambda self: ctx)
     cmd = InitCommand(output=silent_output)

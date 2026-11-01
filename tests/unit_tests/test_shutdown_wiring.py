@@ -8,10 +8,14 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from injectq import InjectQ
 from tenxgraph.core.exceptions import GraphClosedError
 
 from tenxgraph_api.src.app import main as app_main
+from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
+from tenxgraph_api.src.app.core.cache_store.loader import bind_cache_store
 from tenxgraph_api.src.app.core.exceptions.handle_errors import init_errors_handler
+from tenxgraph_api.src.app.core.leases import LeaseManager
 
 
 def _graph(order: list[str]) -> AsyncMock:
@@ -64,6 +68,36 @@ async def test_sweeper_is_cancelled_before_the_graph_closes():
         async with app_main.lifespan(FastAPI()):
             await asyncio.sleep(0)  # let the sweeper start
     assert order == ["sweeper_cancelled", "aclose"]
+
+
+@pytest.mark.asyncio
+async def test_graph_closes_first_then_leases_then_the_cache_store_once():
+    order: list[str] = []
+    graph = _graph(order)
+
+    class _Store(InMemoryCacheStore):
+        async def aclose(self):
+            order.append("cache_store")
+
+    container = InjectQ()
+    bind_cache_store(container, _Store())
+    leases = container.get(LeaseManager)
+    leases_close = leases.aclose
+
+    async def close_leases():
+        order.append("leases")
+        await leases_close()
+
+    leases.aclose = close_leases
+    with (
+        patch.object(app_main, "container", container),
+        patch.object(app_main, "attach_all_modules", AsyncMock(return_value=graph)),
+        patch.object(app_main, "_prepare_checkpointer", AsyncMock()),
+        patch.object(app_main, "_cleanup_temp_media_cache", AsyncMock()),
+    ):
+        async with app_main.lifespan(FastAPI()):
+            pass
+    assert order == ["aclose", "leases", "cache_store"]
 
 
 @pytest.mark.asyncio

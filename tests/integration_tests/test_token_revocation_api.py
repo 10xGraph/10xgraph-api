@@ -4,12 +4,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
-from tenxgraph_api.src.app.core.auth.revocation import (
-    InMemoryTokenRevocation,
-    TokenRevocationBackend,
-)
+from tenxgraph_api.src.app.core.auth.revocation import TokenRevocationConfig, revoke_user
+from tenxgraph_api.src.app.core.cache_store import BaseCacheStore, InMemoryCacheStore
 from tenxgraph_api.src.app.routers.checkpointer.router import router as checkpointer_router
 
 from .conftest import build_app, make_client, user_headers
@@ -20,15 +19,18 @@ HTTP_UNAUTHORIZED = 401
 HTTP_UNAVAILABLE = 503
 
 
-def _client(backend: TokenRevocationBackend):
-    app = build_app(routers=[checkpointer_router], extra_bindings={TokenRevocationBackend: backend})
+def _client(cache: BaseCacheStore):
+    app = build_app(
+        routers=[checkpointer_router],
+        extra_bindings={BaseCacheStore: cache, TokenRevocationConfig: TokenRevocationConfig()},
+    )
     return make_client(app)
 
 
 def test_revoked_user_is_refused_and_others_are_not():
-    backend = InMemoryTokenRevocation()
-    backend.revoke_user("mallory")  # HeaderAuth identities carry no iat -> revoked
-    client = _client(backend)
+    cache = InMemoryCacheStore()
+    asyncio.run(revoke_user(cache, "mallory"))  # HeaderAuth identities carry no iat -> revoked
+    client = _client(cache)
 
     assert client.get("/v1/threads", headers=user_headers("alice")).status_code == HTTP_OK
     resp = client.get("/v1/threads", headers=user_headers("mallory"))
@@ -37,11 +39,17 @@ def test_revoked_user_is_refused_and_others_are_not():
 
 
 def test_revocation_outage_fails_closed():
-    class _Down(TokenRevocationBackend):
-        async def is_revoked(self, identity: dict[str, Any]) -> bool:
-            raise ConnectionError("redis down")
-
-    client = _client(_Down())
+    cache = MagicMock(spec=BaseCacheStore)
+    cache.get = AsyncMock(side_effect=ConnectionError("redis down"))
+    client = _client(cache)
     assert client.get("/v1/threads", headers=user_headers("alice")).status_code == (
         HTTP_UNAVAILABLE
     )
+
+
+def test_revocation_off_ignores_the_cache_store():
+    cache = MagicMock(spec=BaseCacheStore)
+    cache.get = AsyncMock(side_effect=ConnectionError("redis down"))
+    app = build_app(routers=[checkpointer_router], extra_bindings={BaseCacheStore: cache})
+    client = make_client(app)
+    assert client.get("/v1/threads", headers=user_headers("alice")).status_code == HTTP_OK

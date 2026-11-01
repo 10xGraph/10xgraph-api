@@ -2,6 +2,8 @@ import importlib
 import inspect
 import logging
 import os
+import weakref
+from collections.abc import Callable
 from pathlib import Path
 
 from injectq import InjectQ
@@ -9,6 +11,17 @@ from tenxgraph.core import CompiledGraph
 from tenxgraph.core.graph.remote_tool import RemoteToolConfig as CoreRemoteToolConfig
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.storage.store import BaseStore
+from tenxgraph.utils.id_generator import (
+    BaseIDGenerator,
+    BigIntIDGenerator,
+    DefaultIDGenerator,
+    HexIDGenerator,
+    IDType,
+    IntIDGenerator,
+    ShortIDGenerator,
+    TimestampIDGenerator,
+    UUIDGenerator,
+)
 
 from tenxgraph_api import BaseAuth
 from tenxgraph_api.src.app.core.auth.authorization import (
@@ -18,8 +31,14 @@ from tenxgraph_api.src.app.core.auth.authorization import (
     RoleBasedAuthorizationBackend,
     assert_ownership_supported,
 )
+from tenxgraph_api.src.app.core.cache_store.base import BaseCacheStore
+from tenxgraph_api.src.app.core.cache_store.loader import load_and_bind_cache_store
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
-from tenxgraph_api.src.app.utils.thread_name_generator import ThreadNameGenerator
+from tenxgraph_api.src.app.utils.thread_name_generator import (
+    DefaultThreadNameGenerator,
+    FirstMessageThreadNameGenerator,
+    ThreadNameGenerator,
+)
 
 
 logger = logging.getLogger("tenxgraph_api.loader")
@@ -130,6 +149,37 @@ def load_store(path: str | None) -> BaseStore | None:
         raise Exception(f"Failed to load BaseStore from {path}: {e}")
 
     return store
+
+
+def load_cache_store(path: str) -> BaseCacheStore:
+    """Load the ``cache_store`` from ``"module:attr"``: an instance or a zero-arg factory."""
+    if ":" not in path:
+        raise ValueError(f"Invalid cache_store path format '{path}'. Expected 'module:attribute'.")
+
+    module_name_importable, function_name = path.split(":")
+
+    try:
+        module = importlib.import_module(module_name_importable)
+        entry_point_obj = getattr(module, function_name)
+        cache_store = entry_point_obj
+        if not isinstance(cache_store, BaseCacheStore) and callable(cache_store):
+            cache_store = cache_store()
+
+        if isinstance(cache_store, BaseCacheStore):
+            logger.info(f"Successfully loaded BaseCacheStore '{function_name}' from {path}.")
+        else:
+            raise TypeError("Loaded object is not a BaseCacheStore or a factory returning one.")
+    except ModuleNotFoundError as e:
+        logger.error(f"Module not found when loading BaseCacheStore from {path}: {e}")
+        raise ModuleNotFoundError(f"Module not found for cache_store path '{path}': {e}")
+    except AttributeError as e:
+        logger.error(f"Attribute not found when loading BaseCacheStore from {path}: {e}")
+        raise AttributeError(f"Attribute not found for cache_store path '{path}': {e}")
+    except Exception as e:
+        logger.error(f"Error loading BaseCacheStore from {path}: {e}")
+        raise Exception(f"Failed to load BaseCacheStore from {path}: {e}")
+
+    return cache_store
 
 
 def load_container(path: str | None) -> InjectQ | None:
@@ -259,6 +309,168 @@ def load_thread_name_generator(path: str | None) -> ThreadNameGenerator | None:
     return thread_name_generator
 
 
+def resolve_thread_name_generator(choice: str) -> ThreadNameGenerator | None:
+    """The generator for a ``thread_name_generator`` choice; None for ``none`` (no names)."""
+    if choice == "none":
+        return None
+    if choice == "random":
+        return DefaultThreadNameGenerator()
+    if choice == "first_message":
+        return FirstMessageThreadNameGenerator()
+    return load_thread_name_generator(choice)
+
+
+def _snowflake_id_generator() -> BaseIDGenerator:
+    from tenxgraph_api.src.app.utils import snowflake_id_generator
+
+    if not snowflake_id_generator.HAS_SNOWFLAKE:
+        raise ValueError(
+            'id_generator "snowflake" needs the snowflakekit package: '
+            'pip install "10xgraph-api[snowflakekit]"'
+        )
+    return snowflake_id_generator.SnowFlakeIdGenerator()
+
+
+# ``id_generator`` names in 10xgraph.json (graph_config.ID_GENERATOR_NAMES): the concrete core
+# generators, plus the API's Snowflake one (reads the SNOWFLAKE_* environment variables).
+BUILTIN_ID_GENERATORS: dict[str, Callable[[], BaseIDGenerator]] = {
+    "uuid": UUIDGenerator,
+    "hex": HexIDGenerator,
+    "short": ShortIDGenerator,
+    "int": IntIDGenerator,
+    "bigint": BigIntIDGenerator,
+    "timestamp": TimestampIDGenerator,
+    "snowflake": _snowflake_id_generator,
+}
+
+
+def load_id_generator(value: str) -> BaseIDGenerator:
+    """The generator for an ``id_generator`` value: a built-in name or ``"module:attr"``.
+
+    ``module:attr`` may name a ``BaseIDGenerator`` instance, a subclass, or a zero-argument
+    factory returning one.
+    """
+    builtin = BUILTIN_ID_GENERATORS.get(value)
+    if builtin is not None:
+        return builtin()
+    if ":" not in value:
+        raise ValueError(
+            f"id_generator must be one of {', '.join(BUILTIN_ID_GENERATORS)} or "
+            f'"module:attr"; got {value!r}'
+        )
+    module_name, attr = value.split(":", 1)
+    try:
+        target = getattr(importlib.import_module(module_name), attr)
+    except (ImportError, AttributeError) as exc:
+        raise ValueError(f"id_generator {value!r} cannot be loaded: {exc}") from exc
+    generator = target if isinstance(target, BaseIDGenerator) else None
+    if generator is None and callable(target):
+        generator = target()
+    if not isinstance(generator, BaseIDGenerator):
+        raise TypeError(
+            f"id_generator {value!r} is not a BaseIDGenerator instance, subclass or factory "
+            "returning one"
+        )
+    return generator
+
+
+# PgCheckpointer ``id_type`` -> what its thread and message id columns hold.
+_PG_INTEGER_ID_TYPES = {"int": "integer", "bigint": "bigint"}
+
+
+def _check_checkpointer_id_type(
+    generator: BaseIDGenerator, name: str, checkpointer: object
+) -> None:
+    """Refuse a generator whose ids the checkpointer's id columns cannot store.
+
+    Only ``PgCheckpointer`` declares its column type (``id_type``: ``string`` makes VARCHAR
+    columns, ``int`` INTEGER, ``bigint`` BIGINT); other checkpointers store any id.
+    """
+    try:
+        from tenxgraph.storage.checkpointer.pg_checkpointer import PgCheckpointer
+    except ImportError:  # pragma: no cover - the module imports without its drivers
+        return
+    if not isinstance(checkpointer, PgCheckpointer):
+        return
+    raw = getattr(checkpointer, "id_type", "string")
+    column = _PG_INTEGER_ID_TYPES.get(str(getattr(raw, "value", raw)), "string")
+    makes = generator.id_type
+    if makes == IDType.STRING and column != "string":
+        fix = 'id_type="string"'
+    elif (makes != IDType.STRING and column == "string") or (
+        makes == IDType.BIGINT and column == "integer"
+    ):
+        fix = 'id_type="bigint"'
+    else:
+        return
+    raise ValueError(
+        f"id_generator {name!r} makes {makes.value} ids but the PgCheckpointer stores "
+        f"{column} ids (its id_type is {str(getattr(raw, 'value', raw))!r}). Pass {fix} to "
+        "PgCheckpointer(...), or pick an id_generator whose ids its columns hold."
+    )
+
+
+# Generators apply_id_generator put on a graph; see there.
+_applied_id_generators: weakref.WeakSet[BaseIDGenerator] = weakref.WeakSet()
+
+
+def apply_id_generator(
+    graph: CompiledGraph, config: GraphConfig, container: InjectQ
+) -> BaseIDGenerator | None:
+    """Use ``id_generator`` from 10xgraph.json for the loaded graph; None when it is not set.
+
+    Core binds the graph's generator in the graph's InjectQ container as ``BaseIDGenerator``,
+    ``"generated_id_type"`` and the ``"generated_id"`` factory, and reads them back from
+    ``InjectQ.get_instance()`` for thread, message and memory ids; the API reads
+    ``"generated_id"`` for new thread ids. All three are rebound in the graph's container, the
+    API's container and the active one, so every id comes from the configured generator. A
+    ``PgCheckpointer`` whose ``id_type`` cannot hold the generator's ids refuses the boot.
+    A graph compiled with its own (non-default) generator refuses the setting, so the
+    generator lives in one place.
+    """
+    name = config.id_generator
+    if name is None:
+        return None
+    state_graph = getattr(graph, "_state_graph", None)
+    compiled_with = getattr(state_graph, "_id_generator", None)
+    if (
+        compiled_with is not None
+        and type(compiled_with) is not DefaultIDGenerator
+        and compiled_with not in _applied_id_generators
+    ):
+        raise ValueError(
+            f"The graph is compiled with {type(compiled_with).__name__} "
+            f"(StateGraph(id_generator=...)) and 10xgraph.json sets id_generator {name!r}. "
+            "Set the generator in one place: remove one of them."
+        )
+    generator = load_id_generator(name)
+
+    containers: list[InjectQ] = []
+    for candidate in (getattr(state_graph, "_container", None), container, InjectQ.get_instance()):
+        if isinstance(candidate, InjectQ) and all(candidate is not c for c in containers):
+            containers.append(candidate)
+    checkpointer = next(
+        (c.try_get(BaseCheckpointer) for c in containers if BaseCheckpointer in c), None
+    )
+    _check_checkpointer_id_type(generator, name, checkpointer)
+
+    # Factories, not instances: InjectQ keeps a resolved instance binding in its singleton
+    # cache, so a rebound instance would not be seen; a factory is looked up first and called
+    # on every resolve (core rebinds "get_node" the same way in CompiledGraph.override_node).
+    id_type = generator.id_type
+    for target in containers:
+        target.bind_factory(BaseIDGenerator, lambda: generator)
+        target.bind_factory("generated_id_type", lambda: id_type)
+        target.bind_factory("generated_id", generator.generate)
+    if state_graph is not None:
+        # GET /v1/graph reports the generator from here. Remembered, so loading the same graph
+        # object again (a second app in one process) is not mistaken for a compiled-in one.
+        state_graph._id_generator = generator
+        _applied_id_generators.add(generator)
+    logger.info("ID generator: %s (id_generator %s)", type(generator).__name__, name)
+    return generator
+
+
 def load_and_bind_auth(container: InjectQ, auth_config: dict) -> None:
     """Bind the authentication backend described by ``GraphConfig.auth_config()``.
 
@@ -316,36 +528,9 @@ _BUILTIN_AUTHORIZATION = {
 }
 
 
-def _build_ownership_redis(redis_url: str | None) -> object | None:
-    """Build an async Redis client for the ownership L2 cache, or None.
-
-    Returns None (L1-only) when no URL is configured or the ``redis`` package is absent;
-    the resolver degrades gracefully either way.
-    """
-    if not redis_url:
-        return None
-    try:
-        import redis.asyncio  # type: ignore[import]  # noqa: F401
-    except ImportError:
-        logger.warning(
-            "REDIS configured but the 'redis' package is not installed; ownership cache "
-            "runs in-process only (L1). Install the redis extra to share it across workers."
-        )
-        return None
-    try:
-        from tenxgraph_api.src.app.core.redis_client import create_redis
-
-        client = create_redis(redis_url)
-        logger.info("Ownership authorization L2 cache enabled (shared Redis).")
-        return client
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.warning("Failed to build ownership Redis client: %s; using L1 cache only.", exc)
-        return None
-
-
 def _resolve_authorization_backend(
     authorization: str | dict | None,
-    redis_url: str | None = None,
+    cache: BaseCacheStore | None = None,
     server_thread_ids: bool = False,
     auth_enabled: bool = False,
 ) -> AuthorizationBackend:
@@ -367,7 +552,8 @@ def _resolve_authorization_backend(
     ``MODE=development`` and auth on ran ``allow_all``: the API stamped isolation scope
     ``none`` and every authenticated user could read every thread and memory.
 
-    ``redis_url`` (when set) backs the ownership cache's shared L2 tier.
+    ``cache`` (the API's cache store) backs the ownership cache's shared L2 tier; the
+    built-in backends use it and never close it.
     ``server_thread_ids`` (``runs.thread_ids == "server"``) makes the built-in ownership
     backends refuse client-named ids for threads that do not exist yet.
     """
@@ -380,7 +566,7 @@ def _resolve_authorization_backend(
                 role_scopes=authorization.get("roles") or authorization.get("role_scopes") or {},
                 default_scopes=authorization.get("default_scopes") or (),
                 isolation=authorization.get("isolation", "owner"),
-                redis=_build_ownership_redis(redis_url),
+                cache=cache,
                 server_thread_ids=server_thread_ids,
             )
         raise ValueError(
@@ -410,9 +596,7 @@ def _resolve_authorization_backend(
                 key,
             )
         if builtin is OwnershipAuthorizationBackend:
-            return OwnershipAuthorizationBackend(
-                redis=_build_ownership_redis(redis_url), server_thread_ids=server_thread_ids
-            )
+            return OwnershipAuthorizationBackend(cache=cache, server_thread_ids=server_thread_ids)
         return builtin()
 
     # Not configured: owner-only whenever there is an identity to own threads.
@@ -422,9 +606,7 @@ def _resolve_authorization_backend(
             "(owner-only thread access). Set "
             '"authorization": "allow_all" to opt out.'
         )
-        return OwnershipAuthorizationBackend(
-            redis=_build_ownership_redis(redis_url), server_thread_ids=server_thread_ids
-        )
+        return OwnershipAuthorizationBackend(cache=cache, server_thread_ids=server_thread_ids)
 
     logger.info(
         "No authorization configured and auth is off; using DefaultAuthorizationBackend "
@@ -442,12 +624,15 @@ def _is_production() -> bool:
 def load_and_bind_authorization(
     container: InjectQ,
     authorization_path: str | None,
-    redis_url: str | None = None,
+    cache: BaseCacheStore | None = None,
     server_thread_ids: bool = False,
     auth_enabled: bool = False,
 ) -> None:
+    """Bind the authorization backend; ``cache`` defaults to the bound ``BaseCacheStore``."""
+    if cache is None:
+        cache = container.try_get(BaseCacheStore)
     backend = _resolve_authorization_backend(
-        authorization_path, redis_url, server_thread_ids, auth_enabled
+        authorization_path, cache, server_thread_ids, auth_enabled
     )
     if server_thread_ids and not isinstance(backend, OwnershipAuthorizationBackend):
         logger.debug(
@@ -458,54 +643,34 @@ def load_and_bind_authorization(
     container.bind_instance(AuthorizationBackend, backend)
 
 
-def _bind_token_revocation(
-    container: InjectQ, config: GraphConfig, auth_enabled: bool, redis_url: str | None
-) -> None:
-    """Bind the ``token_revocation`` backend from 10xgraph.json, if one is configured.
+def _enable_token_revocation(container: InjectQ, config: GraphConfig, auth_enabled: bool) -> None:
+    """Bind the ``token_revocation`` settings from 10xgraph.json, if it is on.
 
-    A backend the developer already bound in their InjectQ container is left alone.
+    The checks read the cache store bound by ``load_and_bind_cache_store``, so call this after
+    it. With an in-memory cache store a revocation reaches only this process: warned about in
+    production or with more than one worker.
     """
-    from tenxgraph_api.src.app.core.auth.revocation import (
-        TokenRevocationBackend,
-        build_token_revocation,
-    )
+    from tenxgraph_api.src.app.core.auth.revocation import TokenRevocationConfig
+    from tenxgraph_api.src.app.core.cache_store.loader import is_in_memory
 
-    spec = config.token_revocation
-    if not isinstance(spec, str) or not spec:
+    settings = config.token_revocation
+    if settings is None:
         return
     if not auth_enabled:
-        logger.warning("token_revocation is set but auth is off; there are no tokens to revoke.")
+        logger.warning("token_revocation is on but auth is off; there are no tokens to revoke.")
         return
-    if container.try_get(TokenRevocationBackend) is not None:
-        logger.info("Using the TokenRevocationBackend bound in the InjectQ container.")
-        return
-    container.bind_instance(TokenRevocationBackend, build_token_revocation(spec, redis_url))
-    logger.info("Token revocation enabled (%s).", spec)
-
-
-def _bind_shared_concurrency(container: InjectQ, redis_url: str | None) -> None:
-    """Share the run and WebSocket connection caps across workers when Redis is configured.
-
-    Without Redis each process counts its own slots, so a cap becomes ``limit x workers``. A
-    ``ConcurrencyLimiter`` the developer already bound is left alone.
-    """
-    from tenxgraph_api.src.app.core.concurrency import (
-        ConcurrencyLimiter,
-        RedisConcurrencyLimiter,
-    )
-
-    if not redis_url or container.try_get(ConcurrencyLimiter) is not None:
-        return
-    try:
-        limiter = RedisConcurrencyLimiter.from_url(redis_url)
-    except ImportError:
+    container.bind_instance(TokenRevocationConfig, settings)
+    store = container.try_get(BaseCacheStore)
+    logger.info("Token revocation enabled (cache store: %s).", type(store).__name__)
+    workers = _web_concurrency()
+    if is_in_memory(store) and (_is_production() or workers > 1):
         logger.warning(
-            "REDIS configured but the 'redis' package is not installed; run and WebSocket "
-            "caps are counted per process."
+            "token_revocation is on with an in-memory cache store (workers=%d): a revocation "
+            "reaches only the process that recorded it, and `10xgraph revoke` cannot reach it "
+            'at all. Set "cache_store": {"type": "redis", "url": ...} (or type custom) to '
+            "share revocations between workers.",
+            workers,
         )
-        return
-    container.bind_instance(ConcurrencyLimiter, limiter)
-    logger.info("Run and WebSocket connection caps are shared through Redis.")
 
 
 def _web_concurrency() -> int:
@@ -516,11 +681,12 @@ def _web_concurrency() -> int:
         return 1
 
 
-def warn_per_process_state(container: InjectQ, redis_url: str | None) -> None:
+def warn_per_process_state(container: InjectQ) -> None:
     """Warn when threads or caps live in one process and the deployment may run several.
 
     The in-memory and SQLite checkpointers keep threads in one process (or one file), and
-    without Redis the run locks, run caps and rate-limit counters are per process too. That is
+    with an in-memory cache store the run locks, run and WebSocket caps and idempotency
+    records are per process too. That is
     fine for one process; with more than one worker or replica every process has its own view.
     Warns in production or when ``WEB_CONCURRENCY`` is above 1 (the API cannot see replicas,
     so production always gets the line). The choice stays the developer's.
@@ -528,6 +694,8 @@ def warn_per_process_state(container: InjectQ, redis_url: str | None) -> None:
     workers = _web_concurrency()
     if not (_is_production() or workers > 1):
         return
+    from tenxgraph_api.src.app.core.cache_store.loader import is_in_memory
+
     checkpointer = container.try_get(BaseCheckpointer)
     kind = type(checkpointer).__name__
     if kind in {"InMemoryCheckpointer", "SqliteCheckpointer"}:
@@ -538,12 +706,13 @@ def warn_per_process_state(container: InjectQ, redis_url: str | None) -> None:
             kind,
             workers,
         )
-    if not redis_url:
+    if is_in_memory(container.try_get(BaseCacheStore)):
         logger.warning(
-            "No Redis configured: the per-thread run lock, run and WebSocket caps and "
-            "in-memory rate limits are counted per process (workers=%d). With more than one "
-            "worker or replica each limit multiplies and two processes can run the same thread "
-            "at once. Set `redis` in 10xgraph.json for a shared view.",
+            "The cache store is in-memory: the per-thread run lock, run and WebSocket caps, "
+            "idempotency records and in-memory rate limits are counted per process "
+            "(workers=%d). With more than one worker or replica each limit multiplies and two "
+            'processes can run the same thread at once. Set "cache_store": {"type": "redis", '
+            '"url": ...} (or type custom) for a shared view.',
             workers,
         )
 
@@ -564,6 +733,9 @@ async def attach_all_modules(
         for node_name, schemas in grouped.items():
             graph.attach_remote_tools(schemas, node_name)
         logger.info("Attached %d configured remote tools", len(remote_tools))
+
+    if graph is not None:
+        apply_id_generator(graph, config, container)
 
     logger.info("All modules attached successfully")
 
@@ -618,25 +790,24 @@ async def attach_all_modules(
         # bind None
         container.bind_instance(BaseAuth, None, allow_none=True)
 
-    # load thread name generator
-    thread_name_generator_path = config.thread_name_generator_path
-    if thread_name_generator_path:
-        thread_name_generator = load_thread_name_generator(thread_name_generator_path)
-        container.bind_instance(ThreadNameGenerator, thread_name_generator)
-    else:
-        # bind None if not configured
-        container.bind_instance(ThreadNameGenerator, None, allow_none=True)
+    # Thread names: random by default; None (``"none"``) leaves new threads unnamed.
+    container.bind_instance(
+        ThreadNameGenerator,
+        resolve_thread_name_generator(config.thread_name_generator),
+        allow_none=True,
+    )
 
-    # load authorization backend. The ownership cache's shared L2 tier reuses the
-    # configured Redis URL (config `redis`, else settings.REDIS_URL); absent -> L1 only.
-    from tenxgraph_api.src.app.core.config.settings import get_settings
+    # The cache store first: the ownership cache, token revocation and the rate limiter read
+    # it from the container.
+    load_and_bind_cache_store(container, config)
 
+    # load authorization backend. The ownership cache's shared L2 tier is the cache store
+    # (L1 only when it is in-memory).
     authorization_path = config.authorization_path
-    ownership_redis_url = config.redis_url or get_settings().REDIS_URL
     load_and_bind_authorization(
         container,
         authorization_path,
-        ownership_redis_url,
+        container.get(BaseCacheStore),
         server_thread_ids=config.runs.server_thread_ids,
         auth_enabled=bool(auth_config),
     )
@@ -647,9 +818,8 @@ async def attach_all_modules(
             container.get(AuthorizationBackend), container.try_get(BaseCheckpointer)
         )
 
-    _bind_token_revocation(container, config, bool(auth_config), ownership_redis_url)
-    _bind_shared_concurrency(container, ownership_redis_url)
-    warn_per_process_state(container, ownership_redis_url)
+    _enable_token_revocation(container, config, bool(auth_config))
+    warn_per_process_state(container)
 
     # --- Media service wiring ---
     from tenxgraph_api.src.app.core.config.media_settings import (

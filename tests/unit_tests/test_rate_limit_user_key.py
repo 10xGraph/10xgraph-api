@@ -10,11 +10,9 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
+from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RateLimitConfig
-from tenxgraph_api.src.app.core.middleware.rate_limit import (
-    MemoryRateLimitBackend,
-    RateLimitMiddleware,
-)
+from tenxgraph_api.src.app.core.middleware.rate_limit import RateLimitMiddleware
 from tenxgraph_api.src.app.core.middleware.rate_limit.keying import client_key_for
 
 
@@ -29,7 +27,7 @@ class TokenIsUserAuth(BaseAuth):
 
 
 def _config(**overrides) -> RateLimitConfig:
-    data = {"enabled": True, "backend": "memory", "requests": 2, "window": 60, "by": "user"}
+    data = {"enabled": True, "requests": 2, "window": 60, "by": "user"}
     data.update(overrides)
     return RateLimitConfig.from_dict(data)
 
@@ -47,7 +45,7 @@ def auth_container():
 
 def _app(config: RateLimitConfig) -> TestClient:
     app = FastAPI()
-    app.add_middleware(RateLimitMiddleware, config=config, backend=MemoryRateLimitBackend())
+    app.add_middleware(RateLimitMiddleware, config=config, cache=InMemoryCacheStore())
 
     @app.get("/")
     def root():

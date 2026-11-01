@@ -362,9 +362,11 @@ async def test_attach_all_modules():
     config = MagicMock(spec=GraphConfig)
     config.graph_path = "mod:graph"
     config.auth_config.return_value = {"method": "none", "path": "path.py:auth"}
-    config.thread_name_generator_path = "mod:generator"
+    config.thread_name_generator = "mod:generator"
+    config.id_generator = None
     config.authorization_path = "mod:authorization"
     config.store_path = None
+    config.cache_store = None
     config.remote_tools = [
         RemoteToolConfig(
             node="tools",
@@ -400,11 +402,13 @@ async def test_attach_all_modules():
         )
         # verify bindings
         container.bind_instance.assert_any_call(BaseAuth, None, allow_none=True)
-        container.bind_instance.assert_any_call(ThreadNameGenerator, mock_generator)
+        container.bind_instance.assert_any_call(
+            ThreadNameGenerator, mock_generator, allow_none=True
+        )
         container.bind_instance.assert_any_call(AuthorizationBackend, mock_auth_backend)
 
         # Test branch where config has no thread name generator and no auth config
-        config.thread_name_generator_path = None
+        config.thread_name_generator = "none"
         config.auth_config.return_value = None
         config.remote_tools = []
 
@@ -434,10 +438,11 @@ async def test_attach_refuses_ownership_without_owner_lookup(auth_on):
     config = MagicMock(spec=GraphConfig)
     config.graph_path = "mod:graph"
     config.auth_config.return_value = {"method": "jwt"} if auth_on else None
-    config.thread_name_generator_path = None
+    config.thread_name_generator = "none"
+    config.id_generator = None
     config.authorization_path = "ownership"
     config.store_path = None
-    config.redis_url = None
+    config.cache_store = None
     config.remote_tools = []
 
     container = InjectQ()
@@ -462,11 +467,15 @@ async def test_attach_refuses_ownership_without_owner_lookup(auth_on):
 # ---------------------------------------------------------------------------
 
 
-def _warn_container(checkpointer):
+def _warn_container(checkpointer, cache_store=None):
     from unittest.mock import MagicMock
 
+    from tenxgraph_api.src.app.core.cache_store import BaseCacheStore
+
     container = MagicMock()
-    container.try_get.return_value = checkpointer
+    container.try_get.side_effect = lambda key: (
+        cache_store if key is BaseCacheStore else checkpointer
+    )
     return container
 
 
@@ -479,10 +488,10 @@ def test_warns_for_in_memory_checkpointer_and_missing_redis_in_production(monkey
 
     monkeypatch.setattr(loader, "_is_production", lambda: True)
     with caplog.at_level(logging.WARNING):
-        loader.warn_per_process_state(_warn_container(InMemoryCheckpointer()), None)
+        loader.warn_per_process_state(_warn_container(InMemoryCheckpointer()))
     text = " ".join(r.getMessage() for r in caplog.records)
     assert "InMemoryCheckpointer" in text
-    assert "No Redis configured" in text
+    assert "The cache store is in-memory" in text
 
 
 def test_no_warning_in_single_process_development(monkeypatch, caplog):
@@ -495,19 +504,22 @@ def test_no_warning_in_single_process_development(monkeypatch, caplog):
     monkeypatch.setattr(loader, "_is_production", lambda: False)
     monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
     with caplog.at_level(logging.WARNING):
-        loader.warn_per_process_state(_warn_container(InMemoryCheckpointer()), None)
+        loader.warn_per_process_state(_warn_container(InMemoryCheckpointer()))
     assert not caplog.records
 
 
 def test_web_concurrency_above_one_warns_even_in_development(monkeypatch, caplog):
     import logging
+    from unittest.mock import MagicMock
 
     from tenxgraph_api.src.app import loader
+    from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore, RedisCacheStore
 
     monkeypatch.setattr(loader, "_is_production", lambda: False)
     monkeypatch.setenv("WEB_CONCURRENCY", "4")
     with caplog.at_level(logging.WARNING):
-        loader.warn_per_process_state(_warn_container(None), "redis://x")
+        shared = RedisCacheStore(client=MagicMock())
+        loader.warn_per_process_state(_warn_container(None, shared))
         assert not caplog.records
-        loader.warn_per_process_state(_warn_container(None), None)
-    assert "No Redis configured" in caplog.text
+        loader.warn_per_process_state(_warn_container(None, InMemoryCacheStore()))
+    assert "The cache store is in-memory" in caplog.text

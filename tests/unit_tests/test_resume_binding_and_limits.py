@@ -84,7 +84,7 @@ def _service(state: Any = None) -> GraphService:
     srv.checkpointer.aget_state = AsyncMock(return_value=state)
     srv.checkpointer.aget_thread_owner = AsyncMock(return_value=None)
     srv.config = MagicMock()
-    srv.config.thread_name_generator_path = None
+    srv.thread_name_generator = None
     srv._media_service = None
     srv._telemetry = None
     srv._prepare_input = AsyncMock(

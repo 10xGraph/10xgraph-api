@@ -18,7 +18,10 @@ from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     GraphInputSchema,
 )
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
-from tenxgraph_api.src.app.utils.thread_name_generator import ThreadNameGenerator
+from tenxgraph_api.src.app.utils.thread_name_generator import (
+    DefaultThreadNameGenerator,
+    ThreadNameGenerator,
+)
 
 
 class MockStateModel(BaseModel):
@@ -54,7 +57,6 @@ class TestGraphServiceMethods:
     @pytest.fixture
     def mock_config(self):
         config = MagicMock(spec=GraphConfig)
-        config.thread_name_generator_path = None
         return config
 
     @pytest.fixture
@@ -95,12 +97,18 @@ class TestGraphServiceMethods:
         mock_thread_name_generator.generate_name.assert_called_once_with(["msg"])
         mock_checkpointer.aput_thread.assert_called_once()
 
-        # No generator configured
-        service.thread_name_generator = None
+        # The default (random) generator saves its name the same way.
+        service.thread_name_generator = DefaultThreadNameGenerator()
         mock_checkpointer.aput_thread.reset_mock()
         name = await service._save_thread_name({"thread_id": "1"}, 1, ["msg"])
-        assert isinstance(name, str)
-        assert len(name) > 0
+        assert isinstance(name, str) and name
+        saved = mock_checkpointer.aput_thread.await_args.args[1]
+        assert saved.thread_name == name
+
+        # "none": no name, nothing written.
+        service.thread_name_generator = None
+        mock_checkpointer.aput_thread.reset_mock()
+        assert await service._save_thread_name({"thread_id": "1"}, 1, ["msg"]) is None
         mock_checkpointer.aput_thread.assert_not_called()
 
     @pytest.mark.asyncio
@@ -215,9 +223,6 @@ class TestGraphServiceMethods:
             "context_summary": "summary",
         }
 
-        # Mock thread_name_generator_path to trigger save_thread_name
-        mock_config.thread_name_generator_path = "some_path"
-
         # Since _save_thread returns True, it's considered a new thread
         mock_checkpointer.aput_thread.return_value = True
 
@@ -273,8 +278,6 @@ class TestGraphServiceMethods:
             yield chunk
 
         mock_graph.astream = mock_stream
-
-        mock_config.thread_name_generator_path = "some_path"
 
         chunks = []
         async for c in service.stream_graph(gi, {}):

@@ -177,10 +177,10 @@ def _authenticate(
 
 
 async def _reject_if_revoked(connection: HTTPConnection, user: dict[str, Any]) -> None:
-    """Refuse a credential the token revocation backend reports as revoked (401).
+    """Refuse a credential that was revoked (401), when ``token_revocation`` is on.
 
-    When the backend cannot answer, refuse with 503 instead of serving a token that might have
-    been revoked.
+    When the cache store cannot answer, refuse with 503 instead of serving a token that might
+    have been revoked.
     """
     try:
         revoked = await token_revoked(user)

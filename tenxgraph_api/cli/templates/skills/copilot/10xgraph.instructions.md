@@ -85,7 +85,7 @@ Agent(
   "checkpointer": null,
   "injectq": null,
   "store": null,
-  "redis": null,
+  "cache_store": {"type": "memory"},
   "thread_name_generator": null
 }
 ```
@@ -98,7 +98,7 @@ Set `"auth": {"method": "jwt"}` and `JWT_SECRET_KEY` in `.env` to enable JWT aut
 - `thread_id` is the continuity key for conversation state — always pass it for persisted interactions.
 - Auth and request permissions belong in API middleware/routers, not inside graph nodes.
 - Long-term memory store records are cross-thread knowledge, not thread history.
-- Rate limiting config lives in `10xgraph.json` under `"rate_limit"`: backend options are `"memory"` or `"redis"`.
+- The cache store, rate limiting and token revocation live in one `10xgraph.json` object: `"cache_store": {"type": "memory" | "redis" | "custom", "url": "${REDIS_URL}", "rate_limit": {...}, "token_revocation": true}`.
 - `reasoning_config` is on by default — disable explicitly with `reasoning_config=None` when not needed.
 
 ## Verifying behavior

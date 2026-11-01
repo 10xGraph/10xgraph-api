@@ -1,4 +1,4 @@
-"""Unit tests for ThreadOwnershipResolver (L1 LRU + optional Redis L2)."""
+"""Unit tests for ThreadOwnershipResolver (L1 LRU + optional cache store L2)."""
 
 from __future__ import annotations
 
@@ -20,20 +20,23 @@ class _CountingLookup:
 
 
 class _FakeRedis:
+    """A shared cache store (only the key methods the resolver uses)."""
+
     def __init__(self):
         self.store: dict[str, bytes] = {}
         self.gets = 0
         self.sets = 0
-        self.ttls: dict[str, int | None] = {}
+        self.ttls: dict[str, float | None] = {}
 
     async def get(self, key):
         self.gets += 1
         return self.store.get(key)
 
-    async def set(self, key, value, ex=None):
+    async def set(self, key, value, ttl=None, mode="always"):
         self.sets += 1
-        self.ttls[key] = ex
-        self.store[key] = value.encode() if isinstance(value, str) else value
+        self.ttls[key] = ttl
+        self.store[key] = value
+        return True
 
     async def delete(self, key):
         self.store.pop(key, None)
@@ -66,14 +69,14 @@ async def test_negative_result_is_never_cached():
 async def test_redis_l2_is_populated_and_promotes_to_l1():
     lookup = _CountingLookup({"t1": "alice"})
     redis = _FakeRedis()
-    r = ThreadOwnershipResolver(lookup, redis=redis)
+    r = ThreadOwnershipResolver(lookup, cache=redis)
 
     assert await r.owner_of("t1") == "alice"  # DB -> fills L2 + L1
     assert redis.sets == 1
 
     # A fresh resolver sharing the same Redis resolves without touching the DB.
     lookup2 = _CountingLookup({"t1": "alice"})
-    r2 = ThreadOwnershipResolver(lookup2, redis=redis)
+    r2 = ThreadOwnershipResolver(lookup2, cache=redis)
     assert await r2.owner_of("t1") == "alice"
     assert lookup2.calls == 0  # served from L2
     # And it is now in r2's L1 too (no further Redis reads).
@@ -86,11 +89,11 @@ async def test_redis_l2_is_populated_and_promotes_to_l1():
 async def test_evict_clears_l1_and_l2():
     lookup = _CountingLookup({"t1": "alice"})
     redis = _FakeRedis()
-    r = ThreadOwnershipResolver(lookup, redis=redis)
+    r = ThreadOwnershipResolver(lookup, cache=redis)
 
     await r.owner_of("t1")
     await r.evict("t1")
-    assert list(redis.store) == ["af:authz:owner:tomb:t1"]  # owner cleared, tombstone left
+    assert list(redis.store) == ["owner:tomb:t1"]  # owner cleared, tombstone left
 
     await r.owner_of("t1")
     assert lookup.calls == 2  # had to re-resolve after eviction
@@ -118,14 +121,14 @@ async def test_redis_errors_degrade_to_lookup():
         async def get(self, key):
             raise RuntimeError("redis down")
 
-        async def set(self, key, value, ex=None):
+        async def set(self, key, value, ttl=None, mode="always"):
             raise RuntimeError("redis down")
 
         async def delete(self, key):
             raise RuntimeError("redis down")
 
     lookup = _CountingLookup({"t1": "alice"})
-    r = ThreadOwnershipResolver(lookup, redis=_BrokenRedis())
+    r = ThreadOwnershipResolver(lookup, cache=_BrokenRedis())
     # Redis failing must not fail the request; falls through to the DB lookup.
     assert await r.owner_of("t1") == "alice"
 
@@ -166,7 +169,7 @@ async def test_l1_entry_expires_after_its_ttl(monkeypatch):
 @pytest.mark.asyncio
 async def test_l2_entries_are_written_with_a_ttl():
     redis = _FakeRedis()
-    r = ThreadOwnershipResolver(_CountingLookup({"t1": "alice"}), redis=redis, l2_ttl=600)
+    r = ThreadOwnershipResolver(_CountingLookup({"t1": "alice"}), cache=redis, l2_ttl=600)
     await r.owner_of("t1")
     assert list(redis.ttls.values()) == [600]
 
@@ -200,11 +203,11 @@ async def test_delete_leaves_a_tombstone_for_one_l1_ttl():
 @pytest.mark.asyncio
 async def test_tombstone_reaches_other_workers_through_redis():
     redis = _FakeRedis()
-    deleting = ThreadOwnershipResolver(_CountingLookup({}), redis=redis, l1_ttl=30.0)
-    other = ThreadOwnershipResolver(_CountingLookup({}), redis=redis, l1_ttl=30.0)
+    deleting = ThreadOwnershipResolver(_CountingLookup({}), cache=redis, l1_ttl=30.0)
+    other = ThreadOwnershipResolver(_CountingLookup({}), cache=redis, l1_ttl=30.0)
     await deleting.evict("t1")
     assert await other.recently_deleted("t1") is True
-    assert redis.ttls["af:authz:owner:tomb:t1"] == 30
+    assert redis.ttls["owner:tomb:t1"] == 30
 
 
 @pytest.mark.asyncio
@@ -221,7 +224,7 @@ async def test_tombstone_read_errors_degrade_to_not_deleted():
         async def get(self, key):
             raise ConnectionError("down")
 
-    r = ThreadOwnershipResolver(_CountingLookup({}), redis=_Broken())
+    r = ThreadOwnershipResolver(_CountingLookup({}), cache=_Broken())
     assert await r.recently_deleted("t1") is False
 
 
@@ -259,8 +262,8 @@ async def test_deleting_owner_falls_back_to_the_cached_owner():
 @pytest.mark.asyncio
 async def test_shared_tombstone_carries_the_deleting_owner():
     redis = _FakeRedis()
-    deleting = ThreadOwnershipResolver(_CountingLookup({}), redis=redis)
-    other = ThreadOwnershipResolver(_CountingLookup({}), redis=redis)
+    deleting = ThreadOwnershipResolver(_CountingLookup({}), cache=redis)
+    other = ThreadOwnershipResolver(_CountingLookup({}), cache=redis)
     await deleting.evict("t1", owner="alice")
     assert await other.recently_deleted("t1", "alice") is False
     assert await other.recently_deleted("t1", "bob") is True
@@ -273,9 +276,9 @@ async def test_thread_id_cannot_collide_with_a_delete_marker():
     """B31: a thread named "deleted:V" or "tomb:V" must not read or write V's delete marker."""
     redis = _FakeRedis()
     r = ThreadOwnershipResolver(
-        _CountingLookup({"deleted:v": "mallory", "tomb:v": "mallory"}), redis=redis
+        _CountingLookup({"deleted:v": "mallory", "tomb:v": "mallory"}), cache=redis
     )
-    other = ThreadOwnershipResolver(_CountingLookup({}), redis=redis)
+    other = ThreadOwnershipResolver(_CountingLookup({}), cache=redis)
 
     await r.owner_of("deleted:v")
     await r.owner_of("tomb:v")
@@ -283,3 +286,29 @@ async def test_thread_id_cannot_collide_with_a_delete_marker():
 
     await r.evict("v", "alice")
     assert await other.owner_of("tomb:v") == "mallory"
+
+
+@pytest.mark.asyncio
+async def test_in_memory_cache_store_is_not_a_second_l1():
+    from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
+
+    r = ThreadOwnershipResolver(_CountingLookup({"t1": "alice"}), cache=InMemoryCacheStore())
+    assert r._cache is None
+    assert await r.owner_of("t1") == "alice"
+
+
+@pytest.mark.asyncio
+async def test_l2_keys_through_the_redis_cache_store_keep_the_old_layout():
+    from unittest.mock import AsyncMock, MagicMock
+
+    from tenxgraph_api.src.app.core.cache_store import RedisCacheStore
+
+    client = MagicMock()
+    client.get = AsyncMock(return_value=None)
+    client.set = AsyncMock()
+    r = ThreadOwnershipResolver(
+        _CountingLookup({"t:1": "alice"}), cache=RedisCacheStore(client=client), l2_ttl=600
+    )
+    await r.owner_of("t:1")
+    client.get.assert_awaited_with("af:authz:owner:id:t%3A1")
+    assert client.set.await_args.args[0] == "af:authz:owner:id:t%3A1"

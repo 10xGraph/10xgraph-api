@@ -1,21 +1,22 @@
 """G-107: opt-in Idempotency-Key on invoke, stream and WebSocket runs."""
 
-# ruff: noqa: S101, PLR2004
-
 from __future__ import annotations
 
-import asyncio
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from tenxgraph.core.state import StreamChunk, StreamEvent
 
+from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
 from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+from tenxgraph_api.src.app.core.leases import LeaseManager
 from tenxgraph_api.src.app.routers.graph import idempotency
 from tenxgraph_api.src.app.routers.graph.router import router as graph_router
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import GraphInvokeOutputSchema
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
+from tests.unit_tests.test_concurrency_limiter import RecordingStore
 
 from .conftest import build_app, make_client, user_headers
 
@@ -26,10 +27,19 @@ KEY = {"Idempotency-Key": "k-1"}
 
 
 @pytest.fixture(autouse=True)
-def _clean():
-    idempotency._memory.clear()
-    yield
-    idempotency._memory.clear()
+def _app_logs_reach_caplog(monkeypatch):
+    """The app's log setup (run by any test that builds the app) stops the app loggers
+    from propagating; caplog listens on the root logger."""
+    for name in ("tenxgraph_api", "10xgraph-api"):
+        monkeypatch.setattr(logging.getLogger(name), "propagate", True)
+
+
+@pytest.fixture(autouse=True)
+def _clean(monkeypatch):
+    """Fresh in-process records and leases for every test."""
+    leases = LeaseManager(InMemoryCacheStore())
+    monkeypatch.setattr(idempotency, "lease_manager", lambda: leases)
+    return leases
 
 
 def _client():
@@ -144,24 +154,33 @@ async def test_oversized_result_is_marked_not_stored():
 
 
 @pytest.mark.asyncio
-async def test_redis_records_use_the_shared_client(monkeypatch):
-    store: dict[str, tuple[str, int]] = {}
-    client = MagicMock()
-    client.get = AsyncMock(side_effect=lambda name: store.get(name, (None,))[0])
-
-    async def _set(name, value, ex=None):
-        store[name] = (value, ex)
-
-    client.set = _set
-    monkeypatch.setattr(idempotency, "_redis_client", lambda: client)
+async def test_records_live_in_the_cache_store(monkeypatch):
+    store = RecordingStore()
+    monkeypatch.setattr(idempotency, "lease_manager", lambda: LeaseManager(store))
     user = {"user_id": "alice"}
     run, _ = await idempotency.check(user, "r", "invoke", {})
     await run.complete("{}")
     run.release()
-    (name, (_, ttl)) = next(iter(store.items()))
-    assert "idempotency" in name and ":alice:r" in name
-    assert ttl == 86400
-    assert asyncio.iscoroutinefunction(client.get) or client.get.await_count >= 1
+    sets = [call for call in store.calls if call[0] == "set"]
+    assert sets == [("set", "idempotency:alice:r", 86400)]
+    assert ("acquire", "concurrency:runs:idem:alice:r") in store.calls
+    assert json.loads(await store.get("idempotency:alice:r"))["fp"] == run.fp
+
+
+@pytest.mark.asyncio
+async def test_cache_store_errors_run_without_idempotency(monkeypatch, caplog):
+    store = RecordingStore()
+    store.fail = True
+    monkeypatch.setattr(idempotency, "lease_manager", lambda: LeaseManager(store))
+    user = {"user_id": "alice"}
+    with caplog.at_level(logging.WARNING):
+        run, record = await idempotency.check(user, "down", "invoke", {})
+        assert run is not None and record is None  # the request runs
+        await run.complete("{}")  # storing fails too: logged, not raised
+        run.release()
+    assert "Idempotency lookup failed; running without it" in caplog.text
+    assert "Idempotency record could not be stored" in caplog.text
+    assert "Shared concurrency limit unavailable" in caplog.text
 
 
 def test_ws_frame_carries_the_key():

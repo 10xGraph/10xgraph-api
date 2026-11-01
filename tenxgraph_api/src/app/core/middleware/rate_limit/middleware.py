@@ -1,4 +1,5 @@
 import time
+from typing import TYPE_CHECKING
 
 from fastapi import status
 from fastapi.responses import JSONResponse
@@ -7,36 +8,53 @@ from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from tenxgraph_api.src.app.core import logger
+from tenxgraph_api.src.app.core.cache_store import BaseCacheStore, InMemoryCacheStore
 from tenxgraph_api.src.app.core.config.graph_config import RateLimitConfig
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 
-from .base import BaseRateLimitBackend, RateLimitDecision
 from .keying import client_key_for
+from .limiter import RateLimitDecision, bound_cache_store, check
 
 
-# Liveness/readiness probes hit /ping. Limiting it (or failing closed on a backend outage)
+if TYPE_CHECKING:
+    from injectq import InjectQ
+
+
+# Liveness/readiness probes hit /ping. Limiting it (or failing closed on a cache store outage)
 # would make the orchestrator restart healthy pods.
 HEALTH_CHECK_PATHS = frozenset({"/ping", "/health/ready"})
 
 
 class RateLimitMiddleware:
-    """Backend-agnostic rate-limit middleware.
+    """Rate-limit middleware over the API's cache store (see ``limiter.py``).
 
-    Pure ASGI: it answers 429 (limit hit) or 503 (backend unreachable) itself, or edits the
-    ``http.response.start`` message on the way out, so it adds no per-request task and never
-    buffers a streaming body.
+    Pure ASGI: it answers 429 (limit hit) or 503 (cache store unreachable, with ``fail_open``
+    off) itself, or edits the ``http.response.start`` message on the way out, so it adds no
+    per-request task and never buffers a streaming body.
+
+    ``cache`` pins the store; without it each request uses the ``BaseCacheStore`` bound in
+    ``container`` (bound at startup, after the middleware is added), or a store of this
+    middleware's own when none is bound.
     """
 
     def __init__(
         self,
         app: ASGIApp,
         config: RateLimitConfig,
-        backend: BaseRateLimitBackend,
+        cache: BaseCacheStore | None = None,
+        container: "InjectQ | None" = None,
     ) -> None:
         self.app = app
         self.config = config
-        self.backend = backend
+        self.cache = cache
+        self.container = container
+        self._fallback: BaseCacheStore | None = None
         self._exclude = frozenset(config.exclude_paths) | HEALTH_CHECK_PATHS
+
+    def _bound_cache(self) -> BaseCacheStore:
+        if self._fallback is None:
+            self._fallback = InMemoryCacheStore()
+        return bound_cache_store(self.container, self._fallback)
 
     def _client_key(self, request: Request) -> str:
         return client_key_for(request, self.config)
@@ -48,16 +66,19 @@ class RateLimitMiddleware:
 
         request = Request(scope)
         key = self._client_key(request)
-        decision = await self.backend.check(
+        cache = self.cache if self.cache is not None else self._bound_cache()
+        decision = await check(
+            cache,
             key,
-            limit=self.config.requests,
-            window=self.config.window,
+            self.config.requests,
+            self.config.window,
+            fail_open=self.config.fail_open,
         )
         reset_at_epoch = int(time.time()) + decision.reset_after
 
         if not decision.allowed and decision.unavailable:
-            # The backend failed and fails closed: an outage, not the client's fault. The
-            # backend logs the error itself, so this does not log per request.
+            # The cache store failed and fail_open is off: an outage, not the client's fault.
+            # check() logs the error itself, so this does not log per request.
             await self._unavailable(decision, scope)(scope, receive, send)
             return
 

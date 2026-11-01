@@ -25,7 +25,7 @@ from tenxgraph.storage.checkpointer.base_checkpointer import ACTIVE_RUN_NAMESPAC
 from tenxgraph.utils.constants import END
 
 from tenxgraph_api.src.app.core import shutdown
-from tenxgraph_api.src.app.core.concurrency import Lease
+from tenxgraph_api.src.app.core.leases import Lease
 from tenxgraph_api.src.app.routers.graph.run_limits import release_when_done
 from tenxgraph_api.src.app.routers.graph.services.graph_service import _bounded_stream
 

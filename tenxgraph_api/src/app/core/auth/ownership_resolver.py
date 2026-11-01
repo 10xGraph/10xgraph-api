@@ -8,16 +8,19 @@ database round-trip per request.
 Cache tiers:
 
 - **L1**: a bounded in-process LRU (per worker) with a short TTL.
-- **L2** (optional): a shared Redis, so workers/instances do not each re-hit the database.
+- **L2** (optional): the API's shared cache store (``BaseCacheStore``, Redis by default), so
+  workers/instances do not each re-hit the database. With an in-memory cache store there is
+  no L2: it would only cache the same thing twice in this process.
 
 Deleting a thread evicts it from this worker's L1 and from L2, but another worker's L1 cannot
 be reached. A deleted id could be created again by a different user, and a stale L1 entry on
 another worker would then grant the old owner access to the new owner's thread. So a delete
-also leaves a **tombstone** for one L1 TTL (in L1, and in L2 when Redis is configured), and
-:meth:`ThreadOwnershipResolver.recently_deleted` lets the authorization backend refuse to
-create a thread under that id until every worker's stale entry has expired. Without Redis the
-tombstone only exists on the worker that handled the delete; run multi-worker deployments with
-the shared L2 tier. The L2 TTL covers an eviction that failed to reach Redis.
+also leaves a **tombstone** for one L1 TTL (in L1, and in L2 when a shared cache store is
+configured), and :meth:`ThreadOwnershipResolver.recently_deleted` lets the authorization
+backend refuse to create a thread under that id until every worker's stale entry has expired.
+Without a shared cache store the tombstone only exists on the worker that handled the delete;
+run multi-worker deployments with the shared L2 tier. The L2 TTL covers an eviction that
+failed to reach the cache store.
 
 Only *positive* results (a known owner) are cached. A ``None`` result (the thread does not
 exist yet) is **never** cached: a nonexistent thread can become owned by the very next
@@ -33,7 +36,9 @@ import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 
-from tenxgraph_api.src.app.core.redis_client import key_part, prefixed
+from tenxgraph_api.src.app.core.cache_store import BaseCacheStore
+from tenxgraph_api.src.app.core.cache_store.loader import is_in_memory
+from tenxgraph_api.src.app.core.redis_client import key_part
 
 
 logger = logging.getLogger("tenxgraph_api.authorization")
@@ -54,30 +59,28 @@ class ThreadOwnershipResolver:
         lookup: async ``(thread_id) -> user_id | None`` backing lookup (typically
             ``checkpointer.aget_thread_owner``). May raise ``NotImplementedError`` if the
             checkpointer cannot resolve ownership; that propagates uncached.
-        redis: optional async Redis-like client (``get``/``set``/``delete`` coroutines).
-            When absent the resolver is L1-only. Redis errors degrade to the DB lookup and
-            never fail a request.
+        cache: the API's cache store, the shared L2 tier (keys ``owner:id:<thread>`` and
+            ``owner:tomb:<thread>``). None or an ``InMemoryCacheStore`` means L1 only. Cache
+            errors degrade to the DB lookup and never fail a request. The resolver never
+            closes it.
         max_size: L1 LRU capacity (entries).
-        redis_prefix: key namespace for L2 entries (default ``af:authz:owner`` behind
-            ``REDIS_KEY_PREFIX``).
         l1_ttl: seconds an L1 entry is trusted; bounds staleness after a delete elsewhere.
-        l2_ttl: seconds an L2 entry lives in Redis.
+        l2_ttl: seconds an L2 entry lives in the cache store.
     """
 
     def __init__(
         self,
         lookup: OwnerLookup,
         *,
-        redis: object | None = None,
+        cache: BaseCacheStore | None = None,
         max_size: int = 10_000,
-        redis_prefix: str | None = None,
         l1_ttl: float = DEFAULT_L1_TTL_SECONDS,
         l2_ttl: int = DEFAULT_L2_TTL_SECONDS,
     ) -> None:
         self._lookup = lookup
-        self._redis = redis
+        # An in-memory store lives in this process, like L1: caching in it too adds nothing.
+        self._cache = None if is_in_memory(cache) else cache
         self._max_size = max(1, max_size)
-        self._prefix = redis_prefix if redis_prefix is not None else prefixed("af:authz:owner")
         self._l1_ttl = l1_ttl
         self._l2_ttl = l2_ttl
         # key -> (owner, monotonic expiry)
@@ -100,10 +103,10 @@ class ThreadOwnershipResolver:
         if cached is not None:
             return cached
 
-        from_redis = await self._redis_get(key)
-        if from_redis is not None:
-            await self._l1_put(key, from_redis)
-            return from_redis
+        from_l2 = await self._l2_get(key)
+        if from_l2 is not None:
+            await self._l1_put(key, from_l2)
+            return from_l2
 
         owner = await self._lookup(key)  # may raise NotImplementedError -> propagate
         if owner is None:
@@ -111,7 +114,7 @@ class ThreadOwnershipResolver:
 
         owner_str = str(owner)
         await self._l1_put(key, owner_str)
-        await self._redis_set(key, owner_str)
+        await self._l2_set(key, owner_str)
         return owner_str
 
     async def evict(self, thread_id: str | int, owner: str | int | None = None) -> None:
@@ -130,8 +133,8 @@ class ThreadOwnershipResolver:
             self._tombstones.move_to_end(key)
             while len(self._tombstones) > self._max_size:
                 self._tombstones.popitem(last=False)
-        await self._redis_delete(key)
-        await self._redis_tombstone(key, owner_str)
+        await self._l2_delete(key)
+        await self._l2_tombstone(key, owner_str)
 
     async def recently_deleted(self, thread_id: str | int, user_id: str | None = None) -> bool:
         """Whether ``thread_id`` was deleted within the last L1 TTL by someone other than
@@ -150,7 +153,7 @@ class ThreadOwnershipResolver:
                 if time.monotonic() < expires_at:
                     return not (owner and user_id is not None and owner == str(user_id))
                 del self._tombstones[key]
-        shared_owner = await self._redis_tombstone_owner(key)
+        shared_owner = await self._l2_tombstone_owner(key)
         if shared_owner is None:
             return False
         return not (shared_owner and user_id is not None and shared_owner == str(user_id))
@@ -176,69 +179,73 @@ class ThreadOwnershipResolver:
             while len(self._l1) > self._max_size:
                 self._l1.popitem(last=False)  # evict least-recently-used
 
-    # ------------------------------------------------------------------ L2 (Redis)
+    # ------------------------------------------------------------------ L2 (cache store)
 
     # Owner entries and delete markers live under different fixed segments, so no thread id
     # (not even one like "deleted:X") can make an owner key collide with a marker key.
-    def _redis_key(self, key: str) -> str:
-        return f"{self._prefix}:id:{key_part(key)}"
+    @staticmethod
+    def _owner_key(key: str) -> str:
+        return f"owner:id:{key_part(key)}"
 
-    async def _redis_get(self, key: str) -> str | None:
-        if self._redis is None:
+    @staticmethod
+    def _tombstone_key(key: str) -> str:
+        return f"owner:tomb:{key_part(key)}"
+
+    async def _l2_get(self, key: str) -> str | None:
+        if self._cache is None:
             return None
         try:
-            value = await self._redis.get(self._redis_key(key))  # type: ignore[attr-defined]
+            value = await self._cache.get(self._owner_key(key))
         except Exception as exc:  # degrade to DB; never fail the request
             logger.debug("Ownership L2 get failed for %s: %s", key, exc)
             return None
         if value is None:
             return None
-        return value.decode() if isinstance(value, bytes | bytearray) else str(value)
+        return _text(value)
 
-    async def _redis_set(self, key: str, owner: str) -> None:
-        if self._redis is None:
+    async def _l2_set(self, key: str, owner: str) -> None:
+        if self._cache is None:
             return
         try:
             # evict() removes the entry on delete; the TTL covers an eviction that failed.
-            await self._redis.set(  # type: ignore[attr-defined]
-                self._redis_key(key), owner, ex=self._l2_ttl
-            )
+            await self._cache.set(self._owner_key(key), owner.encode(), ttl=self._l2_ttl)
         except Exception as exc:
             logger.debug("Ownership L2 set failed for %s: %s", key, exc)
 
-    def _tombstone_key(self, key: str) -> str:
-        return f"{self._prefix}:tomb:{key_part(key)}"
-
-    async def _redis_tombstone(self, key: str, owner: str) -> None:
-        if self._redis is None:
+    async def _l2_tombstone(self, key: str, owner: str) -> None:
+        if self._cache is None:
             return
         try:
-            await self._redis.set(  # type: ignore[attr-defined]
+            await self._cache.set(
                 self._tombstone_key(key),
                 owner.encode() or b"-",
-                ex=max(1, int(self._l1_ttl + 0.999)),
+                ttl=max(1, int(self._l1_ttl + 0.999)),
             )
         except Exception as exc:
             logger.debug("Ownership L2 tombstone failed for %s: %s", key, exc)
 
-    async def _redis_tombstone_owner(self, key: str) -> str | None:
+    async def _l2_tombstone_owner(self, key: str) -> str | None:
         """The deleting owner in a shared tombstone ("" when unknown), or None when none."""
-        if self._redis is None:
+        if self._cache is None:
             return None
         try:
-            value = await self._redis.get(self._tombstone_key(key))  # type: ignore[attr-defined]
+            value = await self._cache.get(self._tombstone_key(key))
         except Exception as exc:  # degrade to "not deleted"; L1 already answered for us
             logger.debug("Ownership L2 tombstone read failed for %s: %s", key, exc)
             return None
         if value is None:
             return None
-        text = value.decode() if isinstance(value, bytes | bytearray) else str(value)
+        text = _text(value)
         return "" if text == "-" else text
 
-    async def _redis_delete(self, key: str) -> None:
-        if self._redis is None:
+    async def _l2_delete(self, key: str) -> None:
+        if self._cache is None:
             return
         try:
-            await self._redis.delete(self._redis_key(key))  # type: ignore[attr-defined]
+            await self._cache.delete(self._owner_key(key))
         except Exception as exc:
             logger.debug("Ownership L2 delete failed for %s: %s", key, exc)
+
+
+def _text(value: object) -> str:
+    return value.decode() if isinstance(value, bytes | bytearray) else str(value)

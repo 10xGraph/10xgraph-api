@@ -302,3 +302,35 @@ class DefaultThreadNameGenerator(ThreadNameGenerator):
         """
         generator = AIThreadNameGenerator()
         return generator.generate_name("-")
+
+
+# Longest name ``FirstMessageThreadNameGenerator`` makes, in characters.
+FIRST_MESSAGE_NAME_LENGTH = 60
+
+
+def _cut_on_word(text: str, limit: int) -> str:
+    """``text`` cut to at most ``limit`` characters at a word boundary, with nothing added.
+
+    A first word longer than ``limit`` has no boundary to cut at, so it is cut at ``limit``.
+    """
+    if len(text) <= limit:
+        return text
+    space = text.rfind(" ", 0, limit + 1)
+    return text[:space] if space > 0 else text[:limit]
+
+
+class FirstMessageThreadNameGenerator(ThreadNameGenerator):
+    """Names a thread after its first message (``"thread_name_generator": "first_message"``).
+
+    The API passes the user's messages first, so this is the user's first message whenever it
+    has text. Whitespace is collapsed and the text is cut to at most
+    ``FIRST_MESSAGE_NAME_LENGTH`` characters on a word boundary, adding nothing. Without any
+    text the name is a random one, as ``DefaultThreadNameGenerator`` makes.
+    """
+
+    async def generate_name(self, messages: list[str]) -> str:
+        for message in messages:
+            text = " ".join(str(message or "").split())
+            if text:
+                return _cut_on_word(text, FIRST_MESSAGE_NAME_LENGTH)
+        return AIThreadNameGenerator().generate_name("-")

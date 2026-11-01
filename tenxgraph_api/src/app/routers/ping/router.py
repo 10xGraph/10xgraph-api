@@ -33,10 +33,10 @@ async def ping_server(
     "/health/ready",
     summary="Readiness probe",
     description=(
-        "Checks the dependencies a request needs (checkpointer, Redis, store). Answers 200 "
-        "when every configured one is reachable and 503 otherwise, and 503 while the server is "
-        "shutting down. A Redis outage alone stays 200 unless a configured feature (token "
-        "revocation, a fail-closed rate limiter) needs it. /ping stays the liveness "
+        "Checks the dependencies a request needs (checkpointer, store, cache store). Answers "
+        "200 when every configured one is reachable and 503 otherwise, and 503 while the server "
+        "is shutting down. A cache store outage alone stays 200 unless a configured feature "
+        "(token revocation, a fail-closed rate limiter) needs it. /ping stays the liveness "
         "probe. Public, like /ping: it reports only ok or fail per configured component, and the "
         "result is cached for a few seconds."
     ),
@@ -47,7 +47,7 @@ async def readiness_probe(request: Request):
     from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
     from tenxgraph_api.src.app.core.utils.container import current_container
 
-    from .readiness import cached_readiness, is_ready, readiness_targets, redis_required
+    from .readiness import cache_required, cached_readiness, is_ready, readiness_targets
 
     if getattr(request.app.state, "draining", False):
         # Shutting down: leave the load balancer's rotation before the sockets close.
@@ -56,7 +56,7 @@ async def readiness_probe(request: Request):
     container: InjectQ = current_container()
     graph_config = container.try_get(GraphConfig) if GraphConfig in container else None
     checks = await cached_readiness(*readiness_targets(container))
-    ready = is_ready(checks, redis_is_required=redis_required(graph_config))
+    ready = is_ready(checks, cache_is_required=cache_required(graph_config))
     return JSONResponse(
         status_code=200 if ready else 503,
         content={"status": "ready" if ready else "not_ready", "checks": checks},

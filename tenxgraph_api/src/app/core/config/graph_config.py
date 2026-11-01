@@ -135,66 +135,54 @@ def _parse_networks(raw: object) -> tuple[str, ...]:
     return tuple(networks)
 
 
+RATE_LIMIT_KEYS: tuple[str, ...] = (
+    "enabled",
+    "requests",
+    "window",
+    "by",
+    "fail_open",
+    "trusted_proxy_headers",
+    "trusted_proxies",
+    "trusted_proxy_hops",
+    "exclude_paths",
+)
+
+
 @dataclass
 class RateLimitConfig:
-    """Rate limit configuration parsed from 10xgraph.json.
+    """Rate limit configuration: ``cache_store.rate_limit`` in 10xgraph.json.
 
-    Example (memory backend, default)::
+    Example::
 
-        "rate_limit": {
-            "enabled": true,
-            "backend": "memory",
-            "requests": 100,
-            "window": 60,
-            "by": "ip",
-            "trusted_proxy_headers": false,
-            "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"]
+        "cache_store": {
+            "type": "redis",
+            "url": "${REDIS_URL}",
+            "rate_limit": {
+                "enabled": true,
+                "requests": 100,
+                "window": 60,
+                "by": "ip",
+                "trusted_proxy_headers": false,
+                "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"],
+                "fail_open": true
+            }
         }
 
-    Example (Redis backend)::
-
-        "rate_limit": {
-            "enabled": true,
-            "backend": "redis",
-            "requests": 100,
-            "window": 60,
-            "by": "ip",
-            "trusted_proxy_headers": true,
-            "exclude_paths": ["/ping"],
-            "redis": {
-                "url": "redis://localhost:6379/0",
-                "prefix": "10xgraph:rate-limit"
-            },
-            "fail_open": true
-        }
-
-    Example (custom backend)::
-
-        "rate_limit": {
-            "enabled": true,
-            "backend": "custom",
-            "requests": 100,
-            "window": 60,
-            "by": "ip"
-        }
-
-    For custom backends, bind a ``BaseRateLimitBackend`` instance in InjectQ.
+    The counters live in the API's cache store, like the run locks and caps: shared between
+    workers with a Redis or custom store, per process with the in-memory one.
     """
 
     enabled: bool
     requests: int
     window: int
     by: str  # "ip" | "user" | "global"
-    backend: str  # "memory" | "redis" | "custom"
-    redis_url: str | None
-    redis_prefix: str
     exclude_paths: tuple[str, ...]
     trusted_proxy_headers: bool  # honour X-Forwarded-For only when True
     # Number of proxies you control in front of the app. Only this many entries,
     # counted from the RIGHT of X-Forwarded-For, were appended by your own
     # infrastructure; anything further left came from the caller and is forgeable.
     trusted_proxy_hops: int = 1
-    fail_open: bool = True  # on backend error: True=allow, False=deny
+    fail_open: bool = True  # on a cache store error: True=allow, False=deny with 503
     # Networks your proxies connect from. X-Forwarded-For is honoured only for requests
     # whose peer address is in one of them, so a client that reaches the app directly
     # (bypassing the proxy) cannot pick its own address. Empty means
@@ -205,12 +193,16 @@ class RateLimitConfig:
     def from_dict(cls, data: dict) -> "RateLimitConfig":
         if not isinstance(data, dict):
             raise ValueError("rate_limit must be an object")
+        unknown = sorted(set(data) - set(RATE_LIMIT_KEYS))
+        if unknown:
+            raise ValueError(
+                f"rate_limit: unknown keys {unknown}; valid keys: {', '.join(RATE_LIMIT_KEYS)}"
+            )
 
         enabled = _parse_bool(data.get("enabled", True), field="rate_limit.enabled")
         requests = int(data.get("requests", 100))
         window = int(data.get("window", 60))
         by = data.get("by", "ip")
-        backend = data.get("backend", "memory")
         trusted_proxy_headers = _parse_bool(
             data.get("trusted_proxy_headers", False),
             field="rate_limit.trusted_proxy_headers",
@@ -220,18 +212,6 @@ class RateLimitConfig:
             raise ValueError("rate_limit.exclude_paths must be a list of paths")
         exclude_paths = tuple(str(path) for path in exclude_paths_raw)
         fail_open = _parse_bool(data.get("fail_open", True), field="rate_limit.fail_open")
-
-        # Redis sub-object: {"url": "...", "prefix": "..."}
-        redis_obj = data.get("redis") or {}
-        if isinstance(redis_obj, str):
-            # Allow shorthand: "redis": "redis://..."
-            redis_url: str | None = _expand_env(redis_obj)
-            redis_prefix = "10xgraph:rate-limit"
-        elif isinstance(redis_obj, dict):
-            redis_url = _expand_env(redis_obj.get("url") or None)
-            redis_prefix = str(redis_obj.get("prefix", "10xgraph:rate-limit"))
-        else:
-            raise ValueError("rate_limit.redis must be an object or Redis URL string")
 
         # How many proxies of YOUR OWN sit in front of the app and append to
         # X-Forwarded-For. Only that many entries, counted from the right, were
@@ -243,10 +223,6 @@ class RateLimitConfig:
         # Validation
         if by not in ("ip", "global", "user"):
             raise ValueError(f"rate_limit.by must be 'ip', 'user', or 'global', got '{by}'")
-        if backend not in ("memory", "redis", "custom"):
-            raise ValueError(
-                f"rate_limit.backend must be 'memory', 'redis', or 'custom', got '{backend}'"
-            )
         if requests <= 0:
             raise ValueError("rate_limit.requests must be a positive integer")
         if window <= 0:
@@ -261,30 +237,239 @@ class RateLimitConfig:
                 "can reach the app except through it)."
             )
 
-        # The memory backend counts per PROCESS. Under gunicorn with N workers the
-        # effective limit therefore becomes requests x N, and it resets whenever a
-        # worker restarts -- so it does not really limit anything in production.
-        if enabled and backend == "memory":
-            logger.warning(
-                "Rate limiting uses the in-memory backend. It counts per process, so "
-                "with N workers the real limit is requests x N and it resets on every "
-                "worker restart. Use the 'redis' backend for any multi-worker deployment."
-            )
-
         return cls(
             enabled=enabled,
             requests=requests,
             window=window,
             by=by,
-            backend=backend,
-            redis_url=redis_url,
-            redis_prefix=redis_prefix,
             exclude_paths=exclude_paths,
             trusted_proxy_headers=trusted_proxy_headers,
             trusted_proxy_hops=trusted_proxy_hops,
             fail_open=fail_open,
             trusted_proxies=trusted_proxies,
         )
+
+
+# A revoke_user entry is kept this long unless told otherwise. It has to outlive the longest
+# token you issue, or an old token comes back to life when the entry goes.
+DEFAULT_USER_REVOCATION_TTL = 30 * 24 * 3600
+
+
+def _positive_seconds(value: object, *, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not value > 0:
+        raise ValueError(f"{field} must be a positive number of seconds, got {value!r}")
+    return float(value)
+
+
+@dataclass(frozen=True)
+class TokenRevocationConfig:
+    """``cache_store.token_revocation`` in 10xgraph.json: ``true``, or an object.
+
+    Example::
+
+        "cache_store": {
+            "type": "redis",
+            "url": "${REDIS_URL}",
+            "token_revocation": {"enabled": true, "token_lifetime": 3600, "user_ttl": 2592000}
+        }
+
+    Revocations live in the API's cache store: shared between workers with a Redis or custom
+    store, per process with the in-memory one. ``token_lifetime`` is the longest lifetime of the
+    tokens you issue, in seconds; it dates a token that has no ``iat`` from its ``exp``.
+    ``user_ttl`` is how long a ``revoke_user`` entry is kept by default (``null`` keeps it
+    until deleted).
+    """
+
+    token_lifetime: float | None = None
+    user_ttl: float | None = DEFAULT_USER_REVOCATION_TTL
+
+    @classmethod
+    def parse(cls, value: object) -> "TokenRevocationConfig | None":
+        """The settings for ``value``; None when token revocation is off."""
+        if value is None or value is False:
+            return None
+        if value is True:
+            return cls()
+        if not isinstance(value, dict):
+            raise ValueError(
+                "token_revocation must be true, false, or an object with enabled, "
+                f"token_lifetime, user_ttl; got {value!r}"
+            )
+        unknown = set(value) - {"enabled", "token_lifetime", "user_ttl"}
+        if unknown:
+            raise ValueError(
+                f"token_revocation: unknown keys {sorted(unknown)}; use enabled, "
+                "token_lifetime and user_ttl"
+            )
+        if not _parse_bool(value.get("enabled", True), field="token_revocation.enabled"):
+            return None
+        lifetime = value.get("token_lifetime")
+        user_ttl = value.get("user_ttl", DEFAULT_USER_REVOCATION_TTL)
+        return cls(
+            token_lifetime=(
+                None
+                if lifetime is None
+                else _positive_seconds(lifetime, field="token_revocation.token_lifetime")
+            ),
+            user_ttl=(
+                None
+                if user_ttl is None
+                else _positive_seconds(user_ttl, field="token_revocation.user_ttl")
+            ),
+        )
+
+
+CACHE_STORE_TYPES: tuple[str, ...] = ("memory", "redis", "custom")
+CACHE_STORE_KEYS: tuple[str, ...] = ("type", "url", "path", "rate_limit", "token_revocation")
+
+# Top-level keys whose setting belongs inside ``cache_store``, with where it goes. A leftover
+# top-level key is a config error, never ignored: a forgotten ``rate_limit`` would otherwise
+# turn rate limiting off without a word.
+_CACHE_STORE_SETTINGS = {
+    "redis": (
+        '`redis` goes inside `cache_store` as `url`: {"cache_store": {"type": "redis", '
+        '"url": "${REDIS_URL}"}}'
+    ),
+    "rate_limit": (
+        '`rate_limit` goes inside `cache_store`: {"cache_store": {"type": ..., '
+        '"rate_limit": {...}}}'
+    ),
+    "token_revocation": (
+        '`token_revocation` goes inside `cache_store`: {"cache_store": {"type": ..., '
+        '"token_revocation": true}}'
+    ),
+}
+
+
+def check_cache_store_settings(data: dict) -> None:
+    """Raise when a setting that belongs inside ``cache_store`` sits at the top level."""
+    for key, message in _CACHE_STORE_SETTINGS.items():
+        if key in data:
+            raise ValueError(message)
+
+
+@dataclass(frozen=True)
+class CacheStoreConfig:
+    """``cache_store`` in 10xgraph.json: the API's cache store and the features it backs.
+
+    Example::
+
+        "cache_store": {
+            "type": "redis",
+            "url": "${REDIS_URL}",
+            "rate_limit": {"requests": 100, "window": 60, "by": "user"},
+            "token_revocation": true
+        }
+
+    ``type`` picks the store: ``memory`` (the default; one process, not shared between
+    workers), ``redis`` (a ``RedisCacheStore`` on ``url``; also Valkey, Dragonfly, KeyDB) or
+    ``custom`` (``path`` is ``"module:attr"``, a ``BaseCacheStore`` instance or zero-argument
+    factory). ``url`` expands ``$VAR`` / ``${VAR}`` when the store is built, and an unset
+    variable is a config error. The store holds the run locks and caps, idempotency records
+    and the ownership cache, plus the counters of ``rate_limit`` (:class:`RateLimitConfig`) and
+    the revocations of ``token_revocation`` (:class:`TokenRevocationConfig`); both are off
+    when absent. ``rate_limit`` is kept here even when its ``enabled`` is false.
+    """
+
+    type: str = "memory"
+    url: str | None = None  # as written; see expanded_url
+    path: str | None = None
+    rate_limit: RateLimitConfig | None = None
+    token_revocation: TokenRevocationConfig | None = None
+    type_set: bool = False  # whether 10xgraph.json names the type
+
+    @classmethod
+    def parse(cls, value: object) -> "CacheStoreConfig":
+        """The settings for ``value`` (the raw ``cache_store``); memory defaults for None."""
+        if value is None:
+            return cls()
+        if not isinstance(value, dict):
+            raise ValueError(
+                'cache_store must be an object: {"type": "memory"}, {"type": "redis", "url": '
+                '"${REDIS_URL}"} or {"type": "custom", "path": "module:attr"}'
+            )
+        unknown = sorted(set(value) - set(CACHE_STORE_KEYS))
+        if unknown:
+            raise ValueError(
+                f"cache_store: unknown keys {unknown}; valid keys: {', '.join(CACHE_STORE_KEYS)}"
+            )
+        kind = value.get("type")
+        type_set = kind is not None
+        if kind is None:
+            kind = "memory"
+        if kind not in CACHE_STORE_TYPES:
+            raise ValueError(
+                f"cache_store.type must be one of {', '.join(CACHE_STORE_TYPES)}; got {kind!r}"
+            )
+        url = value.get("url")
+        path = value.get("path")
+        if url is not None and kind != "redis":
+            raise ValueError('cache_store.url goes with "type": "redis"')
+        if path is not None and kind != "custom":
+            raise ValueError('cache_store.path goes with "type": "custom"')
+        if url is not None and (not isinstance(url, str) or not url.strip()):
+            raise ValueError(
+                'cache_store.url must be a Redis URL string, such as "redis://host:6379/0" '
+                'or "${CACHE_REDIS_URL}". Leave it out to use the REDIS_URL environment variable.'
+            )
+        if kind == "custom" and (not isinstance(path, str) or ":" not in path):
+            raise ValueError(
+                'cache_store.path is required with "type": "custom": "module:attr" naming a '
+                "BaseCacheStore instance or a zero-argument factory"
+            )
+        rate_limit = value.get("rate_limit")
+        return cls(
+            type=kind,
+            url=url,
+            path=path,
+            rate_limit=None if rate_limit is None else RateLimitConfig.from_dict(rate_limit),
+            token_revocation=TokenRevocationConfig.parse(value.get("token_revocation")),
+            type_set=type_set,
+        )
+
+    @property
+    def url_source(self) -> str:
+        """Where the Redis URL comes from: ``cache_store.url``, else the ``REDIS_URL`` variable."""
+        return "cache_store.url" if self.url is not None else "REDIS_URL"
+
+    def expanded_url(self) -> str | None:
+        """The Redis URL: ``url`` with ``$VAR`` / ``${VAR}`` expanded, else ``REDIS_URL``.
+
+        Only for ``type`` redis. An unset variable, or neither ``url`` nor ``REDIS_URL``,
+        raises ValueError.
+        """
+        if self.type != "redis":
+            return None
+        if self.url is None:
+            env_url = os.environ.get("REDIS_URL", "").strip()
+            if not env_url:
+                raise ValueError(
+                    'cache_store "type": "redis" needs a Redis URL: set cache_store.url in '
+                    "10xgraph.json, or the REDIS_URL environment variable."
+                )
+            return env_url
+        try:
+            return _expand_env(self.url)
+        except ValueError:
+            raise ValueError(
+                f"cache_store.url: {self.url} uses an environment variable that is not set"
+            ) from None
+
+
+# ``id_generator`` names: the concrete generators in core ``tenxgraph.utils.id_generator`` plus
+# the API's ``snowflake`` (``SnowFlakeIdGenerator``). Mapped to classes by the app loader.
+ID_GENERATOR_NAMES: tuple[str, ...] = (
+    "uuid",
+    "hex",
+    "short",
+    "int",
+    "bigint",
+    "timestamp",
+    "snowflake",
+)
+
+# Built-in ``thread_name_generator`` choices; anything else must be ``"module:attr"``.
+THREAD_NAME_CHOICES: tuple[str, ...] = ("random", "first_message", "none")
 
 
 # Finite defaults so an unconfigured server cannot be held open by one client.
@@ -311,11 +496,12 @@ class WebSocketConfig:
             "realtime_client_overrides": ["voice", "modalities", "vad"]
         }
 
-    ``max_connections`` caps the concurrent WebSocket connections this server *process*
-    accepts (realtime ``/v1/graph/live`` + streaming ``/v1/graph/ws``).
+    ``max_connections`` caps the concurrent WebSocket connections the server accepts
+    (realtime ``/v1/graph/live`` + streaming ``/v1/graph/ws``).
     ``max_connections_per_user`` caps how many of those one verified user may hold, so a
-    single account cannot take every slot. Both are per process, like the in-memory
-    rate-limit backend; size them per worker.
+    single account cannot take every slot. Both are counted in the API's cache store: across
+    workers with a shared one (``cache_store`` type ``redis`` or ``custom``), per process with
+    the in-memory one (then size them per worker).
 
     A missing key gets a finite default (1000 and 10). Set a key to ``0`` or ``null`` to make
     it unlimited. WebSocket handshakes, and every graph run started over ``/v1/graph/ws``, also
@@ -619,6 +805,9 @@ class GraphConfig:
         if env_file and Path(env_file).exists():
             load_dotenv(env_file)
 
+        if isinstance(self.data, dict):
+            check_cache_store_settings(self.data)
+
     @property
     def graph_path(self) -> str:
         agent = self.data.get("agent")
@@ -640,12 +829,50 @@ class GraphConfig:
         return self.data.get("store", None)
 
     @property
-    def redis_url(self) -> str | None:
-        return self.data.get("redis", None)
+    def cache_store(self) -> CacheStoreConfig:
+        """``cache_store`` key, parsed (:class:`CacheStoreConfig`); the memory store when absent.
+
+        Parsed once per raw value, so a config warning (such as the one about
+        ``trusted_proxy_headers``) is not repeated by every caller.
+        """
+        check_cache_store_settings(self.data)
+        raw = self.data.get("cache_store", None)
+        key = json.dumps(raw, sort_keys=True, default=str)
+        cached = getattr(self, "_cache_store_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        parsed = CacheStoreConfig.parse(raw)
+        self._cache_store_cache = (key, parsed)
+        return parsed
 
     @property
-    def thread_name_generator_path(self) -> str | None:
-        return self.data.get("thread_name_generator", None)
+    def thread_name_generator(self) -> str:
+        """``thread_name_generator`` key: ``random`` (the default), ``first_message``, ``none``
+        or ``"module:attr"`` naming a ``ThreadNameGenerator`` subclass or instance."""
+        value = self.data.get("thread_name_generator", None)
+        if value is None or value == "":
+            return "random"
+        if not isinstance(value, str) or (value not in THREAD_NAME_CHOICES and ":" not in value):
+            raise ValueError(
+                f"thread_name_generator must be one of {', '.join(THREAD_NAME_CHOICES)} or "
+                f'"module:attr"; got {value!r}'
+            )
+        return value
+
+    @property
+    def id_generator(self) -> str | None:
+        """``id_generator`` key: a built-in name (``ID_GENERATOR_NAMES``) or ``"module:attr"``
+        naming a ``BaseIDGenerator`` instance, subclass or zero-argument factory; None when
+        absent (the graph keeps the generator it was compiled with)."""
+        value = self.data.get("id_generator", None)
+        if value is None or value == "":
+            return None
+        if not isinstance(value, str) or (value not in ID_GENERATOR_NAMES and ":" not in value):
+            raise ValueError(
+                f"id_generator must be one of {', '.join(ID_GENERATOR_NAMES)} or "
+                f'"module:attr"; got {value!r}'
+            )
+        return value
 
     @property
     def remote_tools(self) -> list[RemoteToolConfig]:
@@ -736,26 +963,9 @@ class GraphConfig:
 
     @property
     def rate_limit(self) -> RateLimitConfig | None:
-        """
-        Get rate limit configuration from 10xgraph.json.
-
-        Returns:
-            RateLimitConfig if 'rate_limit' key is present and enabled, else None.
-
-        Example 10xgraph.json entry::
-
-            "rate_limit": {
-                "enabled": true,
-                "requests": 100,
-                "window": 60,
-                "by": "ip"
-            }
-        """
-        data = self.data.get("rate_limit", None)
-        if data is None:
-            return None
-        config = RateLimitConfig.from_dict(data)
-        if not config.enabled:
+        """``cache_store.rate_limit`` when present and enabled, else None."""
+        config = self.cache_store.rate_limit
+        if config is None or not config.enabled:
             return None
         return config
 
@@ -793,12 +1003,10 @@ class GraphConfig:
         return self.graph_introspection == "scoped"
 
     @property
-    def token_revocation(self) -> str | None:
-        """``token_revocation`` key: ``"redis"``, ``"memory"``, ``"module:attr"`` or None."""
-        value = self.data.get("token_revocation", None)
-        if value is not None and not isinstance(value, str):
-            raise ValueError("token_revocation must be 'redis', 'memory', 'module:attr' or null")
-        return value or None
+    def token_revocation(self) -> TokenRevocationConfig | None:
+        """``cache_store.token_revocation``: its settings when on (``true`` or an object),
+        else None. See :class:`TokenRevocationConfig`."""
+        return self.cache_store.token_revocation
 
     @property
     def runs(self) -> RunsConfig:

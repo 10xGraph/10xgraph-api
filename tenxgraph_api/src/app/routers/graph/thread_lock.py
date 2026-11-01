@@ -5,13 +5,13 @@ the history interleaves (a double click on Send, two tabs). Every run path (invo
 WebSocket, AG-UI) takes this lock for the thread before the graph starts and holds it until
 the run is over.
 
-The lock is a one-slot lease from ``core.concurrency.concurrency_limiter``
-(key ``runs:thread:<thread id>``): shared through Redis when it is configured, otherwise
-per process. A Redis lease is renewed in the background while the run is alive and expires on
-its own if the worker dies, so a crashed worker cannot hold a thread forever. A Redis error
-falls back to a per-process lock (the limiter fails open to its own count), so one worker still
-runs one thing at a time on a thread. Run entry points take this lock together with the run
-slot through ``run_guard.acquire_run_guard``.
+The lock is a one-slot lease from ``core.leases.lease_manager`` (key
+``runs:thread:<thread id>``): shared through the cache store (Redis when it is configured,
+otherwise per process). A lease is renewed in the background while the run is alive and
+expires on its own if the worker dies, so a crashed worker cannot hold a thread forever. A
+cache store error falls back to a per-process lock (the lease manager fails open to its own
+count), so one worker still runs one thing at a time on a thread. Run entry points take this
+lock together with the run slot through ``run_guard.acquire_run_guard``.
 
 A run that finds the thread busy waits up to ``THREAD_BUSY_WAIT_SECONDS`` and is then
 rejected with 409. With ``on_busy="cancel"`` it first asks the active run to stop (and
@@ -29,7 +29,7 @@ from fastapi import HTTPException
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.auth.request_config import normalize_thread_id
-from tenxgraph_api.src.app.core.concurrency import Lease, concurrency_limiter
+from tenxgraph_api.src.app.core.leases import Lease, lease_manager
 from tenxgraph_api.src.app.core.redis_client import key_part
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 
@@ -96,7 +96,7 @@ async def acquire_thread_lock(
     """
     if wait_seconds is None:
         wait_seconds = THREAD_BUSY_WAIT_SECONDS
-    limiter = concurrency_limiter()
+    leases = lease_manager()
     key = thread_lock_key(thread_id)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + wait_seconds
@@ -104,7 +104,7 @@ async def acquire_thread_lock(
     next_stop = 0.0
     waited = False
     while True:
-        lease = await limiter.acquire(key, 1)
+        lease = await leases.acquire(key, 1)
         if lease is not None:
             if waited and is_disconnected is not None and await is_disconnected():
                 lease.release()
