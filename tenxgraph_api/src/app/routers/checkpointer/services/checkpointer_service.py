@@ -120,7 +120,7 @@ class CheckpointerService:
         user_id = user.get("user_id")
         if not user_id or not messages:
             return
-        await check_media_references(messages, self._media_service(), str(user_id))
+        await check_media_references(messages, self._media_service(), str(user_id), user)
 
     def _check_media_urls(self, messages: list[Any]) -> None:
         """External media URLs in written messages get the same policy check as graph input
@@ -142,7 +142,50 @@ class CheckpointerService:
             return
         keys = [k for m in messages for k in internal_media_keys(m)]
         if keys:
-            await media.link_threads(keys, str(thread_id), str(user_id))
+            await media.link_threads(keys, str(thread_id), str(user_id), user)
+
+    async def _file_owners(
+        self, media: Any, thread_id: Any, cfg: dict[str, Any], user: dict
+    ) -> list[tuple[str, dict[str, str | None]]]:
+        """Identities whose files linked to the thread are released when it is deleted.
+
+        The thread's owner (``user_id`` plus tenant values, read before the delete through
+        ``aget_thread_scope``, else ``aget_thread_owner``) and the deleter. An org admin or a
+        ``none``-scope deleter thus releases the member's files, not only their own. A
+        failed lookup leaves only the deleter. Never raises.
+        """
+        from tenxgraph_api.src.app.core.auth.authorization import scope_lookup
+        from tenxgraph_api.src.app.core.auth.ownership_resolver import to_scope
+
+        owners: list[tuple[str, dict[str, str | None]]] = []
+        try:
+            columns = media.tenant_columns()
+            scope = to_scope(await scope_lookup(self.checkpointer)(thread_id))
+            if scope is not None and scope.get("user_id") is not None:
+                owners.append((str(scope["user_id"]), {c: scope.get(c) for c in columns}))
+        except Exception as exc:
+            logger.debug("Thread owner lookup for file cleanup failed: %s", exc)
+        caller = cfg.get("user_id")
+        if caller is not None:
+            try:
+                identity = (str(caller), media.caller_tenant(user))
+            except Exception as exc:
+                logger.debug("Caller tenant lookup for file cleanup failed: %s", exc)
+            else:
+                if identity not in owners:
+                    owners.append(identity)
+        return owners
+
+    @staticmethod
+    async def _release_owned_files(
+        media: Any, thread_id: Any, owners: list[tuple[str, dict[str, str | None]]]
+    ) -> bool:
+        """``release_thread`` for each owner; False when any file could not be released."""
+        released_all = True
+        for owner_id, tenant in owners:
+            if await media.release_thread(str(thread_id), owner_id, tenant):
+                released_all = False
+        return released_all
 
     def _link_tracking_media(self) -> Any:
         """The media service when it can track thread links, else ``None``. Never raises."""
@@ -510,6 +553,8 @@ class CheckpointerService:
             except Exception as exc:
                 incomplete.append("files")
                 logger.warning("File cleanup skipped for thread %s: %s", log_safe(thread_id), exc)
+        # Whose files to release, read while the thread still exists.
+        owners = await self._file_owners(media, thread_id, cfg, user) if media is not None else []
         res = await self.checkpointer.aclean_thread(cfg)
         if (
             thread_keys
@@ -519,7 +564,8 @@ class CheckpointerService:
             incomplete.append("files")
         # Files still linked to the thread through messages that are gone (cleared or replaced
         # state) are not in `thread_keys`; release them by their own metadata.
-        if media is not None and await media.release_thread(str(thread_id), cfg.get("user_id")):
+        # Owned by the thread's owner or the deleter, with their tenant values.
+        if media is not None and not await self._release_owned_files(media, thread_id, owners):
             incomplete.append("files")
 
         # Clean telemetry traces if TelemetryStore is bound in InjectQ

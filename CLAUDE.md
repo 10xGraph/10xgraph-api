@@ -224,7 +224,12 @@ valid ones (`RATE_LIMIT_KEYS`).
   `GET /v1/files/{file_id}`, `/{file_id}/info`, `/{file_id}/url`, `DELETE /v1/files/{file_id}`
   (owner only, 404 otherwise, scope `files:delete`, added in `authorization.FILES_DELETE_SCOPES`
   until core lists it), `GET /v1/config/multimodal`. Deleting a message or thread also releases
-  the files it referenced (`CheckpointerService.delete_message` / `delete_thread`).
+  the files it referenced (`CheckpointerService.delete_message` / `delete_thread`; a thread delete
+  releases the thread owner's files too, read with `aget_thread_scope` before the delete). With
+  tenant columns on the bound checkpointer, files are tenant-scoped: upload records
+  `metadata["tenant"]` (canonical values from `config["user"]`, `authorization.identity_values`),
+  and access, list, quota, `graph://media/` / `file_id` references and `link_threads` require a
+  match on every tenant column (`media.tenant_matches`); a file without tenant values is denied.
 - **AG-UI** (`tags=["AG-UI"]`, only when `ag_ui.enabled`): `POST /v1/ag-ui`. `routers/ag_ui/`:
   `converter.py` (RunAgentInput -> new user/tool messages only; the checkpoint is the record),
   `event_mapper.py` (StreamChunk -> AG-UI events), `service.py` (runs `GraphService.stream_chunks`).

@@ -151,14 +151,20 @@ def media_file_ids(message: Message | dict[str, Any]) -> list[str]:
     return ids
 
 
-async def _ensure_access(media_service: MediaService, file_id: str, user_id: str) -> None:
+async def _ensure_access(
+    media_service: MediaService,
+    file_id: str,
+    user_id: str,
+    user: dict[str, Any] | None = None,
+) -> None:
     """Ownership check with one answer for missing and foreign files.
 
     Both become the same ``ValueError`` (a 422 on invoke), so the response never tells a
-    caller whether another user's file exists.
+    caller whether another user's (or another tenant's) file exists. ``user`` is the
+    authenticated identity, whose tenant values the file must also match.
     """
     try:
-        await media_service.ensure_can_access(file_id, user_id)
+        await media_service.ensure_can_access(file_id, user_id, user)
     except (KeyError, PermissionError) as exc:
         raise ClientInputError(f"File not found: {file_id}") from exc
 
@@ -167,8 +173,12 @@ async def check_media_references(
     messages: list[Message] | list[dict[str, Any]],
     media_service: MediaService | None,
     user_id: str,
+    user: dict[str, Any] | None = None,
 ) -> None:
     """Run the ownership check on every internal media reference a client sent.
+
+    ``user`` is the authenticated identity: with tenant columns declared, each file must
+    record the same tenant values as well as the same ``user_id``.
 
     A client may reference ``graph://media/<key>`` directly instead of a ``file_id``;
     the graph resolves both the same way, so both must be checked. Also used for messages
@@ -184,7 +194,7 @@ async def check_media_references(
                 "configured on this server."
             )
         for key in keys:
-            await _ensure_access(media_service, key, user_id)
+            await _ensure_access(media_service, key, user_id, user)
 
 
 async def _get_cached_extraction(media_service: MediaService, file_id: str) -> str | None:
@@ -206,7 +216,10 @@ async def _get_cached_extraction(media_service: MediaService, file_id: str) -> s
 
 
 async def _offload_inline(
-    media_service: MediaService, messages: list[Message], user_id: str | None
+    media_service: MediaService,
+    messages: list[Message],
+    user_id: str | None,
+    user: dict[str, Any] | None = None,
 ) -> None:
     """Move large inline base64 blobs into the media store before anything copies them into state.
 
@@ -214,13 +227,14 @@ async def _offload_inline(
     """
     offload = getattr(media_service, "offload_inline", None)
     if inspect.iscoroutinefunction(offload):
-        await offload(messages, user_id)
+        await offload(messages, user_id, user)
 
 
 async def preprocess_multimodal_messages(
     messages: list[Message],
     media_service: MediaService | None,
     user_id: str | None = None,
+    user: dict[str, Any] | None = None,
 ) -> list[Message]:
     """Resolve file_id references in messages before graph execution.
 
@@ -233,15 +247,16 @@ async def preprocess_multimodal_messages(
         the MediaRefResolver can pick it up at LLM-call time.
 
     With an authenticated ``user_id``, every file the messages reference -- by ``file_id``
-    or by an internal ``graph://media/`` URL -- must belong to that user.
+    or by an internal ``graph://media/`` URL -- must belong to that user (and, with tenant
+    columns declared, to the tenant values of ``user``, the authenticated identity).
     ``media_service`` being None skips the rewriting, but not the ownership rule.
     """
     if user_id:
-        await check_media_references(messages, media_service, user_id)
+        await check_media_references(messages, media_service, user_id, user)
     if media_service is None:
         return messages
 
-    await _offload_inline(media_service, messages, user_id)
+    await _offload_inline(media_service, messages, user_id, user)
 
     processed: list[Message] = []
     for msg in messages:
@@ -255,7 +270,7 @@ async def preprocess_multimodal_messages(
                 and block.media.file_id
             ):
                 if user_id:
-                    await _ensure_access(media_service, block.media.file_id, user_id)
+                    await _ensure_access(media_service, block.media.file_id, user_id, user)
                 cached = await _get_cached_extraction(media_service, block.media.file_id)
                 if cached:
                     new_content.append(TextBlock(text=cached))
@@ -265,7 +280,7 @@ async def preprocess_multimodal_messages(
             if hasattr(block, "media") and block.media.kind == "file_id" and block.media.file_id:
                 fid = block.media.file_id
                 if user_id:
-                    await _ensure_access(media_service, fid, user_id)
+                    await _ensure_access(media_service, fid, user_id, user)
                 # Convert file_id → graph://media/ URL reference
                 if not is_internal_media_url(block.media.url):
                     block.media.kind = "url"

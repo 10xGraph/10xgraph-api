@@ -523,3 +523,50 @@ def test_web_concurrency_above_one_warns_even_in_development(monkeypatch, caplog
         assert not caplog.records
         loader.warn_per_process_state(_warn_container(None, InMemoryCacheStore()))
     assert "The cache store is in-memory" in caplog.text
+
+
+class TestCustomAuthPathForms:
+    """``auth.path`` resolves like the other module:attr keys (project folder on sys.path)."""
+
+    AUTH_SRC = (
+        "from tenxgraph_api import BaseAuth\n"
+        "class TokenAuth(BaseAuth):\n"
+        "    async def authenticate(self, request, response, credential):\n"
+        "        return {'user_id': 'u'}\n"
+    )
+
+    @pytest.fixture
+    def project(self, tmp_path, monkeypatch):
+        import sys
+
+        (tmp_path / "auth_app.py").write_text(self.AUTH_SRC)
+        pkg = tmp_path / "authpkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "token_auth.py").write_text(self.AUTH_SRC)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        yield tmp_path
+        for name in ("auth_app", "authpkg", "authpkg.token_auth"):
+            sys.modules.pop(name, None)
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "auth_app:TokenAuth",
+            "auth_app.py:TokenAuth",
+            "authpkg.token_auth:TokenAuth",
+            "authpkg/token_auth.py:TokenAuth",
+        ],
+    )
+    def test_path_forms_load(self, project, path):
+        from tenxgraph_api.src.app.loader import _load_custom_auth
+
+        assert _load_custom_auth(path).__class__.__name__ == "TokenAuth"
+
+    @pytest.mark.parametrize("path", ["missing_mod:Cls", "pkg.missing:Cls", "nope/x.py:Cls"])
+    def test_missing_module_names_path(self, project, path):
+        from tenxgraph_api.src.app.loader import _load_custom_auth
+
+        with pytest.raises(ValueError, match="Custom auth path does not exist"):
+            _load_custom_auth(path)

@@ -15,7 +15,7 @@ from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
 from tenxgraph_api.src.app.core.auth.request_config import client_error_detail
 from tenxgraph_api.src.app.core.config.media_settings import get_media_settings
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
-from tenxgraph_api.src.app.routers.media import MediaService
+from tenxgraph_api.src.app.routers.media import MediaService, MissingTenantError
 from tenxgraph_api.src.app.routers.media.schemas import (
     FileAccessUrlResponse,
     FileDeleteResponse,
@@ -213,7 +213,15 @@ async def upload_file(
     try:
         # Record the uploader as the owner, so the file cannot later be read by a
         # different user who knows the id.
-        result = await service.upload_file(data, file.filename, mime, user_id=user.get("user_id"))
+        result = await service.upload_file(
+            data, file.filename, mime, user_id=user.get("user_id"), user=user
+        )
+    except MissingTenantError:
+        # Tenant columns are declared but the identity carries no value: the file could not
+        # be scoped to a tenant, so it is refused rather than stored unscoped.
+        raise HTTPException(
+            status_code=403, detail="The authenticated user has no tenant value for files"
+        )
     except ValueError as exc:
         raise HTTPException(status_code=413, detail=client_error_detail(exc))
 
@@ -243,7 +251,7 @@ async def list_files(
 ):
     user_id = user.get("user_id")
     try:
-        items, has_more = await service.list_files(user_id, offset, limit)
+        items, has_more = await service.list_files(user_id, offset, limit, user=user)
     except NotImplementedError:
         raise HTTPException(status_code=501, detail="The configured media store cannot list files")
     payload = FileListResponse(
@@ -271,12 +279,12 @@ async def get_file(
     try:
         # Authentication alone is not enough: without this, ANY authenticated user
         # who knew a file_id could download another user's file.
-        await service.ensure_can_access(file_id, user.get("user_id"))
+        await service.ensure_can_access(file_id, user.get("user_id"), user)
         local = await service.local_file(file_id)
         if local is not None:  # stream from disk instead of loading the whole file
             path, mime_type = local
             return _file_download_response(file_id, path, mime_type)
-        data, mime_type = await service.get_file(file_id, user.get("user_id"))
+        data, mime_type = await service.get_file(file_id, user.get("user_id"), user)
     except KeyError:
         raise HTTPException(status_code=404, detail="File not found")
     except PermissionError:
@@ -301,8 +309,8 @@ async def get_file_info(
     user: dict[str, Any] = Depends(RequirePermission("files", "read")),
 ):
     try:
-        await service.ensure_can_access(file_id, user.get("user_id"))
-        info = await service.get_file_info(file_id, user.get("user_id"))
+        await service.ensure_can_access(file_id, user.get("user_id"), user)
+        info = await service.get_file_info(file_id, user.get("user_id"), user)
     except KeyError:
         raise HTTPException(status_code=404, detail="File not found")
     except PermissionError:
@@ -326,7 +334,7 @@ async def get_file_access_url(
         # Especially important here: this hands out a *signed direct URL*, which
         # bypasses the API entirely. Handing one to a non-owner would leak the file
         # even after this check was added elsewhere.
-        await service.ensure_can_access(file_id, user.get("user_id"))
+        await service.ensure_can_access(file_id, user.get("user_id"), user)
         info = await service.get_file_info(file_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="File not found")
@@ -361,7 +369,7 @@ async def delete_file(
     user: dict[str, Any] = Depends(RequirePermission("files", "delete")),
 ):
     try:
-        await service.ensure_can_access(file_id, user.get("user_id"))
+        await service.ensure_can_access(file_id, user.get("user_id"), user)
         deleted = await service.delete_file(file_id)
     except (KeyError, PermissionError, ValueError):
         # 404, not 403: do not confirm that someone else's file_id exists.

@@ -18,6 +18,7 @@ from tenxgraph.storage.media.offload import MediaOffloadPolicy, ensure_media_off
 from tenxgraph.storage.media.security import check_image_pixels
 from tenxgraph.storage.media.storage.base import BaseMediaStore
 
+from tenxgraph_api.src.app.core.auth.authorization import identity_values, tenant_column_names
 from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
 from tenxgraph_api.src.app.core.config.graph_config import MediaConfig
 from tenxgraph_api.src.app.core.config.media_settings import MediaSettings, MediaStorageType
@@ -35,6 +36,35 @@ _EXTRACTION_NAMESPACE = "media:extraction"
 # Metadata key listing the threads whose messages reference a file. Written empty at upload
 # (so a file without the key is known to predate link tracking and is never auto-deleted).
 THREADS_KEY = "threads"
+# Metadata key holding the uploader's tenant values: ``{column: canonical text}`` for every
+# tenant column the bound checkpointer declares (``PgCheckpointer(tenant_columns=...)``).
+# Written only when tenant columns are declared; the values come from ``config["user"]``.
+TENANT_KEY = "tenant"
+
+
+def tenant_matches(metadata: dict[str, Any], tenant: dict[str, str | None]) -> bool:
+    """Whether a file's recorded tenant values equal ``tenant`` on every column.
+
+    ``tenant`` is the caller's values from :meth:`MediaService.caller_tenant`: empty when no
+    tenant columns are declared (always a match). Fails closed: a caller missing a value, or
+    a file with no recorded value for a column (uploaded before tenant tracking), never
+    matches.
+    """
+    if not tenant:
+        return True
+    recorded = metadata.get(TENANT_KEY)
+    if not isinstance(recorded, dict):
+        return False
+    for column, value in tenant.items():
+        stored = recorded.get(column)
+        if value is None or stored is None or str(stored) != value:
+            return False
+    return True
+
+
+class MissingTenantError(PermissionError):
+    """The authenticated user has no value for a declared tenant column."""
+
 
 # In-process caches in front of the shared checkpointer cache. Bounded so a stream of new
 # uploads cannot grow a worker's memory without limit.
@@ -200,15 +230,27 @@ def _create_document_pipeline(settings: MediaSettings) -> DocumentPipeline:
 class _OwnedStore:
     """Wraps a media store so offloaded blobs get the same metadata as an upload."""
 
-    def __init__(self, store: BaseMediaStore, user_id: str | None, track_threads: bool):
+    def __init__(
+        self,
+        store: BaseMediaStore,
+        user_id: str | None,
+        track_threads: bool,
+        tenant: dict[str, str | None] | None = None,
+    ):
         self._store = store
         self._user_id = user_id
         self._track_threads = track_threads
+        self._tenant = tenant or {}
 
     async def store(self, data: bytes, mime_type: str, metadata: dict[str, Any] | None = None):
         meta: dict[str, Any] = {"created_at": int(time.time()), **(metadata or {})}
         if self._user_id:
+            if any(value is None for value in self._tenant.values()):
+                # Stored unscoped, no one in the tenant could read it back: refuse instead.
+                raise ClientInputError("the authenticated user has no tenant value")
             meta["owner_id"] = str(self._user_id)
+            if self._tenant:
+                meta[TENANT_KEY] = dict(self._tenant)
             if self._track_threads:
                 meta[THREADS_KEY] = []
         return await self._store.store(data, mime_type, metadata=meta)
@@ -265,11 +307,44 @@ class MediaService:
         return int(self._settings.MEDIA_MAX_SIZE_MB * 1024 * 1024)
 
     # ------------------------------------------------------------------
+    # Tenant scope
+    # ------------------------------------------------------------------
+
+    def tenant_columns(self) -> tuple[str, ...]:
+        """Tenant columns the bound checkpointer declares (empty when none or no checkpointer)."""
+        try:
+            checkpointer = self.checkpointer
+        except AttributeError:  # a bare stand-in built without __init__
+            return ()
+        return tenant_column_names(checkpointer)
+
+    def caller_tenant(self, user: dict[str, Any] | None) -> dict[str, str | None]:
+        """The caller's value for each declared tenant column, as canonical text.
+
+        Read from the authenticated user (``config["user"]``) only and converted with the
+        column's declared type, exactly as thread ownership compares them
+        (``authorization.identity_values``). Empty when no tenant columns are declared; a
+        missing or unconvertible value is None, which never matches a file.
+        """
+        columns = self.tenant_columns()
+        if not columns:
+            return {}
+        values = identity_values(self.checkpointer, user or {})
+        return {column: values.get(column) for column in columns}
+
+    @staticmethod
+    def _owned_by(metadata: dict[str, Any], user_id: Any, tenant: dict[str, str | None]) -> bool:
+        """Whether the file records ``user_id`` as owner and ``tenant`` as its tenant values."""
+        return str(metadata.get("owner_id")) == str(user_id) and tenant_matches(metadata, tenant)
+
+    # ------------------------------------------------------------------
     # File operations
     # ------------------------------------------------------------------
 
-    async def ensure_can_access(self, file_id: str, user_id: str | None) -> None:
-        """Reject access to a file owned by a different user.
+    async def ensure_can_access(
+        self, file_id: str, user_id: str | None, user: dict[str, Any] | None = None
+    ) -> None:
+        """Reject access to a file owned by a different user (or tenant).
 
         Files had no owner concept at all: `get_file(file_id)` returned bytes to any
         authenticated caller who knew (or guessed) the id. Ownership is recorded in
@@ -278,9 +353,16 @@ class MediaService:
         Legacy files uploaded before ownership existed, or while auth was off, carry no
         ``owner_id``. ``MEDIA_REQUIRE_OWNER`` decides what happens to them: denied (the
         production default) or allowed with a warning (the development default).
+
+        With tenant columns declared on the checkpointer, the file's recorded tenant values
+        must also equal the caller's (``user``, the authenticated identity) on every column:
+        the same ``user_id`` in two tenants is two identities. A caller without a value, and
+        a file with no recorded tenant values (uploaded before tenant tracking or without an
+        owner), are denied.
         """
         if not user_id:
             return
+        tenant = self.caller_tenant(user)
 
         try:
             metadata = await self.store.get_metadata(file_id)
@@ -293,7 +375,7 @@ class MediaService:
         owner_id = metadata.get("owner_id")
 
         if owner_id is None:
-            if self._settings.MEDIA_REQUIRE_OWNER:
+            if tenant or self._settings.MEDIA_REQUIRE_OWNER:
                 raise PermissionError(f"File has no recorded owner: {file_id}")
             logger.warning(
                 "File %s has no recorded owner (uploaded before ownership tracking); "
@@ -302,7 +384,7 @@ class MediaService:
             )
             return
 
-        if str(owner_id) != str(user_id):
+        if not self._owned_by(metadata, user_id, tenant):
             # Deliberately not "you don't own this" -- do not confirm the id exists.
             logger.warning(
                 "User %s attempted to access file %s owned by another user",
@@ -317,11 +399,17 @@ class MediaService:
         filename: str,
         mime_type: str,
         user_id: str | None = None,
+        user: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Upload a file: store binary + optionally extract text.
 
         Records the uploader as the file's owner, so it cannot later be read by a
-        different user who happens to know the id.
+        different user who happens to know the id. With tenant columns declared, the
+        uploader's tenant values (from ``user``, the authenticated identity) are recorded
+        too, under ``TENANT_KEY``.
+
+        Raises:
+            MissingTenantError: Tenant columns are declared and ``user`` lacks a value.
 
         Returns a dict with file_id, mime_type, size_bytes, filename,
         extracted_text (nullable), and url.
@@ -349,7 +437,8 @@ class MediaService:
             except DocumentTooLargeError as exc:
                 raise ClientInputError(str(exc)) from exc
 
-        await self._check_quota(user_id, len(data))
+        tenant = self._upload_tenant(user_id, user)
+        await self._check_quota(user_id, len(data), tenant)
 
         # Store binary in the configured MediaStore. The owner is written into the
         # file's own metadata, so ownership survives as long as the file does --
@@ -357,6 +446,8 @@ class MediaService:
         file_metadata: dict[str, Any] = {"filename": filename, "created_at": int(time.time())}
         if user_id:
             file_metadata["owner_id"] = str(user_id)
+            if tenant:
+                file_metadata[TENANT_KEY] = tenant
             if self.supports_links:
                 file_metadata[THREADS_KEY] = []
 
@@ -397,11 +488,31 @@ class MediaService:
 
         return result
 
-    async def _check_quota(self, user_id: str | None, incoming_bytes: int) -> None:
+    def _upload_tenant(
+        self, user_id: str | None, user: dict[str, Any] | None
+    ) -> dict[str, str | None]:
+        """The tenant values an upload records (empty without a user or tenant columns).
+
+        Raises:
+            MissingTenantError: Tenant columns are declared and ``user`` lacks a value.
+        """
+        tenant = self.caller_tenant(user) if user_id else {}
+        if any(value is None for value in tenant.values()):
+            raise MissingTenantError("The authenticated user has no value for a tenant column")
+        return tenant
+
+    async def _check_quota(
+        self,
+        user_id: str | None,
+        incoming_bytes: int,
+        tenant: dict[str, str | None] | None = None,
+    ) -> None:
         """Refuse an upload that would take ``user_id`` past the per-user file or byte quota.
 
         Does nothing without a user, with both quotas off, or when the store cannot list its
-        files (a warning is logged once). Counts only files that record this user as owner.
+        files (a warning is logged once). Counts only files that record this user as owner
+        and, with tenant columns declared, the same tenant values (``tenant``), so the same
+        ``user_id`` in two tenants has two quotas.
         """
         max_files = self._settings.MEDIA_MAX_FILES_PER_USER
         max_bytes = int(self._settings.MEDIA_MAX_USER_STORAGE_MB * 1024 * 1024)
@@ -426,7 +537,7 @@ class MediaService:
             except Exception as exc:
                 logger.debug("Skipping unreadable file %s in quota count: %s", log_safe(key), exc)
                 continue
-            if meta and str(meta.get("owner_id")) == str(user_id):
+            if meta and self._owned_by(meta, user_id, tenant or {}):
                 count += 1
                 used += int(meta.get("size_bytes") or 0)
         if max_files and count >= max_files:
@@ -437,20 +548,29 @@ class MediaService:
                 "of files per user"
             )
 
-    async def offload_inline(self, messages: list[Any], user_id: str | None = None) -> None:
+    async def offload_inline(
+        self,
+        messages: list[Any],
+        user_id: str | None = None,
+        user: dict[str, Any] | None = None,
+    ) -> None:
         """Move large inline base64 media in ``messages`` into the store, in place.
 
         Uses core ``ensure_media_offloaded`` with ``MEDIA_INLINE_MAX_BYTES`` as the threshold
         (0 turns it off). Offloaded files are owned by ``user_id`` and carry the same metadata
-        as an upload, so the caller can link them to the thread and they are deleted with it.
+        as an upload (tenant values included), so the caller can link them to the thread and
+        they are deleted with it.
 
         Raises:
-            ClientInputError: The blob is not valid base64 or exceeds ``MEDIA_MAX_SIZE_MB``.
+            ClientInputError: The blob is not valid base64 or exceeds ``MEDIA_MAX_SIZE_MB``,
+                or a blob must be stored while tenant columns are declared and ``user``
+                lacks a value (nothing to scope the offloaded file to).
         """
         threshold = self._settings.MEDIA_INLINE_MAX_BYTES
         if threshold <= 0:
             return
-        store = _OwnedStore(self.store, user_id, self.supports_links)
+        tenant = self.caller_tenant(user) if user_id else {}
+        store = _OwnedStore(self.store, user_id, self.supports_links, tenant)
         try:
             for message in messages:
                 await ensure_media_offloaded(
@@ -523,11 +643,15 @@ class MediaService:
         updates = fn(dict(metadata))
         return await self._update_metadata(key, updates) if updates else True
 
-    async def link_threads(self, keys: list[str], thread_id: str, user_id: str) -> None:
+    async def link_threads(
+        self, keys: list[str], thread_id: str, user_id: str, user: dict[str, Any] | None = None
+    ) -> None:
         """Record ``thread_id`` on each file the caller owns that an accepted message references.
 
-        Never raises: a failure only means the file is not tracked, so it is never auto-deleted.
-        Files without a ``threads`` list (uploaded before link tracking) are left alone.
+        Owning means the same ``user_id`` and, with tenant columns declared, the same tenant
+        values (``user``). Never raises: a failure only means the file is not tracked, so it
+        is never auto-deleted. Files without a ``threads`` list (uploaded before link
+        tracking) are left alone.
         """
         if not keys:
             return
@@ -539,13 +663,14 @@ class MediaService:
                     "are not linked to threads and never deleted automatically."
                 )
             return
+        tenant = self.caller_tenant(user)
         for key in dict.fromkeys(keys):
             try:
 
                 def add_link(metadata: dict[str, Any]) -> dict[str, Any] | None:
                     threads = metadata.get(THREADS_KEY)
                     if (
-                        str(metadata.get("owner_id")) != str(user_id)
+                        not self._owned_by(metadata, user_id, tenant)
                         or not isinstance(threads, list)
                         or thread_id in threads
                     ):
@@ -591,8 +716,17 @@ class MediaService:
                 logger.warning("Could not release file %s from a thread: %s", log_safe(key), exc)
         return failed
 
-    async def release_thread(self, thread_id: str, user_id: str | None) -> list[str]:
+    async def release_thread(
+        self,
+        thread_id: str,
+        user_id: str | None,
+        tenant: dict[str, str | None] | None = None,
+    ) -> list[str]:
         """Release every file ``user_id`` linked to ``thread_id``, whatever the messages say.
+
+        ``tenant`` is the owner's tenant values (canonical text per declared column); only
+        files recording them are released. None with tenant columns declared matches nothing.
+        A thread delete calls this for the thread's owner and for the deleter.
 
         ``unlink_threads`` works from the keys a thread's messages reference. A file linked
         through a message that is gone since (cleared state, replaced messages) would stay
@@ -604,6 +738,8 @@ class MediaService:
         """
         if not self.supports_links or user_id is None:
             return []
+        if tenant is None:
+            tenant = dict.fromkeys(self.tenant_columns())
         try:
             all_keys = await self._keys_of(user_id)
         except NotImplementedError:
@@ -625,7 +761,7 @@ class MediaService:
                 metadata is not None
                 and isinstance(threads, list)
                 and thread_id in threads
-                and str(metadata.get("owner_id")) == str(user_id)
+                and self._owned_by(metadata, user_id, tenant)
             ):
                 linked.append(key)
         failed.extend(await self.unlink_threads(linked, thread_id))
@@ -677,9 +813,16 @@ class MediaService:
                 )
 
     async def list_files(
-        self, user_id: str | None, offset: int = 0, limit: int = 50
+        self,
+        user_id: str | None,
+        offset: int = 0,
+        limit: int = 50,
+        user: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         """One page of the files ``user_id`` owns, newest first, and whether more follow.
+
+        With tenant columns declared, only files recording the caller's tenant values
+        (``user``) are listed.
 
         Files with no recorded owner are not listed for an identified user. With no ``user_id``
         (authentication off) every file is listed, matching ``ensure_can_access``. Reads each
@@ -689,6 +832,7 @@ class MediaService:
             NotImplementedError: The media store cannot enumerate its files.
         """
         keys = await self._keys_of(user_id)
+        tenant = self.caller_tenant(user) if user_id else {}
         owned: list[dict[str, Any]] = []
         for key in keys:
             try:
@@ -698,7 +842,7 @@ class MediaService:
                 continue
             if not meta:
                 continue
-            if user_id and str(meta.get("owner_id")) != str(user_id):
+            if user_id and not self._owned_by(meta, user_id, tenant):
                 continue
             owned.append(
                 {
@@ -715,10 +859,12 @@ class MediaService:
         page = owned[offset : offset + limit]
         return page, offset + limit < len(owned)
 
-    async def get_file(self, file_id: str, user_id: str | None = None) -> tuple[bytes, str]:
+    async def get_file(
+        self, file_id: str, user_id: str | None = None, user: dict[str, Any] | None = None
+    ) -> tuple[bytes, str]:
         """Retrieve file bytes and MIME type."""
         if user_id:
-            await self.ensure_can_access(file_id, user_id)
+            await self.ensure_can_access(file_id, user_id, user)
         return await self.store.retrieve(file_id)
 
     async def local_file(self, file_id: str) -> tuple[Path, str] | None:
@@ -744,10 +890,12 @@ class MediaService:
             return None
         return (path, metadata["mime_type"]) if path.is_file() else None
 
-    async def get_file_info(self, file_id: str, user_id: str | None = None) -> dict[str, Any]:
+    async def get_file_info(
+        self, file_id: str, user_id: str | None = None, user: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         """Return metadata about a stored file."""
         if user_id:
-            await self.ensure_can_access(file_id, user_id)
+            await self.ensure_can_access(file_id, user_id, user)
         metadata = await self.store.get_metadata(file_id)
         if metadata is None:
             raise KeyError(f"File not found: {file_id}")

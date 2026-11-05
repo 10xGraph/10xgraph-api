@@ -88,7 +88,34 @@ Needs the `10xgraph` release that ships them.
   (`TENANT_L2_TTL_SECONDS`) instead of an hour, so a delete whose cache eviction failed leaves
   the old scope readable for minutes, not an hour. Without tenant columns the TTL stays 1 h.
 
+### Security
+
+- Uploaded files are scoped by tenant columns as well as `user_id`. With tenant columns
+  declared on the bound checkpointer (`PgCheckpointer(tenant_columns=...)`), an upload records
+  the caller's values (from `config["user"]` only, converted with the column types) in the
+  file's metadata under `tenant`, and every file path requires them to match the caller's:
+  download, `/info`, `/url`, `DELETE`, `GET /v1/files`, `graph://media/` and `file_id`
+  references in invoke, stream, WebSocket, AG-UI, `PUT state` and `POST messages`, thread
+  links and the per-user quota. Before, `alice` in `org-b` could list, read and reference the
+  files of `alice` in `org-a`, and both shared one quota. Fails closed: an identity without a
+  tenant value gets 403 on upload and 404 on reads, and a file with no recorded tenant values
+  (uploaded before this release, or ownerless) is denied while tenant columns are declared,
+  whatever `MEDIA_REQUIRE_OWNER` says. To keep such files, backfill their metadata with
+  `{"tenant": {"<column>": "<value>"}}` (canonical text, e.g. lowercase UUID). Without tenant
+  columns nothing changes and no key is written.
+
 ### Fixed
+
+- Deleting a thread now releases the files linked to it by the thread's owner, read with
+  `aget_thread_scope` before the delete, as well as the deleter's. Before, an org admin (a scope
+  without `user_id`) or a `none`-scope deleter released only their own files, so the member's
+  linked files stayed behind. `media.delete_with_thread` still decides whether a file left
+  with no thread is deleted.
+- `auth` `{"method": "custom", "path": "module:attr"}` now loads a top-level module in the
+  project folder (`auth_app:TokenAuth`), a dotted package path and a file path form
+  (`auth/custom.py:Cls`). Before, `auth_app:TokenAuth` failed with "Custom auth path does not
+  exist" and `auth_app.py:TokenAuth` with "No module named auth_app.py". A path that truly
+  does not exist still raises the same error naming it.
 - `POST /v1/store/search`: `retrieval_strategy` and `distance_metric` now default to `None`, so the store's own settings apply. They were forced to `similarity` / `cosine`, which broke a text-only or HYBRID `PgVectorStore` and a Qdrant store with another distance.
 
 - **Security:** a store bound from the `store` key in `10xgraph.json` skipped core's

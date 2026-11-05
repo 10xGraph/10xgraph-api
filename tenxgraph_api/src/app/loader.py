@@ -2,6 +2,7 @@ import importlib
 import inspect
 import logging
 import os
+import sys
 import weakref
 from collections.abc import Callable
 from pathlib import Path
@@ -498,21 +499,25 @@ def _load_custom_auth(path: str | None) -> BaseAuth:
     if not path:
         raise ValueError("Custom auth requires a 'path' in auth_config.")
 
-    # Extract file path before the ':' for existence check
-    module_or_path = path.split(":", 1)[0] if ":" in path else path
+    module_or_path, sep, attr = path.partition(":")
 
-    # Simple handling: if it appears to be a filesystem path, use it; otherwise
-    # convert dotted module path to a file path like src/auth/custom_auth.py
-    if os.path.sep in module_or_path or module_or_path.endswith(".py"):
-        file_path = Path(module_or_path)
-    elif "." in module_or_path and os.path.sep not in module_or_path:
-        file_path = Path(module_or_path.replace(".", os.path.sep) + ".py")
+    # Accept a file path form ("auth/custom.py:Cls") as well as a module form
+    # ("auth_app:Cls", "pkg.mod:Cls"). Both become a dotted module name resolved from the
+    # import base (cwd plus sys.path, which holds the project folder), like ``agent``.
+    if module_or_path.endswith(".py"):
+        module_name = module_or_path[:-3].replace("\\", "/").strip("/").replace("/", ".")
     else:
-        file_path = Path(module_or_path)
+        module_name = module_or_path
+    rel = Path(*module_name.split(".")) if module_name else Path(module_or_path)
 
-    if not file_path.exists():
+    bases = [Path.cwd(), *(Path(p) for p in sys.path if p)]
+    found = any(
+        (base / rel).with_suffix(".py").exists() or (base / rel).is_dir() for base in bases
+    )
+    if not found:
         raise ValueError(f"Custom auth path does not exist: {module_or_path}")
 
+    path = f"{module_name}{sep}{attr}"
     auth = load_auth(path)
     if auth is None:  # load_auth only returns None for an empty path, checked above
         raise ValueError("Custom auth requires a 'path' in auth_config.")

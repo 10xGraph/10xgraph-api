@@ -378,10 +378,7 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
 
     def _tenant_columns(self) -> tuple[str, ...]:
         """The checkpointer's declared tenant column names (empty for most checkpointers)."""
-        names = getattr(self.checkpointer, "tenant_column_names", None)
-        if not isinstance(names, Sequence) or isinstance(names, str):
-            return ()
-        return tuple(str(name) for name in names)
+        return tenant_column_names(self.checkpointer)
 
     def _scope_columns(self, user: dict[str, Any]) -> tuple[str, ...] | None:
         """The columns this caller's isolation scope compares, or None to deny.
@@ -440,24 +437,7 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
         Converted with the checkpointer's declared column types, the same way
         :meth:`_matches` reads them, so a tombstone compares like an ownership check.
         """
-        from tenxgraph.storage.columns import ColumnSet, user_value
-
-        from tenxgraph_api.src.app.core.auth.ownership_resolver import canonical_value
-
-        specs = getattr(self.checkpointer, "columns", None)
-        if not isinstance(specs, ColumnSet):
-            specs = None
-        values: dict[str, str | None] = {"user_id": canonical_value(user.get("user_id"))}
-        for column in self._tenant_columns():
-            value = user_value(user, column)
-            spec = specs.get(column) if specs is not None else None
-            if value is not None and spec is not None:
-                try:
-                    value = spec.convert(value)
-                except ValueError:
-                    value = None
-            values[column] = canonical_value(value)
-        return values
+        return identity_values(self.checkpointer, user)
 
     async def authorize(
         self,
@@ -633,6 +613,42 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
         except Exception as exc:  # pragma: no cover - the resolver already swallows errors
             logger.debug("Tombstone check failed for thread %s: %s", resource_id, exc)
             return False
+
+
+def tenant_column_names(checkpointer: Any) -> tuple[str, ...]:
+    """``checkpointer.tenant_column_names`` as a tuple (empty when it declares none)."""
+    names = getattr(checkpointer, "tenant_column_names", None)
+    if not isinstance(names, Sequence) or isinstance(names, str):
+        return ()
+    return tuple(str(name) for name in names)
+
+
+def identity_values(checkpointer: Any, user: Any) -> dict[str, str | None]:
+    """``user``'s ``user_id`` and tenant column values as canonical text (None if unset).
+
+    The tenant columns are the ones ``checkpointer`` declares. Each value is read from the
+    authenticated user only (``config["user"]``) and converted with the column's declared
+    type, as an ownership check compares it; a value the type rejects becomes None. Used by
+    ownership tombstones and by uploaded-file tenant checks (``MediaService``).
+    """
+    from tenxgraph.storage.columns import ColumnSet, user_value
+
+    from tenxgraph_api.src.app.core.auth.ownership_resolver import canonical_value
+
+    specs = getattr(checkpointer, "columns", None)
+    if not isinstance(specs, ColumnSet):
+        specs = None
+    values: dict[str, str | None] = {"user_id": canonical_value(user_value(user, "user_id"))}
+    for column in tenant_column_names(checkpointer):
+        value = user_value(user, column)
+        spec = specs.get(column) if specs is not None else None
+        if value is not None and spec is not None:
+            try:
+                value = spec.convert(value)
+            except ValueError:
+                value = None
+        values[column] = canonical_value(value)
+    return values
 
 
 def _has_scope_lookup(checkpointer: Any) -> bool:
