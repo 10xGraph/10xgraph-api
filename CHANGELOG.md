@@ -27,6 +27,63 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+Tenant isolation and safe filters on top of core's tenant columns (`tenant_columns=` on
+`PgCheckpointer` / `PgVectorStore`) and filter language (`tenxgraph.storage.sql_filter`).
+Needs the `10xgraph` release that ships them.
+
+### Breaking
+
+- **Security:** `RoleBasedAuthorizationBackend(isolation=...)` (and `authorization.isolation`
+  in `10xgraph.json` for the `rbac` backend) raises `ValueError` for anything other than
+  `"owner"`, `"none"` or a `tenxgraph.core.authz.Isolation` member, so the server refuses to
+  boot. An unknown value such as `"owners"` used to become `"owner"` silently.
+- **Security:** `resolve_isolation_scope` gives a backend without an `isolation_scope` method
+  `"owner"` (the `AuthorizationBackend` default, fail closed). It used to give `"none"`.
+- An `isolation_scope(user)` result that is an unknown string now fails the request (403):
+  core's `build_authz` raises for it instead of turning it into `"none"`.
+- Client `filters` on an extra column whose type is not one of the six built-in types
+  (`jsonb`, `text[]`, `numeric(10,2)`, ...) accept only `is_null`; anything else is a 422 with
+  core's message.
+
+### Added
+
+- `AuthorizationBackend.isolation_scope(user)` is called per request with the authenticated
+  user and may return `"owner"`, `"none"` or a list of columns (`"user_id"` and declared
+  tenant columns, e.g. `["org_id"]` for an org admin). The result is stamped into the trusted
+  `authz` block for core. Backends that define `isolation_scope(self)` with no argument keep
+  working (the signature decides how it is called). A malformed column list is a 403, never
+  "no isolation".
+- `GET /v1/threads?filters=<JSON object>`: column conditions on `thread_name`, `created_at`,
+  `updated_at` and the checkpointer's extra columns, validated with core's `validate_filters`
+  before the listing runs. Bad JSON, an unknown column or operator, a tenant column or
+  `user_id`, and a checkpointer without filterable columns (in-memory, SQLite) are 422 with a
+  message that never echoes the input and survives production.
+- Store routes (`/v1/store/search`, `/v1/store/memories/forget`) validate `filters` with the
+  same validator when the store has a `filter_schema` (`PgVectorStore`): a tenant column,
+  `user_id` or a bad condition is a 422 before the store (or the embedding call) runs. Stores
+  without one (`QdrantStore`) are unchanged.
+
+### Changed
+
+- `OwnershipAuthorizationBackend` (and `RoleBasedAuthorizationBackend`) compare a thread with
+  the caller on every column the caller's scope picks, through
+  `BaseCheckpointer.aget_thread_scope` (`aget_thread_owner` for checkpointers without it).
+  Two tenants with the same `user_id` can no longer reach each other's threads. The caller's
+  values come only from the authenticated user (`config["user"]`); a picked column the thread
+  or the caller lacks, or one the checkpointer does not declare, denies.
+- With `isolation: "none"`, `RoleBasedAuthorizationBackend` now lets any authenticated user
+  reach an existing thread (no scope column to compare), matching the unscoped storage that
+  setting already gave. Unowned threads keep the create-only rule.
+- The ownership cache holds the thread's scope values. Without tenant columns the shared cache
+  entry keeps its old layout (`owner:id:<thread>`, plain owner); with them it is a JSON object
+  under `owner:scope:<thread>`, so an owner-only entry is never read as a full scope. A cached
+  entry missing a compared column is looked up again. A thread deleted by someone other than
+  its owner (an org admin) leaves a tombstone that blocks everyone.
+
+---
+
 ## [1.0.0rc4] - 2026-11-01
 
 The fourth release candidate of `10xgraph-api` 1.0. It requires `10xgraph` 1.0.0rc4

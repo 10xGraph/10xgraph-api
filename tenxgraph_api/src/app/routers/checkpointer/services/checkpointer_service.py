@@ -8,6 +8,10 @@ from tenxgraph.core.state import AgentState, Message
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 
 from tenxgraph_api.src.app.core import logger
+from tenxgraph_api.src.app.core.auth.client_filters import (
+    check_thread_filters,
+    filter_errors_as_client_errors,
+)
 from tenxgraph_api.src.app.core.auth.request_config import (
     ClientInputError,
     client_config,
@@ -441,12 +445,26 @@ class CheckpointerService:
         search: str | None = None,
         offset: int | None = None,
         limit: int | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> ThreadsListResponseSchema:
+        """List the caller's threads, narrowed by ``filters`` (validated first, 422 when bad).
+
+        ``filters`` only narrow: core ANDs them after the isolation conditions, which come from
+        the trusted ``config["user"]``, never from the client.
+        """
         cfg = self._config({}, user)
-        res = await self.checkpointer.alist_threads(cfg, search, offset, limit)
-        has_more = await _has_more(
-            len(res), offset, limit, lambda o: self.checkpointer.alist_threads(cfg, search, o, 1)
-        )
+        check_thread_filters(self.checkpointer, filters)
+        # Only pass filters when there are some, so a custom checkpointer written before
+        # ``alist_threads`` took ``filters`` keeps working for plain listings.
+        extra: dict[str, Any] = {"filters": filters} if filters else {}
+        with filter_errors_as_client_errors():
+            res = await self.checkpointer.alist_threads(cfg, search, offset, limit, **extra)
+            has_more = await _has_more(
+                len(res),
+                offset,
+                limit,
+                lambda o: self.checkpointer.alist_threads(cfg, search, o, 1, **extra),
+            )
         return ThreadsListResponseSchema(
             threads=[t.model_dump() for t in res],
             has_more=has_more,

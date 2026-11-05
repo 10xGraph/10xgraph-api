@@ -562,13 +562,20 @@ def _resolve_authorization_backend(
         backend_name = (authorization.get("backend") or authorization.get("type") or "").lower()
         if backend_name in ("rbac", "role_based", "roles"):
             logger.info("Using RoleBasedAuthorizationBackend (config-driven roles).")
-            return RoleBasedAuthorizationBackend(
-                role_scopes=authorization.get("roles") or authorization.get("role_scopes") or {},
-                default_scopes=authorization.get("default_scopes") or (),
-                isolation=authorization.get("isolation", "owner"),
-                cache=cache,
-                server_thread_ids=server_thread_ids,
-            )
+            try:
+                return RoleBasedAuthorizationBackend(
+                    role_scopes=authorization.get("roles")
+                    or authorization.get("role_scopes")
+                    or {},
+                    default_scopes=authorization.get("default_scopes") or (),
+                    # Unknown values (a typo, null) raise: the server must not boot with a
+                    # guessed isolation level.
+                    isolation=authorization.get("isolation", "owner"),
+                    cache=cache,
+                    server_thread_ids=server_thread_ids,
+                )
+            except ValueError as exc:
+                raise ValueError(f"authorization.isolation in 10xgraph.json: {exc}") from exc
         raise ValueError(
             f"Unknown authorization backend config: {authorization!r}. For RBAC use "
             '{"backend": "rbac", "roles": {...}}.'

@@ -37,7 +37,7 @@ Treat https://10xgraph.com/ as the first source of truth for public package name
    - Threads and checkpointing: `references/checkpointing-and-threads.md`
    - Dependency injection (InjectQ): `references/dependency-injection.md`
    - Multimodal files and media stores: `references/media-and-files.md`
-   - Long-term memory stores (MemoryConfig, QdrantStore, Mem0Store): `references/memory-and-store.md`
+   - Long-term memory stores (MemoryConfig, PgVectorStore, QdrantStore) and multi-tenant tenant columns: `references/memory-and-store.md`
    - Streaming, StreamChunk, SSE, ResponseGranularity: `references/streaming.md`
    - Stream emitter for tool progress updates: `references/stream-emitter.md`
    - Observability hooks, validators, and runtime jumps: `references/callbacks-and-command.md`

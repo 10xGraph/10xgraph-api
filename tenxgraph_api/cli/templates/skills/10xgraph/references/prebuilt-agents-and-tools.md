@@ -252,7 +252,7 @@ agent = RAGAgent(store=store, agent=Agent(model="gpt-4o"), reranker=CohereRerank
 Constructor options: `store`, `agent`, `reranker`, `top_k`, `top_n`, `retrieval_strategy`, `score_threshold`, `store_config`, `store_config_builder`, plus `state`, `context_manager`, `publisher`, `id_generator`, `container`.
 
 - `store_config` is a fixed dict passed to every `store.asearch()` call (shared knowledge base).
-- `store_config_builder(run_config) -> dict` builds the store config per run instead, for example `store_config_builder=lambda cfg: {"user_id": cfg["user_id"]}`. `QdrantStore` reads `user_id`, `thread_id` and `collection`. Identity must come from the authenticated run config, never from state.
+- `store_config_builder(run_config) -> dict` builds the store config per run instead, for example `store_config_builder=lambda cfg: {"user_id": cfg["user_id"]}`. `QdrantStore` reads `user_id`, `thread_id` and `collection`. Identity must come from the authenticated run config, never from state. With a tenant-column `PgVectorStore`, `RAGAgent` forwards only `config["user"]` (never `config["authz"]`) to the store; for a knowledge base shared across tenants use a store without tenant columns and `compile(allow_tenant_mismatch=True)`.
 
 The retrieved documents are numbered and fenced in a `<retrieved_documents_...>` block that is added to the latest user message of the model request only, before the user's text. The saved user message is not changed and the documents are not saved in state. The wrapped `agent` must accept `execute(state, config, *, request_blocks=None)` (the built-in `Agent` does), otherwise `RAGAgent` raises `TypeError` when there are documents.
 

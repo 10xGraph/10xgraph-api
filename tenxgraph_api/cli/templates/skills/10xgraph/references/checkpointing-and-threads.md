@@ -14,12 +14,12 @@ At minimum, checkpointed calls need:
 config = {"thread_id": "conv-1"}
 ```
 
-Use `user_id` for multi-tenant scoping where the backend supports it.
+Use `user_id` for multi-tenant scoping where the backend supports it. For organizations and projects, `PgCheckpointer(tenant_columns=..., extra_columns=...)` adds columns to `threads`; see the multi-tenant section of `memory-and-store.md`.
 
 ## Backends
 
 - `InMemoryCheckpointer`: development/tests/single-process only. State is lost on restart and not shared across workers.
-- `PgCheckpointer`: production backend using PostgreSQL for durable data and Redis for fast cache. Requires setup before use.
+- `PgCheckpointer`: production backend using PostgreSQL for durable data and Redis for fast cache. Requires setup before use. Optional `tenant_columns`, `extra_columns` and `row_level_security` (the in-memory and SQLite checkpointers raise if given them).
 
 Use production storage for load-balanced API deployments.
 

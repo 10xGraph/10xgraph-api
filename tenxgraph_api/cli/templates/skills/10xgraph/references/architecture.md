@@ -25,7 +25,7 @@ Use this when deciding where a change belongs or explaining how 10xGraph package
 | `tenxgraph.core.realtime` | `LiveInputQueue`, `RealtimeConfig`, `RealtimeEvent` (Gemini Live audio-to-audio) |
 | `tenxgraph.prebuilt.tools` | `fetch_url`, `safe_calculator`, `file_read`, `file_write`, `file_search`, `google_web_search`, `vertex_ai_search`, `make_user_memory_tool`, `make_agent_memory_tool`, `create_handoff_tool` |
 | `tenxgraph.storage.checkpointer` | `InMemoryCheckpointer`, `PgCheckpointer` |
-| `tenxgraph.storage.store` | `QdrantStore`, `Mem0Store` |
+| `tenxgraph.storage.store` | `PgVectorStore`, `QdrantStore`, `MemoryConfig` |
 | `tenxgraph.storage.media` | `InMemoryMediaStore`, `LocalFileMediaStore`, `CloudMediaStore` |
 | `tenxgraph.runtime` | Publisher adapters (SSE, A2A, Kafka, RabbitMQ, Redis Pub/Sub) |
 | `tenxgraph.utils` | `ResponseGranularity`, `CallbackManager`, `tool` decorator |
