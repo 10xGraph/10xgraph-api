@@ -81,6 +81,34 @@ Needs the `10xgraph` release that ships them.
   under `owner:scope:<thread>`, so an owner-only entry is never read as a full scope. A cached
   entry missing a compared column is looked up again. A thread deleted by someone other than
   its owner (an org admin) leaves a tombstone that blocks everyone.
+- With tenant columns declared, cached thread scopes live in the cache store for 5 minutes
+  (`TENANT_L2_TTL_SECONDS`) instead of an hour, so a delete whose cache eviction failed leaves
+  the old scope readable for minutes, not an hour. Without tenant columns the TTL stays 1 h.
+
+### Fixed
+
+- **Security:** a store bound from the `store` key in `10xgraph.json` skipped core's
+  checkpointer/store tenant column check (it never goes through `compile()`). The loader now
+  runs `check_tenant_columns` against the graph's checkpointer (and the one bound in the
+  container): `MODE=production` refuses the boot, other modes warn. New key
+  `store_allow_tenant_mismatch` (bool, default `false`) opts out, like
+  `compile(allow_tenant_mismatch=True)`, for a store holding only shared data. It is in the
+  config editor's Memory store section.
+- **Security:** the thread delete tombstone exempted the deleter by `user_id` only, so the same
+  `user_id` in another tenant could recreate a just-deleted id while another worker still
+  cached the old tenant's scope. With tenant columns the tombstone stores the deleter's
+  `user_id` and tenant values (canonical JSON under `owner:tomb:<thread>`) and only a caller
+  matching all of them is exempt. `OwnershipAuthorizationBackend.evict` takes the deleting
+  `user=`; `CheckpointerService.delete_thread` passes it when the backend accepts it. Without
+  tenant columns the tombstone keeps its plain `user_id` layout. A plain tombstone written by
+  an older worker during a rolling deploy blocks everyone when tenant columns are declared.
+- A cache store error while evicting a deleted thread's scope or writing its tombstone was
+  swallowed at debug level. It is now a warning, `ThreadOwnershipResolver.evict` raises
+  `OwnershipCacheEvictionError`, and `DELETE /v1/threads/{thread_id}` reports `"cache"` in
+  `cleanup_failed`.
+- Stale docs said AG-UI and `/v1/graph/live` pass `client_thread_ids=True`; they follow
+  `runs.thread_ids` like REST since G-113. The `client_thread_ids` authorize context flag stays
+  for custom callers.
 
 ---
 

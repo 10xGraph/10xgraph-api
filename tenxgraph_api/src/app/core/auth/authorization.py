@@ -410,17 +410,54 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
             )
             return None
 
-    def evict(self, thread_id: str | int, owner: str | int | None = None) -> Any:
+    def evict(
+        self,
+        thread_id: str | int,
+        owner: str | int | None = None,
+        *,
+        user: dict[str, Any] | None = None,
+    ) -> Any:
         """Invalidate a thread's cached ownership (call on thread deletion).
 
-        ``owner`` is the deleting user; they may recreate the id straight away. Returns the
-        resolver's ``evict`` coroutine when a resolver exists, so callers may ``await`` it;
-        returns None when there is nothing to evict.
+        ``owner`` is the deleting user's id; ``user`` the deleting authenticated user. With
+        ``user`` the tombstone records the deleter's ``user_id`` and tenant values, and only a
+        caller matching all of them may recreate the id straight away. Returns the resolver's
+        ``evict`` coroutine when a resolver exists, so callers may ``await`` it (it raises
+        ``OwnershipCacheEvictionError`` when the cache store could not be updated); returns
+        None when there is nothing to evict.
         """
         resolver = self._get_resolver()
         if resolver is None:
             return None
-        return resolver.evict(thread_id, owner)
+        who: Any = owner
+        if user is not None and user.get("user_id") is not None:
+            who = self._identity_values(user)
+        return resolver.evict(thread_id, who)
+
+    def _identity_values(self, user: dict[str, Any]) -> dict[str, str | None]:
+        """The caller's ``user_id`` and tenant column values as canonical text (None if unset).
+
+        Converted with the checkpointer's declared column types, the same way
+        :meth:`_matches` reads them, so a tombstone compares like an ownership check.
+        """
+        from tenxgraph.storage.columns import ColumnSet, user_value
+
+        from tenxgraph_api.src.app.core.auth.ownership_resolver import canonical_value
+
+        specs = getattr(self.checkpointer, "columns", None)
+        if not isinstance(specs, ColumnSet):
+            specs = None
+        values: dict[str, str | None] = {"user_id": canonical_value(user.get("user_id"))}
+        for column in self._tenant_columns():
+            value = user_value(user, column)
+            spec = specs.get(column) if specs is not None else None
+            if value is not None and spec is not None:
+                try:
+                    value = spec.convert(value)
+                except ValueError:
+                    value = None
+            values[column] = canonical_value(value)
+        return values
 
     async def authorize(
         self,
@@ -505,7 +542,7 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
         # No owner yet: only an action that creates the thread may proceed, and it makes the
         # caller the owner. Otherwise the caller must match the thread, for EVERY action.
         if thread_scope is None:
-            if await self._recently_deleted(resolver, resource_id, user_id):
+            if await self._recently_deleted(resolver, resource_id, user_id, user):
                 # Another worker may still cache the deleted thread's owner; handing the id to
                 # a new owner now would let that stale entry reach into the new thread.
                 logger.info(
@@ -579,13 +616,20 @@ class OwnershipAuthorizationBackend(AuthorizationBackend):
                 return False
         return True
 
-    @staticmethod
-    async def _recently_deleted(resolver: Any, resource_id: str, user_id: str) -> bool:
+    async def _recently_deleted(
+        self, resolver: Any, resource_id: str, user_id: str, user: dict[str, Any] | None = None
+    ) -> bool:
         check = getattr(resolver, "recently_deleted", None)
         if not callable(check):
             return False
+        from tenxgraph_api.src.app.core.auth.ownership_resolver import ThreadOwnershipResolver
+
+        # The built-in resolver compares user_id and tenant values; a custom one gets the id.
+        caller: Any = user_id
+        if user is not None and isinstance(resolver, ThreadOwnershipResolver):
+            caller = self._identity_values(user)
         try:
-            return bool(await check(resource_id, user_id))
+            return bool(await check(resource_id, caller))
         except Exception as exc:  # pragma: no cover - the resolver already swallows errors
             logger.debug("Tombstone check failed for thread %s: %s", resource_id, exc)
             return False

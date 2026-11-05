@@ -1,3 +1,4 @@
+import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -38,6 +39,19 @@ from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import
     resolve_media_policy,
 )
 from tenxgraph_api.src.app.utils.parse_output import parse_state_output
+
+
+def _accepts_user_kwarg(func: Callable[..., Any]) -> bool:
+    """Whether ``func`` takes a ``user`` keyword (or ``**kwargs``)."""
+    try:
+        params = inspect.signature(func).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        p.kind is inspect.Parameter.VAR_KEYWORD
+        or (p.name == "user" and p.kind is not inspect.Parameter.POSITIONAL_ONLY)
+        for p in params
+    )
 
 
 class CheckpointerUnavailableError(HTTPException, ValueError):
@@ -532,7 +546,12 @@ class CheckpointerService:
             authz = current_container().try_get(AuthorizationBackend)
             evict = getattr(authz, "evict", None)
             if callable(evict):
-                pending = evict(str(thread_id), user.get("user_id"))
+                # The built-in backend takes the whole user, so the delete tombstone records
+                # the deleter's tenant values too; a custom evict(thread_id, owner) gets the id.
+                if _accepts_user_kwarg(evict):
+                    pending = evict(str(thread_id), user.get("user_id"), user=user)
+                else:
+                    pending = evict(str(thread_id), user.get("user_id"))
                 if pending is not None:
                     await pending
         except Exception as exc:

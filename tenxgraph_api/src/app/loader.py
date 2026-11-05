@@ -724,6 +724,56 @@ def warn_per_process_state(container: InjectQ) -> None:
         )
 
 
+def check_store_tenant_columns(
+    graph: CompiledGraph | None,
+    container: InjectQ,
+    store: BaseStore | None,
+    *,
+    allow_mismatch: bool = False,
+) -> None:
+    """Run core's checkpointer/store tenant column check for the ``store`` key's store.
+
+    ``compile()`` runs it for the store passed to it, honouring ``allow_tenant_mismatch``; the
+    store from ``10xgraph.json`` never goes through ``compile()``. It is compared with the
+    graph's checkpointer and with the checkpointer bound in the container (when different).
+    Same rule as core: ``MODE=production`` refuses the boot (``GraphError``), any other mode
+    logs a warning. ``allow_mismatch`` (``store_allow_tenant_mismatch`` in ``10xgraph.json``)
+    never refuses and logs the mismatch at INFO. Skipped on a core without the check, and when
+    the store is the one the graph was compiled with (``compile()`` already checked it).
+    """
+    if store is None:
+        return
+    try:
+        from tenxgraph.core.graph.utils.tenant_check import check_tenant_columns
+    except ImportError:  # core older than tenant columns: nothing to compare
+        return
+    if graph is not None and getattr(graph, "_store", None) is store:
+        return
+    checkpointers: list[object] = []
+    for candidate in (
+        getattr(graph, "_checkpointer", None) if graph is not None else None,
+        container.try_get(BaseCheckpointer),
+    ):
+        if candidate is not None and all(candidate is not seen for seen in checkpointers):
+            checkpointers.append(candidate)
+    try:
+        takes_flag = "allow_mismatch" in inspect.signature(check_tenant_columns).parameters
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        takes_flag = False
+    for checkpointer in checkpointers:
+        if takes_flag:
+            check_tenant_columns(checkpointer, store, allow_mismatch=allow_mismatch)
+        elif allow_mismatch:
+            logger.info(
+                "store_allow_tenant_mismatch is set: not comparing the tenant columns of %s "
+                "and %s.",
+                type(checkpointer).__name__,
+                type(store).__name__,
+            )
+        else:
+            check_tenant_columns(checkpointer, store)
+
+
 async def attach_all_modules(
     config: GraphConfig,
     container: InjectQ,
@@ -763,6 +813,14 @@ async def attach_all_modules(
     # router reports "Store is not configured" even when 10xgraph.json sets one.
     store = load_store(config.store_path)
     container.bind_instance(BaseStore, store, allow_none=True)
+    # compile() compares the graph's checkpointer and store tenant columns (D6); a store bound
+    # from 10xgraph.json skips compile(), so run the same check here.
+    check_store_tenant_columns(
+        graph,
+        container,
+        store,
+        allow_mismatch=getattr(config, "store_allow_tenant_mismatch", False) is True,
+    )
 
     # Bind the in-memory telemetry store so the graph service can record run
     # events and the /v1/observability endpoints can reconstruct traces.
