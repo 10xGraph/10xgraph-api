@@ -511,9 +511,7 @@ def _load_custom_auth(path: str | None) -> BaseAuth:
     rel = Path(*module_name.split(".")) if module_name else Path(module_or_path)
 
     bases = [Path.cwd(), *(Path(p) for p in sys.path if p)]
-    found = any(
-        (base / rel).with_suffix(".py").exists() or (base / rel).is_dir() for base in bases
-    )
+    found = any((base / rel).with_suffix(".py").exists() or (base / rel).is_dir() for base in bases)
     if not found:
         raise ValueError(f"Custom auth path does not exist: {module_or_path}")
 
