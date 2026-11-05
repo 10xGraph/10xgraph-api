@@ -2,7 +2,8 @@
 
 REST invoke/stream and the checkpointer routes refuse an unknown client-named id (the same
 403 as a taken id, so existence is not revealed); omitting the id still starts a thread.
-AG-UI and ``/v1/graph/live`` pass ``client_thread_ids`` and keep accepting frontend ids.
+AG-UI and ``/v1/graph/live`` follow the same rule. The ``client_thread_ids`` authorize context
+flag is kept for custom callers; no built-in route passes it.
 """
 
 # ruff: noqa: S101, PLR2004

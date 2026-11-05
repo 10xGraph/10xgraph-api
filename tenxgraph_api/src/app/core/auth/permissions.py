@@ -19,6 +19,7 @@ from tenxgraph_api.src.app.core.auth.auth_backend import BaseAuth
 from tenxgraph_api.src.app.core.auth.authorization import (
     AuthorizationBackend,
     ScopeClaimError,
+    resolve_isolation_scope,
     scopes_from_claims,
 )
 from tenxgraph_api.src.app.core.auth.identity_cache import recall_identity
@@ -258,7 +259,7 @@ class RequirePermission:
         self.introspection = introspection
         self.explicit_scope = explicit_scope
 
-    async def __call__(  # noqa: PLR0912
+    async def __call__(  # noqa: PLR0912, PLR0915
         self,
         connection: HTTPConnection,
         response: Response,
@@ -373,16 +374,27 @@ class RequirePermission:
         # this user into config["user"], so the isolation policy + scopes reach every
         # downstream call (checkpointer, store, graph execution). Overwrites anything the
         # client sent -- not hijackable.
+        # The isolation scope is chosen per caller: ``isolation_scope(user)`` (older backends
+        # take no argument; see ``resolve_isolation_scope``).
         if isinstance(user, dict) and user.get("user_id"):
             from tenxgraph.core.authz import build_authz
 
-            scope_fn = getattr(authz, "isolation_scope", None)
-            iso_scope = scope_fn() if callable(scope_fn) else "none"
-            user["authz"] = build_authz(
-                user["user_id"],
-                scope=iso_scope,
-                scopes=granted_scopes if granted_scopes is not None else [],
-            )
+            iso_scope = resolve_isolation_scope(authz, user)
+            try:
+                user["authz"] = build_authz(
+                    user["user_id"],
+                    scope=iso_scope,
+                    scopes=granted_scopes if granted_scopes is not None else [],
+                )
+            except ValueError as exc:
+                # A malformed scope (an unknown string such as "owners", or a bad column
+                # list) must never turn into "no isolation": refuse.
+                logger.error(
+                    "isolation_scope of %s returned an invalid scope: %s",
+                    type(authz).__name__,
+                    exc,
+                )
+                _reject(connection, 403, f"Not authorized to {self.action} {self.resource}")
 
         # Log successful auth/authz (with sanitized user info)
         logger.debug(

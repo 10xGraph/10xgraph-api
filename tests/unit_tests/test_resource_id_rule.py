@@ -63,7 +63,7 @@ BAD_IDS = ["a" * 129, "a b", "a/b", "a\n", "é"]
 GOOD_IDS = [
     "1234567890123456789",  # Snowflake
     "3f2b8c1e-9d4a-4c1b-8f6e-0a1b2c3d4e5f",  # UUID
-    "mem0:user@example.com_1.2-3",
+    "org:user@example.com_1.2-3",
     "a" * 128,
 ]
 

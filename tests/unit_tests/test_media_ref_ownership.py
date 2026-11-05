@@ -27,7 +27,7 @@ from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import
 def _service(owners: dict[str, str]) -> MagicMock:
     """A media service whose ownership check knows the given ``file -> owner`` map."""
 
-    async def ensure_can_access(file_id, user_id):
+    async def ensure_can_access(file_id, user_id, user=None):
         if file_id not in owners:
             raise KeyError(file_id)
         if owners[file_id] != user_id:
@@ -50,7 +50,7 @@ async def test_internal_url_of_another_users_file_is_rejected():
         await preprocess_multimodal_messages(
             [_image("graph://media/victim-file")], service, "attacker"
         )
-    service.ensure_can_access.assert_awaited_once_with("victim-file", "attacker")
+    service.ensure_can_access.assert_awaited_once_with("victim-file", "attacker", None)
 
 
 @pytest.mark.asyncio
@@ -60,7 +60,7 @@ async def test_legacy_internal_url_of_another_users_file_is_rejected():
         await preprocess_multimodal_messages(
             [_image("agentflow://media/victim-file")], service, "attacker"
         )
-    service.ensure_can_access.assert_awaited_once_with("victim-file", "attacker")
+    service.ensure_can_access.assert_awaited_once_with("victim-file", "attacker", None)
 
 
 @pytest.mark.asyncio

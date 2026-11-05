@@ -7,7 +7,7 @@ endpoints with deterministic, seeded data. Search is a naive case-insensitive
 substring match with a fake similarity score — enough to see the UI work.
 
 Referenced in 10xgraph.json as ``"store": "graph.dummy_store:store"``. Swap for a
-real ``QdrantStore``/``Mem0Store`` when embeddings + a vector DB are available.
+real ``QdrantStore``/``PgVectorStore`` when embeddings + a vector DB are available.
 """
 
 from __future__ import annotations

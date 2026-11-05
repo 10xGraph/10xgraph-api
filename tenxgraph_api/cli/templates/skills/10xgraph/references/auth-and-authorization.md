@@ -84,7 +84,10 @@ class MyAuthz(AuthorizationBackend):
         resource_id: str | None = None, **context,
     ) -> bool: ...                     # required; False -> 403
 
-    def isolation_scope(self) -> str:  # optional; "owner" | "none" (default "owner")
+    def isolation_scope(self, user: dict):  # optional; per request. Default "owner"
+        # "owner" | "none" | list of column names, or the tenxgraph.core.authz.Isolation members
+        if user.get("role") == "org_admin":
+            return ["org_id"]  # every row of the caller's org (needs tenant_columns=["org_id"])
         return "owner"
 
     def scopes_for(self, user: dict) -> list[str] | None:  # optional; None = permissive
@@ -92,7 +95,12 @@ class MyAuthz(AuthorizationBackend):
 ```
 
 Subclass `OwnershipAuthorizationBackend` to inherit cached owner-only checks and override only
-what you need.
+what you need. Its thread check compares the same scope columns, so an org admin can open every
+thread of the org (via `BaseCheckpointer.aget_thread_scope`). A backend written as
+`isolation_scope(self)` (no `user`) still works. An unknown scope raises `ValueError` (never a
+silent "none"): use `"owner"`, `"none"`, `Isolation.OWNER` / `Isolation.NONE` or a list of
+`user_id` and declared tenant column names; a list naming an undeclared column raises too.
+A picked tenant column the user lacks raises, it is never dropped from the filter.
 
 ### Scopes
 
@@ -121,15 +129,17 @@ space-separated string) and matches exact names; a claim of the wrong type is a 
 ```
 
 Maps `user["roles"]` to scopes on top of owner isolation. `"*"` -> all scopes. `default_scopes`
-granted to everyone. `isolation`: `"owner"` | `"none"`.
+granted to everyone. `isolation`: `"owner"` | `"none"` (any other value stops the server at boot).
 
 ### Data isolation (config["authz"])
 
 API checks decide access; the storage layer (checkpointer, store) enforces isolation from a
 trusted policy. After a successful check, `RequirePermission` stamps
-`user["authz"] = {user_id, scope, scopes}` where `scope` = backend `isolation_scope()`. Services
+`user["authz"] = {user_id, scope, scopes}` where `scope` = backend `isolation_scope(user)`. Services
 copy the trusted `user` into `config["user"]`, so the core library reads `config["user"]["authz"]`
-and scopes rows to the caller (`owner`) or not (`none`). Set server-side only; not client-forgeable.
+and scopes rows to the caller (`owner`), not at all (`none`), or by the listed columns. Set server-side only; not client-forgeable.
+
+Tenant and extra column values (`org_id`, `project_id`, `public_id`) come only from `config["user"]`: return them from `BaseAuth.authenticate()` (or put them in the JWT claims; the decoded token is the user). Never read them from request config, metadata, state or model output.
 
 Server-owned config keys (`RESERVED_CONFIG_KEYS` in `core/auth/request_config.py`: `authz`, `user`, `user_id`, `remote_tools`, `file_tool_root`, `workspace_root`, `tool_timeout`, `node_timeout`, `max_parallel_tool_calls`, `collection`, plus any `_`-prefixed key) are dropped from client config by `client_config` on every route. They are ignored, not refused (debug log). A client never picks a Qdrant `collection`; see memory-and-store.md.
 

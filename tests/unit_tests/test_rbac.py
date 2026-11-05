@@ -82,7 +82,33 @@ def test_single_role_string_accepted():
 def test_isolation_defaults_to_owner_and_is_configurable():
     assert _backend().isolation_scope() == "owner"
     assert _backend(isolation="none").isolation_scope() == "none"
-    assert _backend(isolation="bogus").isolation_scope() == "owner"  # invalid -> owner
+
+
+
+@pytest.mark.parametrize("bad", ["bogus", "owners", "OWNER", None, True, ["user_id"]])
+def test_unknown_isolation_raises_at_construction(bad):
+    """A typo must stop the server from booting, never pick an isolation level quietly."""
+    with pytest.raises(ValueError, match="Unknown authorization isolation"):
+        _backend(isolation=bad)
+
+
+def test_isolation_accepts_enum_members():
+    from tenxgraph.core.authz import Isolation
+
+    assert _backend(isolation=Isolation.NONE).isolation_scope() == "none"
+    assert _backend(isolation=Isolation.OWNER).isolation_scope() == "owner"
+    assert type(_backend(isolation=Isolation.NONE).isolation_scope()) is str
+
+
+def test_backend_without_isolation_scope_gets_owner():
+    """A duck-typed backend with no isolation_scope method fails closed (owner)."""
+    from tenxgraph_api.src.app.core.auth.authorization import resolve_isolation_scope
+
+    class _Bare:
+        async def authorize(self, *a, **k):
+            return True
+
+    assert resolve_isolation_scope(_Bare(), {"user_id": "u1"}) == "owner"
 
 
 @pytest.mark.asyncio
@@ -113,3 +139,12 @@ def test_loader_rejects_unknown_backend_dict():
 
     with pytest.raises(ValueError):
         _resolve_authorization_backend({"backend": "nope"})
+
+
+@pytest.mark.parametrize("bad", ["owners", None])
+def test_loader_refuses_unknown_isolation(bad):
+    """10xgraph.json with a bad authorization.isolation stops the server from booting."""
+    from tenxgraph_api.src.app.loader import _resolve_authorization_backend
+
+    with pytest.raises(ValueError, match=r"authorization\.isolation in 10xgraph\.json"):
+        _resolve_authorization_backend({"backend": "rbac", "roles": ROLES, "isolation": bad})

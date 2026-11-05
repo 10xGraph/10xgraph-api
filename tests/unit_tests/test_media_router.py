@@ -142,7 +142,7 @@ class TestGetFileLogic:
             user=mock_user,
         )
 
-        mock_service.get_file.assert_called_once_with("file-1", "user-123")
+        mock_service.get_file.assert_called_once_with("file-1", "user-123", mock_user)
         assert result.body == b"file content"
         assert result.media_type == "text/plain"
 
@@ -189,7 +189,7 @@ class TestGetFileInfoLogic:
             user=mock_user,
         )
 
-        mock_service.get_file_info.assert_called_once_with("file-1", "user-123")
+        mock_service.get_file_info.assert_called_once_with("file-1", "user-123", mock_user)
 
     @pytest.mark.asyncio
     async def test_get_file_info_handles_not_found(self, mock_request, mock_service, mock_user):

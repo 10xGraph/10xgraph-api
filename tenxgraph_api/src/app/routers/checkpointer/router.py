@@ -1,11 +1,12 @@
 """Checkpointer router module."""
 
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from injectq.integrations import InjectAPI
 from tenxgraph.core.state import Message
 
+from tenxgraph_api.src.app.core.auth.client_filters import parse_filters_param
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
 from tenxgraph_api.src.app.core.auth.request_config import client_config
 from tenxgraph_api.src.app.core.config.settings import get_settings
@@ -469,6 +470,18 @@ async def list_threads(
     search: str | None = None,
     offset: int | None = None,
     limit: int | None = None,
+    filters: Annotated[
+        str | None,
+        Query(
+            description=(
+                "JSON object of column conditions, e.g. "
+                '{"plan": "pro", "created_at": {"gte": "2026-01-01T00:00:00+00:00"}}. '
+                "Columns: thread_name, created_at, updated_at and the checkpointer's declared "
+                "extra columns. Tenant columns and user_id are refused. Needs a checkpointer "
+                "with filterable columns (PgCheckpointer); 422 otherwise."
+            ),
+        ),
+    ] = None,
     service: CheckpointerService = InjectAPI(CheckpointerService),
     user: dict[str, Any] = Depends(RequirePermission("checkpointer", "read")),
 ):
@@ -493,6 +506,7 @@ async def list_threads(
         search,
         offset,
         _clamp_limit(limit),
+        filters=parse_filters_param(filters),
     )
 
     return success_response(

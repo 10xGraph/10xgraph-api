@@ -8,6 +8,10 @@ from tenxgraph.core.state import Message
 from tenxgraph.storage.store import BaseStore
 
 from tenxgraph_api.src.app.core import logger
+from tenxgraph_api.src.app.core.auth.client_filters import (
+    check_store_filters,
+    filter_errors_as_client_errors,
+)
 from tenxgraph_api.src.app.core.auth.request_config import client_config
 from tenxgraph_api.src.app.routers.store.schemas.store_schemas import (
     ForgetMemorySchema,
@@ -32,15 +36,15 @@ class StoreUnavailableError(HTTPException, ValueError):
 
 
 # Memory fields the store owns. Client metadata is kept, but these keys are dropped from it:
-# user_id and thread_id decide who sees a memory, and memory_id is the id Mem0 reports back.
+# user_id and thread_id decide who sees a memory, and memory_id is the memory's own id.
 SYSTEM_METADATA_KEYS = frozenset(
     {"content", "user_id", "thread_id", "memory_type", "category", "timestamp", "memory_id"}
 )
 
-# Store keyword options a client may set. The built-in stores read only these (``infer`` in
-# Mem0Store.astore, ``replace_metadata`` in QdrantStore.aupdate). Anything else is dropped so a
-# client cannot pass arbitrary keyword arguments to the store; ``memory_id`` is never allowed
-# because ``astore`` upserts, so a client-chosen id could replace an existing memory.
+# Store keyword options a client may set (``replace_metadata`` is read by QdrantStore.aupdate).
+# Anything else is dropped so a client cannot pass arbitrary keyword arguments to the store;
+# ``memory_id`` is never allowed because ``astore`` upserts, so a client-chosen id could replace
+# an existing memory.
 CLIENT_OPTION_KEYS = frozenset({"infer", "replace_metadata"})
 
 
@@ -131,20 +135,23 @@ class StoreService:
         store = self._get_store()
         cfg = self._config(payload.config, user)
         options = _client_options(payload.options)
+        # Validated before anything runs (no embedding call for a bad filter); 422 when bad.
+        check_store_filters(store, payload.filters)
 
-        results = await store.asearch(
-            cfg,
-            payload.query,
-            memory_type=payload.memory_type,
-            category=payload.category,
-            limit=payload.limit,
-            score_threshold=payload.score_threshold,
-            filters=_client_filters(payload.filters),
-            retrieval_strategy=payload.retrieval_strategy,
-            distance_metric=payload.distance_metric,
-            max_tokens=payload.max_tokens,
-            **options,
-        )
+        with filter_errors_as_client_errors():
+            results = await store.asearch(
+                cfg,
+                payload.query,
+                memory_type=payload.memory_type,
+                category=payload.category,
+                limit=payload.limit,
+                score_threshold=payload.score_threshold,
+                filters=_client_filters(payload.filters),
+                retrieval_strategy=payload.retrieval_strategy,
+                distance_metric=payload.distance_metric,
+                max_tokens=payload.max_tokens,
+                **options,
+            )
         return MemorySearchResponseSchema(results=results)
 
     async def get_memory(
@@ -166,12 +173,21 @@ class StoreService:
         limit: int = 100,
         options: dict[str, Any] | None = None,
         offset: int = 0,
+        filters: dict[str, Any] | None = None,
     ) -> MemoryListResponseSchema:
         """One page of memories. The store has no offset, so it is asked for ``offset + limit
         + 1`` rows and the page is cut from those; the extra row only tells ``has_more``."""
         store = self._get_store()
         cfg = self._config(config, user)
-        rows = await store.aget_all(cfg, limit=offset + limit + 1, **_client_options(options))
+        check_store_filters(store, filters)
+        list_kwargs: dict[str, Any] = {}
+        client_filters = _client_filters(filters)
+        if client_filters:
+            list_kwargs["filters"] = client_filters
+        with filter_errors_as_client_errors():
+            rows = await store.aget_all(
+                cfg, limit=offset + limit + 1, **list_kwargs, **_client_options(options)
+            )
         page = list(rows[offset : offset + limit])
         has_more = len(rows) > offset + limit
         return MemoryListResponseSchema(
@@ -219,6 +235,7 @@ class StoreService:
         store = self._get_store()
         cfg = self._config(payload.config, user)
         options = _client_options(payload.options)
+        check_store_filters(store, payload.filters)
         forget_kwargs: dict[str, Any] = {
             "memory_type": payload.memory_type,
             "category": payload.category,
@@ -227,5 +244,6 @@ class StoreService:
         # Remove None values before forwarding to the store
         forget_kwargs = {k: v for k, v in forget_kwargs.items() if v is not None}
         forget_kwargs.update(options)
-        result = await store.aforget_memory(cfg, **forget_kwargs)
+        with filter_errors_as_client_errors():
+            result = await store.aforget_memory(cfg, **forget_kwargs)
         return MemoryOperationResponseSchema(success=True, data=result)

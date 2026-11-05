@@ -829,6 +829,16 @@ class GraphConfig:
         return self.data.get("store", None)
 
     @property
+    def store_allow_tenant_mismatch(self) -> bool:
+        """``store_allow_tenant_mismatch`` (default false): the ``store`` key's opt-out of the
+        checkpointer/store tenant column check, like ``compile(allow_tenant_mismatch=True)``.
+        """
+        value = self.data.get("store_allow_tenant_mismatch", False)
+        if value is None:
+            return False
+        return _parse_bool(value, field="store_allow_tenant_mismatch")
+
+    @property
     def cache_store(self) -> CacheStoreConfig:
         """``cache_store`` key, parsed (:class:`CacheStoreConfig`); the memory store when absent.
 

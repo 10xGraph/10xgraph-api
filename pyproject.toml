@@ -398,3 +398,10 @@ dev = [
     "gunicorn>=23,<27",
     "uvicorn-worker>=0.4,<1",
 ]
+
+# TEMPORARY: develop and test against unreleased core (PgVectorStore, tenant columns,
+# sql_filter, Isolation, aget_thread_scope). uv sources are not written into the built
+# wheel, so published packages still depend on 10xgraph from PyPI.
+# Remove this block at the 1.0.0rc5 release and pin "10xgraph>=1.0.0rc5,<2.0" instead.
+[tool.uv.sources]
+10xgraph = { git = "https://github.com/10xGraph/10xGraph", branch = "main" }

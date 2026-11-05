@@ -27,6 +27,122 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+Tenant isolation and safe filters on top of core's tenant columns (`tenant_columns=` on
+`PgCheckpointer` / `PgVectorStore`) and filter language (`tenxgraph.storage.sql_filter`).
+Needs the `10xgraph` release that ships them.
+
+### Breaking
+
+- **Security:** `RoleBasedAuthorizationBackend(isolation=...)` (and `authorization.isolation`
+  in `10xgraph.json` for the `rbac` backend) raises `ValueError` for anything other than
+  `"owner"`, `"none"` or a `tenxgraph.core.authz.Isolation` member, so the server refuses to
+  boot. An unknown value such as `"owners"` used to become `"owner"` silently.
+- **Security:** `resolve_isolation_scope` gives a backend without an `isolation_scope` method
+  `"owner"` (the `AuthorizationBackend` default, fail closed). It used to give `"none"`.
+- An `isolation_scope(user)` result that is an unknown string now fails the request (403):
+  core's `build_authz` raises for it instead of turning it into `"none"`.
+- Client `filters` on an extra column whose type is not one of the six built-in types
+  (`jsonb`, `text[]`, `numeric(10,2)`, ...) accept only `is_null`; anything else is a 422 with
+  core's message.
+
+### Added
+
+- `POST /v1/store/memories/list` takes `filters`, validated like search and forget (a tenant
+  column or `user_id` is a 422, reserved owner keys are stripped). Filters only narrow the
+  list; the isolation scope still applies. Without `filters` the store call is unchanged.
+- `AuthorizationBackend.isolation_scope(user)` is called per request with the authenticated
+  user and may return `"owner"`, `"none"` or a list of columns (`"user_id"` and declared
+  tenant columns, e.g. `["org_id"]` for an org admin). The result is stamped into the trusted
+  `authz` block for core. Backends that define `isolation_scope(self)` with no argument keep
+  working (the signature decides how it is called). A malformed column list is a 403, never
+  "no isolation".
+- `GET /v1/threads?filters=<JSON object>`: column conditions on `thread_name`, `created_at`,
+  `updated_at` and the checkpointer's extra columns, validated with core's `validate_filters`
+  before the listing runs. Bad JSON, an unknown column or operator, a tenant column or
+  `user_id`, and a checkpointer without filterable columns (in-memory, SQLite) are 422 with a
+  message that never echoes the input and survives production.
+- Store routes (`/v1/store/search`, `/v1/store/memories/forget`) validate `filters` with the
+  same validator when the store has a `filter_schema` (`PgVectorStore`): a tenant column,
+  `user_id` or a bad condition is a 422 before the store (or the embedding call) runs. Stores
+  without one (`QdrantStore`) are unchanged.
+
+### Changed
+
+- `OwnershipAuthorizationBackend` (and `RoleBasedAuthorizationBackend`) compare a thread with
+  the caller on every column the caller's scope picks, through
+  `BaseCheckpointer.aget_thread_scope` (`aget_thread_owner` for checkpointers without it).
+  Two tenants with the same `user_id` can no longer reach each other's threads. The caller's
+  values come only from the authenticated user (`config["user"]`); a picked column the thread
+  or the caller lacks, or one the checkpointer does not declare, denies.
+- With `isolation: "none"`, `RoleBasedAuthorizationBackend` now lets any authenticated user
+  reach an existing thread (no scope column to compare), matching the unscoped storage that
+  setting already gave. Unowned threads keep the create-only rule.
+- The ownership cache holds the thread's scope values. Without tenant columns the shared cache
+  entry keeps its old layout (`owner:id:<thread>`, plain owner); with them it is a JSON object
+  under `owner:scope:<thread>`, so an owner-only entry is never read as a full scope. A cached
+  entry missing a compared column is looked up again. A thread deleted by someone other than
+  its owner (an org admin) leaves a tombstone that blocks everyone.
+- With tenant columns declared, cached thread scopes live in the cache store for 5 minutes
+  (`TENANT_L2_TTL_SECONDS`) instead of an hour, so a delete whose cache eviction failed leaves
+  the old scope readable for minutes, not an hour. Without tenant columns the TTL stays 1 h.
+
+### Security
+
+- Uploaded files are scoped by tenant columns as well as `user_id`. With tenant columns
+  declared on the bound checkpointer (`PgCheckpointer(tenant_columns=...)`), an upload records
+  the caller's values (from `config["user"]` only, converted with the column types) in the
+  file's metadata under `tenant`, and every file path requires them to match the caller's:
+  download, `/info`, `/url`, `DELETE`, `GET /v1/files`, `graph://media/` and `file_id`
+  references in invoke, stream, WebSocket, AG-UI, `PUT state` and `POST messages`, thread
+  links and the per-user quota. Before, `alice` in `org-b` could list, read and reference the
+  files of `alice` in `org-a`, and both shared one quota. Fails closed: an identity without a
+  tenant value gets 403 on upload and 404 on reads, and a file with no recorded tenant values
+  (uploaded before this release, or ownerless) is denied while tenant columns are declared,
+  whatever `MEDIA_REQUIRE_OWNER` says. To keep such files, backfill their metadata with
+  `{"tenant": {"<column>": "<value>"}}` (canonical text, e.g. lowercase UUID). Without tenant
+  columns nothing changes and no key is written.
+
+### Fixed
+
+- Deleting a thread now releases the files linked to it by the thread's owner, read with
+  `aget_thread_scope` before the delete, as well as the deleter's. Before, an org admin (a scope
+  without `user_id`) or a `none`-scope deleter released only their own files, so the member's
+  linked files stayed behind. `media.delete_with_thread` still decides whether a file left
+  with no thread is deleted.
+- `auth` `{"method": "custom", "path": "module:attr"}` now loads a top-level module in the
+  project folder (`auth_app:TokenAuth`), a dotted package path and a file path form
+  (`auth/custom.py:Cls`). Before, `auth_app:TokenAuth` failed with "Custom auth path does not
+  exist" and `auth_app.py:TokenAuth` with "No module named auth_app.py". A path that truly
+  does not exist still raises the same error naming it.
+- `POST /v1/store/search`: `retrieval_strategy` and `distance_metric` now default to `None`, so the store's own settings apply. They were forced to `similarity` / `cosine`, which broke a text-only or HYBRID `PgVectorStore` and a Qdrant store with another distance.
+
+- **Security:** a store bound from the `store` key in `10xgraph.json` skipped core's
+  checkpointer/store tenant column check (it never goes through `compile()`). The loader now
+  runs `check_tenant_columns` against the graph's checkpointer (and the one bound in the
+  container): `MODE=production` refuses the boot, other modes warn. New key
+  `store_allow_tenant_mismatch` (bool, default `false`) opts out, like
+  `compile(allow_tenant_mismatch=True)`, for a store holding only shared data. It is in the
+  config editor's Memory store section.
+- **Security:** the thread delete tombstone exempted the deleter by `user_id` only, so the same
+  `user_id` in another tenant could recreate a just-deleted id while another worker still
+  cached the old tenant's scope. With tenant columns the tombstone stores the deleter's
+  `user_id` and tenant values (canonical JSON under `owner:tomb:<thread>`) and only a caller
+  matching all of them is exempt. `OwnershipAuthorizationBackend.evict` takes the deleting
+  `user=`; `CheckpointerService.delete_thread` passes it when the backend accepts it. Without
+  tenant columns the tombstone keeps its plain `user_id` layout. A plain tombstone written by
+  an older worker during a rolling deploy blocks everyone when tenant columns are declared.
+- A cache store error while evicting a deleted thread's scope or writing its tombstone was
+  swallowed at debug level. It is now a warning, `ThreadOwnershipResolver.evict` raises
+  `OwnershipCacheEvictionError`, and `DELETE /v1/threads/{thread_id}` reports `"cache"` in
+  `cleanup_failed`.
+- Stale docs said AG-UI and `/v1/graph/live` pass `client_thread_ids=True`; they follow
+  `runs.thread_ids` like REST since G-113. The `client_thread_ids` authorize context flag stays
+  for custom callers.
+
+---
+
 ## [1.0.0rc4] - 2026-11-01
 
 The fourth release candidate of `10xgraph-api` 1.0. It requires `10xgraph` 1.0.0rc4

@@ -2,6 +2,7 @@ import importlib
 import inspect
 import logging
 import os
+import sys
 import weakref
 from collections.abc import Callable
 from pathlib import Path
@@ -498,21 +499,23 @@ def _load_custom_auth(path: str | None) -> BaseAuth:
     if not path:
         raise ValueError("Custom auth requires a 'path' in auth_config.")
 
-    # Extract file path before the ':' for existence check
-    module_or_path = path.split(":", 1)[0] if ":" in path else path
+    module_or_path, sep, attr = path.partition(":")
 
-    # Simple handling: if it appears to be a filesystem path, use it; otherwise
-    # convert dotted module path to a file path like src/auth/custom_auth.py
-    if os.path.sep in module_or_path or module_or_path.endswith(".py"):
-        file_path = Path(module_or_path)
-    elif "." in module_or_path and os.path.sep not in module_or_path:
-        file_path = Path(module_or_path.replace(".", os.path.sep) + ".py")
+    # Accept a file path form ("auth/custom.py:Cls") as well as a module form
+    # ("auth_app:Cls", "pkg.mod:Cls"). Both become a dotted module name resolved from the
+    # import base (cwd plus sys.path, which holds the project folder), like ``agent``.
+    if module_or_path.endswith(".py"):
+        module_name = module_or_path[:-3].replace("\\", "/").strip("/").replace("/", ".")
     else:
-        file_path = Path(module_or_path)
+        module_name = module_or_path
+    rel = Path(*module_name.split(".")) if module_name else Path(module_or_path)
 
-    if not file_path.exists():
+    bases = [Path.cwd(), *(Path(p) for p in sys.path if p)]
+    found = any((base / rel).with_suffix(".py").exists() or (base / rel).is_dir() for base in bases)
+    if not found:
         raise ValueError(f"Custom auth path does not exist: {module_or_path}")
 
+    path = f"{module_name}{sep}{attr}"
     auth = load_auth(path)
     if auth is None:  # load_auth only returns None for an empty path, checked above
         raise ValueError("Custom auth requires a 'path' in auth_config.")
@@ -562,13 +565,20 @@ def _resolve_authorization_backend(
         backend_name = (authorization.get("backend") or authorization.get("type") or "").lower()
         if backend_name in ("rbac", "role_based", "roles"):
             logger.info("Using RoleBasedAuthorizationBackend (config-driven roles).")
-            return RoleBasedAuthorizationBackend(
-                role_scopes=authorization.get("roles") or authorization.get("role_scopes") or {},
-                default_scopes=authorization.get("default_scopes") or (),
-                isolation=authorization.get("isolation", "owner"),
-                cache=cache,
-                server_thread_ids=server_thread_ids,
-            )
+            try:
+                return RoleBasedAuthorizationBackend(
+                    role_scopes=authorization.get("roles")
+                    or authorization.get("role_scopes")
+                    or {},
+                    default_scopes=authorization.get("default_scopes") or (),
+                    # Unknown values (a typo, null) raise: the server must not boot with a
+                    # guessed isolation level.
+                    isolation=authorization.get("isolation", "owner"),
+                    cache=cache,
+                    server_thread_ids=server_thread_ids,
+                )
+            except ValueError as exc:
+                raise ValueError(f"authorization.isolation in 10xgraph.json: {exc}") from exc
         raise ValueError(
             f"Unknown authorization backend config: {authorization!r}. For RBAC use "
             '{"backend": "rbac", "roles": {...}}.'
@@ -717,6 +727,56 @@ def warn_per_process_state(container: InjectQ) -> None:
         )
 
 
+def check_store_tenant_columns(
+    graph: CompiledGraph | None,
+    container: InjectQ,
+    store: BaseStore | None,
+    *,
+    allow_mismatch: bool = False,
+) -> None:
+    """Run core's checkpointer/store tenant column check for the ``store`` key's store.
+
+    ``compile()`` runs it for the store passed to it, honouring ``allow_tenant_mismatch``; the
+    store from ``10xgraph.json`` never goes through ``compile()``. It is compared with the
+    graph's checkpointer and with the checkpointer bound in the container (when different).
+    Same rule as core: ``MODE=production`` refuses the boot (``GraphError``), any other mode
+    logs a warning. ``allow_mismatch`` (``store_allow_tenant_mismatch`` in ``10xgraph.json``)
+    never refuses and logs the mismatch at INFO. Skipped on a core without the check, and when
+    the store is the one the graph was compiled with (``compile()`` already checked it).
+    """
+    if store is None:
+        return
+    try:
+        from tenxgraph.core.graph.utils.tenant_check import check_tenant_columns
+    except ImportError:  # core older than tenant columns: nothing to compare
+        return
+    if graph is not None and getattr(graph, "_store", None) is store:
+        return
+    checkpointers: list[object] = []
+    for candidate in (
+        getattr(graph, "_checkpointer", None) if graph is not None else None,
+        container.try_get(BaseCheckpointer),
+    ):
+        if candidate is not None and all(candidate is not seen for seen in checkpointers):
+            checkpointers.append(candidate)
+    try:
+        takes_flag = "allow_mismatch" in inspect.signature(check_tenant_columns).parameters
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        takes_flag = False
+    for checkpointer in checkpointers:
+        if takes_flag:
+            check_tenant_columns(checkpointer, store, allow_mismatch=allow_mismatch)
+        elif allow_mismatch:
+            logger.info(
+                "store_allow_tenant_mismatch is set: not comparing the tenant columns of %s "
+                "and %s.",
+                type(checkpointer).__name__,
+                type(store).__name__,
+            )
+        else:
+            check_tenant_columns(checkpointer, store)
+
+
 async def attach_all_modules(
     config: GraphConfig,
     container: InjectQ,
@@ -756,6 +816,14 @@ async def attach_all_modules(
     # router reports "Store is not configured" even when 10xgraph.json sets one.
     store = load_store(config.store_path)
     container.bind_instance(BaseStore, store, allow_none=True)
+    # compile() compares the graph's checkpointer and store tenant columns (D6); a store bound
+    # from 10xgraph.json skips compile(), so run the same check here.
+    check_store_tenant_columns(
+        graph,
+        container,
+        store,
+        allow_mismatch=getattr(config, "store_allow_tenant_mismatch", False) is True,
+    )
 
     # Bind the in-memory telemetry store so the graph service can record run
     # events and the /v1/observability endpoints can reconstruct traces.

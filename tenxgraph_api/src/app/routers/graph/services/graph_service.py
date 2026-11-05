@@ -854,6 +854,7 @@ class GraphService:
         graph_input: GraphInputSchema,
         user_id: str | None = None,
         server_config: dict[str, Any] | None = None,
+        user: dict[str, Any] | None = None,
     ):
         is_new_thread = False
         config = client_config(graph_input.config)
@@ -888,17 +889,19 @@ class GraphService:
         # External media URLs first: the checks are cheap and need no network.
         self.check_media_urls(graph_input.messages)
         # Preprocess multimodal messages (resolve file_id → cached text, etc.)
+        # ``user`` (the authenticated identity) carries the tenant values files are scoped by.
         preprocessed = await preprocess_multimodal_messages(
             graph_input.messages,
             self.media_service,
             user_id,
+            user=user,
         )
         # The accepted messages now use these files: record the thread on each (owned files
         # only; the ownership check above already ran).
         if user_id and self.media_service is not None:
             keys = [k for m in preprocessed for k in internal_media_keys(m)]
             if keys:
-                await self.media_service.link_threads(keys, str(thread_id), str(user_id))
+                await self.media_service.link_threads(keys, str(thread_id), str(user_id), user)
         input_data: dict = {
             "messages": preprocessed,
         }
@@ -945,7 +948,9 @@ class GraphService:
             logger.debug("Invoking graph with input: %s", log_safe(graph_input.messages))
 
             # Prepare the input
-            input_data, config, meta = await self._prepare_input(graph_input, user.get("user_id"))
+            input_data, config, meta = await self._prepare_input(
+                graph_input, user.get("user_id"), user=user
+            )
             thread_lock = await self._lock_new_thread(meta)
             # add user inside config
             config["user"] = user
@@ -1161,7 +1166,7 @@ class GraphService:
 
             # Prepare the config
             input_data, config, meta = await self._prepare_input(
-                graph_input, user.get("user_id"), server_config
+                graph_input, user.get("user_id"), server_config, user=user
             )
             thread_lock = await self._lock_new_thread(meta)
             # add user inside config

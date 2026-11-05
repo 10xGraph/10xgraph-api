@@ -111,6 +111,7 @@ KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
         "observability",
         "injectq",
         "store",
+        "store_allow_tenant_mismatch",
         "checkpointer",
         "thread_name_generator",
         "remote_tools",
@@ -961,6 +962,17 @@ _SECTIONS: list[dict[str, Any]] = [
                 "type": "text",
                 "placeholder": "graph.dependencies:store",
                 "help": "module:attr of a BaseStore instance.",
+            },
+            {
+                "path": ["store_allow_tenant_mismatch"],
+                "label": "Allow tenant column mismatch",
+                "type": "bool",
+                "default": False,
+                "help": (
+                    "The server refuses to start under MODE=production (and warns otherwise) "
+                    "when this store and the checkpointer declare different tenant columns. "
+                    "Turn on only for a store that holds shared data, such as a knowledge base."
+                ),
             },
         ],
     },

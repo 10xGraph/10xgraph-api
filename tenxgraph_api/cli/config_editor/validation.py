@@ -391,6 +391,11 @@ def _check_wiring(config: dict, out: _Collector, base_dir: Path | None) -> None:
         if value is None or value == "":
             continue
         _check_import_path(key, value, out, base_dir)
+    mismatch = config.get("store_allow_tenant_mismatch")
+    if mismatch is not None and not isinstance(mismatch, bool):
+        out.error(
+            "store_allow_tenant_mismatch", "store_allow_tenant_mismatch must be true or false."
+        )
     if config.get("checkpointer"):
         out.warning(
             "checkpointer",

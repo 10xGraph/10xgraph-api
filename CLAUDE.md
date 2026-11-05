@@ -93,10 +93,11 @@ Parsed by `tenxgraph_api/src/app/core/config/graph_config.py`. Supported keys:
 | `checkpointer` | `"module:attr"` -> a `BaseCheckpointer` |
 | `injectq` | `"module:attr"` -> an InjectQ container |
 | `store` | `"module:attr"` -> a `BaseStore` |
+| `store_allow_tenant_mismatch` | Boolean, default false. The loader runs core `check_tenant_columns` on the store bound from `store` against the graph checkpointer (and a container-bound one): a tenant-column mismatch refuses to boot under `MODE=production` and warns otherwise. `true` logs the mismatch at INFO and boots (for a store that holds only shared data, such as a RAG knowledge base) |
 | `cache_store` | One object, `graph_config.CacheStoreConfig`: `type` (`memory` default \| `redis` \| `custom`), `url` (type redis only, optional: empty uses the `REDIS_URL` environment variable, a set value wins; `$VAR` / `${VAR}` expanded when the store is built, unset variable is a config error; `RedisCacheStore`, also Valkey, Dragonfly, KeyDB), `path` (type custom only, required; `"module:attr"` -> a `BaseCacheStore` instance or zero-arg factory), `rate_limit` (object, see below), `token_revocation` (see its row). No key or no `type`: `InMemoryCacheStore` (per process). Unknown keys are config errors listing the valid ones. Nothing else picks the store (`REDIS_URL` alone does not). Selected and bound at boot by `core/cache_store/loader.py::load_and_bind_cache_store` (one INFO line `Cache store: <class> (<config key>, <endpoint>)`, e.g. `cache_store.url`), closed once in the lifespan; type redis without the `redis` package refuses to boot. Holds the run locks and caps, idempotency, ownership cache L2, token revocation and rate-limit counters. Top-level `redis`, `rate_limit` and `token_revocation` keys are config errors at `GraphConfig` load (`check_cache_store_settings`) saying where the setting goes |
 | `ag_ui` | `{"enabled": bool}`, default off. Mounts `POST /v1/ag-ui` (AG-UI protocol, for CopilotKit and other AG-UI clients). Needs the `ag-ui` extra |
 | `websocket` | `enabled` (`false` leaves out `/v1/graph/ws` and `/v1/graph/live`; `true` without `websockets`/`wsproto` refuses to boot; unset keeps them and warns if no library; `routers/setup_router.py::_graph_router`), `max_connections` (1000), `max_connections_per_user` (10), `realtime_models` (models a `/v1/graph/live` client may pick), `realtime_client_overrides` (init options a client may set; default `voice`, `modalities`, `vad`; add `system_prompt` only for trusted callers) |
-| `runs` | `RunsConfig`: `thread_ids` (`server` default = only existing ids may be named on REST invoke/stream, `/v1/graph/ws` and checkpointer writes, a new thread is started by omitting the id; enforced by the ownership/rbac backends via `OwnershipAuthorizationBackend(server_thread_ids=...)`. AG-UI and `/v1/graph/live` are exempt: they pass `client_thread_ids=True` to `authorize` because their frontends make their own ids, and the caller owns a new one. `client` = any request may name a new thread, explicit opt-in), `config_keys` / `state_keys` (allow-lists for request config and `initial_state`/PUT state; 422 on other keys; `thread_id`, `run_id` always allowed), `max_concurrent_per_user` (HTTP invoke/stream/AG-UI runs in flight, default 10, 429 over it; `routers/graph/run_limits.py`), `timeout` (seconds; invoke 504, streams end with an error chunk), `max_parallel_tool_calls` (positive int, default unset = core's default 10 or env `TENXGRAPH_MAX_PARALLEL_TOOL_CALLS`; set into every run's config in `_prepare_input`, reserved from clients) |
+| `runs` | `RunsConfig`: `thread_ids` (`server` default = only existing ids may be named on REST invoke/stream, `/v1/graph/ws` and checkpointer writes, a new thread is started by omitting the id; enforced by the ownership/rbac backends via `OwnershipAuthorizationBackend(server_thread_ids=...)`. AG-UI and `/v1/graph/live` follow the same rule (a blank or `new` id gets a server id). `client` = any request may name a new thread, explicit opt-in), `config_keys` / `state_keys` (allow-lists for request config and `initial_state`/PUT state; 422 on other keys; `thread_id`, `run_id` always allowed), `max_concurrent_per_user` (HTTP invoke/stream/AG-UI runs in flight, default 10, 429 over it; `routers/graph/run_limits.py`), `timeout` (seconds; invoke 504, streams end with an error chunk), `max_parallel_tool_calls` (positive int, default unset = core's default 10 or env `TENXGRAPH_MAX_PARALLEL_TOOL_CALLS`; set into every run's config in `_prepare_input`, reserved from clients) |
 | `cache_store.token_revocation` | `true`, `false`, `null` or `{"enabled", "token_lifetime", "user_ttl"}` (`graph_config.TokenRevocationConfig`; a string is a config error). Read through `GraphConfig.token_revocation`. Revocations live in the cache store (`core/auth/revocation.py`: `revoke_token`, `revoke_user`, `is_revoked`), checked by `RequirePermission` (401), before every `/v1/graph/ws` run, and before and every 30 s during a `/v1/graph/live` session (`REALTIME_RECHECK_INTERVAL`, close 1008); cache store errors fail closed (503), and an unreachable cache store refuses the boot |
 | `media` | `delete_with_thread` (default true): delete an uploaded file when the last message or thread that references it is deleted. Links are recorded in the file's `threads` metadata (`MediaService.link_threads` / `unlink_threads`); files without a `threads` key (uploaded before link tracking) and stores without `update_metadata` (core older than the release that added it) are never auto-deleted. `false` still records links. Parsed by `graph_config.MediaConfig` |
 | `graph_introspection` | `"open"` or `"scoped"` (default scoped in production): `GET /v1/graph`, `/v1/graph/tools`, `/v1/graph:StateSchema` need an explicit `graph:read` scope (`RequirePermission(..., introspection=True)`) |
@@ -125,9 +126,23 @@ valid ones (`RATE_LIMIT_KEYS`).
   `allow_all` only with auth off in development (no identity, so nothing to authorize).
   Selection lives in `loader._resolve_authorization_backend`; `RequirePermission` passes
   `resource_id` (thread_id from path or body) to `authorize`.
-- **Isolation defaults to owner.** `AuthorizationBackend.isolation_scope()` returns `"owner"`, so a
-  custom backend with only `authorize()` still scopes threads and memories per user; return
-  `"none"` on purpose to share (`DefaultAuthorizationBackend` / `allow_all` does).
+- **Isolation defaults to owner.** `AuthorizationBackend.isolation_scope(user)` is called per request and
+  returns `"owner"` by default, so a custom backend with only `authorize()` still scopes threads and
+  memories per user; return `"none"` on purpose to share (`DefaultAuthorizationBackend` / `allow_all`
+  does), or a list of `user_id` and declared tenant columns (e.g. `["org_id"]` for an org admin).
+  Backends with the old no-argument `isolation_scope(self)` still work (signature decides, no
+  retry on `TypeError`). `core.authz.Isolation` is the `OWNER` / `NONE` StrEnum; an unknown scope
+  raises (`RoleBasedAuthorizationBackend(isolation=...)` raises at construction, so the server
+  refuses to boot). The result is stamped in `config["user"]["authz"]`. Tenant column values come
+  only from `config["user"]` (the `BaseAuth` result or JWT claims).
+- **Ownership compares scope columns.** `OwnershipAuthorizationBackend` allows a thread when its
+  values (`BaseCheckpointer.aget_thread_scope`, cached by `ThreadOwnershipResolver` with the tenant
+  values) equal the caller's on every column the scope picks; a scope naming a column the
+  checkpointer does not declare denies (fails closed).
+- **Client `filters`.** `GET /v1/threads?filters=<JSON>` (at most 8192 chars) and the store routes'
+  `filters` are checked by `core/auth/client_filters.py` with core's `sql_filter` validator before
+  any DB work: malformed JSON, non-filterable or tenant columns / `user_id`, a bad operator, or a
+  checkpointer without filterable columns answer 422 (`ClientInputError`), never echoing values.
 - **Token claims are validated.** `JwtAuth` requires `user_id` to be a non-empty string or an int
   (stored as a string), else 401. `token_revoked` checks `jti` even with an odd `user_id`.
   Scopes come from `authorization.scopes_from_claims`: the `scope` claim (space-separated) and
@@ -209,7 +224,12 @@ valid ones (`RATE_LIMIT_KEYS`).
   `GET /v1/files/{file_id}`, `/{file_id}/info`, `/{file_id}/url`, `DELETE /v1/files/{file_id}`
   (owner only, 404 otherwise, scope `files:delete`, added in `authorization.FILES_DELETE_SCOPES`
   until core lists it), `GET /v1/config/multimodal`. Deleting a message or thread also releases
-  the files it referenced (`CheckpointerService.delete_message` / `delete_thread`).
+  the files it referenced (`CheckpointerService.delete_message` / `delete_thread`; a thread delete
+  releases the thread owner's files too, read with `aget_thread_scope` before the delete). With
+  tenant columns on the bound checkpointer, files are tenant-scoped: upload records
+  `metadata["tenant"]` (canonical values from `config["user"]`, `authorization.identity_values`),
+  and access, list, quota, `graph://media/` / `file_id` references and `link_threads` require a
+  match on every tenant column (`media.tenant_matches`); a file without tenant values is denied.
 - **AG-UI** (`tags=["AG-UI"]`, only when `ag_ui.enabled`): `POST /v1/ag-ui`. `routers/ag_ui/`:
   `converter.py` (RunAgentInput -> new user/tool messages only; the checkpoint is the record),
   `event_mapper.py` (StreamChunk -> AG-UI events), `service.py` (runs `GraphService.stream_chunks`).
