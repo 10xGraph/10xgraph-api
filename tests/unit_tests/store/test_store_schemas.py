@@ -116,8 +116,9 @@ class TestSearchMemorySchema:
         """Test default values."""
         schema = SearchMemorySchema(query="test")
         assert schema.limit == 10
-        assert schema.retrieval_strategy == RetrievalStrategy.SIMILARITY
-        assert schema.distance_metric == DistanceMetric.COSINE
+        # None = the store's own configured strategy and metric (core three-level settings)
+        assert schema.retrieval_strategy is None
+        assert schema.distance_metric is None
         assert schema.max_tokens == 4000
 
     def test_missing_query_raises_error(self):

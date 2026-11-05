@@ -49,6 +49,9 @@ Needs the `10xgraph` release that ships them.
 
 ### Added
 
+- `POST /v1/store/memories/list` takes `filters`, validated like search and forget (a tenant
+  column or `user_id` is a 422, reserved owner keys are stripped). Filters only narrow the
+  list; the isolation scope still applies. Without `filters` the store call is unchanged.
 - `AuthorizationBackend.isolation_scope(user)` is called per request with the authenticated
   user and may return `"owner"`, `"none"` or a list of columns (`"user_id"` and declared
   tenant columns, e.g. `["org_id"]` for an org admin). The result is stamped into the trusted
@@ -86,6 +89,7 @@ Needs the `10xgraph` release that ships them.
   the old scope readable for minutes, not an hour. Without tenant columns the TTL stays 1 h.
 
 ### Fixed
+- `POST /v1/store/search`: `retrieval_strategy` and `distance_metric` now default to `None`, so the store's own settings apply. They were forced to `similarity` / `cosine`, which broke a text-only or HYBRID `PgVectorStore` and a Qdrant store with another distance.
 
 - **Security:** a store bound from the `store` key in `10xgraph.json` skipped core's
   checkpointer/store tenant column check (it never goes through `compile()`). The loader now

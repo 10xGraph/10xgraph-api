@@ -173,12 +173,21 @@ class StoreService:
         limit: int = 100,
         options: dict[str, Any] | None = None,
         offset: int = 0,
+        filters: dict[str, Any] | None = None,
     ) -> MemoryListResponseSchema:
         """One page of memories. The store has no offset, so it is asked for ``offset + limit
         + 1`` rows and the page is cut from those; the extra row only tells ``has_more``."""
         store = self._get_store()
         cfg = self._config(config, user)
-        rows = await store.aget_all(cfg, limit=offset + limit + 1, **_client_options(options))
+        check_store_filters(store, filters)
+        list_kwargs: dict[str, Any] = {}
+        client_filters = _client_filters(filters)
+        if client_filters:
+            list_kwargs["filters"] = client_filters
+        with filter_errors_as_client_errors():
+            rows = await store.aget_all(
+                cfg, limit=offset + limit + 1, **list_kwargs, **_client_options(options)
+            )
         page = list(rows[offset : offset + limit])
         has_more = len(rows) > offset + limit
         return MemoryListResponseSchema(

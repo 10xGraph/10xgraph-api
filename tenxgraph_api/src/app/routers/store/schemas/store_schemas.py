@@ -89,13 +89,13 @@ class SearchMemorySchema(BaseConfigSchema):
         default=None,
         description="Additional store-specific filters.",
     )
-    retrieval_strategy: RetrievalStrategy = Field(
-        default=RetrievalStrategy.SIMILARITY,
-        description="Retrieval strategy used by the backend store.",
+    retrieval_strategy: RetrievalStrategy | None = Field(
+        default=None,
+        description="Retrieval strategy. Omit to use the store's configured default.",
     )
-    distance_metric: DistanceMetric = Field(
-        default=DistanceMetric.COSINE,
-        description="Distance metric applied during similarity search.",
+    distance_metric: DistanceMetric | None = Field(
+        default=None,
+        description="Distance metric. Omit to use the store's configured default.",
     )
     max_tokens: int = Field(
         default=4000,
@@ -137,6 +137,10 @@ class ListMemoriesSchema(BaseConfigSchema):
         ge=0,
         le=MAX_LIST_OFFSET,
         description="Number of memories to skip, for paging. Use next_offset from the response.",
+    )
+    filters: BoundedDict | None = Field(
+        default=None,
+        description="Additional filters that narrow the list; the isolation scope still applies.",
     )
 
 

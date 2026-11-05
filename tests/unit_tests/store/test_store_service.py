@@ -556,3 +556,53 @@ class TestReservedFilterKeys:
             "source": "chat",
             "OR": [{"tag": "x"}],
         }
+
+
+@pytest.mark.asyncio
+class TestListMemoriesFilters:
+    """``filters`` on list: validated like search and forget, passed to ``aget_all``."""
+
+    @pytest.fixture
+    def schema_store(self, mock_store):
+        from tenxgraph.storage.columns import parse_columns
+        from tenxgraph.storage.sql_filter import FilterSchema
+
+        mock_store.filter_schema = FilterSchema.for_memories(
+            parse_columns(["org_id"], {"plan": "text"})
+        )
+        mock_store.aget_all.return_value = []
+        return mock_store
+
+    async def test_valid_filters_reach_aget_all(self, store_service, schema_store, mock_user):
+        await store_service.list_memories(
+            {}, mock_user, filters={"plan": "pro", "source": "chat", "OR": [{"source": "x"}, {"app_id": "b"}]}
+        )
+        kwargs = schema_store.aget_all.call_args.kwargs
+        assert kwargs["filters"] == {"plan": "pro", "source": "chat", "OR": [{"source": "x"}]}
+
+    @pytest.mark.parametrize("filters", [{"org_id": "x"}, {"user_id": "victim"}])
+    async def test_isolation_keys_give_422(self, store_service, schema_store, mock_user, filters):
+        from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
+
+        with pytest.raises(ClientInputError):
+            await store_service.list_memories({}, mock_user, filters=filters)
+        schema_store.aget_all.assert_not_called()
+
+    async def test_bad_operator_gives_422(self, store_service, schema_store, mock_user):
+        from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
+
+        with pytest.raises(ClientInputError):
+            await store_service.list_memories(
+                {}, mock_user, filters={"plan": {"nope": 1}}
+            )
+        schema_store.aget_all.assert_not_called()
+
+    async def test_no_filters_keeps_old_call(self, store_service, mock_store, mock_user):
+        mock_store.aget_all.return_value = []
+        await store_service.list_memories({}, mock_user, limit=5)
+        assert "filters" not in mock_store.aget_all.call_args.kwargs
+
+    async def test_store_without_schema_passes_filters(self, store_service, mock_store, mock_user):
+        mock_store.aget_all.return_value = []
+        await store_service.list_memories({}, mock_user, filters={"tag": "x"})
+        assert mock_store.aget_all.call_args.kwargs["filters"] == {"tag": "x"}
