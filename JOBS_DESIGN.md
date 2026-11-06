@@ -36,14 +36,18 @@ later have to break.
 ## Developer API
 
 ```python
+from injectq import Inject
+from tenxgraph.core.graph.compiled_graph import CompiledGraph
 from tenxgraph_api.jobs import task, TaskContext
 
 @task(http=True, retries=3, timeout=600)
-async def summarize_interview(interview_id: str, ctx: TaskContext) -> dict:
+async def summarize_interview(
+    interview_id: str, ctx: TaskContext, graph: CompiledGraph = Inject[CompiledGraph]
+) -> dict:
     ctx.emit.progress("loading transcript", percent=10)
     with ctx.emit.step("transcribe", weight=0.6):          # start, end and duration recorded
         ...
-    result = await ctx.invoke_graph({"messages": [...]})   # thread_id stable across attempts
+    result = await graph.ainvoke({"messages": [...]}, config={"thread_id": interview_id})
     return {"summary": result["messages"][-1].text()}
 
 @task(schedule="0 2 * * *", timezone="UTC", identity="nightly")
@@ -85,8 +89,9 @@ Rules:
   validated at enqueue and again in the worker. Limits: kwargs 256 KB, result 1 MB (configurable);
   larger data goes to files or the store, and the task returns a reference.
 - `ctx: TaskContext` is optional and injected by type. It gives `run_id`, `attempt`,
-  `identity`, `emit` (see "Progress"), `cancelled` (for cooperative checks in sync code),
-  `thread_id()` (derived from `run_id`, same on every attempt) and `invoke_graph(...)`.
+  `identity`, `emit` (see "Progress"), `cancelled` (for cooperative checks in sync code)
+  and `queue`. The graph, checkpointer and store come from InjectQ (`Inject[CompiledGraph]`);
+  pass your own `thread_id`, the same on every attempt.
 - `Inject[...]` from InjectQ works in `async` and `thread` tasks. `process` tasks get plain
   arguments only (the child does not load the container).
 - `.enqueue()` also takes `delay=` / `at=` (delayed start) and `key=` (idempotency, see below).
@@ -137,7 +142,7 @@ Storage and rate:
   snapshot; the event log keeps earlier attempts, tagged with their attempt number.
 - `process` tasks: the child sends emitter calls to the parent over its result pipe; the parent
   buffers and flushes them.
-- When a task runs a graph (`ctx.invoke_graph`), the graph's `StreamEmitter` tool progress is
+- When a task runs a graph, the graph's `StreamEmitter` tool progress is
   forwarded into the event log as `graph.*` events, so a long agent run shows tool steps too.
 - Read side: the run record (`GET /v1/tasks/runs/{run_id}`) and
   `GET /v1/tasks/runs/{run_id}/events?after=<seq>` (poll with a cursor; server-sent events later).
@@ -473,8 +478,8 @@ and migrations, and for reviews; Sonnet for routes, CLI, tests, docs and the pla
 ### Sprint 3: worker command
 
 - `worker` config section and validator, `10xgraph worker`, queues, priority (fairness,
-  reserved slots), thread and process executors, InjectQ inside tasks, `ctx.invoke_graph`
-  (with graph progress forwarded), worker registry and draining, shutdown,
+  reserved slots), thread and process executors, InjectQ inside tasks
+  (graph progress forwarded), worker registry and draining, shutdown,
   `10xgraph tasks enqueue|runs|workers`.
 - Replace the commented-out legacy stubs in `src/app/worker.py` and `src/app/tasks/`.
 - User test: run the worker on the example project, enqueue from a script, watch retries,
@@ -561,7 +566,7 @@ all coordinate through the shared store, with a leader for cron and pruning.
 
 Sprint 1 code (2026-11-06, fix round applied). The contracts live as docstrings in
 `tenxgraph_api/jobs/store/base.py` (`BaseRunStore`) and `tenxgraph_api/jobs/transport/base.py`
-(`BaseTransport`); records are pydantic models in `tenxgraph_api/jobs/models.py` (the whole
+(`BaseTransport`); records are pydantic models in `tenxgraph_api/jobs/core/models.py` (the whole
 package uses pydantic, no dataclasses). Memory versions: `store/memory.py`,
 `transport/memory.py`. A new backend implements the base class and adds one factory to
 `tests/unit_tests/jobs/contract/conftest.py` (`STORE_FACTORIES`, `TRANSPORT_FACTORIES`); the
@@ -591,8 +596,8 @@ Lua script, one `BEGIN IMMEDIATE`).
 | `purge_expired(*, limit)` | Retention: delete finished runs past `expires_at` and their events; frees the key. |
 
 Rules:
-- Storable values: every store encodes JSON fields with `tenxgraph_api/jobs/serialization.py`
-  and raises `ValueNotStorable(field, reason)` (`jobs/errors.py`) before any write for NaN or
+- Storable values: every store encodes JSON fields with `tenxgraph_api/jobs/core/serialization.py`
+  and raises `ValueNotStorable(field, reason)` (`jobs/errors/__init__.py`) before any write for NaN or
   Infinity, a string holding `\x00` (at any depth, keys too), or a non-JSON value. Postgres
   cannot store the first two; memory, SQLite and Redis refuse them too, so the worker sees the
   same error on every backend and fails the run (`result_not_serializable`) instead of
@@ -616,8 +621,9 @@ Rules:
   script from the run's `slot` field, since they share the tag.
 
 `BaseTransport`: `setup()`, `publish(message)`, `publish_many(messages)`,
-`consume(queues, *, max_messages, block=0.0)` (higher priority first, never blocks past
-`block`; during or after `aclose` it returns `[]`), `ack(deliveries)`, `aclose()` (Redis:
+`consume(queues, *, max_messages, block=0.0, priorities=None)` (higher priority first, never
+blocks past `block`; `priorities` limits the read to those levels and leaves the rest, used by
+the worker for its reserved high-priority slots; during or after `aclose` it returns `[]`), `ack(deliveries)`, `aclose()` (Redis:
 cancels in-flight reads and waits for `consume` before XPENDING / DELCONSUMER, so no delivered
 entry is dropped). Messages carry a format `version` (now 1). A message
 with an unknown version or an unreadable body is acked, dropped and logged, never left unacked
@@ -644,10 +650,64 @@ Worker behaviour (Sprint 1):
   `queued` and is published again after 30 s, so a pod that has the task runs it. It is not
   failed; operators cancel such runs if the task is gone for good.
 - Shutdown during a timeout requeues (shutdown wins).
+- Reserved slots: `poll_once` reads one tier per distinct slot limit, from the lowest level
+  up, each for the slots its level may use. With `consume(priorities=)` the read for reserved
+  slots asks for those levels only; otherwise it reads one message at a time, and a run of a
+  lower level is given back (acked, published again by the sweeper after 2 s, CAS on
+  `next_publish_at`) with a 1 s pause before the next read. A run whose `thread` / `process`
+  executor is full, or one read while draining, is given back the same way.
+- A result or error the store refuses (`ValueNotStorable`: NUL, NaN, Infinity) fails the run
+  with the generic `result_not_serializable` error instead of retrying; a progress flush the
+  store refuses is dropped.
+- `10xgraph worker` shutdown (`jobs/worker/service.py`): `/readyz` turns 503, the worker
+  drains (`aclose`, `shutdown_timeout` plus 15 s, then `abort`), then executors, sweeper,
+  probes, transport (Redis leaves its consumer groups), store and graph close in that order.
+  A second signal only logs; SIGKILL stops at once and the leases expire.
+- Every worker runs the sweeper every `sweep_interval` s with jitter until the leader lock
+  lands (Sprint 4). Several at once is safe: every step is a CAS, so two sweepers can at most
+  publish a run twice, and the claim skips the duplicate.
 
 Open items: the step-end flush timing (step ends wait for the next flush, at most one a second)
 and `RetryAfter` versus `timeout` (a deferral is not capped by the task timeout) are left as
 they are for now.
+
+## Redis backend
+
+Code: `jobs/store/redis/` (`store.py`, `keys.py`, `codec.py`, `connection.py`, one Lua file per
+state change in `scripts/`, each prefixed by `prelude.lua`) and `jobs/transport/redis/`
+(`transport.py`, `reader.py`).
+
+Key layout. Every key is `<prefix>{tenxgraph-jobs}:<part>...`:
+
+| Key | Content |
+|---|---|
+| `run:<run_id>` | hash, one field per `TaskRun` field (absent = None). Times are integer microseconds of the store clock (Redis `TIME`); user data is JSON text the scripts never decode. Internal fields: `seq`, `idem` |
+| `events:<run_id>` | stream, entry id `<seq>-0`, field `e` = event JSON, trimmed to `EVENT_LOG_CAP` |
+| `idem` | hash `json([task, owner, tenant, key])` -> run_id |
+| `counters` | hash `slot_name(task, key)` -> slots in use |
+| `due` / `leases` / `expires` | zsets run_id -> `next_publish_at` / `lease_expires_at` / `expires_at` |
+| `idx:all`, `idx:state:<s>`, `idx:task:<t>`, `idx:owner:<u>` | zsets run_id -> `enqueued_at` for `list_runs` (newest first, ties by run_id, opaque cursor) |
+| `stream:<queue>:<priority>` | transport stream, one consumer group, consumer = worker id, `MAXLEN ~ maxlen` (a trimmed message is harmless: the store republishes) |
+
+Own storage: jobs use database `db` (`worker.redis_db`, default 1). When the server refuses
+`SELECT` (ACL, managed services) or the client is a `RedisCluster`, they use database 0 with
+every key under `10xgraph:jobs:` and one WARNING.
+
+Transport reads (`reader.StreamReader`):
+- Two clients. The read client has `socket_timeout=None` (a blocking read must not race it),
+  connect timeout 5 s, keepalive, `health_check_interval=30`; the short-command client (XADD,
+  XACK, XAUTOCLAIM, XGROUP) keeps `socket_timeout=5`.
+- Every XREADGROUP runs inside `asyncio.timeout(block + 5 s)` (a paused server keeps TCP open)
+  with BLOCK of at most `max_block` (<= 5 s), never 0. A failed read drops the read client's
+  connections, waits a backoff (0.1 s doubling to 5 s, bounded by `block`) and raises.
+- After a reconnect, a cancel or any error, the next read first re-reads this consumer's own
+  pending entries (`XREADGROUP ... 0`), so an entry delivered to a dead socket does not wait
+  for XAUTOCLAIM.
+- `consume` reads `high` alone first (non-blocking, COUNT = free slots), then one read over every
+  stream (blocking only when nothing was found). COUNT applies per stream, so the overflow stays
+  in a local buffer (still pending in Redis) and goes out first next time, in priority order.
+- Entries idle longer than `claim_idle` in any consumer are taken with XAUTOCLAIM (full entries,
+  not `justid`) every `claim_interval`.
 
 ## Executors (Sprint 3)
 

@@ -22,7 +22,7 @@ import pytest
 import pytest_asyncio
 from pydantic import BaseModel, ConfigDict
 
-from tenxgraph_api.jobs.clock import FakeClock
+from tenxgraph_api.jobs.core.clock import FakeClock
 from tenxgraph_api.jobs.store.base import BaseRunStore
 from tenxgraph_api.jobs.store.memory import MemoryRunStore
 from tenxgraph_api.jobs.transport.base import BaseTransport

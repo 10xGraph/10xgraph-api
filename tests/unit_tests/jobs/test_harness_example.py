@@ -1,6 +1,6 @@
 """The JOBS_PLAN "Testing" example, verbatim except for the task body.
 
-JOBS_PLAN's ``summarize_interview`` calls ``ctx.invoke_graph``, which arrives in Sprint 3,
+JOBS_PLAN's ``summarize_interview`` runs a graph,
 so the task here does the same steps without a graph. The test function is the plan's text.
 """
 

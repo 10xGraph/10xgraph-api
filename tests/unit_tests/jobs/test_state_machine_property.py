@@ -25,8 +25,8 @@ import random
 import pytest
 
 from tenxgraph_api.jobs import Fail, RetryAfter, TaskContext, task
-from tenxgraph_api.jobs.backoff import Backoff
-from tenxgraph_api.jobs.models import (
+from tenxgraph_api.jobs.core.backoff import Backoff
+from tenxgraph_api.jobs.core.models import (
     LEASED_STATES,
     TERMINAL_STATES,
     AttemptOutcome,
@@ -36,7 +36,7 @@ from tenxgraph_api.jobs.models import (
 )
 from tenxgraph_api.jobs.store.base import slot_name
 from tenxgraph_api.jobs.testing import jobs_harness
-from tenxgraph_api.jobs.worker import Worker
+from tenxgraph_api.jobs.worker.worker import Worker
 
 
 pytestmark = pytest.mark.asyncio

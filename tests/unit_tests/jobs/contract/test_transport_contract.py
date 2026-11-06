@@ -145,3 +145,25 @@ async def test_close_during_blocking_consume_returns_empty(tut):
     await tut.transport.aclose()
     assert await asyncio.wait_for(waiting, 2.0) == []
     assert time.monotonic() - started < 2.0
+
+
+async def test_consume_priorities_filter(tut):
+    queue = q()
+    low, normal, high = msg(queue, "low"), msg(queue, "normal"), msg(queue, "high")
+    for m in (low, normal, high):
+        await tut.transport.publish(m)
+    assert await tut.transport.consume([queue], max_messages=10, priorities=[]) == []
+    only_high = await tut.transport.consume(
+        [queue], max_messages=10, block=0.5, priorities=["high"]
+    )
+    assert [d.message for d in only_high] == [high]
+    await tut.transport.ack(only_high)
+    assert (
+        await tut.transport.consume([queue], max_messages=10, block=0.2, priorities=["high"]) == []
+    )
+    rest = await tut.transport.consume(
+        [queue], max_messages=10, block=0.5, priorities=["low", "normal"]
+    )
+    assert [d.message for d in rest] == [normal, low]  # still highest first
+    await tut.transport.ack(rest)
+    assert await tut.transport.consume([queue], max_messages=10) == []

@@ -22,11 +22,11 @@ from collections.abc import AsyncIterator, Sequence
 from datetime import datetime
 from typing import Any
 
-from .clock import FakeClock
-from .hooks import TaskLifecycleHook
-from .identity import user_identity
-from .models import CLAIMABLE_STATES
-from .runtime import (
+from tenxgraph_api.jobs.core.clock import FakeClock
+from tenxgraph_api.jobs.core.hooks import TaskLifecycleHook
+from tenxgraph_api.jobs.core.identity import user_identity
+from tenxgraph_api.jobs.core.models import CLAIMABLE_STATES
+from tenxgraph_api.jobs.core.runtime import (
     DEFAULT_LEASE_TTL,
     DEFAULT_MAX_KWARGS_BYTES,
     DEFAULT_MAX_RESULT_BYTES,
@@ -34,10 +34,10 @@ from .runtime import (
     JobsRuntime,
     use_runtime,
 )
-from .store.memory import MemoryRunStore
-from .sweeper import SweepStats, sweep_once
-from .transport.memory import MemoryTransport
-from .worker import Worker
+from tenxgraph_api.jobs.store.memory import MemoryRunStore
+from tenxgraph_api.jobs.transport.memory import MemoryTransport
+from tenxgraph_api.jobs.worker.sweeper import SweepStats, sweep_once
+from tenxgraph_api.jobs.worker.worker import Worker
 
 
 class JobsHarness:

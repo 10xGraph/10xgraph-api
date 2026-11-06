@@ -9,13 +9,13 @@ from collections.abc import Sequence
 import pytest
 
 from tenxgraph_api.jobs import task
+from tenxgraph_api.jobs.core.models import PRIORITIES
 from tenxgraph_api.jobs.errors import ValueNotStorable
 from tenxgraph_api.jobs.executors import ProcessExecutor, ThreadExecutor
-from tenxgraph_api.jobs.models import PRIORITIES
 from tenxgraph_api.jobs.testing import jobs_harness
 from tenxgraph_api.jobs.transport.base import Delivery, TransportMessage
 from tenxgraph_api.jobs.transport.memory import MemoryTransport
-from tenxgraph_api.jobs.worker import Worker
+from tenxgraph_api.jobs.worker.worker import Worker
 from tests.unit_tests.jobs import worker_process_tasks as wpt
 
 
@@ -52,6 +52,13 @@ def ws_thread(x: int) -> int:
     return x + 1
 
 
+class UnfilteredTransport(MemoryTransport):
+    """A memory transport whose consume has no ``priorities=`` (an older transport)."""
+
+    async def consume(self, queues: Sequence[str], *, max_messages: int, block: float = 0.0):
+        return await super().consume(queues, max_messages=max_messages, block=block)
+
+
 class FilteringTransport(MemoryTransport):
     """A memory transport whose consume takes ``priorities=`` (like a filtered read)."""
 
@@ -80,9 +87,7 @@ class FilteringTransport(MemoryTransport):
                     wire = lane.popleft()
                     receipt = next(self._receipts)
                     self._pending[receipt] = wire
-                    out.append(
-                        Delivery(message=TransportMessage.from_dict(wire), receipt=receipt)
-                    )
+                    out.append(Delivery(message=TransportMessage.from_dict(wire), receipt=receipt))
         return out
 
 
@@ -91,20 +96,22 @@ async def test_worker_consumes_only_its_queues():
         jobs.worker._queues = ["qa"]
         a = await ws_on_a.options(identity=U1).enqueue()
         b = await ws_on_b.options(identity=U1).enqueue()
-        await jobs.drain()
+        assert await jobs.worker.poll_once() == 1
+        await asyncio.wait(jobs.worker.jobs())
+        assert await jobs.worker.poll_once() == 0
         assert (await a.status()).state.value == "succeeded"
         assert (await b.status()).state.value == "queued"
         assert jobs.worker.queues() == ["qa"]
+        assert jobs.transport.size() == 1  # qb's message is never read
 
 
 @pytest.mark.parametrize("filtered", [False, True])
 async def test_reserved_slots_keep_room_for_high(filtered):
     GATE["open"] = asyncio.Event()
     async with jobs_harness() as jobs:
-        if filtered:
-            transport = FilteringTransport()
-            jobs.runtime.transport = transport
-            jobs.transport = transport
+        transport = FilteringTransport() if filtered else UnfilteredTransport()
+        jobs.runtime.transport = transport
+        jobs.transport = transport
         worker = Worker(
             jobs.runtime,
             queues=["slots"],
@@ -134,7 +141,8 @@ async def test_reserved_slots_keep_room_for_high(filtered):
         assert await worker.poll_once() == 1
         await asyncio.wait(worker.jobs())
         await worker.aclose(grace=1)
-        assert all((await r.status()).state.value == "succeeded" for r in [*normals, high])
+        states = [(await r.status()).state.value for r in [*normals, high]]
+        assert states == ["succeeded"] * 4
 
 
 async def test_thread_task_runs_in_the_thread_executor():
@@ -192,7 +200,7 @@ async def test_unstorable_result_fails_without_retry(monkeypatch):
         async def transition(run_id, *, attempt, worker_id, outcome):
             calls.append(outcome.kind)
             if outcome.kind == "succeeded":
-                raise ValueNotStorable("result holds NaN")
+                raise ValueNotStorable("result", "holds NaN")
             return await real(run_id, attempt=attempt, worker_id=worker_id, outcome=outcome)
 
         monkeypatch.setattr(jobs.store, "transition", transition)

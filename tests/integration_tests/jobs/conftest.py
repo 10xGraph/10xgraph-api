@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 import pytest
 import pytest_asyncio
 
+
 COMPOSE_PROJECT = "tenxgraph-jobs-test"
 COMPOSE_FILE = Path(__file__).with_name("docker-compose.yml")
 

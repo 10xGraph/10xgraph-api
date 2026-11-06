@@ -41,8 +41,8 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, TypeVar
 
-from tenxgraph_api.jobs import serialization
-from tenxgraph_api.jobs.models import (
+from tenxgraph_api.jobs.core import serialization
+from tenxgraph_api.jobs.core.models import (
     CAP_WAIT_BASE,
     CAP_WAIT_MAX,
     CLAIMABLE_STATES,

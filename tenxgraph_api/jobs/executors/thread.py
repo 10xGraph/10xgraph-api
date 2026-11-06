@@ -8,14 +8,18 @@
 - A running thread cannot be stopped. Timeout and ``kill`` resolve the result at once and set
   ``ctx.cancelled``; the thread keeps its slot until the function returns, and its return
   value or exception is discarded.
+- Each body runs on its own daemon ``threading.Thread`` (bounded by the slot count), not a
+  ``ThreadPoolExecutor``: the pool's exit hook joins its threads, so one abandoned endless
+  task would block interpreter exit.
 """
 
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
+import contextlib
 import contextvars
 import logging
+import threading
 from typing import Any
 
 from tenxgraph_api.jobs.errors import TaskValidationError
@@ -83,10 +87,8 @@ class ThreadExecutor(Executor):
         if threads < 1:
             raise ValueError("threads must be >= 1")
         self._threads = threads
-        self._pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=threads, thread_name_prefix="tenxgraph-task"
-        )
         self._busy = 0
+        self._started = 0
         self._freed = asyncio.Event()
         self._running: set[asyncio.Future[Any]] = set()
         self._closed = False
@@ -126,15 +128,39 @@ class ThreadExecutor(Executor):
         context = contextvars.copy_context()
         fn = spec.task.fn
 
-        def call() -> Any:
-            return context.run(fn, **kwargs)
+        future: asyncio.Future[Any] = loop.create_future()
 
-        future = loop.run_in_executor(self._pool, call)
+        def settle(value: Any, exc: BaseException | None) -> None:
+            if future.done():
+                return
+            if exc is None:
+                future.set_result(value)
+            else:
+                future.set_exception(exc)
+
+        def call() -> None:
+            value: Any = None
+            error: BaseException | None = None
+            try:
+                value = context.run(fn, **kwargs)
+            except StopIteration as exc:  # a Future refuses StopIteration
+                error = RuntimeError(f"task raised StopIteration: {exc!r}")
+            except BaseException as exc:
+                error = exc
+            with contextlib.suppress(RuntimeError):  # the loop is closed: nobody waits
+                loop.call_soon_threadsafe(settle, value, error)
+
+        self._started += 1
+        thread = threading.Thread(target=call, name=f"tenxgraph-task-{self._started}", daemon=True)
         self._running.add(future)
         timeout = spec.effective_timeout()
         if timeout is not None:
             handle._timer = loop.call_later(timeout, handle._on_timeout)
         future.add_done_callback(lambda f: self._returned(handle, f))
+        try:
+            thread.start()
+        except BaseException as exc:
+            settle(None, exc)
         return handle
 
     def _returned(self, handle: ThreadHandle, future: asyncio.Future[Any]) -> None:
@@ -160,7 +186,7 @@ class ThreadExecutor(Executor):
 
     async def aclose(self, *, grace: float = 30.0) -> None:
         """Wait up to ``grace`` s for running threads; threads still running are abandoned
-        (Python cannot stop them) and the pool is shut down without waiting for them."""
+        (Python cannot stop them). They are daemon threads, so they do not block exit."""
         self._closed = True
         self._freed.set()
         if self._running:
@@ -171,4 +197,3 @@ class ThreadExecutor(Executor):
                 len(self._running),
                 grace,
             )
-        self._pool.shutdown(wait=False, cancel_futures=True)

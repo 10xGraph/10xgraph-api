@@ -10,7 +10,7 @@ section 5). Each slot here owns one ``multiprocessing.Process`` and one ``Pipe``
   ``fn.__qualname__`` to the ``Task``. Kwargs and results cross the pipe in JSON form; the
   child loads kwargs with ``task.load_kwargs`` and dumps the result with ``task.dump_result``.
 - ``ctx`` in the child is a ``ProcessTaskContext``: ``run_id``, ``attempt``, ``task``,
-  ``queue``, ``cancelled``, ``emit``, ``thread_id()``. No ``Inject``, no ``invoke_graph``.
+  ``queue``, ``cancelled``, ``emit``. No ``Inject``.
   Emit calls go over the pipe and are replayed into the attempt's ``TaskEmitter``.
 - Cancel sets a flag in shared memory (a lock-free ``RawValue``: an ``mp.Event`` holds a lock
   that a killed child could leave taken). The child is killed ``cancel_grace`` s later if it
@@ -43,18 +43,21 @@ import sys
 import threading
 import time
 import traceback
-import uuid
 from collections.abc import Sequence
 from multiprocessing.connection import Connection
 from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from tenxgraph_api.jobs.context import THREAD_NAMESPACE
-from tenxgraph_api.jobs.control import Fail, RetryAfter
-from tenxgraph_api.jobs.emit import LEVELS
-from tenxgraph_api.jobs.errors import PayloadTooLarge, TaskDefinitionError, TaskValidationError
-from tenxgraph_api.jobs.task import Task
+from tenxgraph_api.jobs.core.emit import LEVELS
+from tenxgraph_api.jobs.core.task import Task
+from tenxgraph_api.jobs.errors import (
+    Fail,
+    PayloadTooLarge,
+    RetryAfter,
+    TaskDefinitionError,
+    TaskValidationError,
+)
 
 from .base import (
     ChildTaskError,
@@ -257,12 +260,6 @@ class ProcessTaskContext:
     def cancelled(self) -> bool:
         return bool(self._cancel_flag.value)
 
-    def thread_id(self) -> str:
-        return str(uuid.uuid5(THREAD_NAMESPACE, self.run_id))
-
-    async def invoke_graph(self, input_data: dict[str, Any], config: dict | None = None) -> Any:
-        raise NotImplementedError("ctx.invoke_graph is not available in a process task")
-
     def __repr__(self) -> str:
         return f"ProcessTaskContext(run_id={self.run_id!r}, task={self.task!r})"
 
@@ -291,6 +288,12 @@ def child_main(conn: Connection, cancel_flag: Any, preload: list[str], parent_pi
             conn.send(("startup_error", f"cannot import {name}: {type(exc).__name__}: {exc}"))
         return
     conn.send(("ready", os.getpid()))
+    send_lock = threading.Lock()  # Connection.send is not thread-safe; task threads emit too
+
+    def send(message: Any) -> None:
+        with send_lock:
+            conn.send(message)
+
     while True:
         try:
             message = conn.recv()
@@ -298,15 +301,15 @@ def child_main(conn: Connection, cancel_flag: Any, preload: list[str], parent_pi
             return
         if message is None:
             return
-        reply = _run_child_task(conn, message[1], cancel_flag)
+        reply = _run_child_task(send, message[1], cancel_flag)
         try:
-            conn.send(reply)
+            send(reply)
         except (OSError, ValueError):
             return
 
 
 def _run_child_task(  # noqa: PLR0911 - one reply per outcome
-    conn: Connection, payload: dict[str, Any], cancel_flag: Any
+    send: Any, payload: dict[str, Any], cancel_flag: Any
 ) -> tuple:
     try:
         task_obj = resolve_task(payload["module"], payload["qualname"], payload["name"])
@@ -316,7 +319,7 @@ def _run_child_task(  # noqa: PLR0911 - one reply per outcome
         kwargs = task_obj.load_kwargs(payload["kwargs"])
     except TaskValidationError as exc:
         return ("error", {"kind": "validation", "type": type(exc).__name__, "message": str(exc)})
-    emitter = ChildEmitter(conn.send)
+    emitter = ChildEmitter(send)
     if task_obj.context_param is not None:
         kwargs[task_obj.context_param] = ProcessTaskContext(
             run_id=payload["run_id"],
@@ -444,9 +447,21 @@ class _Slot:
             name=f"tenxgraph-task-{self.index}",
             daemon=True,
         )
-        await asyncio.to_thread(proc.start)
+        starting = asyncio.ensure_future(asyncio.to_thread(proc.start))
+        try:
+            await asyncio.shield(starting)
+        except asyncio.CancelledError:
+            # proc.start goes on in its thread: wait for it so discard can kill the child
+            with contextlib.suppress(BaseException):
+                await starting
+            child_conn.close()
+            if starting.done() and not starting.cancelled() and starting.exception() is None:
+                self.proc, self.conn = proc, parent_conn
+            raise
         child_conn.close()
         self.proc, self.conn, self.runs = proc, parent_conn, 0
+        if ex._closed:  # aclose ran while the child started: it must not outlive aclose
+            raise _ChildStartError("process executor is closed")
         deadline = time.monotonic() + ex.startup_timeout
         while True:
             remaining = deadline - time.monotonic()
@@ -505,6 +520,7 @@ class ProcessHandle(ExecutionHandle):
         self._outcome: asyncio.Future[ExecutionResult] = self._loop.create_future()
         self._cancel_timer: asyncio.TimerHandle | None = None
         self.supervisor: asyncio.Task | None = None
+        self.ran = False  # the child's reply is in; cancelling now would lose the result
 
     async def result(self) -> ExecutionResult:
         return await asyncio.shield(self._outcome)
@@ -533,6 +549,8 @@ class ProcessHandle(ExecutionHandle):
             self.slot.kill_now()  # the supervisor sees EOF and resolves "stopped"
         elif self.supervisor is None:
             self._resolve(ExecutionResult(kind="stopped", reason=reason))
+        elif not self.ran:  # the slot's child is still starting: stop waiting for it
+            self.supervisor.cancel()
 
     def _resolve(self, result: ExecutionResult) -> None:
         if self._cancel_timer is not None:
@@ -679,8 +697,8 @@ class ProcessExecutor(Executor):
         try:
             result = await self._run_on(slot, handle)
         except asyncio.CancelledError:
-            await slot.discard()
             handle._resolve(ExecutionResult(kind="stopped", reason=handle.kill_reason or "abort"))
+            await slot.discard()
             raise
         except Exception as exc:
             logger.exception("jobs process slot %s failed", slot.index)
@@ -733,6 +751,7 @@ class ProcessExecutor(Executor):
             slot.kill_now()
         result = await self._watch(slot, handle, conn)
         handle.slot = None
+        handle.ran = True
         if result.kind in ("returned", "raised", "invalid"):
             await self._after_run(slot)
         return result
@@ -823,7 +842,11 @@ class ProcessExecutor(Executor):
             if pending:
                 for handle in list(self._handles):
                     handle.kill("shutdown")
-                await asyncio.wait(pending, timeout=STOP_TIMEOUT + 1)
+                _, pending = await asyncio.wait(pending, timeout=STOP_TIMEOUT + 1)
+            for supervisor in pending:  # stuck (a child still starting): stop and reap them
+                supervisor.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
         for handle in list(self._handles):  # waiting for a slot
             handle.kill("shutdown")
         for slot in self._slots:

@@ -9,16 +9,17 @@ import time
 import pytest
 
 from tenxgraph_api.jobs import TaskContext, task
-from tenxgraph_api.jobs import worker as worker_module
-from tenxgraph_api.jobs.emit import TaskEmitter
-from tenxgraph_api.jobs.models import AttemptOutcome, RunState, TaskRun
-from tenxgraph_api.jobs.runtime import JobsRuntime, use_runtime
+from tenxgraph_api.jobs.core.emit import TaskEmitter
+from tenxgraph_api.jobs.core.models import AttemptOutcome, RunState, TaskRun
+from tenxgraph_api.jobs.core.runtime import JobsRuntime, use_runtime
 from tenxgraph_api.jobs.store.base import REDIS_HASH_TAG, redis_key
 from tenxgraph_api.jobs.store.memory import MemoryRunStore
-from tenxgraph_api.jobs.sweeper import sweep_once
 from tenxgraph_api.jobs.testing import jobs_harness
 from tenxgraph_api.jobs.transport.memory import MemoryTransport
-from tenxgraph_api.jobs.worker import Worker, _Attempt
+from tenxgraph_api.jobs.worker import hooks_queue as worker_module
+from tenxgraph_api.jobs.worker.attempt import Attempt as _Attempt
+from tenxgraph_api.jobs.worker.sweeper import sweep_once
+from tenxgraph_api.jobs.worker.worker import Worker
 
 
 pytestmark = pytest.mark.asyncio
@@ -248,7 +249,7 @@ async def test_final_flush_error_still_writes_result(jobs):
         await jobs.drain()
         assert (await handle.status()).result == 7
     finally:
-        from tenxgraph_api.jobs.registry import unregister
+        from tenxgraph_api.jobs.core.registry import unregister
 
         unregister("ft_logs_then_returns")
 

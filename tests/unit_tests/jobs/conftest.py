@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest_asyncio
 
-from tenxgraph_api.jobs.hooks import TaskLifecycleHook
+from tenxgraph_api.jobs.core.hooks import TaskLifecycleHook
 from tenxgraph_api.jobs.testing import jobs_harness
 
 

@@ -11,7 +11,7 @@ plain read (no write lock); only when a message is visible does it take ``BEGIN 
 hand it out, so idle workers never compete with the store for the write lock. ``consume``
 during or after ``aclose`` returns ``[]``.
 
-Why a transport at all when the store has ``claim_next``: the worker (``jobs/worker.py``)
+Why a transport at all when the store has ``claim_next``: the worker (``jobs/worker/worker.py``)
 consumes a transport and then claims each run, the same loop for every backend. Keeping that
 loop for ``local`` means the worker, sweeper and delayed-run republishing behave exactly as in
 production. ``claim_next`` remains available for a local fast path later; both go through the
@@ -36,7 +36,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from tenxgraph_api.jobs.models import PRIORITIES
+from tenxgraph_api.jobs.core.models import PRIORITIES
 from tenxgraph_api.jobs.store.sqlite import (
     DEFAULT_BUSY_TIMEOUT_MS,
     DEFAULT_LOCK_RETRIES,
@@ -179,22 +179,27 @@ class SqliteTransport(BaseTransport):
 
     # ------------------------------------------------------------------ consume and ack
 
-    async def _peek(self, wanted: Sequence[str], marks: str) -> bool:
+    async def _peek(self, where: str, params: Sequence[Any]) -> bool:
         """A read-only check for a visible message, so an idle poll never takes the write lock
         (WAL readers do not block the writer, nor wait for it)."""
         conn = await self._connection()
         async with self._lock:
             rows = await conn.execute_fetchall(
-                f"SELECT 1 FROM {MESSAGES} WHERE queue IN ({marks}) "
-                f"AND visible_at <= {self._clock} LIMIT 1",
-                tuple(wanted),
+                f"SELECT 1 FROM {MESSAGES} WHERE {where} AND visible_at <= {self._clock} LIMIT 1",
+                tuple(params),
             )
         return bool(rows)
 
-    async def _take(self, queues: Sequence[str], max_messages: int) -> list[Delivery]:
+    async def _take(
+        self, queues: Sequence[str], max_messages: int, ranks: Sequence[int]
+    ) -> list[Delivery]:
         wanted = list(dict.fromkeys(queues))
-        marks = ", ".join("?" for _ in wanted)
-        if not await self._peek(wanted, marks):
+        where = (
+            f"queue IN ({', '.join('?' for _ in wanted)}) "
+            f"AND rank IN ({', '.join('?' for _ in ranks)})"
+        )
+        filters = (*wanted, *ranks)
+        if not await self._peek(where, filters):
             return []
 
         async def run(conn: Any) -> list[Delivery]:
@@ -203,9 +208,9 @@ class SqliteTransport(BaseTransport):
             out: list[Delivery] = []
             while len(out) < max_messages:
                 rows = await conn.execute_fetchall(
-                    f"SELECT id, body FROM {MESSAGES} WHERE queue IN ({marks}) "
+                    f"SELECT id, body FROM {MESSAGES} WHERE {where} "
                     "AND visible_at <= ? ORDER BY rank, id LIMIT ?",
-                    (*wanted, now, max_messages - len(out)),
+                    (*filters, now, max_messages - len(out)),
                 )
                 if not rows:
                     break
@@ -240,8 +245,12 @@ class SqliteTransport(BaseTransport):
         *,
         max_messages: int,
         block: float = 0.0,
+        priorities: Sequence[str] | None = None,
     ) -> list[Delivery]:
         if max_messages <= 0 or self._closed or not queues:
+            return []
+        ranks = [_RANK[p] for p in PRIORITIES if priorities is None or p in priorities]
+        if not ranks:
             return []
         deadline = time.monotonic() + max(0.0, block)
         while True:
@@ -249,7 +258,7 @@ class SqliteTransport(BaseTransport):
             if self._closed:
                 return []
             try:
-                out = await self._take(queues, max_messages)
+                out = await self._take(queues, max_messages, ranks)
             except Exception:
                 if self._closed:  # closed while this poll was opening or waiting for the lock
                     return []

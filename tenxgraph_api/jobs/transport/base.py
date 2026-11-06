@@ -22,6 +22,8 @@ Rules every implementation follows (``tests/unit_tests/jobs/contract`` checks th
   it from ``consume`` and never leaves it unacked (an unacked poison entry would come back
   forever through ``XAUTOCLAIM``). The run itself is safe in the store: its
   ``next_publish_at`` makes the sweeper publish it again later, in a format every pod reads.
+- ``consume(..., priorities=[...])`` reads only those levels, still highest first, and leaves
+  every other message untouched.
 - ``consume`` blocks at most ``block`` seconds (0 = do not wait) and returns at most
   ``max_messages``; it never blocks forever.
 - ``consume`` called after ``aclose``, or still waiting when ``aclose`` runs, returns ``[]``
@@ -103,10 +105,14 @@ class BaseTransport(ABC):
         *,
         max_messages: int,
         block: float = 0.0,
+        priorities: Sequence[str] | None = None,
     ) -> list[Delivery]:
         """Up to ``max_messages`` messages from ``queues``, higher priority first.
 
         Waits at most ``block`` seconds when nothing is ready; returns ``[]`` on timeout.
+        ``priorities`` (default: all) limits the read to messages of those priority levels;
+        others stay where they are for the next call (the worker reads only ``high`` when only
+        its reserved high-priority slots are free). An empty list reads nothing.
         """
 
     @abstractmethod

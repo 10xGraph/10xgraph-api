@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from tenxgraph_api.jobs.models import (
+from tenxgraph_api.jobs.core.models import (
     AttemptOutcome,
     ClaimStatus,
     NewRun,
@@ -79,7 +79,7 @@ def run_python(code: str, *args: str, timeout: float = 120.0) -> subprocess.Comp
 
 CLAIM_NEXT_WORKER = """
 import asyncio, json, os, sys
-from tenxgraph_api.jobs.models import AttemptOutcome
+from tenxgraph_api.jobs.core.models import AttemptOutcome
 from tenxgraph_api.jobs.store.sqlite import SqliteRunStore
 
 async def main(path, name):
@@ -115,7 +115,7 @@ asyncio.run(main(sys.argv[1], sys.argv[2]))
 
 CLAIM_BY_ID_WORKER = """
 import asyncio, json, random, sys
-from tenxgraph_api.jobs.models import ClaimStatus
+from tenxgraph_api.jobs.core.models import ClaimStatus
 from tenxgraph_api.jobs.store.sqlite import SqliteRunStore
 
 async def main(path, name, ids_file):

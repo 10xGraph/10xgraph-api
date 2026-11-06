@@ -17,8 +17,8 @@ from tenxgraph_api.jobs import (
     get_task,
     task,
 )
-from tenxgraph_api.jobs.backoff import Backoff, to_backoff
-from tenxgraph_api.jobs.registry import all_tasks, isolated_registry
+from tenxgraph_api.jobs.core.backoff import Backoff, to_backoff
+from tenxgraph_api.jobs.core.registry import all_tasks, isolated_registry
 
 
 @pytest.fixture(autouse=True)

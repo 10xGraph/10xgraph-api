@@ -9,10 +9,9 @@ import uuid
 
 import pytest
 
-from tenxgraph_api.jobs import enqueue, registry
-from tenxgraph_api.jobs.config import WorkerConfigError, parse_worker_config
-from tenxgraph_api.jobs.errors import JobsNotConfigured
-from tenxgraph_api.jobs.factory import (
+from tenxgraph_api.jobs import enqueue
+from tenxgraph_api.jobs.config.config import WorkerConfigError, parse_worker_config
+from tenxgraph_api.jobs.config.factory import (
     build_runtime,
     build_store,
     build_transport,
@@ -22,12 +21,11 @@ from tenxgraph_api.jobs.factory import (
     start_api_jobs,
     stop_api_jobs,
 )
-from tenxgraph_api.jobs.hooks import TaskLifecycleHook
-from tenxgraph_api.jobs.runtime import get_runtime
+from tenxgraph_api.jobs.core import registry
+from tenxgraph_api.jobs.core.hooks import TaskLifecycleHook
+from tenxgraph_api.jobs.core.runtime import get_runtime
+from tenxgraph_api.jobs.errors import JobsNotConfigured
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
-
-
-pytestmark = pytest.mark.asyncio
 
 
 class AuditHook(TaskLifecycleHook):
@@ -68,6 +66,7 @@ def project(tmp_path, monkeypatch):
     sys.modules.pop(name, None)
 
 
+@pytest.mark.asyncio
 async def test_sqlite_local_runtime_creates_its_file_next_to_the_config(tmp_path):
     cfg = parse_worker_config({"backend": "local"})
     runtime = await build_runtime(cfg, base_dir=tmp_path, allow_memory=False)
@@ -81,6 +80,7 @@ async def test_sqlite_local_runtime_creates_its_file_next_to_the_config(tmp_path
         await close_runtime(runtime)
 
 
+@pytest.mark.asyncio
 async def test_memory_is_refused_for_servers_and_workers():
     cfg = parse_worker_config({"store": {"type": "memory"}, "transport": {"type": "memory"}})
     with pytest.raises(WorkerConfigError, match='"backend": "local"'):
@@ -93,7 +93,12 @@ def test_postgres_store_uses_its_own_dsn_and_a_small_pool(monkeypatch):
     monkeypatch.setenv("JOBS_DSN", "postgresql://u:p@db/jobs")
     cfg = parse_worker_config(
         {
-            "store": {"type": "postgres", "url": "${JOBS_DSN}", "schema": "jobs", "auto_migrate": False},
+            "store": {
+                "type": "postgres",
+                "url": "${JOBS_DSN}",
+                "schema": "jobs",
+                "auto_migrate": False,
+            },
             "transport": {"type": "redis", "url": "redis://localhost:6379/0"},
         }
     )
@@ -129,7 +134,10 @@ def test_redis_uses_the_jobs_database_and_the_worker_id_as_consumer():
 def test_unset_url_variable_is_a_config_error(monkeypatch):
     monkeypatch.delenv("NOPE_URL", raising=False)
     cfg = parse_worker_config(
-        {"store": {"type": "redis", "url": "${NOPE_URL}"}, "transport": {"type": "redis", "url": "redis://h"}}
+        {
+            "store": {"type": "redis", "url": "${NOPE_URL}"},
+            "transport": {"type": "redis", "url": "redis://h"},
+        }
     )
     with pytest.raises(WorkerConfigError, match="NOPE_URL"):
         build_store(cfg)
@@ -144,6 +152,7 @@ def test_hooks_and_modules():
         import_task_modules(["no_such_jobs_module"])
 
 
+@pytest.mark.asyncio
 async def test_no_worker_section_creates_nothing(project, monkeypatch):
     tmp_path, _name, _task, write = project
     gc = write(None)
@@ -160,6 +169,7 @@ async def test_no_worker_section_creates_nothing(project, monkeypatch):
     assert not (tmp_path / ".10xgraph").exists()
 
 
+@pytest.mark.asyncio
 async def test_api_enqueue_by_name_with_a_worker_section(project, monkeypatch):
     tmp_path, name, task_name, write = project
     gc = write({"modules": name, "backend": "local"})
@@ -182,5 +192,6 @@ async def test_api_enqueue_by_name_with_a_worker_section(project, monkeypatch):
         get_runtime()
 
 
+@pytest.mark.asyncio
 async def test_stop_api_jobs_none_is_a_noop():
     await stop_api_jobs(None)

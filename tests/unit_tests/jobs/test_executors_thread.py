@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 
@@ -10,10 +13,10 @@ import pytest
 from injectq import Inject, InjectQ
 
 from tenxgraph_api.jobs import Fail, RetryAfter, TaskContext, TaskDefinitionError, task
-from tenxgraph_api.jobs.emit import TaskEmitter
+from tenxgraph_api.jobs.core.emit import TaskEmitter
+from tenxgraph_api.jobs.core.identity import current_task_context
+from tenxgraph_api.jobs.core.registry import isolated_registry
 from tenxgraph_api.jobs.executors import ExecutionSpec, ThreadExecutor
-from tenxgraph_api.jobs.identity import current_task_context
-from tenxgraph_api.jobs.registry import isolated_registry
 
 
 pytestmark = pytest.mark.asyncio
@@ -238,3 +241,43 @@ async def test_close_waits_then_abandons():
     gate.set()
     with pytest.raises(RuntimeError, match="closed"):
         await ex.start(spec(hang))
+
+
+_ABANDON_SCRIPT = textwrap.dedent(
+    """
+    import asyncio, time
+    from tenxgraph_api.jobs import TaskContext, task
+    from tenxgraph_api.jobs.core.emit import TaskEmitter
+    from tenxgraph_api.jobs.executors import ExecutionSpec, ThreadExecutor
+
+    @task(name="tt_forever", executor="thread")
+    def forever() -> None:
+        while True:
+            time.sleep(0.05)
+
+    async def main():
+        ctx = TaskContext(run_id="r", attempt=1, task="t", queue="default",
+                          identity={}, emit=TaskEmitter(clock=time.time))
+        ex = ThreadExecutor(1)
+        handle = await ex.start(ExecutionSpec(task=forever, stored_kwargs={}, ctx=ctx))
+        handle.kill("shutdown")
+        await ex.aclose(grace=0.1)
+        print("closed", flush=True)
+
+    asyncio.run(main())
+    """
+)
+
+
+async def test_abandoned_endless_thread_does_not_block_exit():
+    started = time.monotonic()
+    done = await asyncio.to_thread(
+        subprocess.run,
+        [sys.executable, "-c", _ABANDON_SCRIPT],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert done.returncode == 0, done.stderr
+    assert "closed" in done.stdout
+    assert time.monotonic() - started < 10

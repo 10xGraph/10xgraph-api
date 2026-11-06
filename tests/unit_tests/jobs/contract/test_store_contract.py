@@ -7,8 +7,7 @@ import uuid
 
 import pytest
 
-from tenxgraph_api.jobs.errors import ValueNotStorable
-from tenxgraph_api.jobs.models import (
+from tenxgraph_api.jobs.core.models import (
     EVENT_LOG_CAP,
     AttemptOutcome,
     CancelStatus,
@@ -19,6 +18,7 @@ from tenxgraph_api.jobs.models import (
     RunFilter,
     RunState,
 )
+from tenxgraph_api.jobs.errors import ValueNotStorable
 
 
 pytestmark = pytest.mark.asyncio
@@ -568,9 +568,7 @@ async def test_mark_published_cas_on_defer_and_requeue(sut):
     for outcome in (AttemptOutcome(kind="defer", delay=0.5), AttemptOutcome(kind="requeue")):
         created = (await sut.store.create_run(new_run())).run
         await sut.store.claim(created.run_id, worker_id=W1, lease_ttl=TTL)
-        after = await sut.store.transition(
-            created.run_id, attempt=1, worker_id=W1, outcome=outcome
-        )
+        after = await sut.store.transition(created.run_id, attempt=1, worker_id=W1, outcome=outcome)
         await sut.store.mark_published([created], republish_after=300.0)
         got = await sut.store.get_run(created.run_id)
         assert got.next_publish_at == after.next_publish_at == got.available_at

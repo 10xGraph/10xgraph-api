@@ -24,7 +24,7 @@ from redis.asyncio.cluster import RedisCluster
 from redis.crc import key_slot
 from redis.exceptions import RedisError
 
-from tenxgraph_api.jobs.models import AttemptOutcome, ClaimStatus, EventIn, HeldLease, NewRun
+from tenxgraph_api.jobs.core.models import AttemptOutcome, ClaimStatus, EventIn, HeldLease, NewRun
 from tenxgraph_api.jobs.store.base import REDIS_HASH_TAG
 from tenxgraph_api.jobs.store.redis import FALLBACK_PREFIX, RedisRunStore, open_jobs_redis
 from tenxgraph_api.jobs.transport.base import TransportMessage
@@ -247,7 +247,7 @@ async def test_duplicate_delivery_after_autoclaim_is_fenced(redis_client, redis_
 
 CHILD = r"""
 import asyncio, json, sys
-from tenxgraph_api.jobs.models import AttemptOutcome, HeldLease
+from tenxgraph_api.jobs.core.models import AttemptOutcome, HeldLease
 from tenxgraph_api.jobs.store.redis import RedisRunStore
 from tenxgraph_api.jobs.transport.redis import RedisStreamsTransport
 
@@ -313,5 +313,109 @@ async def test_sigstop_consumer_past_lease(fault, redis_client, redis_url, key_p
             child.kill()
             child.wait()
         await transport.aclose()
+        await store.aclose()
+        await delete_prefix(redis_client, key_prefix)
+
+
+# ---------------------------------------------------------------------- close with a read in flight (M2)
+
+
+async def test_aclose_with_consume_in_flight_drops_nothing(redis_client, redis_url, key_prefix):
+    """M2: a message delivered to the in-flight read after aclose checked XPENDING was lost by
+    DELCONSUMER. The hook publishes exactly in that window; it must reach a new consumer."""
+    queue = f"q-{uuid.uuid4().hex[:8]}"
+    closing = RedisStreamsTransport(url=redis_url, key_prefix=key_prefix, consumer="closing")
+    later = RedisStreamsTransport(url=redis_url, key_prefix=key_prefix, consumer="later")
+    message = TransportMessage(run_id=f"r-{uuid.uuid4().hex}", queue=queue)
+    try:
+        await closing.consume([queue], max_messages=1)  # groups exist
+        waiting = asyncio.create_task(closing.consume([queue], max_messages=10, block=3.0))
+        await asyncio.sleep(0.3)  # blocked in XREADGROUP
+        client = closing._conn.client
+        real_xpending = client.xpending_range
+
+        async def xpending_then_publish(*args, **kwargs):
+            pending = await real_xpending(*args, **kwargs)
+            if not getattr(xpending_then_publish, "done", False):
+                xpending_then_publish.done = True  # type: ignore[attr-defined]
+                await later.publish(message)
+                await asyncio.sleep(0.3)  # an in-flight read would take it now
+            return pending
+
+        client.xpending_range = xpending_then_publish
+        await closing.aclose()
+        assert await asyncio.wait_for(waiting, 2.0) == []
+        got = await later.consume([queue], max_messages=10, block=2.0)
+        if not got:  # delivered to "closing" before it left: it is pending, so reclaimable
+            await later.reclaim(min_idle=0.0)
+            got = await later.consume([queue], max_messages=10, block=0.5)
+        assert [d.message for d in got] == [message]
+        await later.ack(got)
+    finally:
+        await closing.aclose()
+        await later.aclose()
+        await delete_prefix(redis_client, key_prefix)
+
+
+async def test_cancelled_consume_rereads_pending_entries(redis_client, redis_url, key_prefix):
+    """L1: a consume cancelled after Redis delivered entries re-reads them (XREADGROUP 0)."""
+    queue = f"q-{uuid.uuid4().hex[:8]}"
+    transport = RedisStreamsTransport(url=redis_url, key_prefix=key_prefix, consumer="c1")
+    message = TransportMessage(run_id=f"r-{uuid.uuid4().hex}", queue=queue)
+    try:
+        await transport.consume([queue], max_messages=1)
+        assert transport._recover is False
+        reader = transport._reader
+        real = reader.xreadgroup
+
+        async def read_then_hang(*args, **kwargs):
+            reply = await real(*args, **kwargs)
+            if reply:
+                await asyncio.sleep(10)  # entries are delivered (pending), the reply never lands
+            return reply
+
+        reader.xreadgroup = read_then_hang
+        await transport.publish(message)
+        task = asyncio.create_task(transport.consume([queue], max_messages=10, block=1.0))
+        await asyncio.sleep(0.3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert transport._recover is True
+        reader.xreadgroup = real
+        got = await transport.consume([queue], max_messages=10, block=0.5)
+        assert [d.message for d in got] == [message]
+        await transport.ack(got)
+    finally:
+        await transport.aclose()
+        await delete_prefix(redis_client, key_prefix)
+
+
+# ---------------------------------------------------------------------- purge (L3)
+
+
+async def test_purge_in_batches(redis_client, redis_url, key_prefix):
+    store = RedisRunStore(url=redis_url, key_prefix=key_prefix)
+    try:
+        await store.setup()
+        ids = []
+        for _ in range(230):
+            run = (await store.create_run(new_run())).run
+            claim = await store.claim(run.run_id, worker_id="w", lease_ttl=30)
+            await store.transition(
+                run.run_id,
+                attempt=claim.run.attempt,
+                worker_id="w",
+                outcome=AttemptOutcome(kind="succeeded"),
+            )
+            ids.append(run.run_id)
+        await asyncio.sleep(0.01)
+        assert await store.purge_expired(limit=120) == 120
+        assert await store.purge_expired(limit=1000) == 110
+        assert await store.purge_expired() == 0
+        for run_id in ids[:5]:
+            assert await store.get_run(run_id) is None
+            assert await redis_client.exists(store.key("events", run_id)) == 0
+    finally:
         await store.aclose()
         await delete_prefix(redis_client, key_prefix)

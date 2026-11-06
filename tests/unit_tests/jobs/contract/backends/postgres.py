@@ -13,8 +13,8 @@ import uuid
 
 import pytest
 
-from tests.unit_tests.jobs.contract.backends import integration_enabled
 from tenxgraph_api.jobs.store.postgres import PostgresRunStore
+from tests.unit_tests.jobs.contract.backends import integration_enabled
 
 
 DEFAULT_PG_DSN = "postgresql://postgres:jobs_test_pw@localhost:15432/postgres"

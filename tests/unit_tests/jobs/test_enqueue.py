@@ -269,7 +269,7 @@ async def test_events_iterates_pages(jobs):
         assert seqs == list(range(1, 251))
         assert [e.seq async for e in run.events(after=240)] == list(range(241, 251))
     finally:
-        from tenxgraph_api.jobs.registry import unregister
+        from tenxgraph_api.jobs.core.registry import unregister
 
         unregister("eq_many_logs")
 

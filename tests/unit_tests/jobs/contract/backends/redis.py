@@ -17,10 +17,10 @@ from urllib.parse import urlparse
 
 import pytest
 
-from tests.unit_tests.jobs.contract.backends import integration_enabled
-from tenxgraph_api.jobs.models import PRIORITIES
+from tenxgraph_api.jobs.core.models import PRIORITIES
 from tenxgraph_api.jobs.store.redis import RedisRunStore
 from tenxgraph_api.jobs.transport.redis import RedisStreamsTransport
+from tests.unit_tests.jobs.contract.backends import integration_enabled
 
 
 DEFAULT_REDIS_URL = "redis://localhost:16379/1"

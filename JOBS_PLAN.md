@@ -1,6 +1,6 @@
 # Jobs: plan
 
-Status: Sprints 0-1 done, Sprint 2 in progress (2026-11-06). Internals (state machine, delivery
+Status: Sprints 0-3 done, Sprint 4 not started (2026-11-06). Internals (state machine, delivery
 guarantees, stores, cluster, research) are in `JOBS_DESIGN.md`. Auth follows in `AUTH_PLAN.md`.
 
 ## Decisions
@@ -31,15 +31,21 @@ guarantees, stores, cluster, research) are in `JOBS_DESIGN.md`. Auth follows in 
 ### Define a task
 
 ```python
+from injectq import Inject
+from tenxgraph.core.graph.compiled_graph import CompiledGraph
 from tenxgraph_api.jobs import task, TaskContext, RetryAfter, Fail
 
 @task(http=True, retries=3, timeout=600)
-async def summarize_interview(interview_id: str, ctx: TaskContext) -> dict:
+async def summarize_interview(
+    interview_id: str, ctx: TaskContext, graph: CompiledGraph = Inject[CompiledGraph]
+) -> dict:
     ctx.emit.steps(["load", "summarize"])
     with ctx.emit.step("load"):
         transcript = await load(interview_id)
     with ctx.emit.step("summarize"):
-        result = await ctx.invoke_graph({"messages": [transcript]})
+        result = await graph.ainvoke(
+            {"messages": [transcript]}, config={"thread_id": interview_id}
+        )
     return {"summary": result["messages"][-1].text()}
 ```
 
@@ -152,8 +158,6 @@ States: `queued`, `running`, `retrying`, `cancelling`, `succeeded`, `failed`, `c
 | `ctx.identity` | Who enqueued it (a system identity for cron and webhooks). |
 | `ctx.cancelled` | `True` once cancel is asked; check it in long sync loops. |
 | `ctx.emit` | Progress (below). |
-| `ctx.thread_id()` | Same on every attempt, derived from `run_id`. |
-| `await ctx.invoke_graph(input, config=None)` | Runs the loaded graph with that thread id and the run's identity. A retried run continues from the checkpoint. |
 
 Control flow:
 
@@ -163,7 +167,11 @@ raise Fail("bad input")       # fail now, no retries
 ```
 
 `process` tasks get a smaller context: `run_id`, `attempt`, `cancelled`, `emit`. No `Inject`,
-no `invoke_graph`.
+no graph.
+
+A task gets the graph, checkpointer and store through InjectQ like any other code, for example
+`graph: CompiledGraph = Inject[CompiledGraph]`, and passes its own `thread_id`. The worker loads
+the `agent` of `10xgraph.json` and its container at startup, so `Inject[...]` resolves there.
 
 ### Progress: `ctx.emit`
 
@@ -179,7 +187,6 @@ ctx.emit.log("cache miss", level="warning", data={"key": k})
 ```
 
 Writes are buffered and flushed at most once a second, so calling it in a loop is cheap.
-Graph tool progress from `invoke_graph` appears as `graph.*` events.
 
 ### Cron
 
@@ -354,7 +361,7 @@ several). Core gets one new `Event` value, `task_execution`; the phase uses the 
 | cancel, lost | `interrupted` | reason |
 
 `run_id` is the task run id, `user_id` comes from the identity, `metadata` holds the trigger.
-A graph run inside a task (`ctx.invoke_graph`) publishes its usual graph events with the task
+A graph run inside a task publishes its usual graph events with the task
 run id in `metadata`, so a consumer can join them. Turn off with
 `"worker": {"publish_events": false}`.
 
@@ -406,10 +413,10 @@ and retried with backoff.
   picklable args and results. `ctx.emit` and cancel travel over the slot's pipe and event.
   `--max-memory-per-child` polls `/proc` on Linux (psutil elsewhere). A thread task abandoned
   on timeout holds its slot until it returns.
-- Graph tasks: every attempt uses the same `thread_id`; the graph `run_id` is
-  `{run_id}:{attempt}`; the input is sent on attempt 1 only, later attempts send
-  `{"messages": []}`. The node that was running re-runs (at-least-once per node). The
-  checkpointer is closed on shutdown.
+- Graph tasks (advice, not enforced): use the same `thread_id` on every attempt, and send the
+  input only if the thread has no state yet (otherwise resend nothing, or the user message is
+  duplicated). The node that was running re-runs (at-least-once per node). The checkpointer is
+  closed on shutdown.
 - RabbitMQ: messages we publish are `PERSISTENT` and carry a `message_id`.
 - Own storage, created only when the `worker` section exists (no `worker` section: no tables,
   no keys, nothing created):
@@ -510,8 +517,8 @@ CLI, tests, docs and the playground.
 |---|---|---|---|
 | 0 | Verify Redis Streams on redis-py 8.x, Postgres table setup, graph resume, killing a process child, cron library, aio-pika. See `JOBS_SPRINT0.md`. | Findings note; plan updated. | Done (2026-11-06) |
 | 1 | Core on memory: `@task`, registry, enqueue (by object and name), `.options()`, run handle, state machine, async executor, retries, `Fail`, one timeout, cancel, leases, fencing, `ctx.emit`, caps, `RetryAfter`, hooks, `jobs_harness`. | State-machine property test; harness example passes. | Done (2026-11-06): 194 jobs tests, full suite green |
-| 2 | Stores and transports: Postgres, Redis, SQLite `local`; sweeper; store clock; own Redis database and Postgres tables created only with a `worker` section; schema version and `tasks migrate`; one contract suite for all. | Fault injection on real Redis and Postgres: kill -9, SIGSTOP past the lease, duplicate delivery, store error mid-claim. | In progress |
-| 3 | `10xgraph worker`: config and validator, queues, priority, reserved slots, thread and process executors, child recycling, InjectQ, `invoke_graph`, registry, draining, health probes, `tasks` CLI. | User test: two workers, kill one mid-run, the run finishes on the other. | Not started |
+| 2 | Stores and transports: Postgres, Redis, SQLite `local`; sweeper; store clock; own Redis database and Postgres tables created only with a `worker` section; schema version and `tasks migrate`; one contract suite for all. | Fault injection on real Redis and Postgres: kill -9, SIGSTOP past the lease, duplicate delivery, store error mid-claim. | Done (2026-11-06): Postgres, Redis 7/8, SQLite pass contract and fault tests; review fixed |
+| 3 | `10xgraph worker`: config and validator, queues, priority, reserved slots, thread and process executors, child recycling, InjectQ, registry, draining, health probes, `tasks` CLI. | User test: two workers, kill one mid-run, the run finishes on the other. | Done (2026-11-06): live check passed (kill -9 one worker, run finished on the other at attempt 2); review fixed |
 | 4 | Scheduler: leader lock in the run store, cron, catchup, pause, sweeper fallback, fake clock, `tasks fire`. | Three schedulers fire each tick once; store outage gives no duplicates. | Not started |
 | 5 | HTTP routes and client SDK; webhooks (`/v1/webhooks/{name}`, mode `task`, HMAC / JWT / token / custom, secret rotation, callbacks); `routers` key; route-guard support. | Owner-only 404s, bad signature 401, replayed call deduped, non-listed task 404. | Not started |
 | 6 | Events: Redis and RabbitMQ sources, command topics, subscriptions, dead letter, rejected list. Lifecycle hooks and events through the core publisher; core `Event.TASK_EXECUTION` and `OtelPublisher` support; OTEL spans, trace propagation, metrics; backpressure, bulk, operations. | One trace from webhook to task to graph in a real exporter; redelivered message makes no second run. | Not started |

@@ -46,12 +46,12 @@ Publishing (delayed, retrying, lost and capped runs)
     ``mark_published`` is a compare-and-set on ``(attempt, next_publish_at)``: it changes a run
     only while it still holds the values the caller read (from ``create_run``, ``due_runs`` or
     ``get_run``) and is ``queued`` or ``retrying``. Every way back to claimable after a claim
-    raised ``attempt``, so the CAS holds even when two times are equal (a fake clock). A publish races the worker: the run can be claimed,
-    fail and be set to retry in 1 s before the publisher marks it; an unconditional mark would
-    then push that retry 5 minutes out.
+    raised ``attempt``, so the CAS holds even when two times are equal (a fake clock). A
+    publish races the worker: the run can be claimed, fail and be set to retry in 1 s before
+    the publisher marks it; an unconditional mark would then push that retry 5 minutes out.
 
 Storable values
-    Every store encodes JSON fields with ``tenxgraph_api.jobs.serialization`` and raises
+    Every store encodes JSON fields with ``tenxgraph_api.jobs.core.serialization`` and raises
     ``ValueNotStorable(field, reason)`` before any write when a value holds NaN or Infinity, a
     string with ``\\x00``, or is not JSON (Postgres cannot store the first two; the others
     refuse them too, so every backend behaves the same).
@@ -81,7 +81,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 
-from tenxgraph_api.jobs.models import (
+from tenxgraph_api.jobs.core.models import (
     REPUBLISH_AFTER,
     AttemptOutcome,
     CancelResult,

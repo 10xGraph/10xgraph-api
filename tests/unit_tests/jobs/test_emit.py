@@ -8,8 +8,8 @@ import threading
 import pytest
 
 from tenxgraph_api.jobs import TaskContext, task
-from tenxgraph_api.jobs.clock import FakeClock
-from tenxgraph_api.jobs.emit import TaskEmitter
+from tenxgraph_api.jobs.core.clock import FakeClock
+from tenxgraph_api.jobs.core.emit import TaskEmitter
 
 
 U1 = {"user_id": "u1"}

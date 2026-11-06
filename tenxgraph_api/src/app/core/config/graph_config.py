@@ -1043,7 +1043,7 @@ class GraphConfig:
 
     @property
     def worker(self) -> Any:
-        """``worker`` key, parsed (``tenxgraph_api.jobs.config.WorkerConfig``); None when absent.
+        """``worker`` key, parsed (``tenxgraph_api.jobs.config.config.WorkerConfig``); None when absent.
 
         Without a ``worker`` section nothing jobs-related is imported, built or created.
         Parsing touches neither the network nor the disk; a bad section raises
@@ -1056,7 +1056,7 @@ class GraphConfig:
         cached = getattr(self, "_worker_cache", None)
         if cached is not None and cached[0] == key:
             return cached[1]
-        from tenxgraph_api.jobs.config import parse_worker_config
+        from tenxgraph_api.jobs.config.config import parse_worker_config
 
         parsed = parse_worker_config(raw)
         self._worker_cache = (key, parsed)

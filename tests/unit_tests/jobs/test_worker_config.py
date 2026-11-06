@@ -6,9 +6,9 @@ import json
 
 import pytest
 
-from tenxgraph_api.jobs.config import WorkerConfigError, expand_env, parse_worker_config
-from tenxgraph_api.jobs.service import parse_reserve
-from tenxgraph_api.jobs.worker import check_reserve
+from tenxgraph_api.jobs.config.config import WorkerConfigError, expand_env, parse_worker_config
+from tenxgraph_api.jobs.worker.service import parse_reserve
+from tenxgraph_api.jobs.worker.worker import check_reserve
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 
 
@@ -64,10 +64,19 @@ def test_unknown_keys_list_the_valid_ones():
 
 
 def test_unknown_nested_keys():
-    raw = {"store": {"type": "redis", "url": "redis://x", "db": 2}, "transport": {"type": "redis", "url": "redis://x"}}
-    with pytest.raises(WorkerConfigError, match=r"worker\.store: unknown keys \['db'\]; valid keys: type, url, path, schema, auto_migrate"):
+    raw = {
+        "store": {"type": "redis", "url": "redis://x", "db": 2},
+        "transport": {"type": "redis", "url": "redis://x"},
+    }
+    with pytest.raises(
+        WorkerConfigError,
+        match=r"worker\.store: unknown keys \['db'\]; valid keys: type, url, path, schema, auto_migrate",
+    ):
         parse_worker_config(raw)
-    raw = {"store": {"type": "redis", "url": "redis://x"}, "transport": {"type": "redis", "url": "redis://x", "group": "g"}}
+    raw = {
+        "store": {"type": "redis", "url": "redis://x"},
+        "transport": {"type": "redis", "url": "redis://x", "group": "g"},
+    }
     with pytest.raises(WorkerConfigError, match=r"worker\.transport: unknown keys \['group'\]"):
         parse_worker_config(raw)
 
@@ -100,7 +109,10 @@ def test_unknown_nested_keys():
             r"worker\.store\.url goes with",
         ),
         (
-            {"store": {"type": "redis", "url": "r", "schema": "s"}, "transport": {"type": "redis", "url": "r"}},
+            {
+                "store": {"type": "redis", "url": "r", "schema": "s"},
+                "transport": {"type": "redis", "url": "r"},
+            },
             "schema goes with",
         ),
         ({"backend": "local", "modules": ["not a module"]}, "dotted module path"),
@@ -109,7 +121,10 @@ def test_unknown_nested_keys():
         ({"backend": "local", "lease_ttl": 0}, r"worker\.lease_ttl"),
         ({"backend": "local", "system_identities": {"x": {"user_id": " "}}}, "user_id"),
         (
-            {"store": {"type": "sqlite", "path": "a.db"}, "transport": {"type": "sqlite", "path": "b.db"}},
+            {
+                "store": {"type": "sqlite", "path": "a.db"},
+                "transport": {"type": "sqlite", "path": "b.db"},
+            },
             "same file",
         ),
     ],
@@ -122,9 +137,12 @@ def test_invalid_sections(raw, match):
 def test_env_expansion(monkeypatch):
     monkeypatch.setenv("JOBS_DB", "postgresql://u@h/db")
     assert expand_env("${JOBS_DB}", field="worker.store.url") == "postgresql://u@h/db"
-    assert expand_env("$JOBS_DB?x=1", field="f") == "postgresql://u@h/db?x=1"
+    assert expand_env("${JOBS_DB}?x=1", field="f") == "postgresql://u@h/db?x=1"
     monkeypatch.delenv("JOBS_DB")
-    with pytest.raises(WorkerConfigError, match="worker.store.url uses environment variables that are not set: JOBS_DB"):
+    with pytest.raises(
+        WorkerConfigError,
+        match=r"worker.store.url uses environment variables that are not set: \$\{JOBS_DB\}",
+    ):
         expand_env("${JOBS_DB}", field="worker.store.url")
     cfg = parse_worker_config(PROD)
     monkeypatch.delenv("DATABASE_URL", raising=False)
@@ -132,11 +150,25 @@ def test_env_expansion(monkeypatch):
         cfg.store.expanded_url()
 
 
+def test_bare_dollar_is_kept_and_never_echoed(monkeypatch):
+    monkeypatch.setenv("word", "LEAK")
+    monkeypatch.setenv("JOBS_HOST", "h")
+    url = "postgresql://u:pa$word@${JOBS_HOST}/db"
+    assert expand_env(url, field="f") == "postgresql://u:pa$word@h/db"
+    monkeypatch.delenv("JOBS_HOST")
+    with pytest.raises(WorkerConfigError) as err:
+        expand_env(url, field="worker.store.url")
+    assert "${JOBS_HOST}" in str(err.value)
+    assert "pa$" not in str(err.value) and "word" not in str(err.value)
+
+
 def test_graph_config_worker(tmp_path):
     path = tmp_path / "10xgraph.json"
     path.write_text(json.dumps({"agent": "graph:app"}))
     assert GraphConfig(str(path)).worker is None
-    path.write_text(json.dumps({"agent": "graph:app", "worker": {"backend": "local", "modules": "jobs"}}))
+    path.write_text(
+        json.dumps({"agent": "graph:app", "worker": {"backend": "local", "modules": "jobs"}})
+    )
     gc = GraphConfig(str(path))
     assert gc.worker is gc.worker  # parsed once
     assert gc.worker.modules == ["jobs"]

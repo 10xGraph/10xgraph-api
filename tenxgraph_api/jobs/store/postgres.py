@@ -19,7 +19,7 @@ Times are ``double precision`` epoch seconds (the models use float epoch seconds
 ``clock_timestamp()`` (never ``now()``, which is the transaction start). JSON fields are
 ``jsonb``, sent and read as text (``$n::text::jsonb`` / ``col::text``) so a caller's pool with
 its own jsonb codec cannot change them. ``jsonb`` cannot hold ``\\u0000`` or NaN, so the shared
-encoder (``jobs/serialization.py``) refuses both with ``ValueNotStorable`` before any write.
+encoder (``jobs/core/serialization.py``) refuses both with ``ValueNotStorable`` before any write.
 
 Every method is one statement or one transaction. Fencing: every worker write matches
 ``run_id``, ``attempt``, ``worker_id`` and a leased state. A capped claim locks the run row,
@@ -55,9 +55,8 @@ from typing import Any
 
 from tenxgraph.storage.columns import ddl_session
 
-from tenxgraph_api.jobs import serialization
-from tenxgraph_api.jobs.errors import JobsError
-from tenxgraph_api.jobs.models import (
+from tenxgraph_api.jobs.core import serialization
+from tenxgraph_api.jobs.core.models import (
     CAP_WAIT_BASE,
     CAP_WAIT_MAX,
     CLAIMABLE_STATES,
@@ -81,6 +80,7 @@ from tenxgraph_api.jobs.models import (
     TaskEvent,
     TaskRun,
 )
+from tenxgraph_api.jobs.errors import JobsError
 
 from .base import BaseRunStore, published_marks, slot_name
 
@@ -564,8 +564,8 @@ class PostgresRunStore(BaseRunStore):
     asyncpg ``pool`` (never closed by the store; its own ``command_timeout`` applies). Every
     call waits at most ``acquire_timeout`` seconds for a pool connection (default 30 s; set
     ``pool_config["acquire_timeout"]``, None waits forever), so a store call never hangs on an
-    exhausted pool or a stuck server. ``auto_migrate=False`` makes ``setup()`` refuse to run against tables older than
-    this code instead of migrating them.
+    exhausted pool or a stuck server. ``auto_migrate=False`` makes ``setup()`` refuse to run
+    against tables older than this code instead of migrating them.
     """
 
     def __init__(
@@ -930,7 +930,11 @@ class PostgresRunStore(BaseRunStore):
                                 run = _run(row)
                                 if run.state in CLAIMABLE_STATES and run.available_at <= now:
                                     return await self._claim_capped(
-                                        conn, run, now, worker_id, float(lease_ttl),
+                                        conn,
+                                        run,
+                                        now,
+                                        worker_id,
+                                        float(lease_ttl),
                                         concurrency_limit,
                                     )
                         break

@@ -6,21 +6,22 @@ import asyncio
 import os
 import signal
 import sys
+import threading
 import time
 
 import pytest
 import pytest_asyncio
 
 from tenxgraph_api.jobs import Fail, RetryAfter, TaskContext, TaskDefinitionError, task
-from tenxgraph_api.jobs.emit import TaskEmitter
+from tenxgraph_api.jobs.core.emit import TaskEmitter
+from tenxgraph_api.jobs.core.registry import isolated_registry
 from tenxgraph_api.jobs.executors import (
     ChildTaskError,
     ExecutionSpec,
     ProcessExecutor,
     default_start_method,
 )
-from tenxgraph_api.jobs.executors.process import rss_mb
-from tenxgraph_api.jobs.registry import isolated_registry
+from tenxgraph_api.jobs.executors.process import _Slot, rss_mb
 from tests.unit_tests.jobs import process_tasks as pt
 
 
@@ -336,3 +337,82 @@ async def test_close_drains_running_work():
     await asyncio.sleep(0.05)
     await ex.aclose(grace=5)
     assert (await handle.result()).value == "slept"
+
+
+EMIT_THREADS = 4
+EMIT_EACH = 15
+BIG = "x" * 20_000
+
+
+@task(name="pt_emit_threads", executor="process")
+def pt_emit_threads(ctx: TaskContext) -> str:
+    def worker(n: int) -> None:
+        for i in range(EMIT_EACH):
+            ctx.emit.log(f"{n}-{i}", data={"blob": BIG})
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(EMIT_THREADS)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return "done"
+
+
+async def test_emits_from_many_threads_do_not_interleave():
+    ex = ProcessExecutor(1, preload=PRELOAD)
+    try:
+        s = spec(pt_emit_threads, run_id="run-threads", timeout=30)
+        result = await run(ex, s)
+        assert result.kind == "returned", result.error
+        assert result.value == "done"
+        events, _ = s.ctx.emit.take()
+        logs = sorted(e.data["message"] for e in events if e.type == "log")
+        expected = sorted(f"{n}-{i}" for n in range(EMIT_THREADS) for i in range(EMIT_EACH))
+        assert logs == expected
+    finally:
+        await ex.aclose(grace=1)
+
+
+async def test_kill_while_child_starts_resolves_at_once(monkeypatch):
+    async def never_ready(self):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(_Slot, "_spawn", never_ready)
+    ex = ProcessExecutor(1, preload=PRELOAD)
+    handle = await ex.start(spec(pt.pt_add, {"a": 1, "b": 1}))
+    await asyncio.sleep(0.05)
+    started = time.monotonic()
+    handle.kill("lost")
+    result = await asyncio.wait_for(handle.result(), 2)
+    assert result.kind == "stopped"
+    assert result.reason == "lost"
+    assert time.monotonic() - started < 1
+    await asyncio.wait_for(ex.aclose(grace=0.1), 5)
+
+
+async def test_close_while_children_start_leaves_no_child():
+    ex = ProcessExecutor(2, preload=PRELOAD)
+    seen: set[int] = set()
+
+    async def watch_pids():
+        while True:
+            for slot in ex._slots:
+                try:
+                    if slot.proc is not None and slot.proc.pid is not None:
+                        seen.add(slot.proc.pid)
+                except ValueError:  # closed process object
+                    pass
+            await asyncio.sleep(0.002)
+
+    watcher = asyncio.create_task(watch_pids())
+    handles = [await ex.start(spec(pt.pt_add, {"a": i, "b": 1}, run_id=f"c{i}")) for i in range(2)]
+    deadline = time.monotonic() + 10
+    while not seen and time.monotonic() < deadline:  # a child exists, not yet ready
+        await asyncio.sleep(0.002)
+    assert seen
+    await asyncio.wait_for(ex.aclose(grace=0), 30)
+    await asyncio.sleep(0.3)
+    watcher.cancel()
+    for handle in handles:
+        assert (await asyncio.wait_for(handle.result(), 5)).kind in ("stopped", "returned")
+    assert not [p for p in seen if pid_alive(p)]

@@ -1,22 +1,20 @@
 """In-memory run store for tests and single-process use.
 
-Every method does its whole read-check-write without an ``await`` in between, so each call is
-atomic for every coroutine on the one event loop that uses the store. Not shared between
-processes and not thread-safe.
+Every method reads, checks and writes without an ``await`` in between, so each call is atomic
+for every coroutine on the one event loop that uses the store. Not shared between processes
+and not thread-safe.
 """
 
 from __future__ import annotations
 
-import base64
 import json
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 
-from tenxgraph_api.jobs import serialization
-from tenxgraph_api.jobs.clock import SystemClock
-from tenxgraph_api.jobs.models import (
-    CAP_WAIT_BASE,
-    CAP_WAIT_MAX,
+from tenxgraph_api.jobs.core import serialization
+from tenxgraph_api.jobs.core import transitions as tr
+from tenxgraph_api.jobs.core.clock import SystemClock
+from tenxgraph_api.jobs.core.models import (
     CLAIMABLE_STATES,
     EVENT_LOG_CAP,
     LEASED_STATES,
@@ -36,15 +34,12 @@ from tenxgraph_api.jobs.models import (
     NewRun,
     RunFilter,
     RunPage,
-    RunState,
     TaskEvent,
     TaskRun,
 )
 
 from .base import BaseRunStore, published_marks, slot_name
 
-
-MAX_PAGE = 1000
 
 KeyTuple = tuple[str, str | None, str | None, str]
 
@@ -73,32 +68,17 @@ class MemoryRunStore(BaseRunStore):
             return None
         return (run.task, run.owner_user_id, run.tenant, run.idempotency_key)
 
-    def _fenced(self, run_id: str, attempt: int, worker_id: str) -> TaskRun | None:
-        run = self._runs.get(run_id)
-        if (
-            run is None
-            or run.state not in LEASED_STATES
-            or run.attempt != attempt
-            or run.worker_id != worker_id
-        ):
-            return None
-        return run
+    def _save(self, before: TaskRun, after: TaskRun) -> TaskRun:
+        """Store ``after``; give back the slot ``before`` held if ``after`` dropped it."""
+        if before.slot is not None and after.slot is None:
+            self._counters[before.slot] = max(0, self._counters.get(before.slot, 0) - 1)
+        if after.slot is not None and before.slot is None:
+            self._counters[after.slot] = self._counters.get(after.slot, 0) + 1
+        self._runs[after.run_id] = after
+        return after.model_copy(deep=True)
 
-    def _release_slot(self, run: TaskRun) -> None:
-        if run.slot is not None:
-            self._counters[run.slot] = max(0, self._counters.get(run.slot, 0) - 1)
-            run.slot = None
-
-    def _finish(self, run: TaskRun, state: RunState, now: float) -> None:
-        run.state = state
-        run.next_publish_at = None
-        run.finished_at = now
-        run.expires_at = None if run.retention is None else now + run.retention
-
-    @staticmethod
-    def _clear_lease(run: TaskRun) -> None:
-        run.worker_id = None
-        run.lease_expires_at = None
+    def _full(self, slot: str | None, cap: int | None) -> bool:
+        return slot is not None and cap is not None and self._counters.get(slot, 0) >= cap
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -116,33 +96,22 @@ class MemoryRunStore(BaseRunStore):
         key = self._key_of(new)
         if key is not None and key in self._keys:
             existing = self._runs[self._keys[key]]
-            if key_mode == "replace" and existing.state == RunState.QUEUED:
-                existing.kwargs = dict(new.kwargs)
-                existing.concurrency_key = new.concurrency_key
-                existing.updated_at = now
-                return CreateResult(
-                    run=existing.model_copy(deep=True),
-                    created=False,
-                    replaced=True,
-                    due=existing.available_at <= now,
-                )
-            return CreateResult(run=existing.model_copy(deep=True), created=False)
+            after = tr.replaced(existing, new, now) if key_mode == "replace" else None
+            if after is None:
+                return CreateResult(run=existing.model_copy(deep=True), created=False)
+            run = self._save(existing, after)
+            return CreateResult(
+                run=run, created=False, replaced=True, due=run.available_at <= now
+            )
         if new.run_id in self._runs:
             raise ValueError(f"run id {new.run_id} already exists")
-        available_at = new.at if new.at is not None else now + (new.delay or 0.0)
-        data = new.model_dump(exclude={"delay", "at"})
-        run = TaskRun(
-            **data,
-            state=RunState.QUEUED,
-            available_at=available_at,
-            next_publish_at=available_at,
-            enqueued_at=now,
-            updated_at=now,
-        )
+        run = tr.created(new, now)
         self._runs[run.run_id] = run
         if key is not None:
             self._keys[key] = run.run_id
-        return CreateResult(run=run.model_copy(deep=True), created=True, due=available_at <= now)
+        return CreateResult(
+            run=run.model_copy(deep=True), created=True, due=run.available_at <= now
+        )
 
     async def get_run(self, run_id: str) -> TaskRun | None:
         run = self._runs.get(run_id)
@@ -155,12 +124,9 @@ class MemoryRunStore(BaseRunStore):
         limit: int = 50,
         cursor: str | None = None,
     ) -> RunPage:
-        limit = max(1, min(MAX_PAGE, limit))
+        limit = tr.page_limit(limit)
         f = filters or RunFilter()
-        states: set[str] | None = None
-        if f.state is not None:
-            raw = f.state if isinstance(f.state, tuple) else (f.state,)
-            states = {str(s) for s in raw}
+        states = None if f.state is None else set(tr.state_values(f.state))
         rows = [
             r
             for r in self._runs.values()
@@ -171,13 +137,12 @@ class MemoryRunStore(BaseRunStore):
         ]
         rows.sort(key=lambda r: (r.enqueued_at, r.run_id), reverse=True)
         if cursor:
-            after = _decode_cursor(cursor)
+            after = tr.decode_cursor(cursor)
             rows = [r for r in rows if (r.enqueued_at, r.run_id) < after]
         page = rows[:limit]
         next_cursor = None
         if len(rows) > limit:
-            last = page[-1]
-            next_cursor = _encode_cursor(last.enqueued_at, last.run_id)
+            next_cursor = tr.encode_cursor(page[-1].enqueued_at, page[-1].run_id)
         return RunPage(items=[r.model_copy(deep=True) for r in page], next_cursor=next_cursor)
 
     # ------------------------------------------------------------------ worker writes
@@ -194,37 +159,13 @@ class MemoryRunStore(BaseRunStore):
         run = self._runs.get(run_id)
         if run is None:
             return ClaimResult(status=ClaimStatus.NOT_FOUND)
-        if run.state not in CLAIMABLE_STATES or run.available_at > now:
+        if not tr.claimable(run, now):
             return ClaimResult(status=ClaimStatus.NOT_READY, run=run.model_copy(deep=True))
-        slot = None
-        if concurrency_limit is not None:
-            slot = slot_name(run.task, run.concurrency_key)
-            if self._counters.get(slot, 0) >= concurrency_limit:
-                run.available_at = now + min(CAP_WAIT_MAX, CAP_WAIT_BASE * 2**run.cap_waits)
-                run.cap_waits += 1
-                run.next_publish_at = run.available_at
-                run.updated_at = now
-                return ClaimResult(status=ClaimStatus.CAPPED, run=run.model_copy(deep=True))
-        self._take(run, now, worker_id=worker_id, lease_ttl=lease_ttl, slot=slot)
-        return ClaimResult(status=ClaimStatus.CLAIMED, run=run.model_copy(deep=True))
-
-    def _take(
-        self, run: TaskRun, now: float, *, worker_id: str, lease_ttl: float, slot: str | None
-    ) -> None:
-        if slot is not None:
-            self._counters[slot] = self._counters.get(slot, 0) + 1
-        run.state = RunState.RUNNING
-        run.attempt += 1
-        run.worker_id = worker_id
-        run.lease_expires_at = now + lease_ttl
-        run.started_at = now
-        run.cancel_requested = False
-        run.error = None
-        run.progress = {}
-        run.cap_waits = 0
-        run.slot = slot
-        run.next_publish_at = None
-        run.updated_at = now
+        slot = None if concurrency_limit is None else slot_name(run.task, run.concurrency_key)
+        if self._full(slot, concurrency_limit):
+            return ClaimResult(status=ClaimStatus.CAPPED, run=self._save(run, tr.capped(run, now)))
+        after = tr.claimed(run, now, worker_id=worker_id, lease_ttl=lease_ttl, slot=slot)
+        return ClaimResult(status=ClaimStatus.CLAIMED, run=self._save(run, after))
 
     async def claim_next(
         self,
@@ -239,21 +180,15 @@ class MemoryRunStore(BaseRunStore):
         limits = concurrency_limits or {}
         rank = {p: i for i, p in enumerate(PRIORITIES)}
         candidates = sorted(
-            (
-                r
-                for r in self._runs.values()
-                if r.queue in wanted and r.state in CLAIMABLE_STATES and r.available_at <= now
-            ),
+            (r for r in self._runs.values() if r.queue in wanted and tr.claimable(r, now)),
             key=lambda r: (rank.get(r.priority, 1), r.available_at, r.run_id),
         )
         for run in candidates:
-            slot = None
-            if run.task in limits:
-                slot = slot_name(run.task, run.concurrency_key)
-                if self._counters.get(slot, 0) >= limits[run.task]:
-                    continue
-            self._take(run, now, worker_id=worker_id, lease_ttl=lease_ttl, slot=slot)
-            return run.model_copy(deep=True)
+            slot = slot_name(run.task, run.concurrency_key) if run.task in limits else None
+            if self._full(slot, limits.get(run.task)):
+                continue
+            after = tr.claimed(run, now, worker_id=worker_id, lease_ttl=lease_ttl, slot=slot)
+            return self._save(run, after)
         return None
 
     async def renew_leases(
@@ -266,11 +201,10 @@ class MemoryRunStore(BaseRunStore):
         now = self._now()
         out: dict[str, bool] = {}
         for lease in held:
-            run = self._fenced(lease.run_id, lease.attempt, worker_id)
-            if run is None:
-                continue
-            run.lease_expires_at = now + lease_ttl
-            out[run.run_id] = run.cancel_requested
+            run = self._runs.get(lease.run_id)
+            if run is not None and tr.fenced(run, lease.attempt, worker_id):
+                run.lease_expires_at = now + lease_ttl
+                out[run.run_id] = run.cancel_requested
         return out
 
     async def append_events(
@@ -283,19 +217,13 @@ class MemoryRunStore(BaseRunStore):
         progress: dict | None = None,
     ) -> bool:
         serialization.check_events(events, progress)
-        run = self._fenced(run_id, attempt, worker_id)
-        if run is None:
+        run = self._runs.get(run_id)
+        if run is None or not tr.fenced(run, attempt, worker_id):
             return False
-        log = self._events.setdefault(run_id, deque(maxlen=EVENT_LOG_CAP))
-        seq = self._seq.get(run_id, 0)
-        for event in events:
-            seq += 1
-            log.append(
-                TaskEvent(
-                    seq=seq, attempt=attempt, type=event.type, at=event.at, data=dict(event.data)
-                )
-            )
-        self._seq[run_id] = seq
+        last = self._seq.get(run_id, 0)
+        kept, _ = tr.log_events(last, attempt, events)
+        self._events.setdefault(run_id, deque(maxlen=EVENT_LOG_CAP)).extend(kept)
+        self._seq[run_id] = last + len(events)
         if progress is not None:
             run.progress = json.loads(json.dumps(progress))
         run.updated_at = self._now()
@@ -310,42 +238,10 @@ class MemoryRunStore(BaseRunStore):
         outcome: AttemptOutcome,
     ) -> TaskRun | None:
         serialization.check_outcome(outcome)
-        run = self._fenced(run_id, attempt, worker_id)
-        if run is None:
+        run = self._runs.get(run_id)
+        if run is None or not tr.fenced(run, attempt, worker_id):
             return None
-        now = self._now()
-        self._release_slot(run)
-        self._clear_lease(run)
-        run.updated_at = now
-        kind = "cancelled" if run.state == RunState.CANCELLING else outcome.kind
-        if kind == "succeeded":
-            run.result = outcome.result
-            run.error = None
-            self._finish(run, RunState.SUCCEEDED, now)
-        elif kind == "failed":
-            run.error = outcome.error
-            run.failure_count += 1
-            self._finish(run, RunState.FAILED, now)
-        elif kind == "cancelled":
-            run.error = outcome.error if outcome.kind == "cancelled" else None
-            self._finish(run, RunState.CANCELLED, now)
-        elif kind == "retry":
-            run.error = outcome.error
-            run.failure_count += 1
-            run.state = RunState.RETRYING
-            run.available_at = now + max(0.0, outcome.delay)
-            run.next_publish_at = run.available_at
-        elif kind == "defer":
-            run.defer_count += 1
-            run.state = RunState.QUEUED
-            run.available_at = now + max(0.0, outcome.delay)
-            run.next_publish_at = run.available_at
-        else:  # requeue
-            run.error = outcome.error
-            run.state = RunState.QUEUED
-            run.available_at = now
-            run.next_publish_at = now
-        return run.model_copy(deep=True)
+        return self._save(run, tr.ended(run, outcome, self._now()))
 
     # ------------------------------------------------------------------ callers
 
@@ -353,21 +249,9 @@ class MemoryRunStore(BaseRunStore):
         run = self._runs.get(run_id)
         if run is None:
             return CancelResult(status=CancelStatus.NOT_FOUND)
-        now = self._now()
-        if run.state in TERMINAL_STATES:
-            return CancelResult(status=CancelStatus.TERMINAL, run=run.model_copy(deep=True))
-        if run.state == RunState.CANCELLING:
-            return CancelResult(
-                status=CancelStatus.ALREADY_REQUESTED, run=run.model_copy(deep=True)
-            )
-        if run.state in CLAIMABLE_STATES:
-            run.updated_at = now
-            self._finish(run, RunState.CANCELLED, now)
-            return CancelResult(status=CancelStatus.CANCELLED, run=run.model_copy(deep=True))
-        run.state = RunState.CANCELLING
-        run.cancel_requested = True
-        run.updated_at = now
-        return CancelResult(status=CancelStatus.REQUESTED, run=run.model_copy(deep=True))
+        status, after = tr.cancel(run, self._now())
+        saved = run.model_copy(deep=True) if after is None else self._save(run, after)
+        return CancelResult(status=status, run=saved)
 
     async def read_events(
         self,
@@ -376,9 +260,8 @@ class MemoryRunStore(BaseRunStore):
         after: int = 0,
         limit: int = 100,
     ) -> list[TaskEvent]:
-        limit = max(1, min(MAX_PAGE, limit))
         log = self._events.get(run_id, ())
-        return [e.model_copy() for e in log if e.seq > after][:limit]
+        return [e.model_copy() for e in log if e.seq > after][: tr.page_limit(limit)]
 
     # ------------------------------------------------------------------ sweeper
 
@@ -397,32 +280,9 @@ class MemoryRunStore(BaseRunStore):
     async def mark_lost(self, run_id: str, *, attempt: int) -> LostResult | None:
         now = self._now()
         run = self._runs.get(run_id)
-        if (
-            run is None
-            or run.state not in LEASED_STATES
-            or run.attempt != attempt
-            or run.lease_expires_at is None
-            or run.lease_expires_at > now
-        ):
+        if run is None or not tr.lease_expired(run, attempt, now):
             return None
-        self._release_slot(run)
-        self._clear_lease(run)
-        run.lost_count += 1
-        run.updated_at = now
-        if run.state == RunState.CANCELLING:
-            self._finish(run, RunState.CANCELLED, now)
-        elif run.lost_count > run.max_lost:
-            run.error = {
-                "code": "lost",
-                "type": "LeaseLost",
-                "message": f"worker lost the run {run.lost_count} times (max_lost={run.max_lost})",
-            }
-            self._finish(run, RunState.FAILED, now)
-        else:
-            run.state = RunState.QUEUED
-            run.available_at = now
-            run.next_publish_at = now
-        return LostResult(run=run.model_copy(deep=True))
+        return LostResult(run=self._save(run, tr.lost(run, now)))
 
     async def due_runs(self, *, limit: int = 100) -> list[TaskRun]:
         now = self._now()
@@ -442,14 +302,8 @@ class MemoryRunStore(BaseRunStore):
         now = self._now()
         for run_id, attempt, expected in published_marks(seen):
             run = self._runs.get(run_id)
-            if (
-                run is not None
-                and run.state in CLAIMABLE_STATES
-                and run.attempt == attempt
-                and run.next_publish_at == expected
-            ):
-                run.published_at = now
-                run.next_publish_at = now + max(0.0, republish_after)
+            if run is not None and tr.publish_matches(run, attempt, expected):
+                self._runs[run_id] = tr.published(run, now, republish_after)
 
     async def concurrency_count(self, task: str, key: str | None = None) -> int:
         return self._counters.get(slot_name(task, key), 0)
@@ -485,16 +339,3 @@ class MemoryRunStore(BaseRunStore):
 
     def counters(self) -> dict[str, int]:
         return dict(self._counters)
-
-
-def _encode_cursor(enqueued_at: float, run_id: str) -> str:
-    raw = json.dumps([enqueued_at, run_id]).encode()
-    return base64.urlsafe_b64encode(raw).decode()
-
-
-def _decode_cursor(cursor: str) -> tuple[float, str]:
-    try:
-        enqueued_at, run_id = json.loads(base64.urlsafe_b64decode(cursor.encode()))
-        return float(enqueued_at), str(run_id)
-    except (ValueError, TypeError) as exc:
-        raise ValueError("invalid cursor") from exc

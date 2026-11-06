@@ -3,7 +3,7 @@
 Loads the project the way the API server does (config, env file, ``MODE`` check, logging,
 the InjectQ container, the ``observability`` setup, the graph), imports ``worker.modules``,
 opens the jobs store and transport, then runs the worker loop and the sweeper until SIGTERM
-or SIGINT, and drains (see ``tenxgraph_api/jobs/service.py``).
+or SIGINT, and drains (see ``tenxgraph_api/jobs/worker/service.py``).
 """
 
 from __future__ import annotations
@@ -39,11 +39,12 @@ class WorkerCommand(BaseCommand):
         shutdown_timeout: float | None = None,
         metrics_port: int | None = None,
         health_port: int | None = None,
+        health_host: str = "127.0.0.1",
         **kwargs: Any,
     ) -> int:
         try:
-            from tenxgraph_api.jobs.config import WorkerConfigError
-            from tenxgraph_api.jobs.service import WorkerOptions, parse_reserve
+            from tenxgraph_api.jobs.config.config import WorkerConfigError
+            from tenxgraph_api.jobs.worker.service import WorkerOptions, parse_reserve
 
             try:
                 options = WorkerOptions(
@@ -58,8 +59,9 @@ class WorkerCommand(BaseCommand):
                     shutdown_timeout=shutdown_timeout,
                     metrics_port=metrics_port,
                     health_port=health_port,
+                    health_host=health_host,
                 )
-                from tenxgraph_api.jobs.worker import check_reserve
+                from tenxgraph_api.jobs.worker.worker import check_reserve
 
                 check_reserve(options.reserve, options.concurrency)
             except ValueError as exc:
@@ -81,7 +83,7 @@ class WorkerCommand(BaseCommand):
                 f"Starting 10xGraph worker ({config_path}); Ctrl+C or SIGTERM drains and stops",
                 emoji=False,
             )
-            from tenxgraph_api.jobs.service import run_worker_process
+            from tenxgraph_api.jobs.worker.service import run_worker_process
 
             try:
                 return asyncio.run(

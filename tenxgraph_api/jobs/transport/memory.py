@@ -13,7 +13,7 @@ from collections import deque
 from collections.abc import Sequence
 from typing import Any
 
-from tenxgraph_api.jobs.models import PRIORITIES
+from tenxgraph_api.jobs.core.models import PRIORITIES
 from tenxgraph_api.jobs.transport.base import (
     BaseTransport,
     Delivery,
@@ -65,9 +65,11 @@ class MemoryTransport(BaseTransport):
         """Put a raw wire dict on the transport (tests: messages from other code versions)."""
         self._push(dict(wire))
 
-    def _take(self, queues: Sequence[str], max_messages: int) -> list[Delivery]:
+    def _take(
+        self, queues: Sequence[str], max_messages: int, levels: Sequence[str]
+    ) -> list[Delivery]:
         out: list[Delivery] = []
-        for priority in PRIORITIES:
+        for priority in levels:
             for queue in queues:
                 lane = self._lanes(queue)[priority]
                 while lane and len(out) < max_messages:
@@ -90,10 +92,14 @@ class MemoryTransport(BaseTransport):
         *,
         max_messages: int,
         block: float = 0.0,
+        priorities: Sequence[str] | None = None,
     ) -> list[Delivery]:
         if max_messages <= 0 or self._closed:
             return []
-        out = self._take(queues, max_messages)
+        levels = [p for p in PRIORITIES if priorities is None or p in priorities]
+        if not levels:
+            return []
+        out = self._take(queues, max_messages, levels)
         if out or block <= 0:
             return out
         self._wakeup.clear()
@@ -101,7 +107,7 @@ class MemoryTransport(BaseTransport):
             await asyncio.wait_for(self._wakeup.wait(), timeout=block)
         except TimeoutError:
             return []
-        return self._take(queues, max_messages)
+        return self._take(queues, max_messages, levels)
 
     async def ack(self, deliveries: Sequence[Delivery]) -> None:
         for delivery in deliveries:

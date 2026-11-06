@@ -4,15 +4,14 @@ hooks."""
 from __future__ import annotations
 
 import asyncio
-import uuid
 
 import pytest
 
 from tenxgraph_api.jobs import Fail, RetryAfter, TaskContext, task
-from tenxgraph_api.jobs.backoff import Backoff
-from tenxgraph_api.jobs.models import MAX_DEFERRALS, NewRun
+from tenxgraph_api.jobs.core.backoff import Backoff
+from tenxgraph_api.jobs.core.models import MAX_DEFERRALS, NewRun
 from tenxgraph_api.jobs.testing import jobs_harness
-from tenxgraph_api.jobs.worker import Worker
+from tenxgraph_api.jobs.worker.worker import Worker
 
 
 pytestmark = pytest.mark.asyncio
@@ -48,7 +47,7 @@ def on_failure_hook(run):
 
 @task(on_success=on_success_hook)
 async def wk_ok(x: int, ctx: TaskContext) -> dict:
-    return {"x": x, "attempt": ctx.attempt, "thread": ctx.thread_id()}
+    return {"x": x, "attempt": ctx.attempt}
 
 
 @task(retries=2, backoff=Backoff(base=10, cap=100, jitter=False), on_failure=on_failure_hook)
@@ -150,23 +149,21 @@ async def test_success_result_context_and_hooks(jobs, hook):
     assert SUCCESS_HOOK[-1] == run.id
 
 
-async def test_thread_id_is_stable_per_run(jobs):
-    a = await wk_ok.options(identity=U1).enqueue(x=1)
-    b = await wk_ok.options(identity=U1).enqueue(x=1)
+async def test_task_gets_the_graph_through_inject(jobs):
+    from injectq import Inject, InjectQ
+
+    class FakeGraph:
+        name = "g"
+
+    InjectQ.get_instance().bind_instance(FakeGraph, FakeGraph())
+
+    @task(name="wk_inject_graph")
+    async def wk_inject_graph(graph: FakeGraph = Inject[FakeGraph]) -> dict:
+        return {"graph": graph.name}
+
+    run = await wk_inject_graph.options(identity=U1).enqueue()
     await jobs.drain()
-    ta = (await a.result())["thread"]
-    tb = (await b.result())["thread"]
-    assert ta != tb
-    ctx = TaskContext(run_id=a.id, attempt=7, task="t", queue="q", identity=U1, emit=None)
-    assert ctx.thread_id() == ta
-    uuid.UUID(ta)
-
-
-async def test_invoke_graph_without_a_loaded_graph_says_so(jobs):
-    # The real invoke_graph tests are in test_invoke_graph.py.
-    ctx = TaskContext(run_id="r", attempt=1, task="t", queue="q", identity=U1, emit=None)
-    with pytest.raises(RuntimeError, match="10xgraph worker"):
-        await ctx.invoke_graph({"messages": []})
+    assert (await run.result()) == {"graph": "g"}
 
 
 async def test_retries_with_backoff_then_fail(jobs, hook):
@@ -451,7 +448,7 @@ async def test_result_size_limit():
             assert status.state == "failed"
             assert status.error["code"] == "result_too_large"
     finally:
-        from tenxgraph_api.jobs.registry import unregister
+        from tenxgraph_api.jobs.core.registry import unregister
 
         unregister("wk_big_result")
 
@@ -471,7 +468,7 @@ async def test_stored_kwargs_revalidated_in_worker(jobs):
 async def test_unknown_task_stays_queued_for_another_pod(jobs, hook):
     """Rolling deploy: a worker without the task leaves the run queued and republishes it
     later; a pod that has the task then runs it."""
-    from tenxgraph_api.jobs.worker import UNKNOWN_TASK_RETRY
+    from tenxgraph_api.jobs.worker.worker import UNKNOWN_TASK_RETRY
 
     await jobs.store.create_run(NewRun(run_id="ghost", task="wk_not_registered", identity=U1))
     await jobs.drain()
@@ -491,7 +488,7 @@ async def test_unknown_task_stays_queued_for_another_pod(jobs, hook):
         await jobs.drain()
         assert (await jobs.store.get_run("ghost")).result == "new pod"
     finally:
-        from tenxgraph_api.jobs.registry import unregister
+        from tenxgraph_api.jobs.core.registry import unregister
 
         unregister("wk_not_registered")
 

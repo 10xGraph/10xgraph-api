@@ -71,6 +71,7 @@ SkillsCommand = _lazy_command("tenxgraph_api.cli.commands.skills", "SkillsComman
 TestCommand = _lazy_command("tenxgraph_api.cli.commands.test", "TestCommand")
 VersionCommand = _lazy_command("tenxgraph_api.cli.commands.version", "VersionCommand")
 WorkerCommand = _lazy_command("tenxgraph_api.cli.commands.worker", "WorkerCommand")
+TasksCommand = _lazy_command("tenxgraph_api.cli.commands.tasks", "TasksCommand")
 
 # Create the main Typer app
 app = typer.Typer(
@@ -466,6 +467,11 @@ def worker(  # noqa: PLR0913 - one parameter per flag
         max=65535,
         help="Serve /healthz and /readyz on this port (Kubernetes probes).",
     ),
+    health_host: str = typer.Option(
+        "127.0.0.1",
+        "--health-host",
+        help="Address the health probes bind to; 0.0.0.0 for Kubernetes probes from the kubelet.",
+    ),
     config: str = typer.Option(
         DEFAULT_CONFIG_FILE, "--config", "-c", help="Path to the project configuration file."
     ),
@@ -486,10 +492,119 @@ def worker(  # noqa: PLR0913 - one parameter per flag
                 shutdown_timeout=shutdown_timeout,
                 metrics_port=metrics_port,
                 health_port=health_port,
+                health_host=health_host,
             )
         )
     except Exception as e:
         sys.exit(handle_exception(e))
+
+
+tasks_app = typer.Typer(
+    help="Enqueue, inspect, cancel and migrate background task runs.",
+    no_args_is_help=True,
+    rich_markup_mode="rich",
+    pretty_exceptions_enable=False,
+)
+app.add_typer(tasks_app, name="tasks", rich_help_panel="Manage")
+
+_CONFIG_OPTION = typer.Option(
+    DEFAULT_CONFIG_FILE, "--config", "-c", help="Path to the project configuration file."
+)
+
+
+def _run_tasks(action: str, **opts: Any) -> None:
+    try:
+        sys.exit(TasksCommand(output).execute(action, **opts))
+    except Exception as e:
+        sys.exit(handle_exception(e))
+
+
+@tasks_app.command("enqueue")
+def tasks_enqueue(  # - one parameter per flag
+    name: str = typer.Argument(..., help="Registered task name."),
+    kwargs: str = typer.Option("{}", "--kwargs", help="Task arguments as a JSON object."),
+    key: str | None = typer.Option(None, "--key", help="Idempotency key."),
+    queue: str | None = typer.Option(None, "--queue", help="Must match the task's queue."),
+    priority: str | None = typer.Option(None, "--priority", help="high, normal or low."),
+    delay: float | None = typer.Option(None, "--delay", min=0, help="Seconds to wait."),
+    identity: str | None = typer.Option(
+        None, "--identity", help="A worker.system_identities name to run as."
+    ),
+    user: str | None = typer.Option(None, "--user", help="Run as this user_id instead."),
+    config: str = _CONFIG_OPTION,
+) -> None:
+    """Enqueue a task by name and print its run id."""
+    _run_tasks(
+        "enqueue",
+        config=config,
+        name=name,
+        kwargs=kwargs,
+        key=key,
+        queue=queue,
+        priority=priority,
+        delay=delay,
+        identity=identity,
+        user=user,
+    )
+
+
+@tasks_app.command("runs")
+def tasks_runs(  # - one parameter per flag
+    state: str | None = typer.Option(None, "--state", help="Only runs in this state."),
+    task: str | None = typer.Option(None, "--task", help="Only runs of this task."),
+    queue: str | None = typer.Option(None, "--queue", help="Only runs in this queue."),
+    limit: int = typer.Option(50, "--limit", min=1, max=1000, help="Runs per page."),
+    cursor: str | None = typer.Option(None, "--cursor", help="Cursor of the previous page."),
+    config: str = _CONFIG_OPTION,
+) -> None:
+    """List runs, newest first."""
+    _run_tasks(
+        "runs", config=config, state=state, task=task, queue=queue, limit=limit, cursor=cursor
+    )
+
+
+@tasks_app.command("run")
+def tasks_run(
+    run_id: str = typer.Argument(..., help="Run id."),
+    config: str = _CONFIG_OPTION,
+) -> None:
+    """Show one run with its latest events."""
+    _run_tasks("run", config=config, run_id=run_id)
+
+
+@tasks_app.command("cancel")
+def tasks_cancel(
+    run_id: str = typer.Argument(..., help="Run id."),
+    config: str = _CONFIG_OPTION,
+) -> None:
+    """Cancel a run (a running one is stopped by its worker)."""
+    _run_tasks("cancel", config=config, run_id=run_id)
+
+
+@tasks_app.command("workers")
+def tasks_workers(config: str = _CONFIG_OPTION) -> None:
+    """List live workers (arrives with Sprint 4)."""
+    _run_tasks("workers", config=config)
+
+
+@tasks_app.command("fire")
+def tasks_fire(
+    name: str = typer.Argument(..., help="Schedule name."),
+    config: str = _CONFIG_OPTION,
+) -> None:
+    """Run a schedule now (arrives with Sprint 4)."""
+    _run_tasks("fire", config=config, name=name)
+
+
+@tasks_app.command("migrate")
+def tasks_migrate(
+    check: bool = typer.Option(
+        False, "--check", help="Change nothing; exit 1 when the schema is older than the code."
+    ),
+    config: str = _CONFIG_OPTION,
+) -> None:
+    """Create or upgrade the jobs store tables."""
+    _run_tasks("migrate", config=config, check=check)
 
 
 @app.command(rich_help_panel="Manage")

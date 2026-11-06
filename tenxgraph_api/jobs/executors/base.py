@@ -42,8 +42,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from tenxgraph_api.jobs.context import TaskContext
-from tenxgraph_api.jobs.task import Task
+from tenxgraph_api.jobs.core.context import TaskContext
+from tenxgraph_api.jobs.core.task import Task
 
 
 ResultKind = Literal["returned", "raised", "invalid", "timeout", "crashed", "stopped"]
@@ -167,7 +167,7 @@ def error_dict(code: str, type_name: str, message: str, **extra: Any) -> dict[st
 
 def raised_result(exc: BaseException) -> ExecutionResult:
     """``raised`` result for an exception caught in this process."""
-    from tenxgraph_api.jobs.control import Fail
+    from tenxgraph_api.jobs.errors import Fail
 
     error = error_dict("fail" if isinstance(exc, Fail) else "error", type(exc).__name__, str(exc))
     if isinstance(exc, Fail) and exc.data is not None:

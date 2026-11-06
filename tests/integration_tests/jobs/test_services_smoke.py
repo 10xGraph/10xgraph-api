@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from redis import exceptions as redis_exc
 
+
 pytestmark = pytest.mark.integration
 
 

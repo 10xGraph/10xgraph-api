@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 
-from tenxgraph_api.jobs.models import AttemptOutcome, ClaimStatus, NewRun, RunState
+from tenxgraph_api.jobs.core.models import AttemptOutcome, ClaimStatus, NewRun, RunState
 from tenxgraph_api.jobs.store.base import slot_name
 from tenxgraph_api.jobs.store.postgres import (
     CURRENT_SCHEMA_VERSION,
@@ -325,3 +325,150 @@ async def test_claim_next_hands_out_each_run_once(stores):
     batches = await asyncio.gather(*(drain(stores[i % len(stores)], f"w{i}") for i in range(12)))
     taken = [run_id for batch in batches for run_id in batch]
     assert sorted(taken) == sorted(ids)
+
+
+# ---------------------------------------------------------------------- deadlocks (M1)
+
+
+async def test_claim_next_counter_race_and_recount_do_not_deadlock(store, pg_dsn, pg_schema):
+    """M1: a failed conditional upsert still locks the counter row. claim_next used to keep
+    that lock and go on to a second counter; recount locks counters in slot order. Claimer
+    holding `second` (lost race) and waiting for `first` while recount holds `first` and waits
+    for `second` was a deadlock. Now claim_next ends its transaction after a lost race (one
+    counter per transaction), so both finish.
+
+    A BEFORE INSERT trigger on the counters makes the interleaving deterministic: each upsert
+    waits on an advisory lock named after its slot, which the test holds and releases."""
+    hexed = uuid.uuid4().hex
+    first, second = f"aa-{hexed}", f"bb-{hexed}"  # slot order: first < second
+    slot_first, slot_second = slot_name(first, None), slot_name(second, None)
+    queue = f"q-{hexed}"
+    high = (await store.create_run(new_run(second, queue=queue, priority="high"))).run
+    low = (await store.create_run(new_run(first, queue=queue, priority="low"))).run
+    filler = (await store.create_run(new_run(second, queue=f"other-{hexed}"))).run
+    t = table_names(pg_schema)
+    gate = await asyncpg.connect(pg_dsn)
+    watcher = await asyncpg.connect(pg_dsn)
+    try:
+        await gate.execute(
+            f"INSERT INTO {t['counters']} (slot, running) VALUES ($1, 0), ($2, 0)",  # noqa: S608
+            slot_first,
+            slot_second,
+        )
+        await gate.execute(
+            f'CREATE FUNCTION "{pg_schema}".gate() RETURNS trigger AS $$ BEGIN '
+            "PERFORM pg_advisory_xact_lock_shared(hashtext(NEW.slot)); RETURN NEW; END $$ "
+            f"LANGUAGE plpgsql; CREATE TRIGGER gate BEFORE INSERT ON {t['counters']} "
+            f'FOR EACH ROW EXECUTE FUNCTION "{pg_schema}".gate()'
+        )
+        await gate.execute("SELECT pg_advisory_lock(hashtext($1))", slot_second)
+        await gate.execute("SELECT pg_advisory_lock(hashtext($1))", slot_first)
+        limits = {second: 1, first: 1}
+        claimer = asyncio.create_task(
+            store.claim_next([queue], worker_id="w1", lease_ttl=30, concurrency_limits=limits)
+        )
+        await wait_for_lock_waiter(watcher, "ON CONFLICT (slot)")  # picked `high`, gated
+        # `second` fills up for real (a leased run holds the slot, so recount agrees).
+        await gate.execute(
+            f"UPDATE {t['runs']} SET state = 'running', attempt = 1, worker_id = 'x', "  # noqa: S608
+            "lease_expires_at = 9e9, slot = $2 WHERE run_id = $1",
+            filler.run_id,
+            slot_second,
+        )
+        await gate.execute(
+            f"UPDATE {t['counters']} SET running = 1 WHERE slot = $1",  # noqa: S608
+            slot_second,
+        )
+        await gate.execute("SELECT pg_advisory_unlock(hashtext($1))", slot_second)
+        await asyncio.sleep(0.3)  # the upsert on `second` fails; claimer goes on to `first`
+        await wait_for_lock_waiter(watcher, "ON CONFLICT (slot)")  # gated on `first`
+        recount = asyncio.create_task(store.recount_concurrency())
+        await asyncio.sleep(0.5)  # recount holds `first`; before the fix it waits for `second`
+        await gate.execute("SELECT pg_advisory_unlock(hashtext($1))", slot_first)
+        claimed, _ = await asyncio.wait_for(asyncio.gather(claimer, recount), 10)
+    finally:
+        await gate.close()
+        await watcher.close()
+    assert claimed is not None and claimed.run_id == low.run_id
+    assert (await store.get_run(high.run_id)).state == RunState.QUEUED
+    assert await store.concurrency_count(first) == 1
+    assert await store.concurrency_count(second) == 1
+
+
+async def test_opposite_cap_orders_with_recount_stress(stores):
+    """Many claim_next calls with caps listed in opposite orders, queues ordered so they pick
+    the two capped tasks in opposite orders, transitions and recounts: no deadlock error, and
+    every counter matches the leased runs at the end."""
+    hexed = uuid.uuid4().hex
+    task_a, task_b = f"a-{hexed}", f"b-{hexed}"
+    q1, q2 = f"q1-{hexed}", f"q2-{hexed}"
+    for _ in range(15):
+        await stores[0].create_run(new_run(task_a, queue=q1, priority="high"))
+        await stores[0].create_run(new_run(task_b, queue=q1, priority="low"))
+        await stores[0].create_run(new_run(task_b, queue=q2, priority="high"))
+        await stores[0].create_run(new_run(task_a, queue=q2, priority="low"))
+
+    async def work(store: PostgresRunStore, name: str, queue: str, limits: dict) -> int:
+        done = 0
+        for _ in range(40):
+            run = await store.claim_next(
+                [queue], worker_id=name, lease_ttl=30, concurrency_limits=limits
+            )
+            if run is None:
+                await asyncio.sleep(0.005)
+                continue
+            await store.transition(
+                run.run_id,
+                attempt=run.attempt,
+                worker_id=name,
+                outcome=AttemptOutcome(kind="succeeded"),
+            )
+            done += 1
+        return done
+
+    async def recounts(store: PostgresRunStore) -> None:
+        for _ in range(30):
+            await store.recount_concurrency()
+            await asyncio.sleep(0.005)
+
+    jobs = []
+    for i in range(8):
+        store = stores[i % len(stores)]
+        if i % 2:
+            jobs.append(work(store, f"w{i}", q1, {task_a: 2, task_b: 2}))
+        else:
+            jobs.append(work(store, f"w{i}", q2, {task_b: 2, task_a: 2}))
+    results = await asyncio.wait_for(
+        asyncio.gather(*jobs, recounts(stores[0]), recounts(stores[1])), 120
+    )
+    assert sum(r for r in results if isinstance(r, int)) == 60
+    await stores[2].recount_concurrency()
+    assert await stores[3].concurrency_count(task_a) == 0
+    assert await stores[3].concurrency_count(task_b) == 0
+
+
+# ---------------------------------------------------------------------- timeouts (L5)
+
+
+async def test_default_timeouts_and_overrides(pg_dsn, pg_schema):
+    store = PostgresRunStore(dsn=pg_dsn, schema=pg_schema)
+    assert store._pool_config["command_timeout"] == 30.0
+    assert store.acquire_timeout == 30.0
+    await store.aclose()
+
+    quick = PostgresRunStore(
+        dsn=pg_dsn,
+        schema=pg_schema,
+        pool_config={"min_size": 1, "max_size": 1, "command_timeout": 0.3, "acquire_timeout": 0.3},
+    )
+    await quick.setup()
+    try:
+        async with quick._conn() as conn:
+            with pytest.raises(TimeoutError):
+                await conn.execute("SELECT pg_sleep(2)")
+            # The only connection is in use: a store call gives up after acquire_timeout.
+            with pytest.raises(TimeoutError):
+                await quick.now()
+        assert await quick.now() > 0
+    finally:
+        await quick.aclose()

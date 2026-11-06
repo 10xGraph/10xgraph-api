@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from tenxgraph_api.jobs.health import HealthServer
+from tenxgraph_api.jobs.worker.health import HealthServer
 
 
 pytestmark = pytest.mark.asyncio
@@ -54,7 +54,7 @@ async def test_probe_answers():
 
 
 async def test_readiness_times_out(monkeypatch):
-    from tenxgraph_api.jobs import health
+    from tenxgraph_api.jobs.worker import health
 
     monkeypatch.setattr(health, "PROBE_TIMEOUT", 0.05)
 
@@ -71,7 +71,9 @@ async def test_readiness_times_out(monkeypatch):
 
 
 async def test_garbage_request_is_dropped():
-    server = HealthServer(alive=lambda: True, ready=lambda: asyncio.sleep(0, True), host="127.0.0.1")
+    server = HealthServer(
+        alive=lambda: True, ready=lambda: asyncio.sleep(0, True), host="127.0.0.1"
+    )
     port = await server.start()
     try:
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
@@ -81,3 +83,8 @@ async def test_garbage_request_is_dropped():
         writer.close()
     finally:
         await server.aclose()
+
+
+async def test_default_host_is_loopback():
+    server = HealthServer(alive=lambda: True, ready=lambda: asyncio.sleep(0, True), port=0)
+    assert server.host == "127.0.0.1"

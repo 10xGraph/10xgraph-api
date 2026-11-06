@@ -154,7 +154,7 @@ async def _start_jobs():
     related is imported or created."""
     if graph_config.worker is None:
         return None
-    from tenxgraph_api.jobs.factory import start_api_jobs
+    from tenxgraph_api.jobs.config.factory import start_api_jobs
 
     return await start_api_jobs(graph_config, base_dir=Path(graph_path).resolve().parent)
 
@@ -162,7 +162,7 @@ async def _start_jobs():
 async def _stop_jobs(runtime) -> None:
     if runtime is None:
         return
-    from tenxgraph_api.jobs.factory import stop_api_jobs
+    from tenxgraph_api.jobs.config.factory import stop_api_jobs
 
     try:
         await stop_api_jobs(runtime)
