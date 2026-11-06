@@ -70,6 +70,7 @@ RevokeCommand = _lazy_command("tenxgraph_api.cli.commands.revoke", "RevokeComman
 SkillsCommand = _lazy_command("tenxgraph_api.cli.commands.skills", "SkillsCommand")
 TestCommand = _lazy_command("tenxgraph_api.cli.commands.test", "TestCommand")
 VersionCommand = _lazy_command("tenxgraph_api.cli.commands.version", "VersionCommand")
+WorkerCommand = _lazy_command("tenxgraph_api.cli.commands.worker", "WorkerCommand")
 
 # Create the main Typer app
 app = typer.Typer(
@@ -413,6 +414,80 @@ def version(
         command = VersionCommand(output)
         exit_code = command.execute()
         sys.exit(exit_code)
+    except Exception as e:
+        sys.exit(handle_exception(e))
+
+
+@app.command()
+def worker(  # noqa: PLR0913 - one parameter per flag
+    queue: list[str] | None = typer.Option(
+        None,
+        "--queue",
+        help="Queue to consume (repeatable). Default: every queue of the registered tasks.",
+    ),
+    concurrency: int = typer.Option(16, "--concurrency", min=1, help="Task slots."),
+    threads: int | None = typer.Option(
+        None, "--threads", min=1, help="Threads for executor='thread' tasks."
+    ),
+    processes: int | None = typer.Option(
+        None, "--processes", min=1, help="Child processes for executor='process' tasks."
+    ),
+    max_tasks_per_child: int | None = typer.Option(
+        None, "--max-tasks-per-child", min=1, help="Replace a process child after N runs."
+    ),
+    max_memory_per_child: float | None = typer.Option(
+        None,
+        "--max-memory-per-child",
+        min=0,
+        help="Replace a process child above this memory, in MB.",
+    ),
+    reserve: list[str] | None = typer.Option(
+        None,
+        "--reserve",
+        help="Keep slots for a priority, e.g. high=2 (repeatable).",
+    ),
+    no_scheduler: bool = typer.Option(
+        False, "--no-scheduler", help="Do not take part in cron scheduling on this worker."
+    ),
+    shutdown_timeout: float | None = typer.Option(
+        None,
+        "--shutdown-timeout",
+        min=0,
+        help="Seconds running tasks get on SIGTERM before they are requeued "
+        "(default: worker.shutdown_timeout, 30).",
+    ),
+    metrics_port: int | None = typer.Option(
+        None, "--metrics-port", min=0, max=65535, help="Serve Prometheus metrics on this port."
+    ),
+    health_port: int | None = typer.Option(
+        None,
+        "--health-port",
+        min=0,
+        max=65535,
+        help="Serve /healthz and /readyz on this port (Kubernetes probes).",
+    ),
+    config: str = typer.Option(
+        DEFAULT_CONFIG_FILE, "--config", "-c", help="Path to the project configuration file."
+    ),
+) -> None:
+    """Run background tasks from the worker section of 10xgraph.json."""
+    try:
+        sys.exit(
+            WorkerCommand(output).execute(
+                config=config,
+                queues=queue,
+                concurrency=concurrency,
+                threads=threads,
+                processes=processes,
+                max_tasks_per_child=max_tasks_per_child,
+                max_memory_per_child=max_memory_per_child,
+                reserve=reserve,
+                scheduler=not no_scheduler,
+                shutdown_timeout=shutdown_timeout,
+                metrics_port=metrics_port,
+                health_port=health_port,
+            )
+        )
     except Exception as e:
         sys.exit(handle_exception(e))
 

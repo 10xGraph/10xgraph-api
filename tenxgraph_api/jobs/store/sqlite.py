@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import sqlite3
@@ -40,6 +41,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, TypeVar
 
+from tenxgraph_api.jobs import serialization
 from tenxgraph_api.jobs.models import (
     CAP_WAIT_BASE,
     CAP_WAIT_MAX,
@@ -66,7 +68,7 @@ from tenxgraph_api.jobs.models import (
     TaskRun,
 )
 
-from .base import BaseRunStore, slot_name
+from .base import BaseRunStore, published_marks, slot_name
 
 
 try:  # the ``jobs`` extra
@@ -187,6 +189,17 @@ async def open_connection(path: str | Path, *, busy_timeout_ms: int) -> Any:
     return conn
 
 
+#: Write units still running after their caller was cancelled (kept so they are not
+#: garbage collected before they release the write lock).
+_UNITS: set[asyncio.Future[Any]] = set()
+
+
+def _settle(unit: asyncio.Future[Any]) -> None:
+    _UNITS.discard(unit)
+    if not unit.cancelled():
+        unit.exception()  # retrieved: a unit whose caller left must not log "never retrieved"
+
+
 async def write_tx(
     conn: Any,
     lock: asyncio.Lock,
@@ -198,26 +211,74 @@ async def write_tx(
     """Run ``fn(conn)`` inside one ``BEGIN IMMEDIATE`` transaction and commit.
 
     A lock error (after ``busy_timeout`` ran out) rolls back and runs ``fn`` again, at most
-    ``retries`` more times; any other error (or a cancel) rolls back and propagates.
+    ``retries`` more times; any other error rolls back and propagates.
+
+    Cancellation never splits ``BEGIN``, ``fn`` and ``COMMIT``/``ROLLBACK``: the unit runs on
+    its own task, and a cancelled caller only asks it to stop. aiosqlite runs each statement
+    on its thread to the end even when the awaiting coroutine is cancelled, so a ``BEGIN
+    IMMEDIATE`` still waiting in the busy handler would otherwise take the write lock later
+    with nobody left to release it, and every other connection would see "database is locked".
+    The unit checks the stop request after ``BEGIN`` and before ``COMMIT`` and rolls back; the
+    caller waits for that, then raises ``CancelledError``. Once ``COMMIT`` is sent the write
+    stands. A second cancel stops the waiting, never the unit.
     """
+    stop = asyncio.Event()
+    unit = asyncio.ensure_future(
+        _write_unit(conn, lock, fn, stop, retries=retries, backoff=backoff)
+    )
+    _UNITS.add(unit)
+    unit.add_done_callback(_settle)
+    try:
+        return await asyncio.shield(unit)
+    except asyncio.CancelledError:
+        if unit.done():
+            raise
+        stop.set()
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(unit)
+        raise
+
+
+class _Stopped(Exception):
+    """The caller of a write unit was cancelled; the unit rolled back."""
+
+
+async def _write_unit(
+    conn: Any,
+    lock: asyncio.Lock,
+    fn: Callable[[Any], Awaitable[T]],
+    stop: asyncio.Event,
+    *,
+    retries: int,
+    backoff: float,
+) -> T:
     attempt = 0
     while True:
         async with lock:
             try:
                 if conn.in_transaction:  # left open by an interrupted call: undo it
                     await conn.execute("ROLLBACK")
+                if stop.is_set():
+                    raise _Stopped
                 await conn.execute("BEGIN IMMEDIATE")
+                if stop.is_set():
+                    raise _Stopped
                 result = await fn(conn)
+                if stop.is_set():
+                    raise _Stopped
                 await conn.execute("COMMIT")
                 return result
             except BaseException as exc:
                 await _rollback(conn)
-                if not is_lock_error(exc) or attempt >= retries:
+                if stop.is_set() or not is_lock_error(exc) or attempt >= retries:
                     raise
         attempt += 1
         delay = min(1.0, backoff * 2**attempt)
         logger.debug("jobs sqlite database is locked; retry %d in %.2f s", attempt, delay)
-        await asyncio.sleep(delay)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=delay)
+        if stop.is_set():
+            raise _Stopped
 
 
 async def _rollback(conn: Any) -> None:
@@ -336,8 +397,8 @@ STORE_MIGRATIONS: tuple[tuple[str, ...], ...] = (
 )
 
 
-def _dump(value: Any) -> str:
-    return json.dumps(value, separators=(",", ":"))
+def _dump(value: Any, field: str) -> str:
+    return serialization.dumps(value, field=field)
 
 
 def _params(run: TaskRun) -> list[Any]:
@@ -345,7 +406,7 @@ def _params(run: TaskRun) -> list[Any]:
     for name in _FIELDS:
         value = getattr(run, name)
         if name in _JSON_FIELDS:
-            value = None if value is None and name in ("result", "error") else _dump(value)
+            value = None if value is None and name in ("result", "error") else _dump(value, name)
         elif name == "cancel_requested":
             value = 1 if value else 0
         elif name == "state":
@@ -513,6 +574,8 @@ class SqliteRunStore(BaseRunStore):
     # ------------------------------------------------------------------ create and read
 
     async def create_run(self, new: NewRun, *, key_mode: KeyMode = "keep") -> CreateResult:
+        serialization.check_new_run(new)
+
         async def run(conn: Any) -> CreateResult:
             now = await self._now(conn)
             if new.idempotency_key is not None:
@@ -749,7 +812,8 @@ class SqliteRunStore(BaseRunStore):
         events: Sequence[EventIn],
         progress: dict | None = None,
     ) -> bool:
-        progress_text = None if progress is None else _dump(progress)
+        serialization.check_events(events, progress)
+        progress_text = None if progress is None else _dump(progress, "progress")
 
         async def run(conn: Any) -> bool:
             now = await self._now(conn)
@@ -764,7 +828,9 @@ class SqliteRunStore(BaseRunStore):
             batch = []
             for event in events:
                 seq += 1
-                batch.append((run_id, seq, attempt, event.type, event.at, _dump(event.data)))
+                batch.append(
+                    (run_id, seq, attempt, event.type, event.at, _dump(event.data, "event.data"))
+                )
             if batch:
                 await conn.executemany(
                     f"INSERT INTO {EVENTS} (run_id, seq, attempt, type, at, data) "
@@ -798,6 +864,8 @@ class SqliteRunStore(BaseRunStore):
         worker_id: str,
         outcome: AttemptOutcome,
     ) -> TaskRun | None:
+        serialization.check_outcome(outcome)
+
         async def run(conn: Any) -> TaskRun | None:
             record = await self._fenced(conn, run_id, attempt, worker_id)
             if record is None:
@@ -946,23 +1014,21 @@ class SqliteRunStore(BaseRunStore):
         return [_from_row(r) for r in rows]
 
     async def mark_published(
-        self, run_ids: Sequence[str], *, republish_after: float = REPUBLISH_AFTER
+        self, seen: Sequence[TaskRun], *, republish_after: float = REPUBLISH_AFTER
     ) -> None:
-        ids = list(dict.fromkeys(run_ids))
-        if not ids:
+        marks = published_marks(seen)
+        if not marks:
             return
         wait = max(0.0, republish_after)
 
         async def run(conn: Any) -> None:
             now = await self._now(conn)
-            for start in range(0, len(ids), IN_CHUNK):
-                chunk = ids[start : start + IN_CHUNK]
-                await conn.execute(
-                    f"UPDATE {RUNS} SET published_at = ?, next_publish_at = ? "
-                    f"WHERE state IN {_CLAIMABLE_SQL} "
-                    f"AND run_id IN ({', '.join('?' for _ in chunk)})",
-                    (now, now + wait, *chunk),
-                )
+            await conn.executemany(
+                f"UPDATE {RUNS} SET published_at = ?, next_publish_at = ? "
+                f"WHERE run_id = ? AND attempt = ? AND next_publish_at = ? "
+                f"AND state IN {_CLAIMABLE_SQL}",
+                [(now, now + wait, *mark) for mark in marks],
+            )
 
         await self._write(run)
 

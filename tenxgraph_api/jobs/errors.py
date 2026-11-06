@@ -71,3 +71,19 @@ class TaskCancelled(JobsError):
     def __init__(self, run: TaskRun) -> None:
         super().__init__(f"run {run.run_id} ({run.task}) was cancelled")
         self.run = run
+
+
+class ValueNotStorable(JobsError, ValueError):
+    """A value cannot be stored by the run store, so nothing was written.
+
+    Raised by every store (memory, SQLite, Postgres, Redis) before any write when a JSON field
+    (``kwargs``, ``identity``, ``trigger``, ``result``, ``error``, ``progress``, event ``data``
+    or event ``type``) holds NaN or Infinity, a string with a NUL character (``\\x00``, which
+    Postgres ``jsonb`` and ``text`` refuse), or a value JSON cannot encode. ``field`` names the
+    field and ``reason`` says why.
+    """
+
+    def __init__(self, field: str, reason: str) -> None:
+        super().__init__(f"{field} cannot be stored: {reason}")
+        self.field = field
+        self.reason = reason

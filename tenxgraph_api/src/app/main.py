@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.concurrency import asynccontextmanager
@@ -147,6 +148,28 @@ async def _close_cache_store() -> None:
         logger.debug("Cache store close failed: %s", exc)
 
 
+async def _start_jobs():
+    """With a ``worker`` section: import ``worker.modules`` and open the jobs store and
+    transport for enqueue only (tasks run in ``10xgraph worker``). Without one, nothing jobs
+    related is imported or created."""
+    if graph_config.worker is None:
+        return None
+    from tenxgraph_api.jobs.factory import start_api_jobs
+
+    return await start_api_jobs(graph_config, base_dir=Path(graph_path).resolve().parent)
+
+
+async def _stop_jobs(runtime) -> None:
+    if runtime is None:
+        return
+    from tenxgraph_api.jobs.factory import stop_api_jobs
+
+    try:
+        await stop_api_jobs(runtime)
+    except Exception as exc:
+        logger.warning("Jobs store/transport close failed: %s", exc)
+
+
 async def _cleanup_temp_media_cache() -> None:
     """Run best-effort cleanup of expired temporary media cache entries."""
     try:
@@ -184,6 +207,9 @@ async def lifespan(app: FastAPI):
 
     # Fail fast, in development and production, while a configured backend is unreachable.
     await _check_backends(app)
+
+    # Jobs (``worker`` section): enqueue by name needs the task modules and the store.
+    jobs_runtime = await _start_jobs()
 
     # Clean up expired temporary media cache on startup
     try:
@@ -228,6 +254,9 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Graph close did not finish cleanly: %s", exc)
 
+    # After the graph: a run that was finishing may still enqueue a task.
+    await _stop_jobs(jobs_runtime)
+
     # The rate limiter, ownership cache and token revocation share the cache store: closed
     # once here.
     await _close_cache_store()
@@ -268,6 +297,8 @@ init_errors_handler(app)
 
 # A malformed "media" section should stop the boot, not surface on the first delete.
 graph_config.media  # noqa: B018
+# Same for a malformed "worker" section (parsing only: nothing is imported or created here).
+graph_config.worker  # noqa: B018
 
 # init routes
 # The AG-UI endpoint is opt-in through 10xgraph.json; the WebSocket routes can be turned off there.

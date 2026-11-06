@@ -7,6 +7,7 @@ import uuid
 
 import pytest
 
+from tenxgraph_api.jobs.errors import ValueNotStorable
 from tenxgraph_api.jobs.models import (
     EVENT_LOG_CAP,
     AttemptOutcome,
@@ -503,7 +504,9 @@ async def test_due_runs_and_mark_published(sut):
     later = (await sut.store.create_run(new_run(task, delay=0.1))).run
     due = {r.run_id for r in await sut.store.due_runs(limit=1000)}
     assert now_run.run_id in due and later.run_id not in due
-    await sut.store.mark_published([now_run.run_id, uid()], republish_after=0.3)
+    await sut.store.mark_published(
+        [now_run, now_run.model_copy(update={"run_id": uid()})], republish_after=0.3
+    )
     got = await sut.store.get_run(now_run.run_id)
     assert got.published_at is not None
     assert got.next_publish_at == pytest.approx(got.published_at + 0.3)
@@ -521,21 +524,131 @@ async def test_published_backlog_is_not_republished_at_once(sut):
     """A published but unclaimed run is due again only after its own republish_after."""
     task = uid("task")
     first = (await sut.store.create_run(new_run(task))).run
-    await sut.store.mark_published([first.run_id], republish_after=0.2)
+    await sut.store.mark_published([first], republish_after=0.2)
     await sut.advance(0.1)
     second = (await sut.store.create_run(new_run(task))).run
-    await sut.store.mark_published([second.run_id], republish_after=0.2)
+    await sut.store.mark_published([second], republish_after=0.2)
     await sut.advance(0.15)
     due = {r.run_id for r in await sut.store.due_runs(limit=1000)}
     assert first.run_id in due and second.run_id not in due
 
 
 async def test_mark_published_ignores_leased_runs(sut):
-    run = await claimed(sut)
-    await sut.store.mark_published([run.run_id])
+    created = (await sut.store.create_run(new_run())).run
+    claim = await sut.store.claim(created.run_id, worker_id=W1, lease_ttl=TTL)
+    run = claim.run
+    await sut.store.mark_published([created])
     got = await sut.store.get_run(run.run_id)
     assert got.next_publish_at is None
     assert run.run_id not in {r.run_id for r in await sut.store.due_runs(limit=1000)}
+
+
+async def test_stale_mark_published_keeps_a_newer_retry_time(sut):
+    """H2: publish, a fast claim and a failure set a 1 s retry; the publisher's mark that
+    arrives after must not push the retry to now + republish_after."""
+    created = (await sut.store.create_run(new_run())).run
+    claim = await sut.store.claim(created.run_id, worker_id=W1, lease_ttl=TTL)
+    assert claim.status == ClaimStatus.CLAIMED
+    retrying = await sut.store.transition(
+        created.run_id, attempt=1, worker_id=W1, outcome=AttemptOutcome(kind="retry", delay=1.0)
+    )
+    await sut.store.mark_published([created], republish_after=300.0)
+    got = await sut.store.get_run(created.run_id)
+    assert got.state == RunState.RETRYING
+    assert got.next_publish_at == got.available_at == retrying.available_at
+    assert got.published_at is None
+    # The current value still matches: that mark applies.
+    await sut.store.mark_published([got], republish_after=300.0)
+    marked = await sut.store.get_run(created.run_id)
+    assert marked.published_at is not None
+    assert marked.next_publish_at == pytest.approx(marked.published_at + 300.0)
+
+
+async def test_mark_published_cas_on_defer_and_requeue(sut):
+    for outcome in (AttemptOutcome(kind="defer", delay=0.5), AttemptOutcome(kind="requeue")):
+        created = (await sut.store.create_run(new_run())).run
+        await sut.store.claim(created.run_id, worker_id=W1, lease_ttl=TTL)
+        after = await sut.store.transition(
+            created.run_id, attempt=1, worker_id=W1, outcome=outcome
+        )
+        await sut.store.mark_published([created], republish_after=300.0)
+        got = await sut.store.get_run(created.run_id)
+        assert got.next_publish_at == after.next_publish_at == got.available_at
+
+
+async def test_mark_published_rejects_a_plain_id_list(sut):
+    run = (await sut.store.create_run(new_run())).run
+    with pytest.raises(TypeError):
+        await sut.store.mark_published([run.run_id])  # type: ignore[list-item]
+    await sut.store.mark_published([run.model_copy(update={"next_publish_at": None})])
+    assert (await sut.store.get_run(run.run_id)).published_at is None
+
+
+# ---------------------------------------------------------------------- storable values
+
+NOT_STORABLE = {
+    "nul": "a\x00b",
+    "nul_key": {"k\x00": 1},
+    "nul_nested": {"a": [{"b": "x\x00"}]},
+    "nan": float("nan"),
+    "inf": float("inf"),
+    "nested_nan": {"a": [1.0, float("-inf")]},
+}
+
+
+@pytest.mark.parametrize("label", sorted(NOT_STORABLE))
+async def test_result_not_storable_raises_and_writes_nothing(sut, label):
+    """H1: every store refuses the same values before writing; the run stays leased."""
+    run = await claimed(sut)
+    with pytest.raises(ValueNotStorable) as info:
+        await sut.store.transition(
+            run.run_id,
+            attempt=1,
+            worker_id=W1,
+            outcome=AttemptOutcome(kind="succeeded", result={"v": NOT_STORABLE[label]}),
+        )
+    assert info.value.field == "result"
+    got = await sut.store.get_run(run.run_id)
+    assert got.state == RunState.RUNNING and got.worker_id == W1 and got.result is None
+    done = await sut.store.transition(
+        run.run_id,
+        attempt=1,
+        worker_id=W1,
+        outcome=AttemptOutcome(kind="succeeded", result={"v": "a\\u0000 is text"}),
+    )
+    assert done.state == RunState.SUCCEEDED and done.result == {"v": "a\\u0000 is text"}
+
+
+@pytest.mark.parametrize("label", ["nul", "nan", "nul_key"])
+async def test_event_data_not_storable(sut, label):
+    run = await claimed(sut)
+    bad = EventIn(type="log", at=1.0, data={"v": NOT_STORABLE[label]})
+    with pytest.raises(ValueNotStorable) as info:
+        await sut.store.append_events(
+            run.run_id, attempt=1, worker_id=W1, events=[EventIn(type="ok", at=1.0), bad]
+        )
+    assert info.value.field == "event.data"
+    assert await sut.store.read_events(run.run_id) == []
+    with pytest.raises(ValueNotStorable) as info:
+        await sut.store.append_events(
+            run.run_id, attempt=1, worker_id=W1, events=[], progress={"p": NOT_STORABLE[label]}
+        )
+    assert info.value.field == "progress"
+    with pytest.raises(ValueNotStorable) as info:
+        await sut.store.append_events(
+            run.run_id, attempt=1, worker_id=W1, events=[EventIn(type="t\x00", at=1.0)]
+        )
+    assert info.value.field == "event.type"
+    assert (await sut.store.get_run(run.run_id)).progress == {}
+
+
+@pytest.mark.parametrize("label", ["nul", "nan", "nul_key"])
+async def test_kwargs_not_storable(sut, label):
+    new = new_run(kwargs={"v": NOT_STORABLE[label]})
+    with pytest.raises(ValueNotStorable) as info:
+        await sut.store.create_run(new)
+    assert info.value.field == "kwargs"
+    assert await sut.store.get_run(new.run_id) is None
 
 
 async def test_tenant_none_is_one_value_for_keys(sut):
@@ -551,7 +664,7 @@ async def test_tenant_none_is_one_value_for_keys(sut):
 
 async def test_retrying_run_becomes_due(sut):
     run = await claimed(sut)
-    await sut.store.mark_published([run.run_id])
+    await sut.store.mark_published([run])
     await sut.store.transition(
         run.run_id, attempt=1, worker_id=W1, outcome=AttemptOutcome(kind="retry", delay=0.1)
     )

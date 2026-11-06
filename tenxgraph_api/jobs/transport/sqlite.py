@@ -6,7 +6,10 @@
 Lives in the same file as ``SqliteRunStore`` (table ``tenxgraph_task_messages``), so the API
 process that enqueues and every local worker process see the same messages. No server, so no
 push: ``consume`` polls every ``poll_interval`` (200 ms) until ``block`` runs out; a publish
-from the same transport object wakes a waiting ``consume`` at once.
+from the same transport object wakes a waiting ``consume`` at once. Each poll first peeks with a
+plain read (no write lock); only when a message is visible does it take ``BEGIN IMMEDIATE`` to
+hand it out, so idle workers never compete with the store for the write lock. ``consume``
+during or after ``aclose`` returns ``[]``.
 
 Why a transport at all when the store has ``claim_next``: the worker (``jobs/worker.py``)
 consumes a transport and then claims each run, the same loop for every backend. Keeping that
@@ -176,9 +179,23 @@ class SqliteTransport(BaseTransport):
 
     # ------------------------------------------------------------------ consume and ack
 
+    async def _peek(self, wanted: Sequence[str], marks: str) -> bool:
+        """A read-only check for a visible message, so an idle poll never takes the write lock
+        (WAL readers do not block the writer, nor wait for it)."""
+        conn = await self._connection()
+        async with self._lock:
+            rows = await conn.execute_fetchall(
+                f"SELECT 1 FROM {MESSAGES} WHERE queue IN ({marks}) "
+                f"AND visible_at <= {self._clock} LIMIT 1",
+                tuple(wanted),
+            )
+        return bool(rows)
+
     async def _take(self, queues: Sequence[str], max_messages: int) -> list[Delivery]:
         wanted = list(dict.fromkeys(queues))
         marks = ", ".join("?" for _ in wanted)
+        if not await self._peek(wanted, marks):
+            return []
 
         async def run(conn: Any) -> list[Delivery]:
             rows = await conn.execute_fetchall(f"SELECT {self._clock}")
@@ -229,7 +246,14 @@ class SqliteTransport(BaseTransport):
         deadline = time.monotonic() + max(0.0, block)
         while True:
             self._wakeup.clear()
-            out = await self._take(queues, max_messages)
+            if self._closed:
+                return []
+            try:
+                out = await self._take(queues, max_messages)
+            except Exception:
+                if self._closed:  # closed while this poll was opening or waiting for the lock
+                    return []
+                raise
             remaining = deadline - time.monotonic()
             if out or remaining <= 0 or self._closed:
                 return out

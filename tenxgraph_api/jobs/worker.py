@@ -14,22 +14,33 @@ asyncio task and keeps writing for it only while it holds the lease:
   renewed for ``lease_ttl - lease_margin`` cancels the attempt and writes nothing more for it.
 - Store and transport errors are logged and retried; they never end ``run()``.
 
-``10xgraph worker`` (Sprint 3) wraps this with config, signals, thread and process executors.
-``run()`` / ``aclose()`` give a minimal background loop; ``jobs_harness`` drives ``tick``,
-``poll_once`` and ``sweep_once`` by hand instead.
+Queues and priority: the worker reads only ``queues`` (``--queue``). ``reserve`` (``--reserve
+high=2``) keeps slots for a priority and the levels above it: with ``concurrency=16`` and
+``{"high": 2}``, ``normal`` and ``low`` runs use at most 14 slots and the last 2 take ``high``
+runs only. ``poll_once`` reads each tier for the slots it may use. When the transport's
+``consume`` takes ``priorities=`` the read for reserved slots asks for those levels only;
+otherwise it reads one message at a time, and a run of a lower level is given back
+(``_release``: acked, published again by the sweeper after ``RELEASE_RETRY`` s) with a
+``RELEASE_PAUSE`` before the next read. A run whose ``thread`` / ``process`` executor has no
+free slot is given back the same way.
+
+``10xgraph worker`` (``jobs/service.py``) wraps this with config, signals, the sweeper loop and
+health probes. ``run()`` / ``aclose()`` give a minimal background loop; ``jobs_harness``
+drives ``tick``, ``poll_once`` and ``sweep_once`` by hand instead.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import math
 import os
 import socket
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -39,12 +50,14 @@ from .backoff import Backoff
 from .context import TaskContext
 from .control import Fail, RetryAfter
 from .emit import TaskEmitter
-from .errors import PayloadTooLarge, TaskValidationError
+from .errors import PayloadTooLarge, TaskValidationError, ValueNotStorable
 from .hooks import call_safely
 from .identity import current_task_context
+from .logs import log_run
 from .models import (
     LEASED_STATES,
     MAX_DEFERRALS,
+    PRIORITIES,
     AttemptOutcome,
     ClaimStatus,
     HeldLease,
@@ -63,6 +76,10 @@ QueuesSpec = Sequence[str] | Callable[[], Sequence[str]] | None
 #: Seconds before a run of a task this worker does not know is published again (rolling
 #: deploys: a pod that has the task picks it up).
 UNKNOWN_TASK_RETRY = 30.0
+#: A run read without a slot for it (reserved slots, a full executor) is published again after
+#: this many seconds, and the worker pauses reading this long after giving one back.
+RELEASE_RETRY = 2.0
+RELEASE_PAUSE = 1.0
 #: Pending ``on_task_progress`` calls; more are dropped with a warning.
 HOOK_QUEUE_SIZE = 1000
 #: Retry delays for a failed final write, and for the poll loop after a store or transport error.
@@ -70,6 +87,49 @@ WRITE_RETRY_BASE = 0.05
 WRITE_RETRY_MAX = 2.0
 POLL_ERROR_BASE = 0.1
 POLL_ERROR_MAX = 5.0
+
+
+#: The error written when the store refuses a result or error value (``ValueNotStorable``).
+NOT_SERIALIZABLE_ERROR: dict[str, Any] = {
+    "code": "result_not_serializable",
+    "type": "ValueNotStorable",
+    "message": "the task result or error holds a value the run store cannot store "
+    "(a NUL character, NaN or Infinity)",
+}
+
+
+def _not_storable(exc: BaseException) -> bool:
+    """Whether ``exc`` is the store's ``ValueNotStorable`` (NUL, NaN or Infinity in a value)."""
+    return isinstance(exc, ValueNotStorable)
+
+
+def _parameters(fn: Callable[..., Any]) -> set[str]:
+    try:
+        return set(inspect.signature(fn).parameters)
+    except (TypeError, ValueError):
+        return set()
+
+
+def check_reserve(reserve: Mapping[str, int] | None, concurrency: int) -> dict[str, int]:
+    """Validate ``--reserve``: known levels above ``low``, non-negative, and fewer reserved
+    slots than ``concurrency`` so the lowest level keeps at least one."""
+    out: dict[str, int] = {}
+    for level, count in (reserve or {}).items():
+        if level not in PRIORITIES[:-1]:
+            raise ValueError(
+                f"reserve: {level!r} is not a priority that can hold slots; use "
+                + " or ".join(PRIORITIES[:-1])
+            )
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise ValueError(f"reserve: {level}={count!r} must be a whole number >= 0")
+        if count:
+            out[level] = count
+    if sum(out.values()) >= concurrency:
+        raise ValueError(
+            f"reserve: {sum(out.values())} reserved slots leave none of the {concurrency} "
+            "for low priority; reserve fewer or raise concurrency"
+        )
+    return out
 
 
 def error_info(exc: BaseException, code: str = "error") -> dict[str, Any]:
@@ -96,6 +156,8 @@ class _Attempt(BaseModel):
     emitter: TaskEmitter
     job: asyncio.Task | None = None
     inner: asyncio.Task | None = None
+    #: The executor's ``ExecutionHandle`` of a ``thread`` / ``process`` attempt.
+    handle: Any = None
     #: Why the worker stops the attempt: "cancel", "lost", "shutdown" or "abort".
     stop_reason: str | None = None
     fenced_out: bool = False
@@ -120,7 +182,7 @@ class _Attempt(BaseModel):
 class Worker:
     """Runs ``async`` tasks from the runtime's transport and store."""
 
-    def __init__(  # - worker knobs
+    def __init__(  # noqa: PLR0913 - worker knobs
         self,
         runtime: JobsRuntime,
         *,
@@ -131,9 +193,17 @@ class Worker:
         lease_margin: float | None = None,
         flush_interval: float = 1.0,
         monotonic: Callable[[], float] | None = None,
+        reserve: Mapping[str, int] | None = None,
+        graph: Any = None,
+        executors: Mapping[str, Any] | None = None,
     ) -> None:
         if concurrency < 1:
             raise ValueError("concurrency must be >= 1")
+        self.reserve = check_reserve(reserve, concurrency)
+        #: The loaded ``CompiledGraph`` for ``ctx.invoke_graph`` (None: not available).
+        self.graph = graph
+        #: Non-async executors by name (``"thread"``, ``"process"``); see ``_call``.
+        self.executors: dict[str, Any] = dict(executors or {})
         self.runtime = runtime
         self.store = runtime.store
         self.transport = runtime.transport
@@ -159,12 +229,35 @@ class Worker:
         #: Counters for tests and metrics.
         self.poll_errors = 0
         self.hooks_dropped = 0
+        #: Worker-monotonic time of the last finished tick (``/healthz``).
+        self.last_tick: float | None = None
+        #: Whether ``transport.consume`` takes ``priorities=`` (a read limited to some levels).
+        #: Without it, a read for reserved slots takes one message at a time, and a message
+        #: that may not use them waits here (unacked) until a slot it may use frees.
+        self._filtered_reads = "priorities" in _parameters(self.transport.consume)
+        #: Runs the last ``poll_once`` read but gave back (see ``_release``).
+        self.released = 0
 
     # ------------------------------------------------------------------ introspection
 
     @property
     def free_slots(self) -> int:
         return max(0, self.concurrency - len(self._inflight) - len(self._stale))
+
+    @property
+    def stopping(self) -> bool:
+        return self._stopping
+
+    def slot_limit(self, priority: str) -> int:
+        """Slots runs of ``priority`` may use: ``concurrency`` minus the slots reserved for
+        higher levels."""
+        rank = PRIORITIES.index(priority) if priority in PRIORITIES else len(PRIORITIES) - 1
+        return self.concurrency - sum(self.reserve.get(p, 0) for p in PRIORITIES[:rank])
+
+    def capacity(self, priority: str) -> int:
+        """Slots still free for a run of ``priority``."""
+        used = len(self._inflight) + len(self._stale)
+        return max(0, self.slot_limit(priority) - used)
 
     @property
     def inflight(self) -> dict[str, _Attempt]:
@@ -196,19 +289,47 @@ class Worker:
         queues = self.queues()
         if not queues:
             return 0
-        deliveries = await self.transport.consume(queues, max_messages=self.free_slots, block=block)
         started = 0
-        for delivery in deliveries:
-            try:
-                if await self._handle(delivery):
-                    started += 1
-            except Exception:
-                self.poll_errors += 1
-                logger.exception(
-                    "jobs worker could not handle run %s; it will be delivered again",
-                    delivery.message.run_id,
-                )
+        self.released = 0
+        waited = False
+        previous_limit: int | None = None
+        # Tiers from the lowest level up: a tier reads its level and every level above it,
+        # for the slots that level may use. Without reservations every limit is the same, so
+        # this is one read over all priorities.
+        for index in range(len(PRIORITIES) - 1, -1, -1):
+            level = PRIORITIES[index]
+            limit = self.slot_limit(level)
+            if previous_limit is not None and limit == previous_limit:
+                continue
+            previous_limit = limit
+            room = self.capacity(level)
+            if room <= 0 or self._stopping:
+                continue
+            levels = PRIORITIES[: index + 1]
+            options: dict[str, Any] = {}
+            if len(levels) < len(PRIORITIES):
+                if self._filtered_reads:
+                    options["priorities"] = list(levels)
+                else:
+                    room = 1  # one message at a time; a lower level is released (_release)
+            deliveries = await self.transport.consume(
+                queues, max_messages=room, block=0.0 if waited else block, **options
+            )
+            waited = True
+            for delivery in deliveries:
+                started += await self._start_delivery(delivery)
         return started
+
+    async def _start_delivery(self, delivery: Delivery) -> int:
+        try:
+            return 1 if await self._handle(delivery) else 0
+        except Exception:
+            self.poll_errors += 1
+            logger.exception(
+                "jobs worker could not handle run %s; it will be delivered again",
+                delivery.message.run_id,
+            )
+            return 0
 
     async def _ack(self, delivery: Delivery) -> None:
         """Best effort: an ack that fails only means the message may come again."""
@@ -229,9 +350,14 @@ class Worker:
             await self._ack(delivery)
             return False
         task = registry.all_tasks().get(current.task)
-        if task is None:
+        if task is None or not self._runs_here(task):
             await self._ack(delivery)
             await self._leave_for_another_pod(current)
+            return False
+        if self.capacity(current.priority) <= 0 or self._executor_full(task):
+            # Only reserved slots are free and this run may not use them, or its executor has
+            # no free slot: give it back for a worker (or a moment) with room.
+            await self._release(delivery, current)
             return False
         result = await self.store.claim(
             run_id,
@@ -251,6 +377,18 @@ class Worker:
         self._start(run, task, lease_deadline=claimed_at + self.lease_ttl - self.lease_margin)
         return True
 
+    async def _release(self, delivery: Delivery, run: TaskRun) -> None:
+        """Give back a run this worker read but has no slot for: ack the message and have the
+        sweeper publish the run again after ``RELEASE_RETRY`` seconds (CAS on the
+        ``next_publish_at`` read, so a newer publish is never pushed back). ``run()`` then
+        waits up to ``RELEASE_PAUSE`` before reading again, so a backlog is not cycled."""
+        self.released += 1
+        await self._ack(delivery)
+        await self.store.mark_published(
+            {run.run_id: run.next_publish_at}, republish_after=RELEASE_RETRY
+        )
+        logger.debug("task run released run_id=%s task=%s: no free slot", run.run_id, run.task)
+
     async def _leave_for_another_pod(self, run: TaskRun) -> None:
         """Unknown task here (rolling deploy): leave the run queued, publish it again later."""
         logger.warning(
@@ -261,7 +399,9 @@ class Worker:
             run.run_id,
             UNKNOWN_TASK_RETRY,
         )
-        await self.store.mark_published([run.run_id], republish_after=UNKNOWN_TASK_RETRY)
+        await self.store.mark_published(
+            {run.run_id: run.next_publish_at}, republish_after=UNKNOWN_TASK_RETRY
+        )
 
     def _start(self, run: TaskRun, task: Task, *, lease_deadline: float) -> None:
         emitter = TaskEmitter(clock=self.runtime.clock)
@@ -272,18 +412,13 @@ class Worker:
             queue=run.queue,
             identity=dict(run.identity),
             emit=emitter,
+            graph=self.graph,
         )
         attempt = _Attempt(
             run=run, task=task, ctx=ctx, emitter=emitter, lease_deadline=lease_deadline
         )
         self._inflight[run.run_id] = attempt
-        logger.info(
-            "task run started run_id=%s task=%s attempt=%s worker=%s",
-            run.run_id,
-            run.task,
-            run.attempt,
-            self.worker_id,
-        )
+        log_run(logger, logging.INFO, "started", run, worker=self.worker_id, queue=run.queue)
         attempt.job = asyncio.create_task(self._execute(attempt), name=f"task-run:{run.run_id}")
 
     # ------------------------------------------------------------------ execute
@@ -323,10 +458,15 @@ class Worker:
             kind="requeue", error={"code": "interrupted", "message": "worker shut down"}
         )
 
-    async def _run_attempt(self, attempt: _Attempt) -> AttemptOutcome | None:
+    async def _run_attempt(self, attempt: _Attempt) -> AttemptOutcome | None:  # noqa: PLR0911
         task = attempt.task
         if task is None:  # pragma: no cover - unknown tasks never start
             return None
+        if task.executor != "async":
+            # A cancel, shutdown or lost lease may have arrived during on_task_start.
+            if attempt.fenced_out or attempt.stop_reason is not None:
+                return self._stopped_outcome(attempt)
+            return await self._run_in_executor(attempt, task)
         try:
             kwargs = task.load_kwargs(attempt.run.kwargs)
         except TaskValidationError as exc:
@@ -355,6 +495,116 @@ class Worker:
         except Exception as exc:
             logger.exception("jobs worker could not classify run %s", attempt.run_id)
             return AttemptOutcome(kind="failed", error=error_info(exc, "worker_error"))
+
+    # ------------------------------------------------------------------ thread / process
+
+    def executor_for(self, task: Task) -> Any:
+        """The executor of a ``thread`` / ``process`` task (None: not run by this worker);
+        ``async`` tasks return None too and run on the loop."""
+        if task.executor == "async":
+            return None
+        return self.executors.get(task.executor)
+
+    def _runs_here(self, task: Task) -> bool:
+        return task.executor == "async" or task.executor in self.executors
+
+    def _executor_full(self, task: Task) -> bool:
+        executor = self.executor_for(task)
+        return executor is not None and executor.free_slots <= 0
+
+    async def _run_in_executor(self, attempt: _Attempt, task: Task) -> AttemptOutcome | None:
+        """Run a ``thread`` / ``process`` body in its executor and map how it ended."""
+        from .executors import ExecutionSpec
+
+        executor = self.executors[task.executor]
+        spec = ExecutionSpec(
+            task=task,
+            stored_kwargs=attempt.run.kwargs,
+            ctx=attempt.ctx,
+            max_result_bytes=self.runtime.max_result_bytes,
+        )
+        try:
+            handle = await executor.start(spec)
+        except RuntimeError as exc:  # the executor is closing (shutdown)
+            if attempt.stop_reason in ("lost", "abort") or attempt.fenced_out:
+                return None
+            return AttemptOutcome(
+                kind="requeue", error={"code": "interrupted", "message": str(exc)}
+            )
+        attempt.handle = handle
+        # A stop may have arrived while waiting for a slot.
+        if attempt.stop_reason is not None:
+            self._signal_handle(attempt, attempt.stop_reason)
+        try:
+            result = await handle.result()
+        except asyncio.CancelledError:
+            handle.kill("abort")
+            raise
+        try:
+            return self._classify_execution(attempt, result)
+        except Exception as exc:
+            logger.exception("jobs worker could not classify run %s", attempt.run_id)
+            return AttemptOutcome(kind="failed", error=error_info(exc, "worker_error"))
+
+    @staticmethod
+    def _signal_handle(attempt: _Attempt, reason: str) -> None:
+        handle = attempt.handle
+        if handle is None:
+            return
+        if reason == "cancel":
+            handle.request_cancel()
+        else:
+            handle.kill(reason)
+
+    def _classify_execution(  # noqa: PLR0911 - one return per outcome
+        self, attempt: _Attempt, result: Any
+    ) -> AttemptOutcome | None:
+        task = attempt.task
+        assert task is not None  # noqa: S101 - narrowed by the caller
+        reason = attempt.stop_reason
+        if reason in ("lost", "abort") or attempt.fenced_out:
+            return None
+        kind = result.kind
+        if reason == "shutdown" and kind != "returned" and kind != "raised":
+            return AttemptOutcome(
+                kind="requeue", error={"code": "interrupted", "message": "worker shut down"}
+            )
+        if reason == "cancel":
+            return AttemptOutcome(
+                kind="cancelled", error={"code": "cancelled", "message": "cancelled"}
+            )
+        error = result.error or {"code": kind, "message": kind}
+        if kind == "returned":
+            if result.value_is_json:
+                return AttemptOutcome(kind="succeeded", result=result.value)
+            return self._success(attempt, result.value)
+        if kind == "raised":
+            exc = result.exception
+            if isinstance(exc, Fail):
+                return AttemptOutcome(kind="failed", error=error)
+            if isinstance(exc, RetryAfter):
+                return self._defer(attempt, exc)
+            log_run(logger, logging.WARNING, "attempt failed", attempt.run, error=error.get("type"))
+            return self._failure(attempt, error)
+        if kind == "invalid":
+            return AttemptOutcome(kind="failed", error=error)
+        if kind in ("timeout", "crashed"):
+            log_run(
+                logger, logging.WARNING, f"attempt {kind}", attempt.run, error=error.get("code")
+            )
+            return self._failure(attempt, error)
+        # "stopped" without a stop of our own: treat it as a failed attempt.
+        return self._failure(attempt, {"code": "stopped", "message": "the attempt was stopped"})
+
+    def _defer(self, attempt: _Attempt, exc: RetryAfter) -> AttemptOutcome:
+        if attempt.run.defer_count >= MAX_DEFERRALS:
+            error = {
+                "code": "too_many_deferrals",
+                "type": "RetryAfter",
+                "message": f"RetryAfter used more than {MAX_DEFERRALS} times",
+            }
+            return AttemptOutcome(kind="failed", error=error)
+        return AttemptOutcome(kind="defer", delay=exc.seconds)
 
     def _classify(  # noqa: PLR0911 - one return per outcome
         self, attempt: _Attempt, inner: asyncio.Task
@@ -390,21 +640,8 @@ class Worker:
                 error["data"] = exc.data
             return AttemptOutcome(kind="failed", error=error)
         if isinstance(exc, RetryAfter):
-            if attempt.run.defer_count >= MAX_DEFERRALS:
-                error = {
-                    "code": "too_many_deferrals",
-                    "type": "RetryAfter",
-                    "message": f"RetryAfter used more than {MAX_DEFERRALS} times",
-                }
-                return AttemptOutcome(kind="failed", error=error)
-            return AttemptOutcome(kind="defer", delay=exc.seconds)
-        logger.warning(
-            "task run attempt failed run_id=%s task=%s attempt=%s",
-            attempt.run_id,
-            attempt.run.task,
-            attempt.run.attempt,
-            exc_info=exc,
-        )
+            return self._defer(attempt, exc)
+        log_run(logger, logging.WARNING, "attempt failed", attempt.run, exc_info=exc)
         return self._failure(attempt, error_info(exc))
 
     def _success(self, attempt: _Attempt, value: Any) -> AttemptOutcome:
@@ -446,12 +683,13 @@ class Worker:
         run = await self._write_transition(attempt, outcome)
         if run is None:
             return
-        logger.info(
-            "task run %s run_id=%s task=%s attempt=%s",
+        log_run(
+            logger,
+            logging.INFO,
             run.state.value,
-            run.run_id,
-            run.task,
-            attempt.run.attempt,
+            run,
+            attempt=attempt.run.attempt,
+            error=(run.error or {}).get("code"),
         )
         await self._after_transition(run, attempt.task)
 
@@ -477,7 +715,14 @@ class Worker:
                     worker_id=self.worker_id,
                     outcome=outcome,
                 )
-            except Exception:
+            except Exception as exc:
+                if _not_storable(exc) and outcome.error != NOT_SERIALIZABLE_ERROR:
+                    # The result or error holds a value the store refuses (NUL, NaN,
+                    # Infinity): retrying cannot help, so the run fails with a generic error
+                    # that does not echo the value.
+                    log_run(logger, logging.WARNING, "result not storable", attempt.run)
+                    outcome = AttemptOutcome(kind="failed", error=dict(NOT_SERIALIZABLE_ERROR))
+                    continue
                 raised = True
                 logger.warning(
                     "writing the outcome of run %s failed; retrying in %.2f s",
@@ -497,11 +742,7 @@ class Worker:
                     attempt.written = True
                     return landed
             attempt.fenced_out = True
-            logger.warning(
-                "task run result discarded run_id=%s attempt=%s: lease lost",
-                attempt.run_id,
-                attempt.run.attempt,
-            )
+            log_run(logger, logging.WARNING, "result discarded (lease lost)", attempt.run)
             return None
 
     async def _read_back(self, attempt: _Attempt) -> TaskRun | None:
@@ -669,6 +910,7 @@ class Worker:
         attempt.ctx._set_cancelled()
         if attempt.inner is not None and not attempt.inner.done():
             attempt.inner.cancel()
+        self._signal_handle(attempt, reason)
 
     def _lose(self, attempt: _Attempt, why: str) -> None:
         if attempt.fenced_out:
@@ -679,12 +921,8 @@ class Worker:
             del self._inflight[attempt.run_id]
             if attempt.job is not None and not attempt.job.done():
                 self._stale.add(attempt)
-        logger.warning(
-            "task run lease lost run_id=%s attempt=%s worker=%s: %s; stopping it",
-            attempt.run_id,
-            attempt.run.attempt,
-            self.worker_id,
-            why,
+        log_run(
+            logger, logging.WARNING, "lease lost", attempt.run, worker=self.worker_id, why=repr(why)
         )
         self._stop(attempt, "lost")
 
@@ -707,8 +945,9 @@ class Worker:
                         await asyncio.wait_for(self._slot_freed.wait(), timeout=block)
                     continue
                 errors = self.poll_errors
+                started = 0
                 try:
-                    await self.poll_once(block=block)
+                    started = await self.poll_once(block=block)
                 except Exception:
                     self.poll_errors += 1
                     logger.exception("jobs worker poll failed; backing off %.1f s", backoff)
@@ -717,6 +956,10 @@ class Worker:
                     backoff = min(POLL_ERROR_MAX, backoff * 2)
                 else:
                     backoff = POLL_ERROR_BASE
+                    if self.released and not started:
+                        self._slot_freed.clear()
+                        with contextlib.suppress(TimeoutError):
+                            await asyncio.wait_for(self._slot_freed.wait(), RELEASE_PAUSE)
             while jobs := self.jobs():
                 await asyncio.wait(jobs)
         finally:
@@ -731,6 +974,8 @@ class Worker:
                 await self.tick()
             except Exception:
                 logger.exception("jobs worker tick failed; retrying")
+            else:
+                self.last_tick = self._monotonic()
             await asyncio.sleep(interval)
 
     async def aclose(self, *, grace: float = 30.0) -> None:

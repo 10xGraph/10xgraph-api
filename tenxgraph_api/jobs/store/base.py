@@ -38,10 +38,23 @@ Publishing (delayed, retrying, lost and capped runs)
     ``available_at`` whenever the run becomes claimable (create, retry, defer, requeue, lost,
     capped), None while leased or terminal. ``due_runs`` returns claimable runs with
     ``next_publish_at <= now`` (index ``(state, next_publish_at)``); after publishing, the
-    caller calls ``mark_published(ids, republish_after=...)``, which sets ``published_at = now``
-    and ``next_publish_at = now + republish_after``. So a run whose message was lost is
-    published again after ``republish_after``, and a waiting backlog is never republished
-    all at once.
+    caller calls ``mark_published(runs_it_read, republish_after=...)``, which sets
+    ``published_at = now`` and ``next_publish_at = now + republish_after``. So a run whose
+    message was lost is published again after ``republish_after``, and a waiting backlog is
+    never republished all at once.
+
+    ``mark_published`` is a compare-and-set on ``(attempt, next_publish_at)``: it changes a run
+    only while it still holds the values the caller read (from ``create_run``, ``due_runs`` or
+    ``get_run``) and is ``queued`` or ``retrying``. Every way back to claimable after a claim
+    raised ``attempt``, so the CAS holds even when two times are equal (a fake clock). A publish races the worker: the run can be claimed,
+    fail and be set to retry in 1 s before the publisher marks it; an unconditional mark would
+    then push that retry 5 minutes out.
+
+Storable values
+    Every store encodes JSON fields with ``tenxgraph_api.jobs.serialization`` and raises
+    ``ValueNotStorable(field, reason)`` before any write when a value holds NaN or Infinity, a
+    string with ``\\x00``, or is not JSON (Postgres cannot store the first two; the others
+    refuse them too, so every backend behaves the same).
 
 Tenant
     ``tenant`` is never NULL: None is stored as ``""`` (``TaskRun`` normalises it), so a SQL
@@ -262,10 +275,16 @@ class BaseRunStore(ABC):
 
     @abstractmethod
     async def mark_published(
-        self, run_ids: Sequence[str], *, republish_after: float = REPUBLISH_AFTER
+        self, seen: Sequence[TaskRun], *, republish_after: float = REPUBLISH_AFTER
     ) -> None:
-        """For claimable runs among ``run_ids``: ``published_at = now`` and
-        ``next_publish_at = now + republish_after``. Unknown or non-claimable ids are ignored.
+        """Compare-and-set after a publish. ``seen`` are the run records the caller read
+        before publishing (from ``create_run``, ``due_runs`` or ``get_run``).
+
+        For each run still ``queued`` or ``retrying`` with the same ``attempt`` and
+        ``next_publish_at`` as its seen record: ``published_at = now`` and ``next_publish_at =
+        now + republish_after``. Any other run (unknown, leased, terminal, or claimed and made
+        claimable again since: a claim always raises ``attempt``) is left as it is. A seen
+        record without ``next_publish_at`` never matches.
         """
 
     @abstractmethod
@@ -297,6 +316,23 @@ def redis_key(*parts: str) -> str:
     if not parts:
         raise ValueError("redis_key needs at least one part")
     return ":".join((REDIS_HASH_TAG, *parts))
+
+
+def published_marks(seen: Sequence[TaskRun]) -> list[tuple[str, int, float]]:
+    """``seen`` as sorted ``(run_id, attempt, next_publish_at)``; runs without a
+    ``next_publish_at`` are dropped (they cannot match).
+
+    Raises ``TypeError`` for anything but run records (the pre-CAS signature took ids).
+    """
+    if isinstance(seen, str | bytes) or not all(isinstance(r, TaskRun) for r in seen):
+        raise TypeError(
+            "mark_published takes the TaskRun records read before publishing, not run ids"
+        )
+    return sorted(
+        (r.run_id, r.attempt, float(r.next_publish_at))
+        for r in seen
+        if r.next_publish_at is not None
+    )
 
 
 def slot_name(task: str, key: str | None) -> str:

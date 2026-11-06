@@ -162,9 +162,10 @@ async def test_thread_id_is_stable_per_run(jobs):
     uuid.UUID(ta)
 
 
-async def test_invoke_graph_not_yet(jobs):
+async def test_invoke_graph_without_a_loaded_graph_says_so(jobs):
+    # The real invoke_graph tests are in test_invoke_graph.py.
     ctx = TaskContext(run_id="r", attempt=1, task="t", queue="q", identity=U1, emit=None)
-    with pytest.raises(NotImplementedError, match="Sprint 3"):
+    with pytest.raises(RuntimeError, match="10xgraph worker"):
         await ctx.invoke_graph({"messages": []})
 
 

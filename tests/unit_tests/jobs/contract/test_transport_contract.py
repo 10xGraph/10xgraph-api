@@ -127,3 +127,21 @@ async def test_unknown_format_is_acked_and_dropped(tut):
     await tut.transport.ack(got)
     await tut.redeliver()
     assert await tut.transport.consume([queue], max_messages=10) == []
+
+
+async def test_consume_after_close_returns_empty(tut):
+    queue = q()
+    await tut.transport.publish(msg(queue))
+    await tut.transport.aclose()
+    assert await tut.transport.consume([queue], max_messages=10, block=0.2) == []
+
+
+async def test_close_during_blocking_consume_returns_empty(tut):
+    queue = q()
+    await tut.transport.consume([queue], max_messages=1)  # connect / create groups
+    waiting = asyncio.create_task(tut.transport.consume([queue], max_messages=10, block=3.0))
+    await asyncio.sleep(0.3)
+    started = time.monotonic()
+    await tut.transport.aclose()
+    assert await asyncio.wait_for(waiting, 2.0) == []
+    assert time.monotonic() - started < 2.0

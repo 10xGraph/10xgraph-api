@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import json
+import sys
 import typing
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any, NotRequired, TypedDict
 
+from injectq import Inject
 from pydantic import ConfigDict, TypeAdapter, ValidationError
 
 from . import registry
@@ -38,6 +41,61 @@ def _is_context(annotation: Any) -> bool:
     if annotation is TaskContext:
         return True
     return any(arg is TaskContext for arg in typing.get_args(annotation))
+
+
+def _is_inject_default(default: Any) -> bool:
+    """An InjectQ ``Inject[...]`` default (a lazy proxy, resolved when used). ``type()`` is
+    used because the proxy's ``__class__`` resolves the dependency."""
+    return type(default) is Inject
+
+
+def _check_importable(fn: Callable[..., Any], where: str) -> None:
+    """A ``process`` task runs in a child that imports it as ``module:qualname``.
+
+    The module attribute is not bound yet while ``@task`` runs (the decorator runs first), so
+    the "same object" check here only catches a name already bound to something else; the
+    process executor resolves ``module:qualname`` again before the first run.
+    """
+    hint = "define it at module level in an importable module"
+    if not inspect.isfunction(fn):
+        raise TaskDefinitionError(
+            f"{where}: executor='process' needs a plain module-level function, got "
+            f"{type(fn).__name__}; {hint}"
+        )
+    qualname = fn.__qualname__
+    if "<" in qualname:  # <lambda>, <locals>
+        raise TaskDefinitionError(
+            f"{where}: executor='process' cannot use {qualname!r} (a lambda or a function "
+            f"defined inside another function): the child imports it by name; {hint}"
+        )
+    if fn.__module__ in (None, "__main__", "__mp_main__"):
+        raise TaskDefinitionError(
+            f"{where}: executor='process' cannot use a function from {fn.__module__!r}: the "
+            f"child cannot import the main script; {hint}"
+        )
+    module = sys.modules.get(fn.__module__)
+    if module is None:
+        try:
+            module = importlib.import_module(fn.__module__)
+        except Exception as exc:
+            raise TaskDefinitionError(
+                f"{where}: executor='process' needs an importable module; importing "
+                f"{fn.__module__!r} failed: {exc}"
+            ) from exc
+    current: Any = module
+    for part in qualname.split("."):
+        current = getattr(current, part, _MISSING)
+        if current is _MISSING:
+            return  # still being defined: checked again by the process executor
+    if current is fn or getattr(current, "fn", None) is fn:
+        return
+    raise TaskDefinitionError(
+        f"{where}: executor='process' needs {fn.__module__}:{qualname} to name this "
+        f"function, but it names {type(current).__name__}; {hint}"
+    )
+
+
+_MISSING = object()
 
 
 class Task:
@@ -114,13 +172,7 @@ class Task:
             raise TaskDefinitionError(f"{where}: priority must be one of {PRIORITIES}")
         if self.executor not in EXECUTORS:
             raise TaskDefinitionError(f"{where}: executor must be one of {EXECUTORS}")
-        if self.executor != "async":
-            raise TaskDefinitionError(
-                f"{where}: executor={self.executor!r} is not available yet (jobs Sprint 3); "
-                "use an async def with executor='async'"
-            )
-        if not inspect.iscoroutinefunction(self.fn):
-            raise TaskDefinitionError(f"{where}: executor='async' needs an `async def` function")
+        self._check_executor(where)
         if not isinstance(self.retries, int) or self.retries < 0:
             raise TaskDefinitionError(f"{where}: retries must be an int >= 0")
         if self.timeout is not None and not self.timeout > 0:
@@ -144,6 +196,23 @@ class Task:
             if hook is not None and not callable(hook):
                 raise TaskDefinitionError(f"{where}: {hook_name} must be callable")
 
+    def _check_executor(self, where: str) -> None:
+        fn = self.fn
+        is_async = inspect.iscoroutinefunction(fn) or inspect.isasyncgenfunction(fn)
+        if self.executor == "async":
+            if not inspect.iscoroutinefunction(fn):
+                raise TaskDefinitionError(
+                    f"{where}: executor='async' needs an `async def` function"
+                )
+            return
+        if is_async:
+            raise TaskDefinitionError(
+                f"{where}: executor={self.executor!r} needs a plain `def` function, not "
+                "`async def` (use executor='async' for async code)"
+            )
+        if self.executor == "process":
+            _check_importable(fn, where)
+
     def _build_adapters(self) -> tuple[TypeAdapter, TypeAdapter, set[str]]:
         where = f"task {self.name!r}"
         signature = inspect.signature(self.fn)
@@ -158,6 +227,13 @@ class Task:
                 annotation = Any
             if _is_context(annotation):
                 self.context_param = param.name
+                continue
+            if _is_inject_default(param.default):  # resolved from the container, not kwargs
+                if self.executor == "process":
+                    raise TaskDefinitionError(
+                        f"{where}: executor='process' cannot use Inject[...] ({param.name}): "
+                        "the child does not load the container; pass plain arguments"
+                    )
                 continue
             if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
                 raise TaskDefinitionError(f"{where}: *args and **kwargs are not supported")

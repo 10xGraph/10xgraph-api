@@ -586,11 +586,25 @@ Lua script, one `BEGIN IMMEDIATE`).
 | `read_events(id, *, after=0, limit=100)` | Event log after a cursor. |
 | `find_expired_leases(*, limit)`, `mark_lost(id, *, attempt)` | Sweeper: CAS an expired lease back to `queued` (`lost_count + 1`, `next_publish_at = now`), to `failed` past `max_lost`, to `cancelled` when cancelling; slot released. |
 | `due_runs(*, limit=100)` | Claimable runs with `next_publish_at <= now` (index `(state, next_publish_at)`). |
-| `mark_published(ids, *, republish_after=300)` | For claimable runs: `published_at = now`, `next_publish_at = now + republish_after`. Each run waits its own interval, so an unclaimed backlog is never republished all at once. |
+| `mark_published(seen, *, republish_after=300)` | CAS after a publish on `(attempt, next_publish_at)`. `seen` are the `TaskRun` records the caller read before publishing (a claim always raises `attempt`). Only a run still `queued`/`retrying` with the same `attempt` and `next_publish_at` gets `published_at = now`, `next_publish_at = now + republish_after`; a run claimed and set to retry, defer or requeue meanwhile keeps its newer time (without the CAS a 1 s retry waited 5 minutes). Each run waits its own interval, so an unclaimed backlog is never republished all at once. |
 | `concurrency_count(task, key=None)`, `recount_concurrency()` | Read a counter; rebuild counters from leased runs. The recount must hold each counter's row lock (Postgres `FOR UPDATE` in one transaction), run inside the claim script (Redis) or be serialised with claims (SQLite, memory), so it never overwrites a concurrent increment. |
 | `purge_expired(*, limit)` | Retention: delete finished runs past `expires_at` and their events; frees the key. |
 
 Rules:
+- Storable values: every store encodes JSON fields with `tenxgraph_api/jobs/serialization.py`
+  and raises `ValueNotStorable(field, reason)` (`jobs/errors.py`) before any write for NaN or
+  Infinity, a string holding `\x00` (at any depth, keys too), or a non-JSON value. Postgres
+  cannot store the first two; memory, SQLite and Redis refuse them too, so the worker sees the
+  same error on every backend and fails the run (`result_not_serializable`) instead of
+  retrying a write that can never succeed.
+- Cancellation: a cancelled store call either finished its write or wrote nothing. SQLite runs
+  `BEGIN IMMEDIATE`, the body and `COMMIT`/`ROLLBACK` as one unit on its own task; a cancelled
+  caller waits for its rollback.
+- Postgres takes at most one counter row lock per transaction (after the run row) and retries
+  a reported deadlock; statements time out after 30 s, pool acquires after 30 s
+  (`pool_config`: `command_timeout`, `acquire_timeout`).
+- Redis clients built by the jobs code never retry commands (Lua scripts are not idempotent);
+  a supplied client that retries gets a WARNING.
 - Fencing: `attempt` is the token. Every worker write matches `run_id`, `attempt`,
   `worker_id` and a leased state; a lease expired by the clock but not yet recovered can still
   be renewed.
@@ -603,7 +617,9 @@ Rules:
 
 `BaseTransport`: `setup()`, `publish(message)`, `publish_many(messages)`,
 `consume(queues, *, max_messages, block=0.0)` (higher priority first, never blocks past
-`block`), `ack(deliveries)`, `aclose()`. Messages carry a format `version` (now 1). A message
+`block`; during or after `aclose` it returns `[]`), `ack(deliveries)`, `aclose()` (Redis:
+cancels in-flight reads and waits for `consume` before XPENDING / DELCONSUMER, so no delivered
+entry is dropped). Messages carry a format `version` (now 1). A message
 with an unknown version or an unreadable body is acked, dropped and logged, never left unacked
 (that would loop through `XAUTOCLAIM`); the run stays in the store and is published again when
 its `next_publish_at` comes. Transports have no delay: delayed, retrying, capped and lost runs
@@ -632,3 +648,44 @@ Worker behaviour (Sprint 1):
 Open items: the step-end flush timing (step ends wait for the next flush, at most one a second)
 and `RetryAfter` versus `timeout` (a deferral is not capped by the task timeout) are left as
 they are for now.
+
+## Executors (Sprint 3)
+
+`tenxgraph_api/jobs/executors/` runs the body of `thread` and `process` tasks; `async` tasks
+stay in the worker loop. The worker keeps claims, leases, flushes and transitions. Interface
+(`base.py`):
+
+- `Executor`: `capacity`, `free_slots` (abandoned threads count as busy), `await astart()`,
+  `await start(ExecutionSpec) -> ExecutionHandle` (waits for a slot; `RuntimeError` after
+  close), `await aclose(grace=30.0)`.
+- `ExecutionSpec(task, stored_kwargs=run.kwargs, ctx, timeout=None, max_result_bytes)`.
+  The executor loads the kwargs (in the child for `process`) and enforces the timeout
+  (`timeout` or `task.timeout`).
+- `ExecutionHandle`: `await result() -> ExecutionResult` (never raises), `request_cancel()`,
+  `kill(reason)`, `done`.
+- `ExecutionResult.kind`: `returned` (`value`; `value_is_json` true for `process`: already
+  dumped and size-checked, store as is), `raised` (`exception`: `Fail` / `RetryAfter` keep their
+  types, other child errors are `ChildTaskError`; `error` has the original type name),
+  `invalid` (kwargs or result validation: fail now), `timeout`, `crashed` (`crashed`,
+  `memory_limit`, `child_import`, `child_start`: retry policy applies), `stopped` (after
+  `kill(reason)`; the worker decides from its own stop reason).
+
+Worker integration: call `start` inside the attempt's asyncio task (contextvars such as the
+task context and InjectQ's container context are copied into the thread); check `free_slots`
+of the task's executor before claiming; map `_stop(attempt, "cancel")` to `request_cancel()` and
+`lost` / `shutdown` / `abort` to `kill(reason)`; keep flushing `attempt.emitter` (thread tasks
+write to it directly, process emit calls are replayed into it on the loop); call `aclose` on
+shutdown after the worker's own grace.
+
+- `thread`: `ThreadExecutor(threads)`. Timeout and kill set `ctx.cancelled` and resolve at once;
+  the thread keeps its slot until it returns and its result is discarded. `Inject[...]`
+  defaults are left out of the kwargs schema and resolve in the thread.
+- `process`: `ProcessExecutor(processes, preload=[task modules], max_tasks_per_child=None,
+  max_memory_per_child=None (MB), start_method=None, cancel_grace=5.0)`. Forkserver with
+  `set_forkserver_preload` (spawn where missing, never fork); one child and pipe per slot; the
+  child imports the task by `module:qualname`. Cancel sets a lock-free shared flag and kills
+  after `cancel_grace`. Timeout, kill and memory over the limit mid-run kill the child; a new
+  child starts on the next run. A child that cannot start fails runs with `child_start` and
+  backs off 1 s doubling to 60 s. `process` tasks cannot take `Inject[...]` parameters
+  (refused at `@task`). The forkserver preload list is process-wide: the first executor that
+  starts the forkserver decides it.

@@ -41,12 +41,16 @@ async def publish_run(
     runtime: JobsRuntime, run: TaskRun, *, republish_after: float = REPUBLISH_AFTER
 ) -> bool:
     """Publish the wake-up for ``run`` and mark it published. A failure is logged and left to
-    the sweeper (the run is already safe in the store)."""
+    the sweeper (the run is already safe in the store).
+
+    ``run`` is the record read before publishing: ``mark_published`` is a CAS on its
+    ``attempt`` and ``next_publish_at``, so a run claimed and set to retry while this publish was in flight
+    keeps its retry time."""
     try:
         await runtime.transport.publish(
             TransportMessage(run_id=run.run_id, queue=run.queue, priority=run.priority)
         )
-        await runtime.store.mark_published([run.run_id], republish_after=republish_after)
+        await runtime.store.mark_published([run], republish_after=republish_after)
     except Exception:
         logger.exception("publish of run %s failed; the sweeper will republish it", run.run_id)
         return False

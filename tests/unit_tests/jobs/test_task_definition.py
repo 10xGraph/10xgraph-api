@@ -115,11 +115,39 @@ def test_bad_options(kwargs, message):
         async def td_bad(a: int) -> None: ...
 
 
-def test_executor_not_yet_available():
-    with pytest.raises(TaskDefinitionError, match="Sprint 3"):
+def test_thread_and_process_executors_need_plain_def():
+    @task(executor="thread")
+    def td_thread() -> None: ...
 
-        @task(executor="thread")
-        def td_thread() -> None: ...
+    assert td_thread.executor == "thread"
+    for executor in ("thread", "process"):
+        with pytest.raises(TaskDefinitionError, match="plain `def`"):
+
+            @task(name=f"td_async_{executor}", executor=executor)
+            async def td_async() -> None: ...
+
+
+def test_process_executor_needs_module_level_function():
+    with pytest.raises(TaskDefinitionError, match="inside another function"):
+
+        @task(executor="process")
+        def td_local() -> None: ...
+
+    with pytest.raises(TaskDefinitionError, match="lambda"):
+        task(lambda: None, name="td_lambda", executor="process")
+
+
+def test_process_executor_rejects_inject():
+    from injectq import Inject
+
+    from tests.unit_tests.jobs import process_tasks
+
+    def td_inject(x: int, svc: str = Inject[str]) -> None: ...
+
+    td_inject.__qualname__ = "td_inject"
+    td_inject.__module__ = process_tasks.__name__
+    with pytest.raises(TaskDefinitionError, match="Inject"):
+        task(td_inject, executor="process")
 
 
 def test_async_executor_needs_coroutine():

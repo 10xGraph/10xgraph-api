@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
 import uuid
 
 import pytest
 
+from tests.unit_tests.jobs.contract.backends import integration_enabled
 from tenxgraph_api.jobs.store.postgres import PostgresRunStore
 
 
@@ -25,16 +25,11 @@ def pg_dsn() -> str:
     return os.environ.get("JOBS_TEST_PG_DSN", DEFAULT_PG_DSN)
 
 
-def integration_enabled() -> bool:
-    args = sys.argv + os.environ.get("PYTEST_ADDOPTS", "").split()
-    return "--integration" in args
-
-
 class _SchemaPostgresStore(PostgresRunStore):
     """Drops its test schema after closing."""
 
     async def aclose(self) -> None:
-        import asyncpg  # noqa: PLC0415
+        import asyncpg
 
         if self._closed:
             return
@@ -48,7 +43,7 @@ class _SchemaPostgresStore(PostgresRunStore):
 
 async def postgres_store():
     # Imported here: conftest imports this module while it is still loading.
-    from tests.unit_tests.jobs.contract.conftest import StoreUnderTest  # noqa: PLC0415
+    from tests.unit_tests.jobs.contract.conftest import StoreUnderTest
 
     if not integration_enabled():
         pytest.skip("postgres store needs --integration")

@@ -24,6 +24,9 @@ Rules every implementation follows (``tests/unit_tests/jobs/contract`` checks th
   ``next_publish_at`` makes the sweeper publish it again later, in a format every pod reads.
 - ``consume`` blocks at most ``block`` seconds (0 = do not wait) and returns at most
   ``max_messages``; it never blocks forever.
+- ``consume`` called after ``aclose``, or still waiting when ``aclose`` runs, returns ``[]``
+  (it never raises because the transport closed). ``aclose`` never loses a delivered entry:
+  one handed out by a read that ``aclose`` cut off stays pending for redelivery.
 """
 
 from __future__ import annotations

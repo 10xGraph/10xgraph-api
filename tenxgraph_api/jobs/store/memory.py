@@ -12,6 +12,7 @@ import json
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 
+from tenxgraph_api.jobs import serialization
 from tenxgraph_api.jobs.clock import SystemClock
 from tenxgraph_api.jobs.models import (
     CAP_WAIT_BASE,
@@ -40,7 +41,7 @@ from tenxgraph_api.jobs.models import (
     TaskRun,
 )
 
-from .base import BaseRunStore, slot_name
+from .base import BaseRunStore, published_marks, slot_name
 
 
 MAX_PAGE = 1000
@@ -110,6 +111,7 @@ class MemoryRunStore(BaseRunStore):
     # ------------------------------------------------------------------ create and read
 
     async def create_run(self, new: NewRun, *, key_mode: KeyMode = "keep") -> CreateResult:
+        serialization.check_new_run(new)
         now = self._now()
         key = self._key_of(new)
         if key is not None and key in self._keys:
@@ -280,6 +282,7 @@ class MemoryRunStore(BaseRunStore):
         events: Sequence[EventIn],
         progress: dict | None = None,
     ) -> bool:
+        serialization.check_events(events, progress)
         run = self._fenced(run_id, attempt, worker_id)
         if run is None:
             return False
@@ -306,6 +309,7 @@ class MemoryRunStore(BaseRunStore):
         worker_id: str,
         outcome: AttemptOutcome,
     ) -> TaskRun | None:
+        serialization.check_outcome(outcome)
         run = self._fenced(run_id, attempt, worker_id)
         if run is None:
             return None
@@ -433,12 +437,17 @@ class MemoryRunStore(BaseRunStore):
         return [r.model_copy(deep=True) for r in rows[: max(1, limit)]]
 
     async def mark_published(
-        self, run_ids: Sequence[str], *, republish_after: float = REPUBLISH_AFTER
+        self, seen: Sequence[TaskRun], *, republish_after: float = REPUBLISH_AFTER
     ) -> None:
         now = self._now()
-        for run_id in run_ids:
+        for run_id, attempt, expected in published_marks(seen):
             run = self._runs.get(run_id)
-            if run is not None and run.state in CLAIMABLE_STATES:
+            if (
+                run is not None
+                and run.state in CLAIMABLE_STATES
+                and run.attempt == attempt
+                and run.next_publish_at == expected
+            ):
                 run.published_at = now
                 run.next_publish_at = now + max(0.0, republish_after)
 

@@ -82,6 +82,13 @@ for _name in ("postgres", "redis", "sqlite"):
     TRANSPORT_FACTORIES.update(getattr(_mod, "TRANSPORT_FACTORIES", {}))
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Hand ``--integration`` (``tests/conftest.py``) to the backends, which skip without it."""
+    from tests.unit_tests.jobs.contract import backends
+
+    backends.INTEGRATION = bool(config.getoption("--integration", default=False))
+
+
 async def _build(factory: Callable[[], Any]) -> Any:
     made = factory()
     if inspect.isawaitable(made):

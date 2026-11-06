@@ -30,16 +30,16 @@ from tenxgraph_api.jobs.models import (
 
 pytest.importorskip("aiosqlite")
 
-from tenxgraph_api.jobs.store import sqlite as sqlite_store  # noqa: E402
-from tenxgraph_api.jobs.store.sqlite import (  # noqa: E402
+from tenxgraph_api.jobs.store import sqlite as sqlite_store
+from tenxgraph_api.jobs.store.sqlite import (
     SqliteRunStore,
     SqliteSchemaError,
     SqliteVersionError,
     check_sqlite_version,
     clock_sql,
 )
-from tenxgraph_api.jobs.transport.base import TransportMessage  # noqa: E402
-from tenxgraph_api.jobs.transport.sqlite import SqliteTransport  # noqa: E402
+from tenxgraph_api.jobs.transport.base import TransportMessage
+from tenxgraph_api.jobs.transport.sqlite import SqliteTransport
 
 
 pytestmark = pytest.mark.asyncio
@@ -64,7 +64,7 @@ def new_run(task: str = "plain-task", **over) -> NewRun:
 
 def run_python(code: str, *args: str, timeout: float = 120.0) -> subprocess.CompletedProcess:
     env = {**os.environ, "PYTHONPATH": str(ROOT)}
-    return subprocess.run(  # noqa: S603 - our own interpreter and script
+    return subprocess.run(  # - our own interpreter and script
         [sys.executable, "-c", textwrap.dedent(code), *args],
         capture_output=True,
         text=True,
@@ -78,13 +78,17 @@ def run_python(code: str, *args: str, timeout: float = 120.0) -> subprocess.Comp
 # ---------------------------------------------------------------------- several processes
 
 CLAIM_NEXT_WORKER = """
-import asyncio, json, sys
+import asyncio, json, os, sys
 from tenxgraph_api.jobs.models import AttemptOutcome
 from tenxgraph_api.jobs.store.sqlite import SqliteRunStore
 
 async def main(path, name):
     store = SqliteRunStore(path)
     await store.setup()
+    # Start together: report ready, wait for the parent's go file.
+    open(f"{path}.ready-{name}", "w").close()
+    while not os.path.exists(f"{path}.go"):
+        await asyncio.sleep(0.01)
     claimed = []
     idle = 0
     while idle < 3:
@@ -97,6 +101,7 @@ async def main(path, name):
             continue
         idle = 0
         claimed.append(run.run_id)
+        await asyncio.sleep(0.002)  # a little work, so the processes interleave
         done = await store.transition(
             run.run_id, attempt=run.attempt, worker_id=name,
             outcome=AttemptOutcome(kind="succeeded", result={"by": name}),
@@ -150,12 +155,22 @@ async def test_processes_claim_next_no_double_claims(tmp_path, procs):
         task = CAPPED if i % 5 == 0 else "plain-task"
         ids.add((await store.create_run(new_run(task, concurrency_key="k"))).run.run_id)
 
-    claimed = await _run_procs(CLAIM_NEXT_WORKER, [[str(path), f"w{i}"] for i in range(procs)])
+    async def go() -> None:
+        deadline = time.monotonic() + 60
+        while len(list(tmp_path.glob("jobs.db.ready-*"))) < procs:
+            assert time.monotonic() < deadline, "workers did not start"
+            await asyncio.sleep(0.02)
+        (tmp_path / "jobs.db.go").touch()
+
+    claimed, _ = await asyncio.gather(
+        _run_procs(CLAIM_NEXT_WORKER, [[str(path), f"w{i}"] for i in range(procs)]), go()
+    )
 
     every = [run_id for batch in claimed for run_id in batch]
     dupes = [run_id for run_id, n in Counter(every).items() if n > 1]
     assert dupes == []
     assert set(every) == ids
+    assert all(batch for batch in claimed), [len(b) for b in claimed]  # every process won some
     for run_id in ids:
         run = await store.get_run(run_id)
         assert run.state == RunState.SUCCEEDED
@@ -278,7 +293,7 @@ async def test_kill_9_mid_transaction_leaves_db_consistent(tmp_path):
     other = (await store.create_run(new_run())).run
 
     env = {**os.environ, "PYTHONPATH": str(ROOT)}
-    child = subprocess.Popen(  # noqa: S603 - our own interpreter and script
+    child = subprocess.Popen(  # - our own interpreter and script
         [sys.executable, "-c", textwrap.dedent(KILLED_WRITER), str(path), run.run_id],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -318,7 +333,7 @@ async def test_kill_9_mid_transaction_leaves_db_consistent(tmp_path):
 # ---------------------------------------------------------------------- version, clock, schema
 
 
-def test_version_check_message():
+async def test_version_check_message():
     with pytest.raises(SqliteVersionError) as info:
         check_sqlite_version("3.34.1")
     text = str(info.value)
@@ -326,7 +341,7 @@ def test_version_check_message():
     assert check_sqlite_version("3.35.0") == (3, 35, 0)
 
 
-def test_store_refuses_old_sqlite(monkeypatch, tmp_path):
+async def test_store_refuses_old_sqlite(monkeypatch, tmp_path):
     monkeypatch.setattr(sqlite_store.sqlite3, "sqlite_version", "3.31.1")
     with pytest.raises(SqliteVersionError, match="3.31.1"):
         SqliteRunStore(tmp_path / "jobs.db")
@@ -334,7 +349,7 @@ def test_store_refuses_old_sqlite(monkeypatch, tmp_path):
         SqliteTransport(tmp_path / "jobs.db")
 
 
-def test_clock_expression_by_version():
+async def test_clock_expression_by_version():
     assert clock_sql("3.42.0") == "unixepoch('subsec')"
     assert "julianday" in clock_sql("3.41.2")
 
@@ -428,3 +443,60 @@ async def test_store_and_transport_share_one_file(tmp_path):
     assert set(rows) == {"store", "transport"}
     await transport.aclose()
     await store.aclose()
+
+
+# ---------------------------------------------------------------------- cancellation (H3)
+
+
+async def test_cancel_while_begin_waits_leaves_no_write_lock(tmp_path):
+    """A writer cancelled while BEGIN IMMEDIATE waits in the busy handler must not take the
+    write lock later and keep it: another store writes within its busy_timeout."""
+    path = tmp_path / "jobs.db"
+    other = SqliteRunStore(path, busy_timeout_ms=2000, lock_retries=0)
+    cancelled = SqliteRunStore(path, busy_timeout_ms=2000, lock_retries=0)
+    await other.setup()
+    await cancelled.setup()
+    _hold_write_lock(path, 0.6)
+    lost = new_run()
+    writer = asyncio.create_task(cancelled.create_run(lost))
+    await asyncio.sleep(0.2)  # waiting inside BEGIN IMMEDIATE
+    writer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await writer
+    assert not cancelled._conn.in_transaction
+    res = await asyncio.wait_for(other.create_run(new_run()), 1.5)
+    assert res.created
+    assert await other.get_run(lost.run_id) is None  # the cancelled write rolled back
+    assert (await cancelled.create_run(new_run())).created  # and its store still works
+    await cancelled.aclose()
+    await other.aclose()
+
+
+async def test_transport_cancel_while_begin_waits_leaves_no_write_lock(tmp_path):
+    path = tmp_path / "jobs.db"
+    store = SqliteRunStore(path, busy_timeout_ms=2000, lock_retries=0)
+    transport = SqliteTransport(path, busy_timeout_ms=2000, lock_retries=0)
+    await store.setup()
+    await transport.setup()
+    _hold_write_lock(path, 0.6)
+    publisher = asyncio.create_task(transport.publish(TransportMessage(run_id="x", queue=QUEUE)))
+    await asyncio.sleep(0.2)
+    publisher.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await publisher
+    assert (await asyncio.wait_for(store.create_run(new_run()), 1.5)).created
+    await transport.aclose()
+    await store.aclose()
+
+
+async def test_idle_poll_does_not_take_the_write_lock(tmp_path):
+    """L4: with nothing visible, consume peeks with a read and never waits for the writer."""
+    path = tmp_path / "jobs.db"
+    transport = SqliteTransport(path, busy_timeout_ms=3000, lock_retries=0)
+    await transport.setup()
+    _hold_write_lock(path, 1.0)
+    start = time.monotonic()
+    assert await transport.consume([QUEUE], max_messages=5, block=0.0) == []
+    assert time.monotonic() - start < 0.5
+    await asyncio.sleep(1.1)
+    await transport.aclose()
