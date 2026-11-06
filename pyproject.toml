@@ -94,7 +94,7 @@ snowflakekit = [
     "snowflakekit>=0.1.1,<1.0",
 ]
 redis = [
-    "redis>=5.0.7,<7",
+    "redis>=5.0.7",
 ]
 jwt = [
     "PyJWT>=2.15.0,<3",
@@ -123,6 +123,14 @@ ag-ui = [
 # WebSocket library to serve them; set "websocket": {"enabled": false} to run without one.
 websocket = [
     "websockets>=13.0,<17",
+]
+# Background jobs (`worker` section). `jobs`: the SQLite `local` backend (run store and
+# polling transport in `.10xgraph/jobs.db`). `jobs-postgres`: the Postgres run store.
+jobs = [
+    "aiosqlite>=0.19.0",
+]
+jobs-postgres = [
+    "asyncpg>=0.29.0",
 ]
 
 [project.scripts]
@@ -389,6 +397,9 @@ dev = [
     "httpx==0.27.0",
     "requests==2.32.3",
     "redis>=5.0.7",
+    # The jobs and jobs-postgres extras, so the SQLite and Postgres jobs backends are tested.
+    "aiosqlite>=0.19.0",
+    "asyncpg>=0.29.0",
     "PyJWT",
     "textxtract[pdf,docx,html,xml,md]>=0.2.0",
     # The ag-ui extra, so the AG-UI router tests run in CI instead of failing.

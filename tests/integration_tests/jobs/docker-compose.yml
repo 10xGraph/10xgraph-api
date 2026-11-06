@@ -1,0 +1,42 @@
+# Throwaway services for the jobs integration tests. Host ports are high on purpose so
+# nothing here can collide with (or touch) a developer's own Redis/Postgres on defaults.
+name: tenxgraph-jobs-test
+
+services:
+  jobs-redis:
+    image: redis:8-alpine
+    ports: ["16379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  jobs-redis7:
+    image: redis:7-alpine
+    ports: ["16380:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  jobs-pg:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: jobs_test_pw
+    ports: ["15432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  jobs-rabbit:
+    image: rabbitmq:4
+    ports: ["15673:5672"]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
