@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from tenxgraph_api.src.app.core.auth import revocation
-from tenxgraph_api.src.app.core.auth.ownership_resolver import ThreadOwnershipResolver
 from tenxgraph_api.src.app.core.cache_store import redis_store
 from tenxgraph_api.src.app.core.cache_store.redis_store import RedisCacheStore
 from tenxgraph_api.src.app.core.config import settings as settings_module
@@ -56,14 +55,6 @@ def test_keys_match_the_layout_used_before_the_cache_store(request, prefix):
             store.redis_key(f"concurrency:{lease}") == f"{prefixed('10xgraph:concurrency')}:{lease}"
         )
 
-    # The ownership resolver used f"{prefixed('af:authz:owner')}:id:<thread>" and ":tomb:".
-    thread = "th:1"
-    owner_ns = prefixed("af:authz:owner")
-    owner_key = ThreadOwnershipResolver._owner_key(thread)
-    assert store.redis_key(owner_key) == f"{owner_ns}:id:{key_part(thread)}"
-    tomb_key = ThreadOwnershipResolver._tombstone_key(thread)
-    assert store.redis_key(tomb_key) == f"{owner_ns}:tomb:{key_part(thread)}"
-
     # Token revocation used f"{prefixed('10xgraph:revoked')}:jti:<jti>" and ":user:".
     revoked_ns = prefixed("10xgraph:revoked")
     assert store.redis_key(revocation.jti_key("j:1")) == f"{revoked_ns}:jti:{key_part('j:1')}"
@@ -80,7 +71,7 @@ def test_keys_match_the_layout_used_before_the_cache_store(request, prefix):
 
 def test_explicit_prefix_overrides_the_setting(deploy_prefix):
     assert _store(prefix="").redis_key("concurrency:a") == "10xgraph:concurrency:a"
-    assert _store(prefix="p").redis_key("owner:id:a") == "p:af:authz:owner:id:a"
+    assert _store(prefix="p").redis_key("owner:id:a") == "p:10xgraph:cache:owner:id:a"
 
 
 def test_unknown_and_bare_keys_cannot_collide_with_feature_keys():
@@ -262,7 +253,7 @@ async def test_get_returns_bytes_from_a_decoding_client():
 async def test_delete_is_del():
     client = _client()
     await _store(client, prefix="").delete("owner:id:t")
-    client.delete.assert_awaited_once_with("af:authz:owner:id:t")
+    client.delete.assert_awaited_once_with("10xgraph:cache:owner:id:t")
 
 
 def test_scripts_touch_one_key_and_use_the_server_clock():

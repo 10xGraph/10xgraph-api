@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import pytest
+from tenxgraph.core.authz import Identity
 from tenxgraph.storage.checkpointer import InMemoryCheckpointer
+from tenxgraph.utils.thread_info import ThreadInfo
 
 from tenxgraph_api.src.app.core.auth.rbac import RbacConfig
 from tenxgraph_api.src.app.routers.checkpointer.router import router as checkpointer_router
@@ -39,7 +41,11 @@ def _headers(user_id: str, scopes: str | None = None) -> dict[str, str]:
 
 
 def _client(auth: HeaderAuth | None = None):
-    app = build_app(routers=[checkpointer_router], auth=auth, checkpointer=InMemoryCheckpointer())
+    # alice owns t1, so an allowed call reaches the thread instead of a 404.
+    checkpointer = InMemoryCheckpointer()
+    owner = {"thread_id": "t1", "user_id": "alice", "user": Identity(user_id="alice")}
+    checkpointer.put_thread(owner, ThreadInfo(thread_id="t1"))
+    app = build_app(routers=[checkpointer_router], auth=auth, checkpointer=checkpointer)
     return make_client(app)
 
 
@@ -106,7 +112,7 @@ def test_rbac_roles_decide_permissions_end_to_end():
     denied = client.request("DELETE", "/v1/threads/t1", json={}, headers=roled("alice", "viewer"))
     assert denied.status_code == HTTP_FORBIDDEN
     assert "threads:delete" in denied.text
-    allowed = client.request("DELETE", "/v1/threads/t2", json={}, headers=roled("bob", "admin"))
+    allowed = client.request("DELETE", "/v1/threads/t1", json={}, headers=roled("alice", "admin"))
     assert allowed.status_code == HTTP_OK
 
 

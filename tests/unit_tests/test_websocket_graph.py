@@ -46,6 +46,7 @@ def _make_service(stream_chunks_per_call: list[list[str]]) -> MagicMock:
     Call count is tracked via service._stream_calls.
     """
     service = MagicMock()
+    service.require_run_thread = AsyncMock()  # the caller's own thread
     service.is_live_agent = False  # turn-based graph: allowed on /v1/graph/ws
     calls: list = []
 

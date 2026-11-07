@@ -82,9 +82,30 @@ def _client_options(options: dict[str, Any] | None) -> dict[str, Any]:
     return {k: v for k, v in (options or {}).items() if k in CLIENT_OPTION_KEYS}
 
 
+def _memory_not_found() -> HTTPException:
+    # One answer for a missing memory and one outside the caller's reach.
+    return HTTPException(status_code=404, detail="Memory not found")
+
+
+def _is_not_found(exc: Exception) -> bool:
+    """Whether a store error means "no such memory in your reach".
+
+    ``PgVectorStore`` and ``QdrantStore`` raise ``ValueError("Memory <id> not found")`` for a
+    missing or foreign memory, and Qdrant ``PermissionError`` for another user's.
+    """
+    return isinstance(exc, PermissionError) or (
+        isinstance(exc, ValueError) and str(exc).endswith("not found")
+    )
+
+
 @singleton
 class StoreService:
-    """Service layer wrapping interactions with the configured BaseStore."""
+    """Service layer wrapping interactions with the configured BaseStore.
+
+    The store scopes every call by the identity in ``config["user"]``: reads, searches, lists
+    and deletes follow its reach, writes stay the caller's own. A memory id outside that scope
+    answers 404, the same as a missing one.
+    """
 
     @inject
     def __init__(self, store: BaseStore | None):
@@ -166,6 +187,8 @@ class StoreService:
         store = self._get_store()
         cfg = self._config(config, identity)
         result = await store.aget(cfg, memory_id, **_client_options(options))
+        if result is None:
+            raise _memory_not_found()
         return MemoryItemResponseSchema(memory=result)
 
     async def list_memories(
@@ -208,13 +231,18 @@ class StoreService:
         cfg = self._config(payload.config, identity)
         options = _client_options(payload.options)
 
-        result = await store.aupdate(
-            cfg,
-            memory_id,
-            payload.content,
-            metadata=_client_metadata(payload.metadata),
-            **options,
-        )
+        try:
+            result = await store.aupdate(
+                cfg,
+                memory_id,
+                payload.content,
+                metadata=_client_metadata(payload.metadata),
+                **options,
+            )
+        except (ValueError, PermissionError) as exc:
+            if _is_not_found(exc):
+                raise _memory_not_found() from exc
+            raise
         return MemoryOperationResponseSchema(success=True, data=result)
 
     async def delete_memory(
@@ -226,7 +254,17 @@ class StoreService:
     ) -> MemoryOperationResponseSchema:
         store = self._get_store()
         cfg = self._config(config, identity)
-        result = await store.adelete(cfg, memory_id, **_client_options(options))
+        options = _client_options(options)
+        # Read first under the same scope: a store that deletes silently would otherwise
+        # answer 200 for a memory the caller cannot see.
+        if await store.aget(cfg, memory_id, **options) is None:
+            raise _memory_not_found()
+        try:
+            result = await store.adelete(cfg, memory_id, **options)
+        except (ValueError, PermissionError) as exc:
+            if _is_not_found(exc):
+                raise _memory_not_found() from exc
+            raise
         return MemoryOperationResponseSchema(success=True, data=result)
 
     async def forget_memory(

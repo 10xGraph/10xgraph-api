@@ -23,6 +23,7 @@ from tenxgraph.core.state.message_block import (
     ToolCallBlock,
     ToolResultBlock,
 )
+from tenxgraph.utils.thread_info import ThreadInfo
 
 from tenxgraph_api.src.app.core.validation.request_config import client_tool_call_error
 from tenxgraph_api.src.app.routers.checkpointer.services.checkpointer_service import (
@@ -180,7 +181,7 @@ def checkpointer_service():
     service.checkpointer.aget_state_cache = AsyncMock(return_value=None)
     service.checkpointer.aput_state = AsyncMock(side_effect=lambda cfg, state: state)
     service.checkpointer.aput_state_cache = AsyncMock()
-    service.checkpointer.aget_thread_owner = AsyncMock(return_value="alice")
+    service.checkpointer.aget_thread = AsyncMock(return_value=ThreadInfo(thread_id="t1"))
     service.settings = MagicMock()
     return service
 

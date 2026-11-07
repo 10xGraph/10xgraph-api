@@ -11,9 +11,8 @@ public. Results are cached for ``CACHE_SECONDS`` with one check in flight at a t
 of probe requests cannot turn into a flood of database and cache round trips.
 
 The cache store is the one dependency the server survives losing: the run lock, run cap,
-WebSocket caps and idempotency fall back to this process, the ownership cache falls back to
-the database, and the rate limiter allows by default. A cache store outage therefore must not
-take every pod out of rotation. Its result is still reported, but only counts against
+WebSocket caps and idempotency fall back to this process, and the rate limiter allows by
+default. A cache store outage therefore must not take every pod out of rotation. Its result is still reported, but only counts against
 readiness when a configured feature fails closed without it (see :func:`cache_required`).
 While the app is shutting down readiness answers 503 (``draining``) so the load balancer stops
 sending new requests.

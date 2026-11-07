@@ -39,25 +39,14 @@ from .conftest import build_app, make_client, user_headers
 _EVENT = TypeAdapter(Event)
 
 
-class OwnershipAuth(BaseAuth):
-    """The caller is the ``X-Test-User`` header; a thread with an owner is its owner's only."""
-
-    def __init__(self) -> None:
-        self.owners: dict[str, str] = {}
-
-    def own(self, thread_id: str, user_id: str) -> None:
-        self.owners[thread_id] = user_id
+class HeaderUserAuth(BaseAuth):
+    """The caller is the ``X-Test-User`` header. Thread ownership is the checkpointer's."""
 
     def authenticate(self, request: Request, response: Response | None, credential: Any):
         user_id = request.headers.get("X-Test-User")
         if not user_id:
             raise HTTPException(status_code=401, detail="X-Test-User header required")
         return {"user_id": user_id}
-
-    async def authorize(
-        self, identity: Identity, permission: str, resource: str | None = None
-    ) -> bool:
-        return self.owners.get(str(resource), identity.user_id) == identity.user_id
 
 
 class ColorState(AgentState):
@@ -151,14 +140,16 @@ def _graph(checkpointer: BaseCheckpointer) -> CompiledGraph:
 
 
 class _Config:
-    """GraphConfig stand-in: the AG-UI and runs settings."""
+    """GraphConfig stand-in: the AG-UI and runs settings.
+
+    Runs default to ``thread_ids: "client"``: these tests name their own new thread ids.
+    """
 
     def __init__(self, allow_client_tools: bool = True, runs: Any = None) -> None:
-        from tenxgraph_api.src.app.core.config.graph_config import AgUiConfig
+        from tenxgraph_api.src.app.core.config.graph_config import AgUiConfig, RunsConfig
 
         self.ag_ui = AgUiConfig(enabled=True, allow_client_tools=allow_client_tools)
-        if runs is not None:
-            self.runs = runs
+        self.runs = runs if runs is not None else RunsConfig(thread_ids="client")
 
 
 @pytest.fixture(scope="module")
@@ -175,7 +166,7 @@ def graph_and_checkpointer():
 
 def _client(graph_and_checkpointer, config: _Config):
     graph, checkpointer = graph_and_checkpointer
-    auth = OwnershipAuth()
+    auth = HeaderUserAuth()
     app = build_app(
         routers=[ag_ui_router],
         auth=auth,
@@ -294,15 +285,28 @@ def test_resending_a_known_message_does_not_rerun_the_graph(setup):
     assert _types(again)[-1] == EventType.RUN_FINISHED
 
 
-def test_other_users_thread_is_forbidden(setup):
-    client, _, auth = setup
-    auth.own("thread-A", "alice")
-    response = client.post(
-        "/v1/ag-ui",
-        json=_body("thread-A", [{"id": "u1", "role": "user", "content": "hi"}]),
-        headers=user_headers("mallory"),
+def test_other_users_thread_is_not_found(setup):
+    client, _, _ = setup
+    body = _body("thread-A", [{"id": "u1", "role": "user", "content": "weather?"}])
+    _events(client.post("/v1/ag-ui", json=body, headers=user_headers("alice")))
+    response = client.post("/v1/ag-ui", json=body, headers=user_headers("mallory"))
+    # Before the response starts: a real 404 that does not tell the thread exists.
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "THREAD_NOT_FOUND"
+
+
+def test_server_thread_ids_refuse_an_unknown_id_and_accept_new(graph_and_checkpointer):
+    from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+
+    client, _, _ = _client(graph_and_checkpointer, _Config(runs=RunsConfig()))
+    body = _body("never-made", [{"id": "u1", "role": "user", "content": "weather?"}])
+    response = client.post("/v1/ag-ui", json=body, headers=user_headers("alice"))
+    assert response.status_code == 404
+    new = _events(
+        client.post("/v1/ag-ui", json={**body, "threadId": "new"}, headers=user_headers("alice"))
     )
-    assert response.status_code == 403
+    assert new[0].thread_id not in ("new", "never-made")
+    assert _types(new)[-1] == EventType.RUN_FINISHED
 
 
 def test_unauthenticated_request_is_rejected(setup):
@@ -583,7 +587,7 @@ def test_runs_config_keys_does_not_block_ag_ui(graph_and_checkpointer):
     """B28: the server's own ``remote_tools`` key is not subject to the client allow-list."""
     from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
 
-    runs = RunsConfig(config_keys=frozenset({"thread_id"}))
+    runs = RunsConfig(thread_ids="client", config_keys=frozenset({"thread_id"}))
     client, _, _ = _client(graph_and_checkpointer, _Config(runs=runs))
     events = _events(
         client.post(

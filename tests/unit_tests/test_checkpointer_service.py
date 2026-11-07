@@ -4,9 +4,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from tenxgraph.core.authz import Identity
+from tenxgraph.core.exceptions import ThreadNotFoundError
 from tenxgraph.core.state import AgentState, Message
 from tenxgraph.storage.checkpointer import BaseCheckpointer
+from tenxgraph.utils.thread_info import ThreadInfo
 
+from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
 from tenxgraph_api.src.app.routers.checkpointer.schemas.checkpointer_schemas import (
     MessagesListResponseSchema,
     ResponseSchema,
@@ -38,7 +41,10 @@ class TestCheckpointerService:
         checkpointer.aget_message = AsyncMock()
         checkpointer.alist_messages = AsyncMock()
         checkpointer.adelete_message = AsyncMock()
-        checkpointer.aget_thread = AsyncMock()
+        # The scoped thread read every thread route starts with finds the caller's thread.
+        checkpointer.aget_thread = AsyncMock(
+            return_value=ThreadInfo(thread_id="t1", user_id=ALICE.user_id)
+        )
         checkpointer.alist_threads = AsyncMock()
         checkpointer.aclean_thread = AsyncMock()
         return checkpointer
@@ -95,7 +101,7 @@ class TestCheckpointerService:
         ) as mock_parse:
             mock_parse.return_value = {"test": "data"}
 
-            result = await checkpointer_service.get_state({}, ALICE)
+            result = await checkpointer_service.get_state({"thread_id": "t1"}, ALICE)
 
             assert isinstance(result, StateResponseSchema)
             assert result.state == {"test": "data"}
@@ -107,7 +113,7 @@ class TestCheckpointerService:
         mock_checkpointer.aget_state.return_value = None
         mock_checkpointer.aget_state_cache.return_value = {"cached": "data"}
 
-        result = await checkpointer_service.get_state({}, ALICE)
+        result = await checkpointer_service.get_state({"thread_id": "t1"}, ALICE)
 
         assert isinstance(result, StateResponseSchema)
         assert result.state == {"cached": "data"}
@@ -118,7 +124,7 @@ class TestCheckpointerService:
         """Test clear_state returns success response."""
         mock_checkpointer.aclear_state.return_value = True
 
-        result = await checkpointer_service.clear_state({}, ALICE)
+        result = await checkpointer_service.clear_state({"thread_id": "t1"}, ALICE)
 
         assert isinstance(result, ResponseSchema)
         assert result.success is True
@@ -132,7 +138,7 @@ class TestCheckpointerService:
         mock_checkpointer.alist_messages.return_value = mock_messages
 
         result = await checkpointer_service.get_messages(
-            {}, ALICE, search="test", offset=0, limit=10
+            {"thread_id": "t1"}, ALICE, search="test", offset=0, limit=10
         )
 
         assert isinstance(result, MessagesListResponseSchema)
@@ -151,7 +157,7 @@ class TestCheckpointerService:
         mock_thread.model_dump.return_value = {"thread_id": "123", "data": "test"}
         mock_checkpointer.aget_thread.return_value = mock_thread
 
-        result = await checkpointer_service.get_thread({}, ALICE)
+        result = await checkpointer_service.get_thread({"thread_id": "t1"}, ALICE)
 
         assert isinstance(result, ThreadResponseSchema)
         assert result.thread == {"thread_id": "123", "data": "test"}
@@ -173,7 +179,7 @@ class TestCheckpointerService:
     @pytest.mark.asyncio
     async def test_delete_thread_success(self, checkpointer_service, mock_checkpointer):
         """Test delete_thread returns success response."""
-        mock_checkpointer.aclean_thread.return_value = True
+        mock_checkpointer.aclean_thread.return_value = 1
 
         result = await checkpointer_service.delete_thread({}, ALICE, "thread_123")
 
@@ -227,58 +233,78 @@ class TestCheckpointerService:
 
 
 # ---------------------------------------------------------------------------
-# Thread claiming on writes
+# The scoped thread read and new client-named threads
 # ---------------------------------------------------------------------------
 
 
-class TestClaimThread:
+class TestRequireThread:
     @staticmethod
-    def _service(owner=None, owner_error=None):
-        from unittest.mock import AsyncMock, MagicMock
-
-        from tenxgraph_api.src.app.routers.checkpointer.services.checkpointer_service import (
-            CheckpointerService,
-        )
-
+    def _service(thread=None, thread_ids="server"):
         service = CheckpointerService.__new__(CheckpointerService)
         service.checkpointer = MagicMock()
-        service.checkpointer.aget_thread_owner = AsyncMock(
-            return_value=owner, side_effect=owner_error
-        )
+        service.checkpointer.aget_thread = AsyncMock(return_value=thread)
+        service.checkpointer.aget_thread_owner = AsyncMock(return_value=None)  # a free id
         service.checkpointer.aput_thread = AsyncMock(return_value=True)
+        service._runs = lambda: RunsConfig(thread_ids=thread_ids)
         return service
 
     @pytest.mark.asyncio
-    async def test_unowned_thread_is_registered_to_the_caller(self):
-        service = self._service(owner=None)
+    async def test_unknown_thread_is_404_for_reads_in_any_mode(self):
+        for mode in ("server", "client"):
+            with pytest.raises(ThreadNotFoundError):
+                await self._service(thread_ids=mode)._require(ALICE, "t1")
+
+    @pytest.mark.asyncio
+    async def test_unknown_thread_write_is_404_under_server_ids(self):
+        with pytest.raises(ThreadNotFoundError):
+            await self._service()._require(ALICE, "t1", write=True)
+
+    @pytest.mark.asyncio
+    async def test_unknown_thread_write_is_new_under_client_ids(self):
+        assert await self._service(thread_ids="client")._require(ALICE, "t1", write=True) is None
+
+    @pytest.mark.asyncio
+    async def test_write_reads_with_reach_own(self):
+        from tenxgraph.core.authz import Reach
+
+        thread = ThreadInfo(thread_id="t1", user_id="123")
+        service = self._service(thread=thread)
+        admin = Identity(user_id="123", reach=Reach.ALL)
+        assert await service._require(admin, "t1", write=True) is thread
+        cfg = service.checkpointer.aget_thread.await_args.args[0]
+        assert cfg["user"].reach is Reach.OWN
+
+    @pytest.mark.asyncio
+    async def test_new_thread_is_registered_to_the_caller_before_the_write(self):
+        service = self._service(thread_ids="client")
+        service.settings = MagicMock()
+        service.checkpointer.aget_state = AsyncMock(return_value=None)
+        service.checkpointer.aget_state_cache = AsyncMock(return_value=None)
+        service.checkpointer.aput_state = AsyncMock(side_effect=lambda cfg, state: state)
+        service.checkpointer.aput_state_cache = AsyncMock()
         cfg = {"thread_id": "t1", "user_id": "alice"}
-        await service._claim_thread(cfg, Identity(user_id="alice"))
+        with patch(
+            "tenxgraph_api.src.app.routers.checkpointer.services.checkpointer_service.parse_state_output",
+            return_value={},
+        ):
+            await service.put_state(cfg, Identity(user_id="alice"), {})
         args = service.checkpointer.aput_thread.await_args.args
-        assert args[0] is cfg
         assert args[1].thread_id == "t1"
         assert args[1].user_id == "alice"
 
     @pytest.mark.asyncio
-    async def test_owned_thread_is_left_alone(self):
-        service = self._service(owner="alice")
-        await service._claim_thread(
-            {"thread_id": "t1", "user_id": "alice"}, Identity(user_id="alice")
-        )
-        service.checkpointer.aput_thread.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_no_identity_skips_the_claim(self):
-        service = self._service(owner=None)
-        await service._claim_thread({"thread_id": "t1"}, None)
-        service.checkpointer.aget_thread_owner.assert_not_awaited()
-        service.checkpointer.aput_thread.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_checkpointer_without_owner_lookup_skips_the_claim(self):
-        service = self._service(owner_error=NotImplementedError)
-        await service._claim_thread(
-            {"thread_id": "t1", "user_id": "alice"}, Identity(user_id="alice")
-        )
+    async def test_existing_thread_is_not_registered_again(self):
+        service = self._service(thread=ThreadInfo(thread_id="t1", user_id="alice"))
+        service.settings = MagicMock()
+        service.checkpointer.aget_state = AsyncMock(return_value=None)
+        service.checkpointer.aget_state_cache = AsyncMock(return_value=None)
+        service.checkpointer.aput_state = AsyncMock(side_effect=lambda cfg, state: state)
+        service.checkpointer.aput_state_cache = AsyncMock()
+        with patch(
+            "tenxgraph_api.src.app.routers.checkpointer.services.checkpointer_service.parse_state_output",
+            return_value={},
+        ):
+            await service.put_state({"thread_id": "t1"}, Identity(user_id="alice"), {})
         service.checkpointer.aput_thread.assert_not_awaited()
 
 

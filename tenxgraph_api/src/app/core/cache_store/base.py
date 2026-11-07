@@ -1,7 +1,6 @@
 """The one extension point for state the API shares between its workers.
 
-Run locks, run and WebSocket caps, idempotency records, the ownership cache, token revocation
-and rate limiting all keep their shared state in a :class:`BaseCacheStore`. Two primitives
+Run locks, run and WebSocket caps, idempotency records, token revocation and rate limiting all keep their shared state in a :class:`BaseCacheStore`. Two primitives
 cover every one of them:
 
 - **Timed slots** (``acquire`` / ``renew`` / ``release``): a set of expiring slots per key,

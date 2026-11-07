@@ -50,6 +50,7 @@ def _request():
 
 def _service(invoke):
     service = MagicMock()
+    service.require_run_thread = AsyncMock()  # the caller's own thread
     service.runs_policy.return_value = RunsConfig()
     service.invoke_graph = invoke
     service.check_resume_target = AsyncMock()
@@ -327,12 +328,12 @@ async def test_ag_ui_busy_thread_answers_409_and_waits_by_default(fresh_locks):
     service.check_media_urls = MagicMock()
     held = await thread_lock.acquire_thread_lock("t1")
     with pytest.raises(HTTPException) as exc:
-        await run_ag_ui(request, service, Identity(user_id="alice"), None, config)
+        await run_ag_ui(request, service, Identity(user_id="alice"), config)
     assert exc.value.status_code == 409
     assert exc.value.detail == "thread is busy"
     service.stop_graph.assert_not_awaited()
     held.release()
-    response = await run_ag_ui(request, service, Identity(user_id="alice"), None, config)
+    response = await run_ag_ui(request, service, Identity(user_id="alice"), config)
     assert fresh_locks.held(thread_lock.thread_lock_key("t1")) == 1
     del response  # never iterated: the finalizer gives the lock back
     gc.collect()
@@ -398,6 +399,7 @@ def _graph_service(astream):
     service.checkpointer = MagicMock()
     service.checkpointer.aput_thread = AsyncMock(return_value=True)
     service.checkpointer.aget_state = AsyncMock(return_value=None)
+    service.checkpointer.aget_thread = AsyncMock(return_value=object())  # the caller's thread
     service.thread_name_generator = None
     service._media_service = None
     service._telemetry = None

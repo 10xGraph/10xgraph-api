@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from injectq import InjectQ, inject, singleton
-from tenxgraph.core.authz import Identity
+from tenxgraph.core.authz import Identity, Reach, can_reach
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.storage.media.config import DocumentHandling
 from tenxgraph.storage.media.offload import MediaOffloadPolicy, ensure_media_offloaded
@@ -335,12 +335,37 @@ class MediaService:
         """Whether the file records ``user_id`` as owner and ``tenant`` as its tenant values."""
         return str(metadata.get("owner_id")) == str(user_id) and tenant_matches(metadata, tenant)
 
+    def _in_reach(self, metadata: dict[str, Any], user: Identity) -> bool:
+        """Whether the file is within the caller's reach (reads, lists and deletes).
+
+        Reach ``own``: the caller's own files. ``tenant`` and ``all`` add the files
+        ``can_reach`` allows by the file's recorded owner and tenant values. With tenant
+        columns declared, a file without recorded tenant values is never reachable, and a
+        file without an owner is never widened to.
+        """
+        if self._owned_by(metadata, user.user_id, self.caller_tenant(user)):
+            return True
+        owner = metadata.get("owner_id")
+        if user.reach is Reach.OWN or owner is None:
+            return False
+        recorded = metadata.get(TENANT_KEY)
+        recorded = recorded if isinstance(recorded, dict) else {}
+        tenant = {column: recorded.get(column) for column in self.tenant_columns()}
+        if any(value is None for value in tenant.values()):
+            return False
+        return can_reach({"user": user}, owner, tenant)
+
     # ------------------------------------------------------------------
     # File operations
     # ------------------------------------------------------------------
 
     async def ensure_can_access(
-        self, file_id: str, user_id: str | None, user: Identity | None = None
+        self,
+        file_id: str,
+        user_id: str | None,
+        user: Identity | None = None,
+        *,
+        follow_reach: bool = False,
     ) -> None:
         """Reject access to a file owned by a different user (or tenant).
 
@@ -357,6 +382,11 @@ class MediaService:
         the same ``user_id`` in two tenants is two identities. A caller without a value, and
         a file with no recorded tenant values (uploaded before tenant tracking or without an
         owner), are denied.
+
+        ``follow_reach=True`` is for the file routes' reads and deletes: they follow the
+        caller's reach (``tenant`` and ``all`` widen them, see :meth:`_in_reach`). Everything
+        else (a ``graph://media/`` or ``file_id`` reference in a run or a thread write, thread
+        links) stays with the caller's own files.
         """
         if not user_id:
             return
@@ -382,7 +412,11 @@ class MediaService:
             )
             return
 
-        if not self._owned_by(metadata, user_id, tenant):
+        if follow_reach and user is not None:
+            allowed = self._in_reach(metadata, user)
+        else:
+            allowed = self._owned_by(metadata, user_id, tenant)
+        if not allowed:
             # Deliberately not "you don't own this" -- do not confirm the id exists.
             logger.warning(
                 "User %s attempted to access file %s owned by another user",
@@ -715,14 +749,15 @@ class MediaService:
     async def release_thread(
         self,
         thread_id: str,
-        user_id: str | None,
-        tenant: dict[str, str | None] | None = None,
+        owner_id: str | None,
+        user: Identity | None = None,
     ) -> list[str]:
-        """Release every file ``user_id`` linked to ``thread_id``, whatever the messages say.
+        """Release every file ``owner_id`` linked to ``thread_id``, whatever the messages say.
 
-        ``tenant`` is the owner's tenant values (canonical text per declared column); only
-        files recording them are released. None with tenant columns declared matches nothing.
-        A thread delete calls this for the thread's owner and for the deleter.
+        A thread delete calls this after storage deleted the thread, with the owner from the
+        caller's scoped thread read. Only files of that owner within the deleter's reach
+        (``user``, see :meth:`_in_reach`) are released; with no ``user`` (auth off) every file
+        of the owner linked to the thread is.
 
         ``unlink_threads`` works from the keys a thread's messages reference. A file linked
         through a message that is gone since (cleared state, replaced messages) would stay
@@ -732,12 +767,10 @@ class MediaService:
         deleted only with ``media.delete_with_thread`` on. Never raises; returns the keys that
         could not be released.
         """
-        if not self.supports_links or user_id is None:
+        if not self.supports_links or owner_id is None:
             return []
-        if tenant is None:
-            tenant = dict.fromkeys(self.tenant_columns())
         try:
-            all_keys = await self._keys_of(user_id)
+            all_keys = await self._keys_of(owner_id)
         except NotImplementedError:
             return []
         except Exception as exc:
@@ -757,7 +790,8 @@ class MediaService:
                 metadata is not None
                 and isinstance(threads, list)
                 and thread_id in threads
-                and self._owned_by(metadata, user_id, tenant)
+                and str(metadata.get("owner_id")) == str(owner_id)
+                and (user is None or self._in_reach(metadata, user))
             ):
                 linked.append(key)
         failed.extend(await self.unlink_threads(linked, thread_id))
@@ -815,10 +849,12 @@ class MediaService:
         limit: int = 50,
         user: Identity | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
-        """One page of the files ``user_id`` owns, newest first, and whether more follow.
+        """One page of the files within the caller's reach, newest first, and whether more
+        follow.
 
-        With tenant columns declared, only files recording the caller's tenant values
-        (``user``) are listed.
+        Reach ``own`` lists the files ``user_id`` owns; ``tenant`` and ``all`` widen the list
+        (see :meth:`_in_reach`). With tenant columns declared, only files recording tenant
+        values the caller's reach covers are listed.
 
         Files with no recorded owner are not listed for an identified user. With no ``user_id``
         (authentication off) every file is listed, matching ``ensure_can_access``. Reads each
@@ -827,7 +863,8 @@ class MediaService:
         Raises:
             NotImplementedError: The media store cannot enumerate its files.
         """
-        keys = await self._keys_of(user_id)
+        widened = user is not None and user.reach is not Reach.OWN
+        keys = await self._keys_of(None if widened else user_id)
         tenant = self.caller_tenant(user) if user_id else {}
         owned: list[dict[str, Any]] = []
         for key in keys:
@@ -838,7 +875,10 @@ class MediaService:
                 continue
             if not meta:
                 continue
-            if user_id and not self._owned_by(meta, user_id, tenant):
+            if user is not None:
+                if not self._in_reach(meta, user):
+                    continue
+            elif user_id and not self._owned_by(meta, user_id, tenant):
                 continue
             owned.append(
                 {

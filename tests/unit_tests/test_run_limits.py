@@ -34,8 +34,8 @@ class _Slots(LeaseManager):
     def __init__(self):
         super().__init__(InMemoryCacheStore())
 
-    def held(self, user_id):  # tests count by user id
-        return super().held(run_limits.run_slot_key(user_id))
+    def held(self, user_id):  # tests count by user id (no tenant values)
+        return super().held(run_limits.run_slot_key(Identity(user_id=user_id)))
 
 
 @pytest.fixture(autouse=True)
@@ -153,6 +153,7 @@ async def test_second_concurrent_invoke_gets_429(fresh_slots):
         return {"messages": []}
 
     service = MagicMock()
+    service.require_run_thread = AsyncMock()
     service.runs_policy.return_value = RunsConfig(max_concurrent_per_user=1)
     service.invoke_graph = slow_invoke
     request = MagicMock()
@@ -175,6 +176,7 @@ async def test_stream_route_refuses_before_streaming(fresh_slots):
     from tenxgraph_api.src.app.routers.graph.router import stream_graph
 
     service = MagicMock()
+    service.require_run_thread = AsyncMock()
     service.runs_policy.return_value = RunsConfig(max_concurrent_per_user=1)
     service.check_resume_target = AsyncMock()
     service.stream_graph = MagicMock(return_value=_items("a"))

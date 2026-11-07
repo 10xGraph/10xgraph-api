@@ -15,8 +15,6 @@ Caller key                      Redis key (``P:`` only when a prefix is set)
 ==============================  ==================================================
 ``concurrency:<lease key>``     ``P:10xgraph:concurrency:<lease key>``
 ``idempotency:<ident>``         ``P:10xgraph:idempotency:<ident>``
-``owner:id:<thread>``           ``P:af:authz:owner:id:<thread>``
-``owner:tomb:<thread>``         ``P:af:authz:owner:tomb:<thread>``
 ``revoked:jti:<jti>``           ``P:10xgraph:revoked:jti:<jti>``
 ``revoked:user:<user>``         ``P:10xgraph:revoked:user:<user>``
 ``ratelimit:<client key>``      ``P:10xgraph:ratelimit2:<client key>``
@@ -52,7 +50,6 @@ from .base import BaseCacheStore, SetMode, SlotResult
 FEATURE_NAMESPACES: dict[str, str] = {
     "concurrency": "10xgraph:concurrency",
     "idempotency": "10xgraph:idempotency",
-    "owner": "af:authz:owner",
     "revoked": "10xgraph:revoked",
     "ratelimit": "10xgraph:ratelimit2",
 }

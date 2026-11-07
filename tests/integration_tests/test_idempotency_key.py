@@ -222,9 +222,11 @@ async def test_ag_ui_repeat_of_a_finished_key_is_409_and_other_body_422():
         return req
 
     config = SimpleNamespace(auth_config=lambda: None, ag_ui=SimpleNamespace())
+    service = MagicMock()
+    service.require_run_thread = AsyncMock()  # the caller's own thread
     with pytest.raises(HTTPException) as same:
-        await run_ag_ui(request(body), MagicMock(), user, MagicMock(), config)
+        await run_ag_ui(request(body), service, user, config)
     assert same.value.status_code == 409
     with pytest.raises(HTTPException) as other:
-        await run_ag_ui(request({**body, "runId": "r2"}), MagicMock(), user, MagicMock(), config)
+        await run_ag_ui(request({**body, "runId": "r2"}), service, user, config)
     assert other.value.status_code == 422

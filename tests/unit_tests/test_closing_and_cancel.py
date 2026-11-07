@@ -55,7 +55,10 @@ def _graph(node):
 def _service(graph) -> GraphService:
     service = GraphService.__new__(GraphService)
     service._graph = graph
-    service.config = SimpleNamespace(runs=RunsConfig(max_concurrent_per_user=1))
+    # "client": the tests name a new thread ("t1") on every run.
+    service.config = SimpleNamespace(
+        runs=RunsConfig(thread_ids="client", max_concurrent_per_user=1)
+    )
     service.checkpointer = graph._checkpointer
     service.thread_name_generator = None
     service._media_service = None
@@ -175,7 +178,7 @@ async def test_cancelled_stream_request_releases_thread_lock_and_run_slot(limite
 
     reader = asyncio.create_task(read())
     await asyncio.wait_for(probe.started.wait(), 5)
-    assert limiters.slots.held(run_limits.run_slot_key("alice")) == 1
+    assert limiters.slots.held(run_limits.run_slot_key(Identity(user_id="alice"))) == 1
     reader.cancel()  # the server cancels the request task
     await asyncio.gather(reader, return_exceptions=True)
     await asyncio.sleep(0)
@@ -200,7 +203,7 @@ async def test_cancelled_invoke_request_releases_thread_lock_and_run_slot(limite
     )
     await asyncio.wait_for(probe.started.wait(), 5)
     assert limiters.locks.held(thread_lock.thread_lock_key("t1")) == 1
-    assert limiters.slots.held(run_limits.run_slot_key("alice")) == 1
+    assert limiters.slots.held(run_limits.run_slot_key(Identity(user_id="alice"))) == 1
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task

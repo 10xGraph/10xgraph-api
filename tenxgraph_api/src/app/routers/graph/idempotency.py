@@ -2,7 +2,7 @@
 
 A gateway that retries a request after a timeout would run the tools twice. A client that sends
 an ``Idempotency-Key`` header (WebSocket: ``idempotency_key`` in the run frame) gets this
-instead, per user and key:
+instead, per caller (user and tenant values) and key:
 
 - the first request runs normally and holds a lease while it runs;
 - the same key while that run is still going: 409 with ``Retry-After``;
@@ -12,9 +12,10 @@ instead, per user and key:
 - the same key with a different request body: 422;
 - a run that failed stores nothing, so the same key may be retried.
 
-No header, no change. Records live in the cache store (``idempotency:<user>:<key>`` with a
-ttl of ``IDEMPOTENCY_TTL_SECONDS``): shared between workers with Redis, else in this process.
-The running state is the same kind of lease the thread lock uses (``runs:idem:<user>:<key>``),
+No header, no change. Records live in the cache store (``idempotency:<caller>:<key>``, the
+caller being ``run_limits.identity_key``, with a ttl of ``IDEMPOTENCY_TTL_SECONDS``): shared
+between workers with Redis, else in this process. The running state is the same kind of lease
+the thread lock uses (``runs:idem:<caller>:<key>``),
 so a crashed worker's key frees itself. A cache store error is logged and the request runs
 without idempotency, as the leases fail open.
 """
@@ -37,6 +38,7 @@ from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.leases import Lease, lease_manager
 from tenxgraph_api.src.app.core.redis_client import key_part
 from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
+from tenxgraph_api.src.app.routers.graph.run_limits import identity_key
 
 
 IDEMPOTENCY_HEADER = "Idempotency-Key"
@@ -143,8 +145,7 @@ async def check(
     """
     if problem := idempotency_key_error(key):
         raise ClientInputError(problem)
-    user_id = user.user_id if user is not None else "anonymous"
-    ident = f"{key_part(user_id)}:{key_part(key)}"
+    ident = f"{identity_key(user)}:{key_part(key)}"
     name = f"idempotency:{ident}"
     fp = fingerprint(kind, body)
 

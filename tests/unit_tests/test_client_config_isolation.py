@@ -15,6 +15,7 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 from tenxgraph.core.authz import Identity
+from tenxgraph.utils.thread_info import ThreadInfo
 
 from tenxgraph_api.src.app.core.auth.permissions import _body_thread_id
 from tenxgraph_api.src.app.core.validation.request_config import (
@@ -408,6 +409,7 @@ async def test_put_state_honours_the_state_allow_list(monkeypatch):
 
     service = CheckpointerService.__new__(CheckpointerService)
     service.checkpointer = MagicMock()
+    service.checkpointer.aget_thread = AsyncMock(return_value=ThreadInfo(thread_id="t1"))
     service.checkpointer.aput_state = AsyncMock()
     with pytest.raises(HTTPException) as exc_info:
         await service.put_state({"thread_id": "t1"}, TRUSTED_USER, {"role": "admin"})

@@ -1,5 +1,7 @@
 """Run-trace capture and reconstruction (observability)."""
 
+from unittest.mock import AsyncMock, MagicMock
+
 from tenxgraph.core.state import Message
 from tenxgraph.core.state.message import TokenUsages
 from tenxgraph.core.state.message_block import TextBlock, ToolCallBlock, ToolResultBlock
@@ -148,10 +150,12 @@ def test_observability_flags(monkeypatch):
     svc = GraphService.__new__(GraphService)
     svc._telemetry = None
     monkeypatch.setattr(GraphService, "telemetry", property(lambda self: None))
-    out = asyncio.run(svc.get_observability("t"))
+    out = asyncio.run(svc.get_observability("t", None))
     assert out.enabled is False and out.reason in {"disabled_in_production", "store_unavailable"}
 
     store = TelemetryStore()
     monkeypatch.setattr(GraphService, "telemetry", property(lambda self: store))
-    out = asyncio.run(svc.get_observability("t"))
+    svc.checkpointer = MagicMock()
+    svc.checkpointer.aget_thread = AsyncMock(return_value=object())  # the caller's thread
+    out = asyncio.run(svc.get_observability("t", None))
     assert out.enabled is True and out.reason == "no_runs" and out.run is None

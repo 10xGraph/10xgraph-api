@@ -55,6 +55,7 @@ def _make_websocket(receive_side_effects: list, init: dict):
 
 def _make_service(events: list):
     service = MagicMock()
+    service.require_run_thread = AsyncMock()
     service.is_live_agent = True  # live graph: allowed on /v1/graph/live
     service.runs_policy.return_value = RunsConfig()
     service.new_thread_id = AsyncMock(return_value="srv-1")
@@ -161,6 +162,7 @@ class TestRealtimeWebSocket:
     async def test_downstream_error_closes_with_1011(self):
         ws = _make_websocket([WebSocketDisconnect()], init={"model": "gemini-2.5-flash-live"})
         service = MagicMock()
+        service.require_run_thread = AsyncMock()
         service.runs_policy.return_value = RunsConfig()
         service.new_thread_id = AsyncMock(return_value="srv-1")
 
@@ -236,6 +238,7 @@ class TestRealtimeWebSocket:
                 yield e
 
         service = MagicMock()
+        service.require_run_thread = AsyncMock()
         service.runs_policy.return_value = RunsConfig()
         service.new_thread_id = AsyncMock(return_value="srv-1")
         service.realtime_graph = _slow_gen
@@ -262,6 +265,7 @@ class TestRealtimeWebSocket:
             yield  # make it an async generator
 
         service = MagicMock()
+        service.require_run_thread = AsyncMock()
         service.runs_policy.return_value = RunsConfig()
         service.new_thread_id = AsyncMock(return_value="srv-1")
         service.realtime_graph = _boom

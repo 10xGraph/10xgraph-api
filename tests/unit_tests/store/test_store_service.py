@@ -3,6 +3,7 @@
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 from tenxgraph.storage.store.store_schema import DistanceMetric, MemoryType, RetrievalStrategy
 
 from tenxgraph_api.src.app.routers.store.schemas.store_schemas import (
@@ -256,15 +257,13 @@ class TestGetMemory:
     async def test_get_memory_not_found(
         self, store_service, mock_store, mock_user, sample_memory_id
     ):
-        """Test retrieving non-existent memory."""
-        # Arrange
+        """A missing memory, or one outside the caller's reach, is a 404."""
         mock_store.aget.return_value = None
 
-        # Act
-        result = await store_service.get_memory(sample_memory_id, {}, mock_user)
+        with pytest.raises(HTTPException) as exc:
+            await store_service.get_memory(sample_memory_id, {}, mock_user)
 
-        # Assert
-        assert result.memory is None
+        assert exc.value.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -441,6 +440,46 @@ class TestDeleteMemory:
         # Assert
         call_args = mock_store.adelete.call_args
         assert call_args[1]["infer"] is False
+
+    async def test_delete_outside_reach_is_404_and_deletes_nothing(
+        self, store_service, mock_store, mock_user, sample_memory_id
+    ):
+        mock_store.aget.return_value = None
+
+        with pytest.raises(HTTPException) as exc:
+            await store_service.delete_memory(sample_memory_id, {}, mock_user)
+
+        assert exc.value.status_code == 404
+        mock_store.adelete.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "error",
+        [ValueError("Memory m1 not found"), PermissionError("not yours")],
+    )
+    async def test_store_not_found_errors_are_404(
+        self, store_service, mock_store, mock_user, sample_memory_id, error
+    ):
+        mock_store.adelete.side_effect = error
+        mock_store.aupdate.side_effect = error
+
+        with pytest.raises(HTTPException) as deleted:
+            await store_service.delete_memory(sample_memory_id, {}, mock_user)
+        with pytest.raises(HTTPException) as updated:
+            await store_service.update_memory(
+                sample_memory_id, UpdateMemorySchema(content="x"), mock_user
+            )
+
+        assert deleted.value.status_code == updated.value.status_code == 404
+
+    async def test_other_store_errors_pass_through(
+        self, store_service, mock_store, mock_user, sample_memory_id
+    ):
+        mock_store.aupdate.side_effect = ValueError("memory content must be a string")
+
+        with pytest.raises(ValueError, match="must be a string"):
+            await store_service.update_memory(
+                sample_memory_id, UpdateMemorySchema(content="x"), mock_user
+            )
 
 
 @pytest.mark.asyncio

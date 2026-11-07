@@ -62,6 +62,7 @@ def _production(monkeypatch):
 
 def _service(runs=None):
     service = MagicMock()
+    service.require_run_thread = AsyncMock()  # the caller's own thread
     service.is_live_agent = False
     service.runs_policy.return_value = runs or RunsConfig(max_concurrent_per_user=1)
     service.stop_graph = AsyncMock(return_value={"ok": True})

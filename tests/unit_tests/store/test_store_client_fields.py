@@ -70,7 +70,7 @@ async def test_search_cannot_pick_a_collection(store_service, mock_store, mock_u
 @pytest.mark.asyncio
 async def test_list_and_get_cannot_pick_a_collection(store_service, mock_store, mock_user):
     mock_store.aget_all.return_value = []
-    mock_store.aget.return_value = None
+    mock_store.aget.return_value = {"id": "m1"}
     await store_service.list_memories({"collection": "x2"}, mock_user)
     await store_service.get_memory("m1", {"collection": "x3"}, mock_user)
     assert "collection" not in mock_store.aget_all.call_args.args[0]

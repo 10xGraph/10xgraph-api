@@ -19,6 +19,7 @@ from tenxgraph.core.state.message_block import (
     TextBlock,
     ToolResultBlock,
 )
+from tenxgraph.utils.thread_info import ThreadInfo
 
 from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import (
     preprocess_multimodal_messages,
@@ -143,6 +144,7 @@ def checkpointer_service(monkeypatch):
 
     service = CheckpointerService.__new__(CheckpointerService)
     service.checkpointer = MagicMock()
+    service.checkpointer.aget_thread = AsyncMock(return_value=ThreadInfo(thread_id="t1"))
     service.checkpointer.aget_state = AsyncMock(return_value=AgentState())
     service.checkpointer.aput_state = AsyncMock(side_effect=lambda cfg, state: state)
     service.checkpointer.aput_state_cache = AsyncMock()

@@ -623,14 +623,14 @@ class RunsConfig:
             "max_parallel_tool_calls": 10
         }
 
-    ``thread_ids`` decides who may name a new thread. ``"server"`` (the default) accepts only
-    ids of threads that already exist; a new thread is started by omitting the id (or sending
-    ``"new"`` over WebSocket), and the server picks it. ``"client"`` lets a request start a
-    thread under any id it picks; under owner-only authorization the first writer of an id then
-    owns it, so a user who claims a guessable id (``"default"``) first locks its intended owner
-    out, and a request on an unknown id answers differently from one on someone else's. AG-UI
+    ``thread_ids`` decides who may name a new thread, with auth on or off. ``"server"`` (the
+    default) accepts only ids of threads that already exist; a new thread is started by
+    omitting the id (or sending ``"new"`` over WebSocket), and the server picks it.
+    ``"client"`` lets a request start a thread under any id it picks; the first writer of an id
+    then owns it, so a user who claims a guessable id (``"default"``) first locks its intended
+    owner out. A thread the caller cannot see and an unknown one both answer 404. AG-UI
     (``POST /v1/ag-ui``) and realtime (``/v1/graph/live``) follow the same rule as REST: with
-    ``"server"`` an id the server has never seen is refused (403). An AG-UI client that has no
+    ``"server"`` an id the server has never seen is refused (404). An AG-UI client that has no
     thread yet sends ``threadId`` blank or ``"new"`` and reads the server's id from
     ``RUN_STARTED``; a frontend that makes its own ids needs ``"client"``.
 

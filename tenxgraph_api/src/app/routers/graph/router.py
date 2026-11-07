@@ -12,6 +12,7 @@ from injectq import InjectQ
 from injectq.integrations import InjectAPI
 from pydantic import ValidationError
 from tenxgraph.core.authz import Identity
+from tenxgraph.core.exceptions import ThreadNotFoundError
 from tenxgraph.core.realtime.base import ErrorEvent
 from tenxgraph.core.realtime.queue import LiveInputQueue
 from tenxgraph.core.state import StreamChunk, StreamEvent
@@ -25,6 +26,7 @@ from tenxgraph_api.src.app.core.auth.revocation import (
     token_revoked,
 )
 from tenxgraph_api.src.app.core.leases import Lease
+from tenxgraph_api.src.app.core.threads import require_thread
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe, summarize_validation_error
 from tenxgraph_api.src.app.core.validation.request_config import (
     ClientInputError,
@@ -224,6 +226,16 @@ async def _send_ws_error(websocket: WebSocket, reason: str) -> None:
     )
 
 
+def _thread_not_found() -> tuple[str, str]:
+    """``(code, message)`` of the 404 for a thread the caller cannot see, for socket frames."""
+    from tenxgraph_api.src.app.core.exceptions.handle_errors import (
+        THREAD_NOT_FOUND_CODE,
+        THREAD_NOT_FOUND_MESSAGE,
+    )
+
+    return THREAD_NOT_FOUND_CODE, THREAD_NOT_FOUND_MESSAGE
+
+
 def _seconds_until_expiry(identity: Identity | None) -> float | None:
     """Seconds until the identity's ``exp`` claim, or ``None`` when it has none."""
     exp = identity.claims.get("exp") if identity is not None else None
@@ -387,6 +399,8 @@ async def invoke_graph(
     """
     logger.info(f"Graph invoke request received with {len(graph_input.messages)} messages")
     service.check_media_urls(graph_input.messages)
+    # A thread the caller cannot run on is a 404 before anything is held.
+    await service.require_run_thread(requested_thread_id(graph_input.config), identity)
 
     # Opt-in Idempotency-Key: a finished run's stored result is returned, a running one is 409.
     idem, replay = await _idempotency(request, identity, "invoke")
@@ -441,8 +455,10 @@ async def stream_graph(
     Stream the graph execution with real-time output.
     """
     logger.info(f"Graph stream request received with {len(graph_input.messages)} messages")
-    # Before the response starts, so a blocked URL is a real 400 and not an error chunk.
+    # Before the response starts, so a blocked URL is a real 400 and a thread the caller
+    # cannot run on a real 404, not an error chunk.
     service.check_media_urls(graph_input.messages)
+    await service.require_run_thread(requested_thread_id(graph_input.config), identity)
 
     # Opt-in Idempotency-Key: a finished run's final state is replayed, a running one is 409.
     idem, replay = await _idempotency(request, identity, "stream")
@@ -565,7 +581,7 @@ async def observability(
     if not _is_production():
         logger.info("Observability requested for thread %s", log_safe(thread_id))
 
-    result: ObservabilitySchema = await service.get_observability(thread_id, run_id)
+    result: ObservabilitySchema = await service.get_observability(thread_id, identity, run_id)
 
     return success_response(
         result,
@@ -616,6 +632,10 @@ async def stop_graph(
     """
     Stop the graph execution for a specific thread.
 
+    Allowed on any thread the caller's reach covers (an admin with reach ``all`` may stop
+    another user's run). A thread the caller cannot reach or an unknown one answers 404; a
+    visible thread with no run answers 200 with ``ok: false``.
+
     Args:
         stop_request: Request containing thread_id and optional config
 
@@ -625,6 +645,7 @@ async def stop_graph(
     if not _is_production():
         logger.info("Graph stop request received for thread: %s", log_safe(stop_request.thread_id))
 
+    await require_thread(service.checkpointer, identity, stop_request.thread_id)
     result = await service.stop_graph(stop_request.thread_id, identity, stop_request.config)
 
     if not _is_production():
@@ -680,6 +701,8 @@ async def fix_graph(
     if not _is_production():
         logger.info("Graph fix request received for thread: %s", log_safe(fix_request.thread_id))
 
+    # Fix writes state, so it stays in the caller's own threads whatever their reach.
+    await require_thread(service.checkpointer, identity, fix_request.thread_id, run=True)
     async with thread_write_guard(fix_request.thread_id):
         result = await service.fix_graph(
             fix_request.thread_id,
@@ -884,7 +907,9 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
 
     Every run on the socket counts against the same rate limit (an error chunk with
     ``retry_after_seconds`` is sent when over it), and the token is re-verified before each
-    run.
+    run. A run naming a thread the caller cannot run on (another user's, or an unknown id
+    under ``runs.thread_ids: "server"``) gets an error chunk with ``code: "THREAD_NOT_FOUND"``
+    and the socket stays open.
 
     Close codes
     -----------
@@ -952,6 +977,18 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
                     ws_input.invoke_type,
                     log_safe(thread_id),
                 )
+
+            # A thread the caller cannot run on: an error chunk, the socket stays open.
+            try:
+                await service.require_run_thread(thread_id, identity)
+            except ThreadNotFoundError:
+                code, message = _thread_not_found()
+                await websocket.send_text(
+                    StreamChunk(
+                        event=StreamEvent.ERROR, data={"reason": message, "code": code}
+                    ).model_dump_json()
+                )
+                continue
 
             graph_input = ws_input.to_graph_input()
             if not await _ws_media_urls_allowed(websocket, service, graph_input):
@@ -1162,7 +1199,8 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
     First frame  : JSON control  ``{model, thread_id?, voice?, modalities?, vad?, ...}``
                    (``thread_id`` absent, blank or ``"new"`` makes the server create the thread)
     First reply  : JSON ``{type:"session_started", thread_id}``; reconnect with that id to
-                   continue the thread
+                   continue the thread. A thread the caller cannot run on gets a fatal
+                   ``THREAD_NOT_FOUND`` error event and close 1008 instead
     Upstream     : binary frame   = PCM16 input audio
                    JSON control   = ``{type:"activity_start"|"activity_end"|"text"|"close", ...}``
     Downstream   : binary frame   = PCM16 model audio (``audio_delta``)
@@ -1236,9 +1274,10 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
             await websocket.close(code=1003)
         return
 
+    named_thread = thread_id is not None
     if thread_id is None:
         # No id (absent, blank or "new"): the server makes the thread, as AG-UI does, so there
-        # is nothing to owner-check. The id goes back to the client in ``session_started``.
+        # is nothing to check. The id goes back to the client in ``session_started``.
         thread_id = await service.new_thread_id()
         init["thread_id"] = thread_id
 
@@ -1262,6 +1301,26 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
     if await _live_credential_error(websocket, identity):
         await close_session_expired()
         return
+
+    # A thread the caller cannot run on ends the session before anything is held. A storage
+    # error closes it too (1011): the check fails closed.
+    if named_thread:
+        try:
+            await service.require_run_thread(thread_id, identity)
+        except ThreadNotFoundError:
+            code, message = _thread_not_found()
+            with contextlib.suppress(Exception):
+                await websocket.send_text(
+                    _realtime_event_json(ErrorEvent(code=code, message=message, fatal=True))
+                )
+            with contextlib.suppress(Exception):
+                await websocket.close(code=1008)
+            return
+        except Exception as e:
+            logger.error("Realtime thread check failed: %s", e)
+            with contextlib.suppress(Exception):
+                await websocket.close(code=1011)
+            return
 
     # The same guard as every other run: one session at a time on a thread, and the session
     # counts against the user's run cap for as long as it lasts.

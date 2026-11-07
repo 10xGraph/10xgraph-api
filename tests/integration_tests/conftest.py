@@ -18,7 +18,7 @@ from injectq.integrations.fastapi import setup_fastapi
 from tenxgraph.storage.checkpointer import BaseCheckpointer, InMemoryCheckpointer
 
 from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
-from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
+from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RunsConfig
 from tenxgraph_api.src.app.core.config.media_settings import MediaSettings, MediaStorageType
 from tenxgraph_api.src.app.core.config.setup_middleware import setup_middleware
 from tenxgraph_api.src.app.core.exceptions.handle_errors import init_errors_handler
@@ -59,6 +59,15 @@ class _AuthOnConfig:
 
     def auth_config(self) -> str:
         return "custom"
+
+
+class ClientThreadIdsConfig(_AuthOnConfig):
+    """Auth on and ``runs.thread_ids: "client"``: a request may name a new thread id.
+
+    Bind it with ``extra_bindings={GraphConfig: ClientThreadIdsConfig()}``.
+    """
+
+    runs = RunsConfig(thread_ids="client")
 
 
 def build_app(

@@ -198,9 +198,10 @@ def test_production_with_auth_off_warns_but_is_allowed():
     assert _rules({"auth": "jwt"}, "warning", production=True) == set()
 
 
-def test_runs_server_with_auth_off_warns():
+def test_runs_server_with_auth_off_is_not_a_warning():
+    # runs.thread_ids "server" is enforced with auth on or off (an unknown id is a 404).
     data = {"runs": {"thread_ids": "server"}}
-    assert _rules(data, "warning") == {"runs-server-auth-off"}
+    assert _rules(data, "warning") == set()
     assert _rules({**data, "auth": "jwt"}, "warning") == set()
 
 

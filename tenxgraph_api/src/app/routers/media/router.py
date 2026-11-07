@@ -234,7 +234,7 @@ async def upload_file(
 
 
 # ------------------------------------------------------------------
-# GET /v1/files  — the caller's own files, paged (declared before /{file_id})
+# GET /v1/files  — the files in the caller's reach, paged (declared before /{file_id})
 # ------------------------------------------------------------------
 @router.get(
     "/v1/files",
@@ -242,7 +242,8 @@ async def upload_file(
     response_model=FileListResponse,
     description=(
         "Lists the files the authenticated user uploaded (files without a recorded owner are "
-        "not listed), newest first. With authentication off there is no user, so, like the "
+        "not listed), newest first. Reach `tenant` adds the files of every user in the same "
+        "tenant, reach `all` every file. With authentication off there is no user, so, like the "
         "download route, every file is listed. Returns 501 when the configured media store cannot "
         "enumerate its files."
     ),
@@ -283,12 +284,12 @@ async def get_file(
     try:
         # Authentication alone is not enough: without this, ANY authenticated user
         # who knew a file_id could download another user's file.
-        await service.ensure_can_access(file_id, _user_id(identity), identity)
+        await service.ensure_can_access(file_id, _user_id(identity), identity, follow_reach=True)
         local = await service.local_file(file_id)
         if local is not None:  # stream from disk instead of loading the whole file
             path, mime_type = local
             return _file_download_response(file_id, path, mime_type)
-        data, mime_type = await service.get_file(file_id, _user_id(identity), identity)
+        data, mime_type = await service.get_file(file_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="File not found")
     except PermissionError:
@@ -313,8 +314,8 @@ async def get_file_info(
     identity: Identity | None = Depends(RequirePermission("files", "read")),
 ):
     try:
-        await service.ensure_can_access(file_id, _user_id(identity), identity)
-        info = await service.get_file_info(file_id, _user_id(identity), identity)
+        await service.ensure_can_access(file_id, _user_id(identity), identity, follow_reach=True)
+        info = await service.get_file_info(file_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="File not found")
     except PermissionError:
@@ -338,7 +339,7 @@ async def get_file_access_url(
         # Especially important here: this hands out a *signed direct URL*, which
         # bypasses the API entirely. Handing one to a non-owner would leak the file
         # even after this check was added elsewhere.
-        await service.ensure_can_access(file_id, _user_id(identity), identity)
+        await service.ensure_can_access(file_id, _user_id(identity), identity, follow_reach=True)
         info = await service.get_file_info(file_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="File not found")
@@ -355,14 +356,15 @@ async def get_file_access_url(
 
 
 # ------------------------------------------------------------------
-# DELETE /v1/files/{file_id}  — owner-only manual cleanup
+# DELETE /v1/files/{file_id}  — manual cleanup, follows the caller's reach
 # ------------------------------------------------------------------
 @router.delete(
     "/v1/files/{file_id}",
     summary="Delete a file",
     description=(
-        "Deletes the stored file and its metadata. Only the uploader may delete it; a file "
-        "that is missing or belongs to someone else gives 404."
+        "Deletes the stored file and its metadata. The uploader may delete it, and so may a "
+        "caller whose reach (`tenant` or `all`) covers it; a file that is missing or outside "
+        "the caller's reach gives 404."
     ),
     response_model=FileDeleteResponse,
 )
@@ -373,7 +375,7 @@ async def delete_file(
     identity: Identity | None = Depends(RequirePermission("files", "delete")),
 ):
     try:
-        await service.ensure_can_access(file_id, _user_id(identity), identity)
+        await service.ensure_can_access(file_id, _user_id(identity), identity, follow_reach=True)
         deleted = await service.delete_file(file_id)
     except (KeyError, PermissionError, ValueError):
         # 404, not 403: do not confirm that someone else's file_id exists.

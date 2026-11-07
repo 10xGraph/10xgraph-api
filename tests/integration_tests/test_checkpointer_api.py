@@ -8,8 +8,10 @@ server-side pagination cap.
 from __future__ import annotations
 
 import pytest
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import AgentState
 from tenxgraph.storage.checkpointer import InMemoryCheckpointer
+from tenxgraph.utils.thread_info import ThreadInfo
 
 from tenxgraph_api.src.app.routers.checkpointer.router import router as checkpointer_router
 
@@ -24,6 +26,10 @@ HTTP_UNPROCESSABLE = 422
 def seeded():
     """An app whose checkpointer already holds a thread for user 'alice'."""
     cp = InMemoryCheckpointer()
+    owner = Identity(user_id="alice")
+    cp.put_thread(
+        {"thread_id": "t1", "user_id": "alice", "user": owner}, ThreadInfo(thread_id="t1")
+    )
     app = build_app(routers=[checkpointer_router], checkpointer=cp)
     return app, cp
 

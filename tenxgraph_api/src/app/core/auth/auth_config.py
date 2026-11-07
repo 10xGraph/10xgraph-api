@@ -130,8 +130,6 @@ def check_auth_config(data: dict[str, Any], *, production: bool) -> list[AuthIss
         issues.extend(_check_rbac(auth))
     elif production:
         issues.append(_warning("auth-off-production", "auth", _AUTH_OFF_PRODUCTION))
-    if auth.method == "none":
-        issues.extend(_check_auth_off(data))
     return issues
 
 
@@ -204,21 +202,6 @@ def _check_rbac(auth: AuthConfig) -> list[AuthIssue]:
                 "auth.roles",
                 "roles with reach 'all' can read every row of every tenant: "
                 + ", ".join(reach_all),
-            )
-        )
-    return issues
-
-
-def _check_auth_off(data: dict[str, Any]) -> list[AuthIssue]:
-    issues: list[AuthIssue] = []
-    runs = data.get("runs")
-    if isinstance(runs, dict) and runs.get("thread_ids") == "server":
-        issues.append(
-            _warning(
-                "runs-server-auth-off",
-                "runs.thread_ids",
-                'runs.thread_ids "server" does nothing with auth off: without an identity '
-                "no thread has an owner.",
             )
         )
     return issues

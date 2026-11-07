@@ -11,7 +11,6 @@ from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.validation.client_filters import parse_filters_param
 from tenxgraph_api.src.app.core.validation.request_config import client_config
-from tenxgraph_api.src.app.routers.graph.thread_lock import thread_write_guard
 from tenxgraph_api.src.app.utils.parse_output import parse_message_output
 from tenxgraph_api.src.app.utils.response_helper import success_response
 from tenxgraph_api.src.app.utils.swagger_helper import generate_swagger_responses
@@ -118,16 +117,15 @@ async def put_state(
         Success response or error
     """
     validate_thread_id(thread_id)
-    # The path thread_id is the one RequirePermission checked; it is applied last so the
-    # body config cannot redirect the call to another thread.
+    # The path thread_id is applied last so the body config cannot redirect the call to
+    # another thread.
     config = {**client_config(payload.config), "thread_id": thread_id}
 
-    async with thread_write_guard(thread_id):
-        res = await service.put_state(
-            config,
-            identity,
-            payload.state,
-        )
+    res = await service.put_state(
+        config,
+        identity,
+        payload.state,
+    )
 
     return success_response(
         res,
@@ -162,11 +160,10 @@ async def clear_state(
     validate_thread_id(thread_id)
     config = {"thread_id": thread_id}
 
-    async with thread_write_guard(thread_id):
-        res = await service.clear_state(
-            config,
-            identity,
-        )
+    res = await service.clear_state(
+        config,
+        identity,
+    )
 
     return success_response(
         res,
@@ -349,16 +346,15 @@ async def delete_message(
     if not message_id or (isinstance(message_id, str) and not str(message_id).strip()):
         raise HTTPException(status_code=422, detail="message_id is required and cannot be empty")
 
-    # The path thread_id is the one RequirePermission checked; it is applied last so the
-    # body config cannot redirect the call to another thread.
+    # The path thread_id is applied last so the body config cannot redirect the call to
+    # another thread.
     config = {**client_config(payload.config), "thread_id": thread_id}
 
-    async with thread_write_guard(thread_id):
-        await service.delete_message(
-            config,
-            identity,
-            message_id,
-        )
+    await service.delete_message(
+        config,
+        identity,
+        message_id,
+    )
 
     return success_response(
         {"success": True, "message": "Message deleted successfully"},
@@ -488,16 +484,15 @@ async def delete_thread(
         Success response or error
     """
     validate_thread_id(thread_id)
-    # The path thread_id is the one RequirePermission checked; it is applied last so the
-    # body config cannot redirect the call to another thread.
+    # The path thread_id is applied last so the body config cannot redirect the call to
+    # another thread.
     config = {**client_config(payload.config), "thread_id": thread_id}
 
-    async with thread_write_guard(thread_id):
-        res = await service.delete_thread(
-            config,
-            identity,
-            thread_id,
-        )
+    res = await service.delete_thread(
+        config,
+        identity,
+        thread_id,
+    )
 
     return success_response(
         res,

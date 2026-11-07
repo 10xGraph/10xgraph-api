@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from injectq import InjectQ, inject, singleton
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from tenxgraph.core.authz import Identity
-from tenxgraph.core.exceptions import GraphClosedError
+from tenxgraph.core.exceptions import GraphClosedError, ThreadNotFoundError
 from tenxgraph.core.exceptions.media_exceptions import UnsupportedMediaInputError
 from tenxgraph.core.graph import CompiledGraph
 from tenxgraph.core.state import AgentState, Message, StreamChunk, StreamEvent
@@ -26,6 +26,7 @@ from tenxgraph_api.src.app.core.shutdown import (
     cancel_and_wait,
     end_on_shutdown,
 )
+from tenxgraph_api.src.app.core.threads import require_thread
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.core.validation.request_config import (
     ALWAYS_ALLOWED_CONFIG_KEYS,
@@ -207,6 +208,14 @@ def _stream_error_data(exc: Exception) -> dict[str, Any]:
     A run refused because the graph is closing carries the same code and retry hint as the
     HTTP 503 (``SERVICE_UNAVAILABLE``), so a client can tell it from a failure and retry.
     """
+    if isinstance(exc, ThreadNotFoundError):
+        # The same code and text as the HTTP 404: never says whether the id exists.
+        from tenxgraph_api.src.app.core.exceptions.handle_errors import (
+            THREAD_NOT_FOUND_CODE,
+            THREAD_NOT_FOUND_MESSAGE,
+        )
+
+        return {"reason": THREAD_NOT_FOUND_MESSAGE, "code": THREAD_NOT_FOUND_CODE}
     if isinstance(exc, GraphClosedError):
         from tenxgraph_api.src.app.core.exceptions.server_errors import RETRY_AFTER_SECONDS
 
@@ -609,6 +618,10 @@ class GraphService:
         """
         Stop the graph execution for a specific thread.
 
+        Core ``astop`` reads the identity from ``config["user"]``: it stops only runs whose
+        owner the caller's reach covers and answers ``reason: "no-state"`` for a thread the
+        caller cannot reach, exactly as for one with no run.
+
         Args:
             thread_id (str): The thread ID to stop
             user: The caller's identity, or None when auth is off
@@ -751,6 +764,24 @@ class GraphService:
         runs = getattr(self.config, "runs", None)
         return runs if isinstance(runs, RunsConfig) else RunsConfig()
 
+    async def require_run_thread(self, thread_id: str | None, user: Identity | None) -> None:
+        """Raise ``ThreadNotFoundError`` (404) unless ``user`` may run on ``thread_id``.
+
+        Every run entry point calls this once, before the thread lock, the run slot and any
+        response header. Runs stay in the caller's own threads whatever their reach; an
+        unknown id is refused under ``runs.thread_ids: "server"``. ``None`` (the request
+        starts a new thread) needs no check.
+        """
+        if thread_id is None:
+            return
+        await require_thread(
+            self.checkpointer,
+            user,
+            thread_id,
+            run=True,
+            server_thread_ids=self.runs_policy().server_thread_ids,
+        )
+
     async def new_thread_id(self) -> str:
         """A fresh server-made thread id (public name of :meth:`_new_thread_id`)."""
         return await self._new_thread_id()
@@ -758,10 +789,11 @@ class GraphService:
     async def _new_thread_id(self) -> str:
         """Generate a thread id that nobody owns yet.
 
-        The permission check approved "a new thread", so the id handed out here must really
-        be new. Generated ids (Snowflake by default) are predictable, and a client may create
-        a thread under any id it likes, so another user could have claimed the next id
-        first; running on it would put this user's messages in their thread.
+        The request asked for a new thread, so the id handed out here must really be new.
+        Generated ids (Snowflake by default) are predictable, and with ``runs.thread_ids:
+        "client"`` a client may create a thread under any id it likes, so another user could
+        have claimed the next id first. Storage would refuse the run on it (404); picking an
+        unused id avoids that.
         """
         for _ in range(MAX_THREAD_ID_ATTEMPTS):
             thread_id = str(await InjectQ.get_instance().atry_get("generated_id") or uuid4())
@@ -866,7 +898,7 @@ class GraphService:
         # Server-owned keys set by a trusted caller (a protocol adapter), after the client's
         # own config has been stripped of them.
         config.update(server_config or {})
-        # Same normalisation as the permission check, so the checked thread is the one used.
+        # Same normalisation as the router's thread check, so the checked thread is the one used.
         thread_id = normalize_thread_id(config.get("thread_id"))
         if thread_id is None:
             thread_id = await self._new_thread_id()
@@ -899,7 +931,7 @@ class GraphService:
             user=user,
         )
         # The accepted messages now use these files: record the thread on each (owned files
-        # only; the ownership check above already ran).
+        # only; the router already checked the thread is the caller's).
         if user is not None and self.media_service is not None:
             keys = [k for m in preprocessed for k in internal_media_keys(m)]
             if keys:
@@ -926,7 +958,7 @@ class GraphService:
             },
         )
 
-    async def invoke_graph(  # noqa: PLR0912, PLR0915
+    async def invoke_graph(
         self,
         graph_input: GraphInputSchema,
         user: Identity | None,
@@ -1134,7 +1166,7 @@ class GraphService:
         async for line in end_on_shutdown(lines(), keepalive_seconds=KEEPALIVE_SECONDS):
             yield line
 
-    async def stream_chunks(  # noqa: PLR0912, PLR0915
+    async def stream_chunks(
         self,
         graph_input: GraphInputSchema,
         user: Identity | None,
@@ -1526,6 +1558,7 @@ class GraphService:
     async def get_observability(
         self,
         thread_id: str,
+        user: Identity | None,
         run_id: str | None = None,
     ) -> "ObservabilitySchema":
         """Reconstruct an observability trace for a thread from captured run events.
@@ -1533,6 +1566,9 @@ class GraphService:
         Rebuilds spans (root → node → llm/tool), an event list, and aggregated
         token usage from the telemetry records a run emitted. Returns the latest
         run by default, or the requested ``run_id``.
+
+        The telemetry store is keyed by thread only, so the thread is read with the caller's
+        reach first: a thread they cannot see is a 404 (``ThreadNotFoundError``).
         """
         store = self.telemetry
         if not store:
@@ -1547,6 +1583,7 @@ class GraphService:
                 thread_id=str(thread_id), enabled=False, reason=reason, run_count=0
             )
 
+        await require_thread(self.checkpointer, user, thread_id)
         runs = store.get_runs(thread_id)
         run_ids = [r.run_id for r in runs]
 

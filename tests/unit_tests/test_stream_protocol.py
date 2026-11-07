@@ -4,7 +4,7 @@
 
 import asyncio
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from tenxgraph.core.state import StreamChunk, StreamEvent
@@ -65,6 +65,7 @@ async def test_router_labels_the_stream_ndjson():
         messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
     )
     service = MagicMock()
+    service.require_run_thread = AsyncMock()
     guard = MagicMock()
     with (
         patch(

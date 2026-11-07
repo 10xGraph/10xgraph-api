@@ -242,7 +242,7 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning("Task broker close failed: %s", exc)
 
-    # The rate limiter, ownership cache and token revocation share the cache store: closed
+    # The rate limiter and token revocation share the cache store: closed
     # once here.
     await _close_cache_store()
 

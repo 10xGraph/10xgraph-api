@@ -7,13 +7,13 @@ import pytest
 from fastapi import HTTPException
 from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import ImageBlock, MediaRef, Message
+from tenxgraph.utils.thread_info import ThreadInfo
 
 from tenxgraph_api.src.app import main as app_main
 from tenxgraph_api.src.app.core import redis_client
 from tenxgraph_api.src.app.core.auth import revocation
 from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore, RedisCacheStore
 from tenxgraph_api.src.app.core.leases import LeaseManager
-from tenxgraph_api.src.app.routers.checkpointer import router as cp_router
 from tenxgraph_api.src.app.routers.checkpointer.services.checkpointer_service import (
     CheckpointerService,
 )
@@ -66,43 +66,33 @@ async def test_guard_is_released_when_the_body_raises(fresh_locks):
     assert await _hold(fresh_locks, "t1") is not None
 
 
-def _routes(service):
-    from tenxgraph_api.src.app.routers.checkpointer.schemas.checkpointer_schemas import (
-        ConfigSchema,
-        StateSchema,
-    )
-
-    request = MagicMock()
+def _writes(service):
     return {
-        "put_state": lambda: cp_router.put_state(
-            request, "t1", StateSchema(state={}), service, USER
-        ),
-        "clear_state": lambda: cp_router.clear_state(request, "t1", service, USER),
-        "delete_message": lambda: cp_router.delete_message(
-            request, "m1", "t1", ConfigSchema(), service, USER
-        ),
-        "delete_thread": lambda: cp_router.delete_thread(
-            request, "t1", ConfigSchema(), service, USER
-        ),
+        "put_state": lambda: service.put_state({"thread_id": "t1"}, USER, {}),
+        "clear_state": lambda: service.clear_state({"thread_id": "t1"}, USER),
+        "delete_message": lambda: service.delete_message({"thread_id": "t1"}, USER, "m1"),
+        "delete_thread": lambda: service.delete_thread({"thread_id": "t1"}, USER, "t1"),
     }
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", ["put_state", "clear_state", "delete_message", "delete_thread"])
-async def test_checkpointer_write_routes_answer_409_during_a_run(fresh_locks, name):
-    service = MagicMock()
+async def test_checkpointer_writes_answer_409_during_a_run(fresh_locks, name):
+    service = _service()
     lease = await _hold(fresh_locks, "t1")
     with pytest.raises(HTTPException) as exc:
-        await _routes(service)[name]()
+        await _writes(service)[name]()
     assert exc.value.status_code == 409
-    for method in ("put_state", "clear_state", "delete_message", "delete_thread"):
-        getattr(service, method).assert_not_called()
+    cp = service.checkpointer
+    for method in ("aput_state", "aclear_state", "adelete_message", "aclean_thread"):
+        getattr(cp, method).assert_not_called()
     lease.release()
 
 
 @pytest.mark.asyncio
 async def test_fix_route_answers_409_during_a_run(fresh_locks):
     service = MagicMock()
+    service.checkpointer.aget_thread = AsyncMock(return_value=object())  # the caller's thread
     service.fix_graph = AsyncMock(return_value={})
     lease = await _hold(fresh_locks, "t1")
     with pytest.raises(HTTPException) as exc:
@@ -124,7 +114,11 @@ def test_key_part_keeps_plain_ids_and_separates_colons():
 
 
 def test_run_slot_key_is_unambiguous():
-    assert run_slot_key("a:b") != run_slot_key("a") + ":b"
+    assert run_slot_key(Identity(user_id="a:b")) != run_slot_key(Identity(user_id="a")) + ":b"
+    # Tenant values are part of the key, and cannot be forged through the user id.
+    acme = Identity(user_id="a", tenant={"org": "acme"})
+    assert run_slot_key(acme) != run_slot_key(Identity(user_id="a"))
+    assert run_slot_key(acme) != run_slot_key(Identity(user_id="a:org:acme"))
     assert thread_lock.thread_lock_key("a:b") == "runs:thread:a%3Ab"
 
 
@@ -158,8 +152,11 @@ def _service(state_context=None, messages=None):
     cp = MagicMock()
     cp.aget_state = AsyncMock(return_value=SimpleNamespace(context=state_context or []))
     cp.alist_messages = AsyncMock(return_value=messages or [])
-    cp.aclean_thread = AsyncMock(return_value=None)
-    cp.adelete_message = AsyncMock(return_value=None)
+    cp.aget_thread = AsyncMock(return_value=ThreadInfo(thread_id="t1", user_id=USER.user_id))
+    cp.aput_state = AsyncMock()
+    cp.aclear_state = AsyncMock(return_value=1)
+    cp.aclean_thread = AsyncMock(return_value=1)
+    cp.adelete_message = AsyncMock(return_value=1)
     cp.aget_message = AsyncMock(return_value=None)
     service.checkpointer = cp
     service.settings = MagicMock()
@@ -238,7 +235,9 @@ async def test_message_media_is_released_only_after_the_core_delete(monkeypatch)
     monkeypatch.setattr(CheckpointerService, "_media_service", staticmethod(lambda: media))
     service = _service(state_context=[message], messages=[message])
     service.checkpointer.aget_message = AsyncMock(return_value=message)
-    service.checkpointer.adelete_message = AsyncMock(side_effect=lambda *a: order.append("delete"))
+    service.checkpointer.adelete_message = AsyncMock(
+        side_effect=lambda *a: order.append("delete") or 1
+    )
     await service.delete_message({"thread_id": "t1"}, USER, "m1")
     assert order == ["delete", "unlink"]
     service.checkpointer.adelete_message.assert_awaited_once()

@@ -9,11 +9,12 @@ from __future__ import annotations
 import pytest
 from tenxgraph.storage.checkpointer import InMemoryCheckpointer
 
+from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.routers.checkpointer.router import router as checkpointer_router
 from tenxgraph_api.src.app.routers.media import MediaService
 from tenxgraph_api.src.app.routers.media.router import router as media_router
 
-from .conftest import build_app, make_client, user_headers
+from .conftest import ClientThreadIdsConfig, build_app, make_client, user_headers
 
 
 HTTP_OK = 200
@@ -106,8 +107,13 @@ BODY = {"state": {"context": []}, "config": {}}
 
 
 def _thread_client():
+    # runs.thread_ids "client", so PUT state may start a thread with a client-named id.
     checkpointer = InMemoryCheckpointer()
-    app = build_app(routers=[checkpointer_router], checkpointer=checkpointer)
+    app = build_app(
+        routers=[checkpointer_router],
+        checkpointer=checkpointer,
+        extra_bindings={GraphConfig: ClientThreadIdsConfig()},
+    )
     return make_client(app), checkpointer
 
 
@@ -122,7 +128,7 @@ def test_a_state_write_claims_the_thread_for_the_writer():
     assert anyio.run(checkpointer.aget_thread_owner, "t-new") == "alice"
 
     mallory = client.put("/v1/threads/t-new/state", json=BODY, headers=user_headers("mallory"))
-    assert mallory.status_code >= HTTP_BAD_REQUEST, mallory.text
+    assert mallory.status_code == HTTP_NOT_FOUND, mallory.text
     # The owner is unchanged.
     assert anyio.run(checkpointer.aget_thread_owner, "t-new") == "alice"
 
@@ -133,12 +139,10 @@ def test_a_foreign_thread_looks_missing_to_other_users():
     assert put.status_code == HTTP_OK, put.text
 
     state = client.get("/v1/threads/t-priv/state", headers=user_headers("mallory"))
-    assert state.status_code == HTTP_OK
-    assert state.json()["data"]["state"] is None
+    assert state.status_code == HTTP_NOT_FOUND
 
     thread = client.get("/v1/threads/t-priv", headers=user_headers("mallory"))
-    assert thread.status_code == HTTP_OK
-    assert thread.json()["data"]["thread_data"]["thread"] is None
+    assert thread.status_code == HTTP_NOT_FOUND
 
 
 def test_the_owner_can_recreate_a_thread_they_just_deleted():

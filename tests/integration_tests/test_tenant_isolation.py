@@ -31,15 +31,17 @@ from tenxgraph.utils.thread_info import ThreadInfo
 from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
 from tenxgraph_api.src.app.core.auth.rbac import RbacConfig, RoleConfig
+from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.routers.checkpointer.router import router as checkpointer_router
 from tenxgraph_api.src.app.routers.store.router import router as store_router
 
-from .conftest import build_app, make_client
+from .conftest import ClientThreadIdsConfig, build_app, make_client
 
 
 HTTP_OK = 200
 HTTP_UNAUTHORIZED = 401
+HTTP_NOT_FOUND = 404
 HTTP_UNPROCESSABLE = 422
 
 
@@ -140,8 +142,11 @@ class TenantCheckpointer(InMemoryCheckpointer):
 
     async def aclean_thread(self, config):
         if not self._visible(config, config.get("thread_id")):
-            return False
-        return await super().aclean_thread(config)
+            return 0
+        deleted = await super().aclean_thread(config)
+        if deleted:  # the id is free again, for anyone
+            self.rows.pop(str(config["thread_id"]), None)
+        return deleted
 
     async def alist_threads(self, config, search=None, offset=None, limit=None, filters=None):
         self.list_calls.append(filters)
@@ -256,13 +261,18 @@ def _probe_router() -> APIRouter:
     return probe
 
 
-def _app(*, checkpointer: Any = None, store: Any = None) -> tuple[Any, TenantCheckpointer]:
+def _app(
+    *, checkpointer: Any = None, store: Any = None, client_ids: bool = False
+) -> tuple[Any, TenantCheckpointer]:
     checkpointer = checkpointer if checkpointer is not None else TenantCheckpointer()
+    bindings: dict[type, Any] = {BaseStore: store if store is not None else TenantStore()}
+    if client_ids:  # runs.thread_ids "client": PUT state may name a new thread
+        bindings[GraphConfig] = ClientThreadIdsConfig()
     app = build_app(
         routers=[checkpointer_router, store_router, _probe_router()],
         auth=TenantAuth(),
         checkpointer=checkpointer,
-        extra_bindings={BaseStore: store if store is not None else TenantStore()},
+        extra_bindings=bindings,
     )
     return make_client(app), checkpointer
 
@@ -321,13 +331,15 @@ def test_thread_reads_show_nothing_of_the_other_tenant():
         assert resp.status_code == HTTP_OK, resp.text
         return resp.json()["data"]
 
+    def status(thread_id, path, headers):
+        return client.get(f"/v1/threads/{thread_id}{path}", headers=headers).status_code
+
     assert read("t-a", "", ALICE_A)["thread_data"]["thread"] is not None
     assert read("t-a", "/state", ALICE_A)["state"] is not None
     assert read("t-a", "/messages", ALICE_A)["messages"]
-    assert read("t-b", "", ALICE_A)["thread_data"]["thread"] is None
-    assert read("t-b", "/state", ALICE_A)["state"] is None
-    assert read("t-b", "/messages", ALICE_A)["messages"] == []
-    assert read("t-a", "/state", ALICE_B)["state"] is None
+    for path in ("", "/state", "/messages"):
+        assert status("t-b", path, ALICE_A) == HTTP_NOT_FOUND
+        assert status("t-a", path, ALICE_B) == HTTP_NOT_FOUND
 
 
 def test_thread_writes_and_deletes_do_not_touch_the_other_tenant():
@@ -359,11 +371,11 @@ def test_org_admin_reach_covers_every_thread_of_the_org_only():
 
     def state(thread_id):
         resp = client.get(f"/v1/threads/{thread_id}/state", headers=admin_a)
-        return resp.json()["data"]["state"]
+        return resp.json()["data"]["state"] if resp.status_code == HTTP_OK else resp.status_code
 
     assert state("t-a") is not None
     assert state("t-bob") is not None
-    assert state("t-b") is None
+    assert state("t-b") == HTTP_NOT_FOUND
     assert _listed(client, admin_a) == {"t-a", "t-bob"}
 
     seen = client.post("/v1/graph/invoke", json={}, headers=admin_a).json()
@@ -389,7 +401,7 @@ FORGED_CONFIG = {
 
 
 def test_client_config_user_and_tenant_keys_do_not_reach_stored_thread_values():
-    client, cp = _app()
+    client, cp = _app(client_ids=True)
     _seed_two_tenants(cp)
 
     resp = client.put(
@@ -401,7 +413,7 @@ def test_client_config_user_and_tenant_keys_do_not_reach_stored_thread_values():
     assert cp.rows["t-new"]["org_id"] == "org-a"
     # The forged values reached neither the stored row nor anyone's view of it.
     other = client.get("/v1/threads/t-new/state", headers=ALICE_B)
-    assert other.json()["data"]["state"] is None
+    assert other.status_code == HTTP_NOT_FOUND
     assert _listed(client, ALICE_B) == {"t-b"}
     assert _listed(client, ALICE_A) == {"t-a", "t-new"}
 
@@ -460,11 +472,11 @@ def test_store_routes_keep_two_tenants_with_the_same_user_id_apart():
     assert ids(client.post("/v1/store/search", json=search, headers=ALICE_B)) == []
     assert ids(client.post("/v1/store/memories/list", json={}, headers=ALICE_B)) == []
     got = client.post(f"/v1/store/memories/{memory_id}", json={}, headers=ALICE_B)
-    assert got.json()["data"]["memory"] is None
+    assert got.status_code == HTTP_NOT_FOUND
     upd = client.put(f"/v1/store/memories/{memory_id}", json={"content": "x"}, headers=ALICE_B)
     assert upd.json()["data"]["data"] is False
     gone = client.request("DELETE", f"/v1/store/memories/{memory_id}", json={}, headers=ALICE_B)
-    assert gone.json()["data"]["data"] is False
+    assert gone.status_code == HTTP_NOT_FOUND
     forget = client.post("/v1/store/memories/forget", json={}, headers=ALICE_B)
     assert forget.json()["data"]["data"] == 0
     assert list(store.rows) == [memory_id]

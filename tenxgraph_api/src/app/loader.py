@@ -729,7 +729,7 @@ async def attach_all_modules(
         allow_none=True,
     )
 
-    # The cache store first: the ownership cache, token revocation and the rate limiter read
+    # The cache store first: token revocation and the rate limiter read
     # it from the container.
     load_and_bind_cache_store(container, config)
 

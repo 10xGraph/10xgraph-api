@@ -15,6 +15,7 @@ from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import Message
 from tenxgraph.core.state.message_block import ImageBlock, MediaRef, TextBlock
 from tenxgraph.storage.media.storage.memory_store import InMemoryMediaStore
+from tenxgraph.utils.thread_info import ThreadInfo
 
 from tenxgraph_api.src.app.core.auth.permissions_registry import expand
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, MediaConfig
@@ -121,6 +122,7 @@ def _graph_service(policy: Any = None, media: Any = None) -> GraphService:
     srv._graph = SimpleNamespace(media_policy=policy if policy is not None else _Policy())
     srv.checkpointer = MagicMock()
     srv.checkpointer.aget_thread_owner = AsyncMock(return_value=None)
+    srv.checkpointer.aget_thread = AsyncMock(return_value=object())  # the caller's thread
     srv.config = MagicMock()
     srv.thread_name_generator = None
     srv._media_service = media
@@ -264,7 +266,7 @@ async def test_ag_ui_route_answers_400():
     request.json = AsyncMock(return_value=body)
     config = SimpleNamespace(auth_config=lambda: None)
     with pytest.raises(HTTPException) as exc:
-        await run_ag_ui(request, _graph_service(), Identity(user_id="u1"), None, config)
+        await run_ag_ui(request, _graph_service(), Identity(user_id="u1"), config)
     assert exc.value.status_code == 400
 
 
@@ -277,7 +279,7 @@ def checkpointer_service(monkeypatch):
     cp.aput_state = AsyncMock(side_effect=lambda cfg, state: state)
     cp.aput_state_cache = AsyncMock()
     cp.aput_messages = AsyncMock(return_value=[])
-    cp.aget_thread_owner = AsyncMock(return_value="u1")
+    cp.aget_thread = AsyncMock(return_value=ThreadInfo(thread_id="t1", user_id="u1"))
     service.checkpointer = cp
     service.settings = MagicMock()
     monkeypatch.setattr(CheckpointerService, "_graph_service", staticmethod(_graph_service))
@@ -423,10 +425,13 @@ def _thread_service(monkeypatch, media, messages: list[Message]) -> Checkpointer
 
     async def adelete(cfg, message_id):
         state["messages"] = [m for m in state["messages"] if str(m.message_id) != str(message_id)]
+        return 1
 
     async def aclean(cfg):
         state["messages"] = []
+        return 1
 
+    cp.aget_thread = AsyncMock(return_value=ThreadInfo(thread_id="t1", user_id="alice"))
     cp.aget_state = AsyncMock(return_value=None)
     cp.alist_messages = AsyncMock(side_effect=alist)
     cp.aget_message = AsyncMock(side_effect=aget)

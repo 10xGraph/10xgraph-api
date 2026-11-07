@@ -144,7 +144,11 @@ class TestGetFileLogic:
             identity=mock_user,
         )
 
-        mock_service.get_file.assert_called_once_with("file-1", "user-123", mock_user)
+        # The route checks access by the caller's reach, then reads the file.
+        mock_service.ensure_can_access.assert_awaited_once_with(
+            "file-1", "user-123", mock_user, follow_reach=True
+        )
+        mock_service.get_file.assert_called_once_with("file-1")
         assert result.body == b"file content"
         assert result.media_type == "text/plain"
 
@@ -191,7 +195,10 @@ class TestGetFileInfoLogic:
             identity=mock_user,
         )
 
-        mock_service.get_file_info.assert_called_once_with("file-1", "user-123", mock_user)
+        mock_service.ensure_can_access.assert_awaited_once_with(
+            "file-1", "user-123", mock_user, follow_reach=True
+        )
+        mock_service.get_file_info.assert_called_once_with("file-1")
 
     @pytest.mark.asyncio
     async def test_get_file_info_handles_not_found(self, mock_request, mock_service, mock_user):

@@ -38,8 +38,23 @@ RUN_CAP_RETRY_AFTER_SECONDS = 5
 RunSlot = Lease
 
 
-def run_slot_key(user_id: str) -> str:
-    return f"runs:user:{key_part(user_id)}"
+def identity_key(user: Identity | None) -> str:
+    """The cache-key part for a caller: ``user_id`` and then each tenant column and value.
+
+    The same ``user_id`` in two tenants is two callers, so their run caps and idempotency
+    records never mix. Each part is ``key_part``-encoded (no ``:`` inside), so the joined key
+    reads back one way. Without tenant values it is ``key_part(user_id)``, as before.
+    """
+    if user is None:
+        return "anonymous"
+    parts = [user.user_id]
+    for column, value in sorted(user.tenant.items()):
+        parts += [column, value]
+    return ":".join(key_part(part) for part in parts)
+
+
+def run_slot_key(user: Identity) -> str:
+    return f"runs:user:{identity_key(user)}"
 
 
 async def acquire_run_slot(user: Identity | None, runs: RunsConfig) -> Lease:
@@ -51,11 +66,10 @@ async def acquire_run_slot(user: Identity | None, runs: RunsConfig) -> Lease:
     limit = runs.max_concurrent_per_user
     if user is None or limit is None:
         return Lease(None)
-    user_id = user.user_id
-    lease = await lease_manager().acquire(run_slot_key(user_id), limit)
+    lease = await lease_manager().acquire(run_slot_key(user), limit)
     if lease is None:
         logger.warning(
-            "Concurrent run limit reached for user %s (max=%s)", log_safe(user_id), limit
+            "Concurrent run limit reached for user %s (max=%s)", log_safe(user.user_id), limit
         )
         raise HTTPException(
             status_code=HTTP_TOO_MANY_REQUESTS,
