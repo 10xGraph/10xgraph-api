@@ -24,7 +24,6 @@ def test_defaults():
     assert cfg.broker.type == "redis_stream"
     assert cfg.result_ttl == 86400
     assert cfg.retries == 3
-    assert cfg.prometheus is None
 
 
 @pytest.mark.parametrize("bad", [{"broker": {"type": "nope"}}, {"retries": -1}, {"typo": 1}])

@@ -63,18 +63,12 @@ class ResultBackendConfig(_Section):
         return self
 
 
-class PrometheusConfig(_Section):
-    host: str = "0.0.0.0"  # noqa: S104
-    port: int = 9000
-
-
 class WorkerConfig(_Section):
     broker: BrokerConfig = Field(default_factory=BrokerConfig)
     result_backend: ResultBackendConfig | None = None
     tasks: list[str] = Field(default_factory=list)
     result_ttl: int = Field(default=86400, gt=0)
     retries: int = Field(default=3, ge=0)
-    prometheus: PrometheusConfig | None = None
 
 
 def _expand(raw: str, key: str) -> str:

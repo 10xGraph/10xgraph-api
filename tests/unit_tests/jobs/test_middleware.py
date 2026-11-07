@@ -6,6 +6,7 @@ type-hint and dependency reading working through ``functools.wraps``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Annotated
@@ -184,30 +185,97 @@ async def test_monitoring_logs_and_publishes(monitored, caplog):
     env, manager = monitored
     publisher = FakePublisher()
     env.container.bind_instance(BasePublisher, publisher)
-    job, sync_job = add_tasks(env)
+    _, sync_job = add_tasks(env)
 
     @env.broker.task
     async def boom() -> None:
-        raise ValueError("bad")
+        raise ValueError("bad " + "x" * 600)
+
+    @env.broker.task
+    async def stopped() -> None:
+        raise TaskCancelled("stop")
 
     env.wrap()
-    with caplog.at_level(logging.INFO, logger="tenxgraph_api.jobs"):
-        await (await kiq_with_id(sync_job, 1)).wait_result(timeout=5)
-        await (await kiq_with_id(boom)).wait_result(timeout=5)
-    await manager.wait_for_all(timeout=5)
-    phases = [
-        (event.node_name.rsplit(":", 1)[-1], str(event.event_type)) for event in publisher.events
+
+    async def run(task, *args) -> list[tuple[str, str]]:
+        publisher.events.clear()
+        handle = await kiq_with_id(task, *args)
+        await handle.wait_result(timeout=5)
+        await manager.wait_for_all(timeout=5)
+        events = [e for e in publisher.events if e.run_id == handle.task_id]
+        return [(e.metadata["phase"], str(e.event_type)) for e in events]
+
+    with caplog.at_level(logging.DEBUG, logger="tenxgraph_api.jobs"):
+        ok = await run(sync_job, 1)
+        ok_events = list(publisher.events)
+        caplog.clear()
+        failed = await run(boom)
+        failed_events = list(publisher.events)
+        failed_records = list(caplog.records)
+        caplog.clear()
+        cancelled = await run(stopped)
+        cancelled_records = list(caplog.records)
+        cancelled_events = list(publisher.events)
+
+    assert ok == [
+        ("queued", "update"),
+        ("started", "start"),
+        ("finished", "end"),
+        ("saved", "result"),
     ]
-    assert phases == [
-        ("sync_job", "start"),
-        ("sync_job", "end"),
-        ("boom", "start"),
-        ("boom", "error"),
+    assert ok_events[2].data["duration"] >= 0
+    assert "return_value" not in ok_events[3].data
+    assert failed == [
+        ("queued", "update"),
+        ("started", "start"),
+        ("failed", "error"),
+        ("saved", "result"),
     ]
-    assert publisher.events[-1].data["error"] == "ValueError"
-    assert (
-        "started" in caplog.text and "finished in" in caplog.text and "failed after" in caplog.text
+    error = failed_events[2]
+    assert error.is_error and error.data["error"] == "ValueError"
+    assert error.data["message"].startswith("bad x") and len(error.data["message"]) == 500
+    assert error.data["attempt"] == 1 and "duration" in error.data
+    logged = [
+        r for r in failed_records if r.levelno == logging.ERROR and r.name == "tenxgraph_api.jobs"
+    ]
+    assert len(logged) == 1 and "failed on attempt 1" in logged[0].getMessage()
+    assert logged[0].exc_info and logged[0].exc_info[0] is ValueError  # traceback is logged
+    assert cancelled == [
+        ("queued", "update"),
+        ("started", "start"),
+        ("cancelled", "interrupted"),
+        ("saved", "result"),
+    ]
+    assert not cancelled_events[2].is_error
+    assert not [
+        r
+        for r in cancelled_records
+        if r.levelno >= logging.WARNING and r.name == "tenxgraph_api.jobs"
+    ]
+    assert any("cancelled" in r.getMessage() for r in cancelled_records)
+
+
+async def test_monitoring_counts_retries():
+    env = Env(
+        InMemoryCacheStore(), SimpleRetryMiddleware(default_retry_count=3), MonitoringMiddleware()
     )
+    manager = BackgroundTaskManager()
+    publisher = FakePublisher()
+    env.container.bind_instance(BackgroundTaskManager, manager)
+    env.container.bind_instance(BasePublisher, publisher)
+    await env.broker.startup()
+
+    @env.broker.task(retry_on_error=True)
+    async def flaky() -> str:
+        raise RuntimeError("again")
+
+    handle = await kiq_with_id(flaky)
+    await handle.wait_result(timeout=5)
+    await asyncio.sleep(0.3)  # retries are re-sent in the background
+    await manager.wait_for_all(timeout=5)
+    attempts = [e.data["attempt"] for e in publisher.events if e.metadata["phase"] == "failed"]
+    assert attempts == [1, 2, 3]
+    await env.broker.shutdown()
 
 
 async def test_monitoring_never_raises_on_a_failing_publisher(monitored):

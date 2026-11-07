@@ -238,6 +238,15 @@ def _make_otel_publisher(publisher_cls: Any, level: Any, user_id_mode: str) -> A
         return publisher_cls(level=level)
 
 
+def _bind_publisher(container: InjectQ, publisher) -> None:
+    """Bind ``publisher`` as the ``BasePublisher``. InjectQ keeps serving the instance it
+    resolved first (``try_get`` above), so the cache is cleared or the old publisher stays."""
+    from tenxgraph.runtime.publisher.base_publisher import BasePublisher
+
+    container.bind_instance(BasePublisher, publisher)
+    container.clear_all_scopes()
+
+
 def _attach_otel_publisher(
     container: InjectQ, settings, graph_config: GraphConfig | None = None
 ) -> None:
@@ -272,13 +281,13 @@ def _attach_otel_publisher(
     existing = container.try_get(BasePublisher)
 
     if existing is None:
-        container.bind_instance(BasePublisher, otel_publisher)
+        _bind_publisher(container, otel_publisher)
         logger.info("OTEL: OtelPublisher bound (level=%s)", level)
     elif isinstance(existing, CompositePublisher):
         existing.add_publisher(otel_publisher)
         logger.info("OTEL: OtelPublisher added to existing CompositePublisher (level=%s)", level)
     else:
-        container.bind_instance(BasePublisher, CompositePublisher([existing, otel_publisher]))
+        _bind_publisher(container, CompositePublisher([existing, otel_publisher]))
         logger.info(
             "OTEL: wrapped %s + OtelPublisher in CompositePublisher (level=%s)",
             type(existing).__name__,
@@ -346,11 +355,11 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
     existing = container.try_get(BasePublisher)
 
     if existing is None:
-        container.bind_instance(BasePublisher, otel_publisher)
+        _bind_publisher(container, otel_publisher)
     elif isinstance(existing, CompositePublisher):
         existing.add_publisher(otel_publisher)
     else:
-        container.bind_instance(BasePublisher, CompositePublisher([existing, otel_publisher]))
+        _bind_publisher(container, CompositePublisher([existing, otel_publisher]))
 
     logger.info(
         "Observability enabled (logfire=%s, langsmith=%s, level=%s)",
@@ -360,19 +369,18 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
     )
 
 
-def _setup_otel(app: FastAPI, settings) -> None:
-    """Configure OpenTelemetry tracing and instrument the FastAPI app.
+def setup_otel_provider(settings) -> bool:
+    """Configure the OpenTelemetry tracer provider and exporter (API and worker share this).
 
     Reads OTEL_EXPORTER_OTLP_ENDPOINT from settings. If unset, falls back to
     the standard OTEL_EXPORTER_OTLP_ENDPOINT env var (honoured automatically
     by the OTLP exporter). A ConsoleSpanExporter is used when no endpoint is
     configured and the app is not in production, so traces are visible locally
     without any collector. In production with no endpoint nothing is set up and a warning
-    is logged.
+    is logged. Returns True when a provider was installed.
     """
     try:
         from opentelemetry import trace
-        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -381,7 +389,7 @@ def _setup_otel(app: FastAPI, settings) -> None:
             "OTEL_ENABLED=true but opentelemetry packages are not installed. "
             "Install with: pip install '10xgraph-api[otel]'"
         )
-        return
+        return False
 
     resource = Resource.create({"service.name": settings.OTEL_SERVICE_NAME})
     provider = TracerProvider(resource=resource)
@@ -398,7 +406,7 @@ def _setup_otel(app: FastAPI, settings) -> None:
                 "OTEL_EXPORTER_OTLP_ENDPOINT is set but opentelemetry-exporter-otlp "
                 "is not installed. Install with: pip install '10xgraph-api[otel]'"
             )
-            return
+            return False
     elif settings.MODE == "production":
         # Printing spans to stdout would put request URLs and, at OTEL_LEVEL=full, message
         # content in the container logs, so production exports nowhere instead.
@@ -406,7 +414,7 @@ def _setup_otel(app: FastAPI, settings) -> None:
             "OTEL_ENABLED=true but OTEL_EXPORTER_OTLP_ENDPOINT is not set; traces are not "
             "exported. Console span output is development-only. Set the endpoint to export."
         )
-        return
+        return False
     else:
         from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
 
@@ -414,6 +422,21 @@ def _setup_otel(app: FastAPI, settings) -> None:
         logger.info("OTEL: no endpoint configured, printing spans to console")
 
     trace.set_tracer_provider(provider)
+    return True
+
+
+def _setup_otel(app: FastAPI, settings) -> None:
+    """Configure OpenTelemetry tracing and instrument the FastAPI app."""
+    if not setup_otel_provider(settings):
+        return
+    try:
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    except ImportError:
+        logger.warning(
+            "OTEL_ENABLED=true but opentelemetry packages are not installed. "
+            "Install with: pip install '10xgraph-api[otel]'"
+        )
+        return
     FastAPIInstrumentor.instrument_app(app)
     logger.info("OTEL: FastAPI instrumentation active (service=%s)", settings.OTEL_SERVICE_NAME)
 

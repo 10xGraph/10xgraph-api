@@ -654,3 +654,19 @@ def test_make_otel_publisher_falls_back_on_an_older_core():
 
     publisher = setup_middleware_module._make_otel_publisher(OldCorePublisher, "standard", "hash")
     assert publisher.level == "standard"
+
+
+def test_bind_publisher_replaces_one_already_resolved():
+    """InjectQ serves the first resolved instance unless the cache is cleared."""
+    from injectq import InjectQ
+    from tenxgraph.runtime.publisher.base_publisher import BasePublisher
+    from tenxgraph.runtime.publisher.console_publisher import ConsolePublisher
+
+    from tenxgraph_api.src.app.core.config.setup_middleware import _bind_publisher
+
+    container = InjectQ()
+    container.bind_instance(BasePublisher, ConsolePublisher({}))
+    assert container.try_get(BasePublisher) is not None
+    replacement = ConsolePublisher({})
+    _bind_publisher(container, replacement)
+    assert container.try_get(BasePublisher) is replacement

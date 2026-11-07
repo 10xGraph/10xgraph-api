@@ -43,14 +43,6 @@ broker.add_middlewares(
     MonitoringMiddleware(),
     TaskMiddleware(),
 )
-if worker_config is not None and worker_config.prometheus is not None:
-    from taskiq.middlewares import PrometheusMiddleware
-
-    broker.add_middlewares(
-        PrometheusMiddleware(
-            server_addr=worker_config.prometheus.host, server_port=worker_config.prometheus.port
-        )
-    )
 
 
 async def worker_startup(state: TaskiqState) -> None:
@@ -59,6 +51,10 @@ async def worker_startup(state: TaskiqState) -> None:
     The ``taskiq worker`` CLI has imported the task modules before this event.
     """
     from tenxgraph_api.src.app.core.config.settings import get_settings
+    from tenxgraph_api.src.app.core.config.setup_middleware import (
+        _attach_otel_publisher,
+        setup_otel_provider,
+    )
     from tenxgraph_api.src.app.loader import attach_all_modules, load_container
     from tenxgraph_api.src.app.routers.ping.startup_checks import check_backends_at_startup
 
@@ -66,9 +62,12 @@ async def worker_startup(state: TaskiqState) -> None:
         raise RuntimeError('The worker needs a "worker" key in 10xgraph.json')
     container = load_container(graph_config.injectq_path) or InjectQ.get_instance()
     container.bind_instance(GraphConfig, graph_config)
+    settings = get_settings()
+    if settings.OTEL_ENABLED:  # same traces as the API; before the graph freezes BasePublisher
+        setup_otel_provider(settings)
+        _attach_otel_publisher(container, settings, graph_config)
     state.container = container
     state.graph = await attach_all_modules(graph_config, container)
-    settings = get_settings()
     if settings.STARTUP_CHECKS:
         await check_backends_at_startup(container, timeout=settings.STARTUP_CHECK_TIMEOUT_SECONDS)
     setup_taskiq(container, broker)
