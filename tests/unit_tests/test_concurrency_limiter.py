@@ -313,7 +313,7 @@ async def test_websocket_caps_use_the_lease_manager(monkeypatch):
 
     store = RecordingStore()
     manager = LeaseManager(store)
-    monkeypatch.setattr(realtime_guard.keying, "verified_user_id", lambda ws: "alice")
+    monkeypatch.setattr(realtime_guard.keying, "verified_caller_key", lambda ws: "alice")
     ws_config = WebSocketConfig(max_connections=10, max_connections_per_user=1)
     websocket = SimpleNamespace()
 
@@ -336,7 +336,7 @@ async def test_websocket_caps_hold_per_process_without_a_shared_store(monkeypatc
     from tenxgraph_api.src.app.routers.graph import realtime_guard
 
     manager = LeaseManager(InMemoryCacheStore())
-    monkeypatch.setattr(realtime_guard.keying, "verified_user_id", lambda ws: None)
+    monkeypatch.setattr(realtime_guard.keying, "verified_caller_key", lambda ws: None)
     ws_config = WebSocketConfig(max_connections=1, max_connections_per_user=1)
     async with realtime_guard._connection_slots(manager, SimpleNamespace(), ws_config):
         assert manager.held("ws:all") == 1

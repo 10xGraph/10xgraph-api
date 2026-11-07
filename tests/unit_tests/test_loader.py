@@ -395,6 +395,18 @@ def test_boot_refuses_tenant_claim_without_column_in_production(monkeypatch):
         check_auth_at_boot(_config(data), MagicMock(tenant_column_names=()), None)
 
 
+def test_boot_refuses_tenant_column_without_claim_in_production(monkeypatch):
+    """Tenant columns on the checkpointer and auth on with no tenant_claims: every thread
+    request would fail, so the boot refuses."""
+    from tenxgraph_api.src.app.core.config import settings as settings_module
+
+    monkeypatch.setattr(settings_module, "get_settings", lambda: MagicMock(MODE="production"))
+    with pytest.raises(ValueError, match="not in auth.tenant_claims"):
+        check_auth_at_boot(
+            _config({"auth": "jwt"}), MagicMock(tenant_column_names=("org_id",)), None
+        )
+
+
 # ---------------------------------------------------------------------------
 # G-28: per-process state warning
 # ---------------------------------------------------------------------------

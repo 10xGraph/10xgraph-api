@@ -215,8 +215,10 @@ def check_tenant_claims(
     production: bool,
     allow_mismatch: bool = False,
 ) -> list[AuthIssue]:
-    """Boot-time rule: every tenant claim is a declared tenant column of the checkpointer and
-    the store. An error in production, a warning otherwise.
+    """Boot-time rule: ``tenant_claims`` and the tenant columns declared on the checkpointer and
+    the store are the same names. A claim with no column leaves that data unisolated by it; a
+    column with no claim fails every request that touches the backend (no tenant value to
+    write or filter by). An error in production, a warning otherwise.
 
     ``allow_mismatch`` (``store_allow_tenant_mismatch``) leaves the store out of the check.
     """
@@ -237,6 +239,18 @@ def check_tenant_claims(
                     message=f"tenant_claims {missing} are not declared as tenant columns on the "
                     f"{label} ({type(backend).__name__}), so that data is not isolated by them. "
                     "Declare the same tenant columns on it.",
+                )
+            )
+        unclaimed = [c for c in declared if c not in tenant_claims]
+        if unclaimed:
+            issues.append(
+                AuthIssue(
+                    level=level,
+                    rule="tenant-columns",
+                    field="auth.tenant_claims",
+                    message=f"the {label} ({type(backend).__name__}) declares tenant columns "
+                    f"{unclaimed} that are not in auth.tenant_claims, so requests have no "
+                    "value for them and fail. Add them to auth.tenant_claims.",
                 )
             )
     return issues

@@ -107,7 +107,7 @@ def caller(monkeypatch):
     """Set which verified user the guard sees (``None`` = anonymous / invalid token)."""
 
     def _set(user_id: str | None):
-        monkeypatch.setattr(keying, "verified_user_id", lambda connection: user_id)
+        monkeypatch.setattr(keying, "verified_caller_key", lambda connection: user_id)
 
     _set(None)
     return _set
@@ -250,7 +250,7 @@ async def test_guard_and_runs_share_the_bound_cache_store(monkeypatch):
     store = InMemoryCacheStore()
     monkeypatch.setattr(realtime_guard, "bound_cache_store", lambda: store)
     monkeypatch.setattr(realtime_guard, "lease_manager", lambda: LeaseManager(store))
-    monkeypatch.setattr(keying, "verified_user_id", lambda connection: None)
+    monkeypatch.setattr(keying, "verified_caller_key", lambda connection: None)
     websocket = SimpleNamespace(state=SimpleNamespace())
     ws_config = WebSocketConfig(max_connections=None, max_connections_per_user=None)
     config = _Config(ws_config, rate_limit=_Global())

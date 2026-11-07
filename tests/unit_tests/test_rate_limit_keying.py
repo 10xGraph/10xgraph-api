@@ -9,11 +9,18 @@ time, so the rate limit could be bypassed entirely.
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
+from injectq import InjectQ
 from starlette.datastructures import Headers
+from starlette.requests import Request
+from tenxgraph.core.authz import Identity
 
+from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
+from tenxgraph_api.src.app.core.auth.rbac import RbacConfig
 from tenxgraph_api.src.app.core.config.graph_config import RateLimitConfig
 from tenxgraph_api.src.app.core.middleware.rate_limit import keying
 from tenxgraph_api.src.app.core.middleware.rate_limit.keying import client_key_for
+from tenxgraph_api.src.app.routers.graph.realtime_guard import ws_identity_still_valid
 
 
 def _cfg(**overrides) -> RateLimitConfig:
@@ -43,7 +50,7 @@ def verified_as(monkeypatch):
     """Make the limiter see the caller as a verified user (``None`` = no valid token)."""
 
     def _set(user_id):
-        monkeypatch.setattr(keying, "verified_user_id", lambda connection: user_id)
+        monkeypatch.setattr(keying, "verified_caller_key", lambda connection: user_id)
 
     return _set
 
@@ -149,3 +156,49 @@ class TestDefaultTrustedProxies:
                 }
             )
         assert "without rate_limit.trusted_proxies" not in caplog.text
+
+
+class _TenantCookieAuth(BaseAuth):
+    """A custom class that reads a ``session`` cookie (``user_id@org_id``), no bearer token."""
+
+    rbac = RbacConfig(tenant_claims=["org_id"])
+
+    def authenticate(self, request, response, credential):
+        user_id, _, org_id = request.cookies.get("session", "").partition("@")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="no session")
+        return {"user_id": user_id, "org_id": org_id}
+
+
+def _cookie_request(session: str | None) -> Request:
+    headers = [(b"cookie", f"session={session}".encode())] if session else []
+    return Request({"type": "http", "method": "GET", "path": "/", "headers": headers})
+
+
+@pytest.fixture
+def cookie_auth(monkeypatch):
+    container = InjectQ()
+    container.bind_instance(BaseAuth, _TenantCookieAuth())
+    monkeypatch.setattr(InjectQ, "get_instance", classmethod(lambda cls: container))
+
+
+class TestVerifiedCallerKey:
+    def test_key_has_the_tenant_values(self, cookie_auth):
+        assert keying.verified_caller_key(_cookie_request("u1@a")) == "u1:org_id:a"
+        assert client_key_for(_cookie_request("u1@a"), _cfg(by="user")) == "user:u1:org_id:a"
+
+    def test_same_user_id_in_two_tenants_gets_two_buckets(self, cookie_auth):
+        cfg = _cfg(by="user")
+        assert client_key_for(_cookie_request("u1@a"), cfg) != client_key_for(
+            _cookie_request("u1@b"), cfg
+        )
+
+    def test_a_request_that_does_not_authenticate_has_no_key(self, cookie_auth):
+        assert keying.verified_caller_key(_cookie_request(None)) is None
+
+    def test_socket_recheck_works_without_a_bearer_credential(self, cookie_auth):
+        """The per-run re-check runs authenticate as the handshake did (a cookie here)."""
+        alice_a = Identity(user_id="u1", tenant={"org_id": "a"})
+        assert ws_identity_still_valid(_cookie_request("u1@a"), alice_a)
+        assert not ws_identity_still_valid(_cookie_request("u1@b"), alice_a)
+        assert not ws_identity_still_valid(_cookie_request(None), alice_a)

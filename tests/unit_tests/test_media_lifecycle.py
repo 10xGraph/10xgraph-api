@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException, UploadFile
 from tenxgraph.core.authz import Identity
+from tenxgraph.core.exceptions import ThreadNotFoundError
 from tenxgraph.core.state import Message
 from tenxgraph.core.state.message_block import ImageBlock, MediaRef, TextBlock
 from tenxgraph.storage.media.storage.memory_store import InMemoryMediaStore
@@ -562,6 +563,23 @@ async def test_cleanup_failures_never_fail_the_delete(monkeypatch, delete_settin
     assert res.success is False and "files" in res.data["cleanup_failed"]
     res = await service.delete_message({"thread_id": "t1"}, _USER, "m1")
     assert res.success is True
+
+
+@pytest.mark.asyncio
+async def test_a_delete_whose_file_cleanup_failed_can_be_sent_again(monkeypatch, delete_setting):
+    media = _media()
+    key = await _upload(media)
+    other = await _upload(media, owner="bob")
+    await media.link_threads([key], "t1", "alice")
+    await media.link_threads([other], "t1", "bob")
+    service = _thread_service(monkeypatch, media, [])
+    # The first delete removed the thread but left the files linked; the thread is gone now.
+    service.checkpointer.aget_thread = AsyncMock(return_value=None)
+    with pytest.raises(ThreadNotFoundError):
+        await service.delete_thread({"thread_id": "t1"}, _USER, "t1")
+    assert not await media.store.exists(key)  # the caller's own file is released
+    assert await media.store.exists(other)  # nobody else's, whatever the caller's reach
+    service.checkpointer.aclean_thread.assert_not_awaited()
 
 
 @pytest.mark.asyncio

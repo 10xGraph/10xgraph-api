@@ -12,7 +12,8 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+from tenxgraph.core.authz import Identity
 
 
 if TYPE_CHECKING:
@@ -45,7 +46,16 @@ class TaskStatus(BaseModel):
 
 
 def owner_of(config: dict[str, Any]) -> str | None:
-    """The run config's ``user_id`` as a string (owner checks compare strings)."""
+    """The run's owner as ``/v1/tasks`` compares it: ``identity_key`` of ``config["user"]``
+    (``user_id`` and tenant values), else the ``user_id`` alone."""
+    from tenxgraph_api.src.app.routers.graph.run_limits import identity_key
+
+    user = config.get("user")
+    if isinstance(user, dict):
+        try:
+            return identity_key(Identity.model_validate(user))
+        except ValidationError:
+            logger.warning("Ignoring a run config user that is not an Identity")
     user_id = config.get("user_id")
     return None if user_id is None else str(user_id)
 

@@ -24,6 +24,7 @@ from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
 from tenxgraph_api.src.app.core.cache_store import BaseCacheStore
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
+from tenxgraph_api.src.app.routers.graph.run_limits import identity_key
 from tenxgraph_api.src.app.utils.response_helper import success_response
 
 from .schemas import Schedule, ScheduleChange, ScheduleRecord, TaskCall
@@ -45,7 +46,8 @@ def _store() -> BaseCacheStore:
 
 
 def _owner(identity: Identity | None) -> str:
-    return identity.user_id if identity is not None else "anonymous"
+    """The caller key a task belongs to: ``user_id`` and tenant values (``identity_key``)."""
+    return identity_key(identity)
 
 
 def _visible(owner: str | None, identity: Identity | None) -> bool:
@@ -130,7 +132,7 @@ async def start_task(
         raise ClientInputError(str(exc)) from None
     store = _store()
     owner = _owner(identity)
-    config: dict[str, Any] = {"user_id": owner}
+    config: dict[str, Any] = {"user_id": identity.user_id if identity is not None else "anonymous"}
     if identity is not None:
         # JSON for the worker, which rebuilds the Identity from it.
         config["user"] = identity.model_dump(mode="json")

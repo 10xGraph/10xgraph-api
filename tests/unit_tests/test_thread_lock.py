@@ -10,6 +10,7 @@ import pytest
 from fastapi import HTTPException, WebSocketDisconnect
 from pydantic import ValidationError
 from tenxgraph.core.authz import Identity
+from tenxgraph.core.exceptions import ThreadNotFoundError
 from tenxgraph.core.state import StreamChunk, StreamEvent
 
 from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
@@ -298,6 +299,34 @@ async def test_ws_run_releases_the_lock_and_next_run_works(fresh_locks):
     ws = _ws([frame, frame, WebSocketDisconnect()])
     await websocket_graph(websocket=ws, service=service, identity=None)
     assert service.stream_graph.call_count == 2
+    assert fresh_locks._held == {}
+
+
+@pytest.mark.asyncio
+async def test_invoke_reads_the_thread_again_once_locked(fresh_locks):
+    """runs.thread_ids "client": another user may create the id while this run waits."""
+    service = _service(AsyncMock())
+    service.require_run_thread = AsyncMock(side_effect=[None, ThreadNotFoundError("t1")])
+    with pytest.raises(ThreadNotFoundError):
+        await _call(service, _input())
+    assert service.require_run_thread.await_count == 2
+    service.invoke_graph.assert_not_awaited()
+    assert fresh_locks._held == {}
+
+
+@pytest.mark.asyncio
+async def test_ws_thread_taken_while_waiting_is_an_error_chunk(fresh_locks):
+    service = _service(None)
+    service.is_live_agent = False
+    service.require_run_thread = AsyncMock(side_effect=[None, ThreadNotFoundError("t1")])
+    service.stream_graph = MagicMock(side_effect=lambda *a, **k: _items("ok\n"))
+    frame = {"invoke_type": "fresh", "messages": MSG, "config": {"thread_id": "t1"}}
+    ws = _ws([frame, WebSocketDisconnect()])
+    await websocket_graph(websocket=ws, service=service, identity=None)
+    chunk = json.loads(ws.send_text.call_args_list[0].args[0])
+    assert chunk["data"]["code"] == "THREAD_NOT_FOUND"
+    service.stream_graph.assert_not_called()
+    ws.close.assert_not_awaited()
     assert fresh_locks._held == {}
 
 

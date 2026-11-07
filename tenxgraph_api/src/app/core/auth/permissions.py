@@ -26,11 +26,6 @@ from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
 from tenxgraph_api.src.app.core.auth.permissions_registry import ALL_PERMISSIONS
 from tenxgraph_api.src.app.core.auth.rbac import InvalidClaimsError, resolve
-from tenxgraph_api.src.app.core.validation.request_config import (
-    ClientInputError,
-    normalize_thread_id,
-    resource_id_error,
-)
 from tenxgraph_api.src.app.core.auth.reserved_identity import (
     RESERVED_USER_ID_MESSAGE,
     identity_is_reserved,
@@ -41,6 +36,12 @@ from tenxgraph_api.src.app.core.auth.revocation import (
     token_revoked,
 )
 from tenxgraph_api.src.app.core.exceptions.general_exception import GeneralException
+from tenxgraph_api.src.app.core.utils.container import current_container
+from tenxgraph_api.src.app.core.validation.request_config import (
+    ClientInputError,
+    normalize_thread_id,
+    resource_id_error,
+)
 
 
 # Sec-WebSocket-Protocol sentinel carrying the bearer token for browser WebSocket clients.
@@ -248,12 +249,9 @@ class RequireIdentity:
         if self.permission is not None:
             resource_id = await _resource_id(connection)
             try:
-                allowed = await auth.authorize(identity, self.permission, resource_id)
+                await _authorize(auth, identity, self.permission, resource_id)
             except HTTPException as exc:
                 _reject(connection, exc.status_code, str(exc.detail))
-            if not allowed:
-                logger.warning("User %s lacks permission %s", identity.user_id, self.permission)
-                _reject(connection, 403, f"Missing required permission: {self.permission}")
         return identity
 
 
@@ -273,8 +271,36 @@ class RequirePermission(RequireIdentity):
         self.permission = permission
 
 
+async def _authorize(
+    auth: BaseAuth, identity: Identity, permission: str, resource: str | None
+) -> None:
+    """``auth.authorize`` or an ``HTTPException`` (403; one ``authorize`` raised passes through)."""
+    if not await auth.authorize(identity, permission, resource):
+        logger.warning("User %s lacks permission %s", identity.user_id, permission)
+        raise HTTPException(status_code=403, detail=f"Missing required permission: {permission}")
+
+
+async def authorize_resource(
+    identity: Identity | None, permission: str, resource: str | None
+) -> None:
+    """``BaseAuth.authorize`` on a thread the route reads from its own input; 403 when refused.
+
+    ``RequirePermission`` passes the id from the path or a JSON ``thread_id``. AG-UI
+    (``threadId``), every ``/v1/graph/ws`` run frame and the ``/v1/graph/live`` init frame name
+    their thread where it cannot look, so those routes call this once they know it, and
+    ``authorize`` sees the same ``(permission, resource)`` on every transport. Raises
+    ``HTTPException``; a socket route turns it into an error frame. Nothing to check with auth
+    off (``identity`` is None).
+    """
+    if identity is None:
+        return
+    auth = current_container().try_get(BaseAuth)
+    if auth is not None:
+        await _authorize(auth, identity, permission, resource)
+
+
 async def _resource_id(connection: HTTPConnection) -> str | None:
-    """The thread (or memory, namespace) id the request targets, validated (422).
+    """The thread (or memory, namespace, file) id the request targets, validated (422).
 
     Path parameters win; otherwise the thread id from the JSON body. Ids that break the shared
     resource-id rule are refused here, once, for every route.
@@ -285,7 +311,8 @@ async def _resource_id(connection: HTTPConnection) -> str | None:
         if name in params:
             problem = resource_id_error(params[name], name) or problem
     resource_id = next(
-        (str(params[n]) for n in ("thread_id", "memory_id", "namespace") if n in params), None
+        (str(params[n]) for n in ("thread_id", "memory_id", "namespace", "file_id") if n in params),
+        None,
     )
     if resource_id is None:
         resource_id = await _body_thread_id(connection)

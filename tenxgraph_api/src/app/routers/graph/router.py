@@ -19,6 +19,7 @@ from tenxgraph.core.state import StreamChunk, StreamEvent
 
 from tenxgraph_api.src.app.core.auth.permissions import (
     RequirePermission,
+    authorize_resource,
     ws_bearer_subprotocol,
 )
 from tenxgraph_api.src.app.core.auth.revocation import (
@@ -226,6 +227,15 @@ async def _send_ws_error(websocket: WebSocket, reason: str) -> None:
     )
 
 
+async def _send_thread_not_found(websocket: WebSocket) -> None:
+    code, message = _thread_not_found()
+    await websocket.send_text(
+        StreamChunk(
+            event=StreamEvent.ERROR, data={"reason": message, "code": code}
+        ).model_dump_json()
+    )
+
+
 def _thread_not_found() -> tuple[str, str]:
     """``(code, message)`` of the 404 for a thread the caller cannot see, for socket frames."""
     from tenxgraph_api.src.app.core.exceptions.handle_errors import (
@@ -368,6 +378,7 @@ async def _http_run_guard(
         on_busy=graph_input.on_busy,
         stop=lambda: service.stop_graph(thread_id, identity),
         is_disconnected=request.is_disconnected if request is not None else None,
+        recheck=lambda: service.require_run_thread(thread_id, identity),
     )
 
 
@@ -978,16 +989,17 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
                     log_safe(thread_id),
                 )
 
-            # A thread the caller cannot run on: an error chunk, the socket stays open.
+            # A thread the caller may not use or cannot run on: an error chunk, the socket
+            # stays open. The handshake authorized with no thread; this run names one.
             try:
+                if thread_id is not None:
+                    await authorize_resource(identity, "graph:stream", thread_id)
                 await service.require_run_thread(thread_id, identity)
+            except HTTPException as exc:
+                await _send_ws_error(websocket, str(exc.detail))
+                continue
             except ThreadNotFoundError:
-                code, message = _thread_not_found()
-                await websocket.send_text(
-                    StreamChunk(
-                        event=StreamEvent.ERROR, data={"reason": message, "code": code}
-                    ).model_dump_json()
-                )
+                await _send_thread_not_found(websocket)
                 continue
 
             graph_input = ws_input.to_graph_input()
@@ -1017,6 +1029,7 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
                     thread_id=thread_id,
                     on_busy=ws_input.on_busy,
                     stop=lambda tid=thread_id: service.stop_graph(tid, identity),
+                    recheck=lambda tid=thread_id: service.require_run_thread(tid, identity),
                 )
             except HTTPException as exc:
                 if idem:
@@ -1026,6 +1039,11 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
                         event=StreamEvent.ERROR, data={"reason": _guard_refusal(exc)}
                     ).model_dump_json()
                 )
+                continue
+            except ThreadNotFoundError:
+                if idem:
+                    idem.release()
+                await _send_thread_not_found(websocket)
                 continue
             try:
                 finished = await _ws_run(websocket, service, graph_input, identity, frames)
@@ -1143,6 +1161,16 @@ async def _live_credential_error(websocket: WebSocket, identity: Identity | None
     revoked, so it fails closed).
     """
     return not ws_identity_still_valid(websocket, identity) or await _ws_token_revoked(identity)
+
+
+async def _close_live(websocket: WebSocket, code: str, message: str) -> None:
+    """End a live session before it starts: a fatal error event, then close 1008."""
+    with contextlib.suppress(Exception):
+        await websocket.send_text(
+            _realtime_event_json(ErrorEvent(code=code, message=message, fatal=True))
+        )
+    with contextlib.suppress(Exception):
+        await websocket.close(code=1008)
 
 
 def _dispatch_realtime_control(queue: Any, text: str) -> str | None:
@@ -1306,15 +1334,14 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
     # error closes it too (1011): the check fails closed.
     if named_thread:
         try:
+            # The handshake authorized with no thread; the init frame names one.
+            await authorize_resource(identity, "graph:stream", thread_id)
             await service.require_run_thread(thread_id, identity)
+        except HTTPException as exc:
+            await _close_live(websocket, "forbidden", str(exc.detail))
+            return
         except ThreadNotFoundError:
-            code, message = _thread_not_found()
-            with contextlib.suppress(Exception):
-                await websocket.send_text(
-                    _realtime_event_json(ErrorEvent(code=code, message=message, fatal=True))
-                )
-            with contextlib.suppress(Exception):
-                await websocket.close(code=1008)
+            await _close_live(websocket, *_thread_not_found())
             return
         except Exception as e:
             logger.error("Realtime thread check failed: %s", e)
@@ -1323,11 +1350,21 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
             return
 
     # The same guard as every other run: one session at a time on a thread, and the session
-    # counts against the user's run cap for as long as it lasts.
+    # counts against the user's run cap for as long as it lasts. A named thread is read again
+    # once locked.
     try:
         guard = await acquire_run_guard(
-            user=identity, runs=service.runs_policy(), thread_id=thread_id, on_busy="wait"
+            user=identity,
+            runs=service.runs_policy(),
+            thread_id=thread_id,
+            on_busy="wait",
+            recheck=(lambda: service.require_run_thread(thread_id, identity))
+            if named_thread
+            else None,
         )
+    except ThreadNotFoundError:
+        await _close_live(websocket, *_thread_not_found())
+        return
     except HTTPException as exc:
         busy = exc.status_code == 409  # noqa: PLR2004
         with contextlib.suppress(Exception):

@@ -468,7 +468,7 @@ def check_auth_at_boot(
     production = get_settings().MODE == "production"
     issues: list[AuthIssue] = check_auth_config(config.data, production=production)
     auth = config.auth_config() if not any(i.level == "error" for i in issues) else None
-    if auth is not None and auth.tenant_claims:
+    if auth is not None:
         issues += check_tenant_claims(
             auth.tenant_claims,
             checkpointer,

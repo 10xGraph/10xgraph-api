@@ -234,9 +234,9 @@ def test_cache_never_stores_or_returns_reserved_claims():
 def test_rate_limit_key_does_not_use_a_reserved_user():
     container = _container(_ReusableTokenAuth())
     with patch("injectq.InjectQ.get_instance", return_value=container):
-        assert keying.verified_user_id(_request("alice")) == "alice"
-        assert keying.verified_user_id(_request("__system__")) is None
-        assert keying.verified_user_id(_request("  __system__")) is None
+        assert keying.verified_caller_key(_request("alice")) == "alice"
+        assert keying.verified_caller_key(_request("__system__")) is None
+        assert keying.verified_caller_key(_request("  __system__")) is None
 
 
 def test_reusable_backend_with_rate_limit_by_user_is_still_refused():

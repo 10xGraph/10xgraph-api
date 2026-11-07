@@ -153,6 +153,15 @@ def test_tenant_claims_not_declared_as_columns(production, level):
     assert [(i.rule, i.level) for i in issues] == [("tenant-columns", level)]
 
 
+@pytest.mark.parametrize(("production", "level"), [(True, "error"), (False, "warning")])
+def test_tenant_columns_not_in_tenant_claims(production, level):
+    issues = check_tenant_claims(
+        [], _Backend(tenant_column_names=("org_id",)), None, production=production
+    )
+    assert [(i.rule, i.level) for i in issues] == [("tenant-columns", level)]
+    assert "['org_id']" in issues[0].message
+
+
 def test_tenant_claims_declared_pass_and_store_is_compared():
     ok = _Backend(tenant_column_names=("org_id",))
     assert check_tenant_claims(["org_id"], ok, ok, production=True) == []

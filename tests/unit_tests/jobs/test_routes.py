@@ -19,6 +19,7 @@ from taskiq import InMemoryBroker, ScheduledTask, ScheduleSource
 from tenxgraph_api.jobs import state
 from tenxgraph_api.jobs.middleware import TaskMiddleware, wrap_tasks
 from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
+from tenxgraph_api.src.app.core.auth.rbac import RbacConfig
 from tenxgraph_api.src.app.core.auth.route_guard import _iter_routes, find_unprotected_routes
 from tenxgraph_api.src.app.core.cache_store import BaseCacheStore, InMemoryCacheStore
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
@@ -38,6 +39,16 @@ class TokenAuth(BaseAuth):
 
     def authenticate(self, request, response, credential):
         return {"user_id": credential.credentials} if credential else {}
+
+
+class TenantTokenAuth(BaseAuth):
+    """The bearer token is ``user_id@org_id``; ``org_id`` is a tenant claim."""
+
+    rbac = RbacConfig(tenant_claims=["org_id"])
+
+    def authenticate(self, request, response, credential):
+        user_id, _, org_id = credential.credentials.partition("@")
+        return {"user_id": user_id, "org_id": org_id}
 
 
 class AuthOn:
@@ -60,12 +71,13 @@ class FakeSource(ScheduleSource):
 
 
 class Env:
-    def __init__(self, monkeypatch, auth: bool = True) -> None:
+    def __init__(self, monkeypatch, auth: bool = True, auth_impl: BaseAuth | None = None) -> None:
         self.store = InMemoryCacheStore()
         self.source = FakeSource()
         container = InjectQ()
         container.bind_instance(GraphConfig, AuthOn())
-        container.bind_instance(BaseAuth, TokenAuth() if auth else None, allow_none=True)
+        auth_impl = auth_impl or (TokenAuth() if auth else None)
+        container.bind_instance(BaseAuth, auth_impl, allow_none=True)
         container.bind_instance(BaseCacheStore, self.store)
         self.broker = InMemoryBroker(await_inplace=True).with_middlewares(TaskMiddleware())
         self.seen: list[dict] = []
@@ -149,6 +161,29 @@ def test_other_user_gets_404_on_task(env):
     assert env.call("GET", f"/v1/tasks/{task_id}", user="u2").status_code == 404
     assert env.call("POST", f"/v1/tasks/{task_id}/cancel", user="u2").status_code == 404
     assert env.call("GET", "/v1/tasks/missing").status_code == 404
+
+
+def test_same_user_id_in_another_tenant_gets_404(monkeypatch):
+    env = Env(monkeypatch, auth_impl=TenantTokenAuth())
+    resp = env.call("POST", f"/v1/tasks/{ADD}", user="u1@a", json={"args": [1, 1]})
+    task_id = resp.json()["data"]["task_id"]
+    assert env.call("GET", f"/v1/tasks/{task_id}", user="u1@a").status_code == 200
+    assert env.call("GET", f"/v1/tasks/{task_id}", user="u1@b").status_code == 404
+    assert env.call("POST", f"/v1/tasks/{task_id}/cancel", user="u1@b").status_code == 404
+
+    body = {"args": [1, 2], "schedule": {"every": 3}}
+    resp = env.call("POST", f"/v1/tasks/{ADD}", user="u1@a", json=body)
+    schedule_id = resp.json()["data"]["schedule_id"]
+    change = {"schedule": {"every": 5}}
+    assert env.call("GET", f"/v1/tasks/{schedule_id}", user="u1@b").status_code == 404
+    assert (
+        env.call("PATCH", f"/v1/tasks/{schedule_id}", user="u1@b", json=change).status_code == 404
+    )
+    assert env.call("POST", f"/v1/tasks/{schedule_id}/cancel", user="u1@b").status_code == 404
+    assert env.call("GET", f"/v1/tasks/{schedule_id}", user="u1@a").status_code == 200
+    # The worker records the same owner key for a run it creates (a scheduled run).
+    label = json.loads(env.source.schedules[schedule_id].labels[state.CONFIG_LABEL])
+    assert state.owner_of(label) == "u1:org_id:a"
 
 
 def test_cancel_a_queued_task(env, monkeypatch):

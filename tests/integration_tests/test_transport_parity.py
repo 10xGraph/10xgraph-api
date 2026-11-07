@@ -33,6 +33,8 @@ from tenxgraph_api.src.app.routers.checkpointer.router import router as threads_
 from tenxgraph_api.src.app.routers.graph.router import router as graph_router
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
 from tenxgraph_api.src.app.routers.me import router as me_router
+from tenxgraph_api.src.app.routers.media import MediaService
+from tenxgraph_api.src.app.routers.media.router import router as media_router
 from tenxgraph_api.src.app.routers.store.router import router as store_router
 
 from . import conftest
@@ -278,3 +280,84 @@ def test_me_reports_reach_all_and_needs_a_token(client):
     assert data["reach"] == "all"
     assert "graph:invoke" in data["permissions"]
     assert client.get("/v1/me").status_code == 401
+
+
+# --- authorize sees the same (permission, resource) on every transport --------------------
+
+THREAD = "T1"
+
+
+class _RecordingAuth(_Auth):
+    """Records every ``authorize`` call and refuses anything on ``THREAD`` (a per-thread ACL)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[tuple[str, str | None]] = []
+
+    async def authorize(
+        self, identity: Identity, permission: str, resource: str | None = None
+    ) -> bool:
+        self.calls.append((permission, resource))
+        return resource != THREAD and identity.can(permission)
+
+
+class _LiveStub(_StubService):
+    is_live_agent = True
+
+
+def _user_message() -> dict[str, Any]:
+    return {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+
+
+def _refused_on_thread(client, transport: str, headers: dict[str, str]) -> str:
+    """Name ``THREAD`` on one transport; return how it was refused."""
+    if transport == "ws":
+        with client.websocket_connect("/v1/graph/ws", headers=headers) as ws:
+            ws.send_json({"messages": [_user_message()], "config": {"thread_id": THREAD}})
+            chunk = ws.receive_json()
+        assert chunk["event"] == "error"
+        return chunk["data"]["reason"]
+    if transport == "live":
+        with client.websocket_connect("/v1/graph/live", headers=headers) as ws:
+            ws.send_json({"model": "m", "thread_id": THREAD})
+            event = ws.receive_json()
+            with pytest.raises(WebSocketDisconnect) as closed:
+                ws.receive_json()
+        assert closed.value.code == POLICY_VIOLATION
+        assert event["code"] == "forbidden"
+        return event["message"]
+    if transport == "ag_ui":
+        body: dict[str, Any] = {"threadId": THREAD, "runId": "r1", "messages": []}
+        response = client.post("/v1/ag-ui", json=body, headers=headers)
+    else:
+        body = {"messages": [_user_message()], "config": {"thread_id": THREAD}}
+        response = client.post(f"/v1/graph/{transport}", json=body, headers=headers)
+    assert response.status_code == 403  # noqa: PLR2004
+    return "403"
+
+
+@pytest.mark.parametrize("transport", TRANSPORTS)
+def test_authorize_gets_the_thread_id_on_every_transport(app_container, transport):
+    auth = _RecordingAuth()
+    service = _LiveStub() if transport == "live" else _StubService()
+    app = build_app(
+        routers=[graph_router, ag_ui_router],
+        auth=auth,
+        extra_bindings={GraphConfig: _Config(), GraphService: service},
+    )
+    headers = {"Authorization": f"Bearer {mint(roles=['admin'])}"}
+    assert _refused_on_thread(make_client(app), transport, headers)
+    assert (TRANSPORTS[transport], THREAD) in auth.calls
+
+
+def test_authorize_gets_the_file_id_on_file_routes(app_container):
+    auth = _RecordingAuth()
+    app = build_app(
+        routers=[media_router],
+        auth=auth,
+        extra_bindings={GraphConfig: _Config(), MediaService: AsyncMock(spec=MediaService)},
+    )
+    headers = {"Authorization": f"Bearer {mint(roles=['admin'])}"}
+    response = make_client(app).get(f"/v1/files/{THREAD}", headers=headers)
+    assert response.status_code == 403  # noqa: PLR2004
+    assert auth.calls == [("files:read", THREAD)]

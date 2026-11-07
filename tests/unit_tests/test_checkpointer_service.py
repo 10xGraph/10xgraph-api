@@ -3,6 +3,8 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
+from pydantic import TypeAdapter
 from tenxgraph.core.authz import Identity
 from tenxgraph.core.exceptions import ThreadNotFoundError
 from tenxgraph.core.state import AgentState, Message
@@ -291,6 +293,26 @@ class TestRequireThread:
         args = service.checkpointer.aput_thread.await_args.args
         assert args[1].thread_id == "t1"
         assert args[1].user_id == "alice"
+
+    @pytest.mark.asyncio
+    async def test_invalid_state_does_not_claim_a_new_thread(self):
+        service = self._service(thread_ids="client")
+        service.settings = MagicMock()
+        service.checkpointer.aget_state = AsyncMock(return_value=None)
+        service.checkpointer.aget_state_cache = AsyncMock(return_value=None)
+        service.checkpointer.aput_state = AsyncMock()
+
+        def invalid(old_state, data):
+            TypeAdapter(int).validate_python({"field": "not an int"})
+
+        service._reconstruct_state = invalid
+        with pytest.raises(HTTPException) as exc:
+            await service.put_state(
+                {"thread_id": "t1", "user_id": "alice"}, Identity(user_id="alice"), {}
+            )
+        assert exc.value.status_code == 422  # noqa: PLR2004
+        service.checkpointer.aput_thread.assert_not_awaited()
+        service.checkpointer.aput_state.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_existing_thread_is_not_registered_again(self):

@@ -5,7 +5,7 @@ from injectq.integrations import InjectAPI
 from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.core import logger
-from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
+from tenxgraph_api.src.app.core.auth.permissions import RequirePermission, authorize_resource
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
@@ -74,13 +74,16 @@ async def run_ag_ui(
         raise HTTPException(status_code=422, detail=client_error_detail(exc)) from exc
 
     thread_id = normalize_thread_id(run_input.thread_id)
-    if thread_id is None or thread_id == NEW_THREAD:
+    named = thread_id not in (None, NEW_THREAD)
+    if not named:
         # The protocol makes threadId required, so a client that wants a server-made thread
         # sends it blank or "new". The new id comes back in RUN_STARTED.
         thread_id = await service.new_thread_id()
     else:
         if problem := resource_id_error(thread_id, "threadId"):
             raise ClientInputError(problem)
+        # RequirePermission saw no thread id (AG-UI names it threadId): authorize on it here.
+        await authorize_resource(identity, "graph:stream", thread_id)
         await service.require_run_thread(thread_id, identity)
     run_input.thread_id = thread_id
 
@@ -93,14 +96,14 @@ async def run_ag_ui(
         if idem is None:
             raise idempotency.refuse_repeat()
     try:
-        return await _run_ag_ui(request, run_input, service, identity, config, idem)
+        return await _run_ag_ui(request, run_input, service, identity, config, idem, named)
     except BaseException:
         if idem is not None:
             idem.release()
         raise
 
 
-async def _run_ag_ui(request, run_input, service, identity, config, idem):
+async def _run_ag_ui(request, run_input, service, identity, config, idem, named):
     thread_id = run_input.thread_id
     # External media URLs in the request, checked before the response starts so a blocked
     # one is a 400. Anything the converter rejects is left to the run, which reports it.
@@ -117,8 +120,13 @@ async def _run_ag_ui(request, run_input, service, identity, config, idem):
         )
     encoder = EventEncoder(accept=request.headers.get("accept") or "")
     # One run at a time per thread (AG-UI always waits); taken before the response starts so a
-    # busy thread is a real 409.
-    guard = await acquire_run_guard(user=identity, runs=service.runs_policy(), thread_id=thread_id)
+    # busy thread is a real 409. A named thread is read again once locked.
+    guard = await acquire_run_guard(
+        user=identity,
+        runs=service.runs_policy(),
+        thread_id=thread_id,
+        recheck=(lambda: service.require_run_thread(thread_id, identity)) if named else None,
+    )
     events = stream_ag_ui(
         service, run_input, identity, encoder, allow_client_tools=config.ag_ui.allow_client_tools
     )

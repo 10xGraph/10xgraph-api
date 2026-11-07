@@ -4,7 +4,7 @@ from typing import Any
 from fastapi import HTTPException
 from injectq import inject, singleton
 from pydantic import BaseModel, ValidationError
-from tenxgraph.core.authz import Identity
+from tenxgraph.core.authz import Identity, Reach
 from tenxgraph.core.exceptions import ThreadNotFoundError
 from tenxgraph.core.state import AgentState, Message
 from tenxgraph.storage.checkpointer import BaseCheckpointer
@@ -308,11 +308,6 @@ class CheckpointerService:
             state = {**state, "context": with_fresh_message_ids(context)}
         self._check_media_urls(state.get("context") or [])
         await self._check_media_references(state.get("context") or [], identity)
-        if new_thread:
-            # A client-named new thread (runs.thread_ids "client"): register it first, so the
-            # caller owns it and it is listed. Of two callers racing for one id, the loser gets
-            # ThreadNotFoundError (404) from storage.
-            await self.checkpointer.aput_thread(cfg, owned_thread_info(cfg, cfg["thread_id"]))
         old_state: AgentState | None = await self.checkpointer.aget_state(cfg)
         if not old_state:
             old_state = await self.checkpointer.aget_state_cache(cfg)
@@ -328,6 +323,11 @@ class CheckpointerService:
             # Name the offending fields, never echo the values.
             fields = ", ".join(sorted({".".join(str(p) for p in e["loc"]) for e in exc.errors()}))
             raise HTTPException(status_code=422, detail=f"Invalid state fields: {fields}") from exc
+        if new_thread:
+            # A client-named new thread (runs.thread_ids "client"), claimed only once the state
+            # is valid: the caller then owns it and it is listed. Of two callers racing for one
+            # id, the loser gets ThreadNotFoundError (404) from storage.
+            await self.checkpointer.aput_thread(cfg, owned_thread_info(cfg, cfg["thread_id"]))
         res = await self.checkpointer.aput_state(cfg, to_store)  # type: ignore[arg-type]
         # update cache as well
         await self.checkpointer.aput_state_cache(cfg, to_store)  # type: ignore
@@ -526,6 +526,9 @@ class CheckpointerService:
         deleted, and only for the owner the scoped read returned: a delete that removed nothing
         (outside the caller's reach, or gone meanwhile) is a 404 and touches no file and no
         trace. A deleted id can be created again by anyone.
+
+        A delete whose file cleanup failed can be sent again: the thread is gone then (404), but
+        the caller's own files still linked to it are released first.
         """
         cfg = self._config(config, identity)
         logger.debug(
@@ -533,9 +536,24 @@ class CheckpointerService:
             log_safe(identity.user_id if identity else None),
             log_safe(thread_id),
         )
-        thread = await self._require(identity, thread_id)
+        try:
+            thread = await self._require(identity, thread_id)
+        except ThreadNotFoundError:
+            await self._release_own_files(cfg, identity, thread_id)
+            raise
         async with thread_write_guard(thread_id):
             return await self._delete_thread(cfg, identity, thread_id, thread)
+
+    async def _release_own_files(
+        self, cfg: dict[str, Any], identity: Identity | None, thread_id: Any
+    ) -> None:
+        """Release the caller's own files linked to ``thread_id`` (reach ``own``, never others')."""
+        media = self._link_tracking_media()
+        if media is None:
+            return
+        if identity is not None and identity.reach is not Reach.OWN:
+            identity = identity.model_copy(update={"reach": Reach.OWN})
+        await media.release_thread(str(thread_id), str(cfg["user_id"]), identity)
 
     async def _delete_thread(
         self,

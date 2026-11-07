@@ -81,24 +81,25 @@ def _networks(
     return tuple(ipaddress.ip_network(net, strict=False) for net in trusted)
 
 
-def verified_user_id(connection: HTTPConnection) -> str | None:
-    """Identify the caller from their credential, exactly as ``RequirePermission`` does.
+def verified_caller_key(connection: HTTPConnection) -> str | None:
+    """Identify the caller, exactly as ``RequirePermission`` does: ``user_id`` and tenant values.
 
     The rate limiter runs before any route dependency, so it cannot read an authenticated
-    user from request state. It verifies the credential itself with the bound auth class
-    instead. Returns ``None`` when auth is off, no credential was sent, or the credential does
-    not verify; the caller is then limited by address, so forged tokens cannot buy fresh
-    buckets.
+    user from request state. It runs the bound auth class itself instead, with whatever
+    credential the request carries (none for a class that reads a cookie), and returns
+    ``run_limits.identity_key`` of the resolved identity: the same ``user_id`` in two tenants
+    is two callers. Returns ``None`` when auth is off or the request does not authenticate;
+    the caller is then limited by address, so forged tokens cannot buy fresh buckets.
     """
     from injectq import InjectQ
 
     from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
     from tenxgraph_api.src.app.core.auth.permissions import _extract_credential, remember_claims
+    from tenxgraph_api.src.app.core.auth.rbac import resolve
     from tenxgraph_api.src.app.core.auth.reserved_identity import identity_is_reserved
+    from tenxgraph_api.src.app.routers.graph.run_limits import identity_key
 
     credential = _extract_credential(connection)
-    if credential is None:
-        return None
     try:
         auth = InjectQ.get_instance().try_get(BaseAuth)
         if auth is None:
@@ -109,12 +110,13 @@ def verified_user_id(connection: HTTPConnection) -> str | None:
         claims = auth.authenticate(connection, Response(), credential)
         if not isinstance(claims, dict) or identity_is_reserved(claims):
             return None  # not a valid key; RequirePermission rejects it
-        remember_claims(connection, auth, credential.credentials, claims)
-    except Exception as exc:  # invalid token, auth error: fall back to the address
+        if credential is not None:
+            remember_claims(connection, auth, credential.credentials, claims)
+        identity = resolve(claims, auth.rbac)
+    except Exception as exc:  # invalid token, bad claims, auth error: fall back to the address
         logger.debug("Rate limit could not verify caller identity: %s", exc)
         return None
-    user_id = claims.get("user_id")
-    return str(user_id) if user_id else None
+    return identity_key(identity) if identity.user_id else None
 
 
 def client_key_for(connection: HTTPConnection, config: RateLimitConfig) -> str:
@@ -137,9 +139,9 @@ def client_key_for(connection: HTTPConnection, config: RateLimitConfig) -> str:
         return "__global__"
 
     if config.by == "user":
-        user_id = verified_user_id(connection)
-        if user_id:
-            return f"user:{user_id}"
+        caller = verified_caller_key(connection)
+        if caller:
+            return f"user:{caller}"
         return f"ip:{_client_ip(connection, config)}"
 
     return _client_ip(connection, config)
