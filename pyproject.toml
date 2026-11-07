@@ -100,6 +100,17 @@ jobs = [
     "taskiq>=0.13.0",
     "taskiq-redis>=1.2.4",
 ]
+# RabbitMQ and Kafka store no results: the result backend and schedules stay on Redis.
+jobs-rabbitmq = [
+    "taskiq>=0.13.0",
+    "taskiq-redis>=1.2.4",
+    "taskiq-aio-pika>=0.6.1",
+]
+jobs-kafka = [
+    "taskiq>=0.13.0",
+    "taskiq-redis>=1.2.4",
+    "taskiq-aio-kafka>=1.0.0",
+]
 jwt = [
     "PyJWT>=2.15.0,<3",
 ]
@@ -395,6 +406,8 @@ dev = [
     "redis>=5.0.7",
     "taskiq>=0.13.0",
     "taskiq-redis>=1.2.4",
+    "taskiq-aio-pika>=0.6.1",
+    "taskiq-aio-kafka>=1.0.0",
     "PyJWT",
     "textxtract[pdf,docx,html,xml,md]>=0.2.0",
     # The ag-ui extra, so the AG-UI router tests run in CI instead of failing.

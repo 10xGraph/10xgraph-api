@@ -185,6 +185,12 @@ async def lifespan(app: FastAPI):
     # Fail fast, in development and production, while a configured backend is unreachable.
     await _check_backends(app)
 
+    # Background tasks: import the task modules and start the broker for sending.
+    if graph_config.worker is not None:
+        from tenxgraph_api.src.app.routers.tasks import start_broker
+
+        await start_broker(graph_path, graph_config.worker.tasks, container)
+
     # Clean up expired temporary media cache on startup
     try:
         await asyncio.wait_for(_cleanup_temp_media_cache(), BOOT_CLEANUP_TIMEOUT_SECONDS)
@@ -227,6 +233,14 @@ async def lifespan(app: FastAPI):
             logger.info("Graph closed: %s", stats)
         except Exception as exc:
             logger.warning("Graph close did not finish cleanly: %s", exc)
+
+    if graph_config.worker is not None:
+        from tenxgraph_api.src.app.routers.tasks import stop_broker
+
+        try:
+            await stop_broker()
+        except Exception as exc:
+            logger.warning("Task broker close failed: %s", exc)
 
     # The rate limiter, ownership cache and token revocation share the cache store: closed
     # once here.
@@ -275,6 +289,7 @@ init_routes(
     app,
     ag_ui=graph_config.ag_ui.enabled,
     websocket=graph_config.websocket.enabled,
+    tasks=graph_config.worker is not None,
 )
 
 # Secure by construction: refuse to boot if any non-public route forgot its

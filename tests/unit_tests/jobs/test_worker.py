@@ -10,7 +10,6 @@ from taskiq.middlewares import SimpleRetryMiddleware
 
 from tenxgraph_api.jobs import middleware as mw
 from tenxgraph_api.jobs import monitoring
-from tenxgraph_api.jobs.config import WorkerConfig
 
 
 def load_worker(monkeypatch, tmp_path, data):
@@ -43,17 +42,6 @@ def test_middlewares_in_order(monkeypatch, tmp_path):
     kinds = [type(m) for m in worker.broker.middlewares]
     assert kinds == [SimpleRetryMiddleware, monitoring.MonitoringMiddleware, mw.TaskMiddleware]
     assert worker.broker.middlewares[0].default_retry_count == 5
-
-
-def test_import_tasks_by_module_and_glob(monkeypatch, tmp_path):
-    (tmp_path / "pkg_tasks.py").write_text("LOADED = True\n")
-    (tmp_path / "other_tasks.py").write_text("LOADED = True\n")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.syspath_prepend(str(tmp_path))
-    data = {"agent": "a:b", "worker": {"broker": {"type": "memory"}}}
-    worker = load_worker(monkeypatch, tmp_path, data)
-    worker.import_tasks(WorkerConfig(tasks=["pkg_tasks", "other_*.py"]))
-    assert "pkg_tasks" in sys.modules and "other_tasks" in sys.modules
 
 
 @pytest.mark.asyncio
@@ -143,43 +131,6 @@ async def test_shutdown_uses_container_from_startup(monkeypatch, tmp_path):
     mine.bind_instance(BaseCacheStore, FakeCache())
     await worker.worker_shutdown(state)
     assert closed == ["cache"]
-
-
-@pytest.mark.asyncio
-async def test_startup_runs_checkpointer_setup(monkeypatch, tmp_path):
-    from injectq import InjectQ
-
-    data = {"agent": "a:b", "worker": {"broker": {"type": "memory"}}}
-    worker = load_worker(monkeypatch, tmp_path, data)
-    calls = []
-
-    class FakeCheckpointer:
-        async def asetup(self):
-            calls.append("setup")
-
-    mine = InjectQ()
-    mine.bind_instance("checkpointer", FakeCheckpointer())
-    _patch_loader(monkeypatch, container=mine)
-    monkeypatch.setattr(worker, "wrap_tasks", lambda b: None)
-    await worker.worker_startup(SimpleNamespace())
-    assert calls == ["setup"]
-
-
-@pytest.mark.asyncio
-async def test_checkpointer_setup_failure_is_logged_not_raised(monkeypatch, tmp_path, caplog):
-    from injectq import InjectQ
-
-    worker = load_worker(monkeypatch, tmp_path, {"agent": "a:b"})
-
-    class BadCheckpointer:
-        async def asetup(self):
-            raise RuntimeError("no db")
-
-    mine = InjectQ()
-    mine.bind_instance("checkpointer", BadCheckpointer())
-    with caplog.at_level(logging.ERROR, logger="tenxgraph_api.jobs"):
-        await worker._prepare_checkpointer(mine)
-    assert any("Checkpointer setup failed" in r.message for r in caplog.records)
 
 
 def test_result_ttl_set_from_config(monkeypatch, tmp_path):

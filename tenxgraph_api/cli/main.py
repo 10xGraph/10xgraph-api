@@ -69,7 +69,9 @@ InitCommand = _lazy_command("tenxgraph_api.cli.commands.init", "InitCommand")
 RevokeCommand = _lazy_command("tenxgraph_api.cli.commands.revoke", "RevokeCommand")
 SkillsCommand = _lazy_command("tenxgraph_api.cli.commands.skills", "SkillsCommand")
 TestCommand = _lazy_command("tenxgraph_api.cli.commands.test", "TestCommand")
+SchedulerCommand = _lazy_command("tenxgraph_api.cli.commands.worker", "SchedulerCommand")
 VersionCommand = _lazy_command("tenxgraph_api.cli.commands.version", "VersionCommand")
+WorkerCommand = _lazy_command("tenxgraph_api.cli.commands.worker", "WorkerCommand")
 
 # Create the main Typer app
 app = typer.Typer(
@@ -413,6 +415,37 @@ def version(
         command = VersionCommand(output)
         exit_code = command.execute()
         sys.exit(exit_code)
+    except Exception as e:
+        sys.exit(handle_exception(e))
+
+
+TASKIQ_ARGS = {"allow_extra_args": True, "ignore_unknown_options": True}
+
+
+@app.command(rich_help_panel="Run", context_settings=TASKIQ_ARGS)
+def worker(
+    ctx: typer.Context,
+    config_file: str = typer.Option(
+        DEFAULT_CONFIG_FILE, "--config", "-c", help="Project configuration file."
+    ),
+) -> None:
+    """Run the TaskIQ worker for the project's "worker" config. Other options go to TaskIQ."""
+    try:
+        sys.exit(WorkerCommand(output).execute(config=config_file, extra=ctx.args))
+    except Exception as e:
+        sys.exit(handle_exception(e))
+
+
+@app.command(rich_help_panel="Run", context_settings=TASKIQ_ARGS)
+def scheduler(
+    ctx: typer.Context,
+    config_file: str = typer.Option(
+        DEFAULT_CONFIG_FILE, "--config", "-c", help="Project configuration file."
+    ),
+) -> None:
+    """Run the TaskIQ scheduler (run exactly one). Other options go to TaskIQ."""
+    try:
+        sys.exit(SchedulerCommand(output).execute(config=config_file, extra=ctx.args))
     except Exception as e:
         sys.exit(handle_exception(e))
 

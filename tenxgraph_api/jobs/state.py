@@ -1,8 +1,8 @@
-"""Job state kept in the API's cache store: status records, cancel flags, schedule records.
+"""Job state kept in the API's cache store: status records and cancel flags.
 
-Keys live under ``jobs:`` and expire after ``RESULT_TTL`` seconds (schedule records live as long
-as the schedule). The store is the ``BaseCacheStore`` bound in the InjectQ container: the one
-``setup_taskiq`` attached to the broker in a worker, else the API's container.
+Keys live under ``jobs:`` and expire after ``RESULT_TTL`` seconds. The store is the
+``BaseCacheStore`` bound in the InjectQ container: the one ``setup_taskiq`` attached to the
+broker in a worker, else the API's container.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ import time
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
-from taskiq import ScheduledTask
 
 
 if TYPE_CHECKING:
@@ -43,14 +42,6 @@ class TaskStatus(BaseModel):
     owner: str | None = None
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)
-
-
-class ScheduleRecord(BaseModel):
-    """A schedule as we created it: TaskIQ has no read-by-id, and hides future one-time ones."""
-
-    owner: str | None = None
-    created_at: float = Field(default_factory=time.time)
-    task: ScheduledTask
 
 
 def owner_of(config: dict[str, Any]) -> str | None:
@@ -119,21 +110,3 @@ async def set_cancel_flag(store: BaseCacheStore, task_id: str) -> None:
 
 async def is_cancel_flag_set(store: BaseCacheStore, task_id: str) -> bool:
     return await store.get(_key("cancel", task_id)) is not None
-
-
-async def read_schedule(store: BaseCacheStore, schedule_id: str) -> ScheduleRecord | None:
-    raw = await store.get(_key("schedule", schedule_id))
-    return ScheduleRecord.model_validate_json(raw) if raw else None
-
-
-async def write_schedule(store: BaseCacheStore, record: ScheduleRecord) -> None:
-    """Keep a cron / interval schedule until deleted, a one-time one until RESULT_TTL after."""
-    ttl: float | None = None
-    if record.task.time is not None:
-        ttl = max(record.task.time.timestamp() - time.time(), 0) + RESULT_TTL
-    data = record.model_dump_json().encode()
-    await store.set(_key("schedule", record.task.schedule_id), data, ttl)
-
-
-async def delete_schedule(store: BaseCacheStore, schedule_id: str) -> None:
-    await store.delete(_key("schedule", schedule_id))

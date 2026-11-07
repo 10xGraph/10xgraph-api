@@ -75,7 +75,7 @@ async def test_cancel_before_start_gives_error_result_and_status(env):
 
 async def test_worker_recheck_blocks_injected_override(env):
     job, _ = add_tasks(env)
-    handle = await kiq_with_id(job, 1, graph="EVIL")  # plain kiq, no enqueue check
+    handle = await kiq_with_id(job, 1, graph="EVIL")  # plain kiq, no caller-side check
     result = await handle.wait_result(timeout=5)
     assert isinstance(result.error, ReservedArgumentError)
     assert RAN == []

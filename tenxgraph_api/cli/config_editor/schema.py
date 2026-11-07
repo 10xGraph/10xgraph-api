@@ -78,6 +78,9 @@ AUTHORIZATION_SCOPES: tuple[str, ...] = (
     "store:delete",
     "store:read",
     "store:write",
+    "tasks:cancel",
+    "tasks:invoke",
+    "tasks:read",
 )
 
 BUILTIN_AUTHORIZATION: tuple[str, ...] = ("ownership", "allow_all", "default", "none")
@@ -117,6 +120,7 @@ KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
         "remote_tools",
         "test",
         "evaluation",
+        "worker",
     }
 )
 
@@ -1002,6 +1006,79 @@ _SECTIONS: list[dict[str, Any]] = [
         "default": [],
         "widget": "remote_tools",
         "fields": [],
+    },
+    {
+        "id": "worker",
+        "title": "Worker (background tasks)",
+        "description": "The TaskIQ broker and result backend that run background tasks.",
+        "key": "worker",
+        "optional": True,
+        "off_summary": "No background worker is configured.",
+        "default": {"broker": {"type": "redis_stream"}},
+        "fields": [
+            {
+                "path": ["worker", "broker", "type"],
+                "label": "Broker type",
+                "type": "select",
+                "options": [
+                    ["redis_stream", "Redis Streams"],
+                    ["rabbitmq", "RabbitMQ"],
+                    ["kafka", "Kafka"],
+                    ["memory", "In memory (local only, no worker)"],
+                ],
+                "default": "redis_stream",
+            },
+            {
+                "path": ["worker", "broker", "url"],
+                "label": "Broker URL",
+                "type": "text",
+                "placeholder": "Redis: empty uses REDIS_URL",
+                "help": (
+                    "Redis Streams: empty uses REDIS_URL. RabbitMQ: amqp://user:pass@host:5672/ "
+                    "(required). Kafka: host:9092, the bootstrap servers (required). A value or a "
+                    "variable such as ${WORKER_REDIS_URL}."
+                ),
+            },
+            {
+                "path": ["worker", "result_backend", "type"],
+                "label": "Result backend type",
+                "type": "select",
+                "options": [["redis", "Redis"], ["memory", "In memory"]],
+                "default": "redis",
+            },
+            {
+                "path": ["worker", "result_backend", "url"],
+                "label": "Result backend URL",
+                "type": "text",
+                "placeholder": "Empty: the broker URL for Redis Streams, else REDIS_URL",
+                "help": "Empty: the broker URL for Redis Streams, else REDIS_URL",
+            },
+            {
+                "path": ["worker", "tasks"],
+                "label": "Task modules",
+                "type": "list",
+                "placeholder": "graph.tasks",
+                "help": "Module names or file globs that define your tasks.",
+            },
+            {
+                "path": ["worker", "result_ttl"],
+                "label": "Result TTL (seconds)",
+                "type": "number",
+                "exclusive_min": 0,
+                "step": 1,
+                "placeholder": "86400",
+                "help": "How long task results are kept.",
+            },
+            {
+                "path": ["worker", "retries"],
+                "label": "Retries",
+                "type": "number",
+                "min": 0,
+                "step": 1,
+                "placeholder": "3",
+                "help": "How many times a failed task is retried.",
+            },
+        ],
     },
     {
         "id": "test",

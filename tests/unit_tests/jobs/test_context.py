@@ -1,8 +1,8 @@
-"""TaskContext, the reserved-argument check, enqueue, cancel and the schedule helpers."""
+"""TaskContext, the reserved-argument check and cancel."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+import json
 from typing import Annotated
 
 import pytest
@@ -10,17 +10,8 @@ from injectq.integrations.taskiq import InjectTaskiq
 from taskiq import Context, TaskiqDepends
 
 from tenxgraph_api.jobs import state
-from tenxgraph_api.jobs.context import (
-    ReservedArgumentError,
-    ScheduleNotFoundError,
-    TaskContext,
-    cancel,
-    check_arguments,
-    enqueue,
-    reschedule,
-    schedule,
-    unschedule,
-)
+from tenxgraph_api.jobs.arguments import ReservedArgumentError, check_arguments
+from tenxgraph_api.jobs.context import TaskContext, cancel
 
 from .conftest import Service
 
@@ -39,7 +30,6 @@ def make_report(env):
         *,
         label: str = "x",
     ) -> dict:
-        await ctx.progress({"step": "loading"})
         return {
             "id": report_id,
             "config": config,
@@ -59,9 +49,7 @@ def make_report(env):
         ((1,), {"config": {}}, "set by the server"),
         ((1,), {"user_id": "u2"}, "set by the server"),
         ((1,), {"authz": {}}, "set by the server"),
-        ((1,), {"bogus": 1}, "has no arguments"),
         ((1, {}), {}, "at most 1 positional"),
-        ((1,), {"report_id": 2}, "given twice"),
     ],
 )
 async def test_check_arguments_rejects(env, args, kwargs, message):
@@ -86,9 +74,13 @@ async def test_check_arguments_accepts_plain_and_spots_all_injection_styles(env)
             check_arguments(styles, (), {name: 1})
 
 
-async def test_enqueue_passes_config_records_owner_and_progress(env):
+def with_config(task, config):
+    return task.kicker().with_labels(**{state.CONFIG_LABEL: json.dumps(config)})
+
+
+async def test_kiq_with_config_label_reaches_task_and_records_owner(env):
     task = make_report(env)
-    handle = await enqueue(task, 7, config=CONFIG, label="z")
+    handle = await with_config(task, CONFIG).kiq(7, label="z")
     result = await handle.wait_result(timeout=5)
     assert not result.is_err, result.error
     value = result.return_value
@@ -97,21 +89,11 @@ async def test_enqueue_passes_config_records_owner_and_progress(env):
     assert value["ctx_config"] == expected
     assert value["graph"] is True
     assert value["cancelled"] is False
-    progress = await env.broker.result_backend.get_progress(handle.task_id)
-    assert progress.meta == {"step": "loading"}
     record = await state.read_status(env.store, handle.task_id)
     assert (record.status, record.owner, record.task_name) == ("success", "u1", task.task_name)
 
 
-async def test_enqueue_refuses_before_sending(env):
-    task = make_report(env)
-    with pytest.raises(ReservedArgumentError):
-        await enqueue(task, 1, graph="EVIL")
-    with pytest.raises(ReservedArgumentError):
-        await enqueue(task, 1, 2)
-
-
-async def test_enqueue_without_config_and_sync_task(env):
+async def test_kiq_without_config_and_sync_task(env):
     @env.broker.task
     def plain(a: int) -> int:
         return a * 2
@@ -120,9 +102,9 @@ async def test_enqueue_without_config_and_sync_task(env):
     def sync_cfg(a: int, config: dict, ctx: Annotated[TaskContext, TaskiqDepends()]) -> list:
         return [a, config, ctx.config, ctx.task_name]
 
-    result = await (await enqueue(plain, 4, config=CONFIG)).wait_result(timeout=5)
+    result = await (await with_config(plain, CONFIG).kiq(4)).wait_result(timeout=5)
     assert result.return_value == 8
-    handle = await enqueue(sync_cfg, 1)
+    handle = await sync_cfg.kiq(1)
     result = await handle.wait_result(timeout=5)
     only_id = {"task_id": handle.task_id}
     assert result.return_value == [1, only_id, only_id, sync_cfg.task_name]
@@ -140,37 +122,3 @@ async def test_cancel_marks_only_a_queued_task(env):
     assert (await state.read_status(env.store, "q")).status == "cancelled"
     assert (await state.read_status(env.store, "r")).status == "running"
     assert await state.is_cancel_flag_set(env.store, "r")
-
-
-async def test_schedule_reschedule_unschedule(env, source):
-    task = make_report(env)
-    schedule_id = await schedule(task, 3, cron="0 9 * * 1", config=CONFIG, label="w")
-    stored = source.items[schedule_id]
-    assert (stored.cron, stored.args, stored.kwargs) == ("0 9 * * 1", [3], {"label": "w"})
-    assert stored.task_id is None  # never with_task_id on a schedule
-    assert state.parse_config(stored.labels) == CONFIG
-    assert (await state.read_schedule(env.store, schedule_id)).owner == "u1"
-
-    await reschedule(schedule_id, every=60, broker=env.broker)
-    changed = source.items[schedule_id]
-    assert (changed.cron, changed.interval, changed.args) == (None, 60, [3])
-    assert (await state.read_schedule(env.store, schedule_id)).task.interval == 60
-
-    at = datetime.now(UTC) + timedelta(hours=1)
-    await reschedule(schedule_id, at=at, broker=env.broker)
-    assert source.items[schedule_id].time == at
-
-    await unschedule(schedule_id, env.broker)
-    assert schedule_id not in source.items
-    assert await state.read_schedule(env.store, schedule_id) is None
-    with pytest.raises(ScheduleNotFoundError):
-        await reschedule(schedule_id, cron="* * * * *", broker=env.broker)
-
-
-async def test_schedule_checks_timing_and_arguments(env, source):
-    task = make_report(env)
-    with pytest.raises(ValueError, match="exactly one"):
-        await schedule(task, 1, cron="* * * * *", every=5)
-    with pytest.raises(ReservedArgumentError):
-        await schedule(task, 1, cron="* * * * *", graph="EVIL")
-    assert source.items == {}

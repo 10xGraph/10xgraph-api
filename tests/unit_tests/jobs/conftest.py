@@ -4,14 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 import pytest_asyncio
 from injectq import InjectQ
 from injectq.integrations.taskiq import setup_taskiq
-from taskiq import InMemoryBroker, ScheduledTask, ScheduleSource
+from taskiq import InMemoryBroker
 
 from tenxgraph_api.jobs.middleware import TaskMiddleware, wrap_tasks
-from tenxgraph_api.jobs.schedules import set_schedule_source
 from tenxgraph_api.src.app.core.cache_store import BaseCacheStore, InMemoryCacheStore
 
 
@@ -19,20 +17,6 @@ class Service:
     """Something InjectQ injects into tasks."""
 
     name = "bound"
-
-
-class FakeScheduleSource(ScheduleSource):
-    def __init__(self) -> None:
-        self.items: dict[str, ScheduledTask] = {}
-
-    async def get_schedules(self) -> list[ScheduledTask]:
-        return list(self.items.values())
-
-    async def add_schedule(self, schedule: ScheduledTask) -> None:
-        self.items[schedule.schedule_id] = schedule
-
-    async def delete_schedule(self, schedule_id: str) -> None:
-        self.items.pop(schedule_id, None)
 
 
 class Env:
@@ -55,11 +39,3 @@ async def env():
     await environment.broker.startup()
     yield environment
     await environment.broker.shutdown()
-
-
-@pytest.fixture
-def source():
-    fake = FakeScheduleSource()
-    set_schedule_source(fake)
-    yield fake
-    set_schedule_source(None)

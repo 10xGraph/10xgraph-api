@@ -19,7 +19,11 @@ from tenxgraph_api.cli.config_editor import (
     build_schema,
     validate_config,
 )
-from tenxgraph_api.cli.config_editor.schema import AUTHORIZATION_SCOPES, KNOWN_TOP_LEVEL_KEYS
+from tenxgraph_api.cli.config_editor.schema import (
+    AUTHORIZATION_SCOPES,
+    KNOWN_TOP_LEVEL_KEYS,
+    section_for_key,
+)
 from tenxgraph_api.cli.config_editor.server import TOKEN_HEADER
 from tenxgraph_api.src.app.core.config.graph_config import DEFAULT_USER_REVOCATION_TTL
 
@@ -723,3 +727,77 @@ def test_config_command_targets_10xgraph_json_when_only_legacy_exists(
     assert store.path == tmp_path / "10xgraph.json"
     assert store.seed_path == tmp_path / "agentflow.json"
     assert store.load().config == {"agent": "old:app"}
+
+
+def test_worker_section_fields_and_key() -> None:
+    section = _section("worker")
+    assert section["key"] == "worker"
+    assert section["optional"] is True
+    paths = [tuple(f["path"]) for f in section["fields"]]
+    assert paths == [
+        ("worker", "broker", "type"),
+        ("worker", "broker", "url"),
+        ("worker", "result_backend", "type"),
+        ("worker", "result_backend", "url"),
+        ("worker", "tasks"),
+        ("worker", "result_ttl"),
+        ("worker", "retries"),
+    ]
+    assert section_for_key("worker") == "worker"
+    issues = validate_config({"agent": "a:b", "worker": section["default"]})
+    assert [i for i in issues if i["section"] == "worker"] == []
+
+
+def test_worker_valid_config_has_no_worker_issues() -> None:
+    worker = {
+        "broker": {"type": "redis_stream", "url": "${REDIS_URL}"},
+        "result_backend": {"type": "redis"},
+        "tasks": ["graph.tasks"],
+        "result_ttl": 60,
+        "retries": 0,
+    }
+    issues = validate_config({"agent": "a:b", "worker": worker})
+    assert [i for i in issues if i["section"] == "worker"] == []
+
+
+def test_worker_errors_name_the_field() -> None:
+    worker = {"broker": {"type": "nope"}, "retries": -1, "result_ttl": 0, "bogus": 1}
+    found = validate_config({"agent": "a:b", "worker": worker})
+    issues = [i for i in found if i["level"] == "error"]
+    paths = {i["path"] for i in issues}
+    assert {"worker.broker", "worker.retries", "worker.result_ttl", "worker.bogus"} <= paths
+    assert all(i["section"] == "worker" for i in issues)
+    assert not any("errors.pydantic.dev" in i["message"] for i in issues)
+
+
+def test_worker_type_fields_are_selects() -> None:
+    fields = {tuple(f["path"]): f for f in _section("worker")["fields"]}
+    broker = fields[("worker", "broker", "type")]
+    assert broker["type"] == "select"
+    assert [o[0] for o in broker["options"]] == ["redis_stream", "rabbitmq", "kafka", "memory"]
+    assert broker["options"][0] == ["redis_stream", "Redis Streams"]
+    assert broker["default"] == "redis_stream"
+    backend = fields[("worker", "result_backend", "type")]
+    assert backend["type"] == "select"
+    assert [o[0] for o in backend["options"]] == ["redis", "memory"]
+
+
+@pytest.mark.parametrize(
+    ("worker", "path", "message"),
+    [
+        (
+            {"broker": {"type": "my.mod:broker"}},
+            "worker.broker.type",
+            "'my.mod:broker' is not supported. Supported: redis_stream, rabbitmq, kafka, memory.",
+        ),
+        (
+            {"broker": {"type": "memory"}, "result_backend": {"type": "pkg:backend"}},
+            "worker.result_backend.type",
+            "'pkg:backend' is not supported. Supported: redis, memory.",
+        ),
+    ],
+)
+def test_worker_unsupported_type_is_refused(worker: dict, path: str, message: str) -> None:
+    issues = validate_config({"agent": "a:b", "worker": worker})
+    matching = [i for i in issues if i["path"] == path]
+    assert [i["message"] for i in matching] == [message]

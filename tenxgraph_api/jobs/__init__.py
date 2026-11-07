@@ -9,23 +9,13 @@ from typing import TYPE_CHECKING, Any
 
 
 if TYPE_CHECKING:
-    from tenxgraph_api.jobs.context import (
-        TaskContext,
-        cancel,
-        enqueue,
-        reschedule,
-        schedule,
-        unschedule,
-    )
+    from tenxgraph_api.jobs.context import TaskCancelled, TaskContext, cancel
     from tenxgraph_api.jobs.worker import broker
 
 _SOURCES = {
     "broker": "worker",
     "TaskContext": "context",
-    "enqueue": "context",
-    "schedule": "context",
-    "reschedule": "context",
-    "unschedule": "context",
+    "TaskCancelled": "context",
     "cancel": "context",
 }
 

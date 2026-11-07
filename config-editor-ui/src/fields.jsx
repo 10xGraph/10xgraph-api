@@ -136,12 +136,12 @@ function Control({ id, field: f, value, invalid }) {
     );
   }
   if (f.type === "select") {
-    const options = f.options.map((o) => [o, o]);
+    const options = f.options.map((o) => (Array.isArray(o) ? o : [o, o]));
     if (f.unset_label !== undefined) options.unshift(["", f.unset_label]);
     return (
       <Select
         id={id} options={options} invalid={invalid}
-        value={value ?? (f.unset_label !== undefined ? "" : f.default ?? f.options[0])}
+        value={value ?? (f.unset_label !== undefined ? "" : f.default ?? (Array.isArray(f.options[0]) ? f.options[0][0] : f.options[0]))}
         onChange={(v) => put(f.path, v === "" ? undefined : v)}
       />
     );

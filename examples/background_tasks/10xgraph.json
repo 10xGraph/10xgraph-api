@@ -1,0 +1,9 @@
+{
+  "agent": "app.graph:app",
+  "auth": null,
+  "cache_store": {"type": "redis", "url": "${REDIS_URL}"},
+  "worker": {
+    "broker": {"type": "redis_stream", "url": "${REDIS_URL}"},
+    "tasks": ["app.tasks"]
+  }
+}

@@ -2,7 +2,7 @@
 
 TaskIQ applies caller kwargs over injected values (``kwargs.update(message.kwargs)`` in its
 receiver), so ``graph=`` from a caller would replace the injected graph. This is a security
-check, used by ``jobs.enqueue`` / ``jobs.schedule``, the HTTP routes and the worker middleware.
+check, used by the HTTP routes and the worker middleware.
 """
 
 from __future__ import annotations
@@ -23,7 +23,8 @@ _POSITIONAL = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_O
 
 
 class ReservedArgumentError(ValueError):
-    """A caller tried to set an injected or reserved argument, or one the task does not have."""
+    """A caller tried to set an injected or reserved argument (Python rejects unknown or
+    repeated ones at call time)."""
 
 
 def injected_names(func: Callable[..., Any]) -> set[str]:
@@ -64,29 +65,15 @@ def check_arguments(
     """Raise ``ReservedArgumentError`` unless ``args`` / ``kwargs`` set only plain arguments."""
     func = task.original_func
     params = list(inspect.signature(func).parameters.values())
-    by_name = {param.name: param for param in params}
     blocked = injected_names(func) | RESERVED_NAMES
-    accepts_any = any(param.kind is inspect.Parameter.VAR_KEYWORD for param in params)
     name = task.task_name
 
     bad = sorted(set(kwargs) & blocked)
     if bad:
         raise ReservedArgumentError(f"Task {name!r}: arguments {bad} are set by the server")
-    unknown = sorted(
-        key
-        for key in kwargs
-        if (key not in by_name and not accepts_any)
-        or (key in by_name and by_name[key].kind is inspect.Parameter.POSITIONAL_ONLY)
-    )
-    if unknown:
-        raise ReservedArgumentError(f"Task {name!r} has no arguments {unknown}")
 
     limit = _max_positional(params, blocked)
     if limit is not None and len(args) > limit:
         raise ReservedArgumentError(
             f"Task {name!r} takes at most {limit} positional arguments, got {len(args)}"
         )
-    positional = [param.name for param in params if param.kind in _POSITIONAL]
-    twice = sorted(set(positional[: len(args)]) & set(kwargs))
-    if twice:
-        raise ReservedArgumentError(f"Task {name!r}: arguments {twice} are given twice")

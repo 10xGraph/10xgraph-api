@@ -85,6 +85,7 @@ def validate_config(config: Any, base_dir: Path | None = None) -> list[Issue]:
     _check_remote_tools(config, out)
     _check_test(config, out)
     _check_evaluation(config, out)
+    _check_worker(config, out)
     out.issues.extend(production_readiness_warnings(config))
 
     for key in config:
@@ -463,6 +464,38 @@ def _check_evaluation(config: dict, out: _Collector) -> None:
     concurrency = data.get("max_concurrency")
     if concurrency is not None and not (_is_int(concurrency) and concurrency >= 1):
         out.error("evaluation.max_concurrency", "max_concurrency must be a whole number >= 1.")
+
+
+_WORKER_TYPES = {
+    "broker": ("redis_stream", "rabbitmq", "kafka", "memory"),
+    "result_backend": ("redis", "memory"),
+}
+
+
+def _check_worker(config: dict, out: _Collector) -> None:
+    data = config.get("worker")
+    if data is None:
+        return
+    from pydantic import ValidationError
+
+    from tenxgraph_api.jobs.config import WorkerConfig
+
+    refused: set[str] = set()
+    if isinstance(data, dict):
+        for part, allowed in _WORKER_TYPES.items():
+            value = (data.get(part) or {}).get("type") if isinstance(data.get(part), dict) else None
+            if value is not None and value not in allowed:
+                path = f"worker.{part}.type"
+                refused.add(path)
+                out.error(path, f"{value!r} is not supported. Supported: {', '.join(allowed)}.")
+
+    try:
+        WorkerConfig.model_validate(data)
+    except ValidationError as exc:
+        for err in exc.errors():
+            path = ".".join(["worker", *(str(part) for part in err["loc"])])
+            if path not in refused:
+                out.error(path, err["msg"].removeprefix("Value error, "))
 
 
 # ---------------------------------------------------------------------------

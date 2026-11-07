@@ -71,7 +71,9 @@ def _graph_router(websocket: bool | None) -> APIRouter:
     return graph_router
 
 
-def init_routes(app: FastAPI, *, ag_ui: bool = False, websocket: bool | None = None):
+def init_routes(
+    app: FastAPI, *, ag_ui: bool = False, websocket: bool | None = None, tasks: bool = False
+):
     """
     Initialize the routes for the FastAPI application.
 
@@ -85,11 +87,17 @@ def init_routes(app: FastAPI, *, ag_ui: bool = False, websocket: bool | None = N
         ``ag_ui.enabled`` is set in 10xgraph.json.
         websocket (bool | None): ``websocket.enabled`` from 10xgraph.json. ``False`` leaves
         out ``/v1/graph/ws`` and ``/v1/graph/live``; see ``_graph_router``.
+        tasks (bool): Mount ``/v1/tasks`` (background tasks). On when 10xgraph.json has a
+        ``worker`` key; imported only then, so servers without it never need TaskIQ.
     """
     app.include_router(_graph_router(websocket))
     app.include_router(checkpointer_router)
     app.include_router(store_router)
     if ag_ui:
         app.include_router(_ag_ui_router())
+    if tasks:
+        from .tasks import router as tasks_router
+
+        app.include_router(tasks_router)
     app.include_router(ping_router)
     app.include_router(media_router)
