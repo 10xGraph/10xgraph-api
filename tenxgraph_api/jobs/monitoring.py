@@ -1,0 +1,165 @@
+"""``MonitoringMiddleware``: log every TaskIQ hook and send the same as core publisher events
+when a ``BasePublisher`` is bound in the container. It also records two metrics through core's
+metrics facade (exported when OTEL is enabled): ``tenxgraph.task.runs`` (attributes ``task``,
+``status`` = queued, success, failure, cancelled) and ``tenxgraph.task.duration_ms`` (attribute
+``task``). Never raises."""
+
+from __future__ import annotations
+
+import logging
+import time
+from typing import Any
+
+from taskiq import TaskiqMessage, TaskiqMiddleware, TaskiqResult
+
+from tenxgraph_api.jobs import state
+from tenxgraph_api.jobs.context import TaskCancelled
+
+
+logger = logging.getLogger("tenxgraph_api.jobs")
+MESSAGE_LIMIT = 500
+RUNS_METRIC = "tenxgraph.task.runs"
+DURATION_METRIC = "tenxgraph.task.duration_ms"
+
+
+class MonitoringMiddleware(TaskiqMiddleware):
+    """Task lifecycle logs and events. Core has no task event kind yet, so events use
+    ``Event.GRAPH_EXECUTION`` with ``metadata["source"] == "task"`` and the hook name in
+    ``metadata["phase"]``.
+
+    | hook | event type | phase |
+    |---|---|---|
+    | pre_send | none | |
+    | post_send | UPDATE | queued |
+    | pre_execute | START | started |
+    | on_error | ERROR (INTERRUPTED for ``TaskCancelled``) | failed (cancelled) |
+    | post_execute | END (success only) | finished |
+    | post_save | RESULT | saved |
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        # TaskIQ rounds ``execution_time`` to 10 ms, too coarse for a latency histogram.
+        self._started: dict[str, float] = {}
+
+    async def startup(self) -> None:
+        logger.info("Task monitoring started")
+
+    async def shutdown(self) -> None:
+        logger.info("Task monitoring stopped")
+
+    def pre_send(self, message: TaskiqMessage) -> TaskiqMessage:
+        logger.debug("Task %s (%s) sending", message.task_name, message.task_id)
+        return message
+
+    def post_send(self, message: TaskiqMessage) -> None:
+        logger.info("Task %s (%s) queued", message.task_name, message.task_id)
+        self._count(message, "queued")
+        self._publish(message, "update", "queued")
+
+    def pre_execute(self, message: TaskiqMessage) -> TaskiqMessage:
+        logger.info("Task %s (%s) started", message.task_name, message.task_id)
+        self._started[message.task_id] = time.perf_counter()
+        self._publish(message, "start", "started")
+        return message
+
+    def on_error(
+        self, message: TaskiqMessage, result: TaskiqResult[Any], exception: BaseException
+    ) -> None:
+        name, task_id, took = message.task_name, message.task_id, result.execution_time
+        if isinstance(exception, TaskCancelled):
+            logger.info("Task %s (%s) cancelled after %.2fs", name, task_id, took)
+            self._count(message, "cancelled")
+            self._publish(message, "interrupted", "cancelled", {"duration": took})
+            return
+        attempt = int(message.labels.get("_retries", 0)) + 1  # SimpleRetryMiddleware's counter
+        logger.error(
+            "Task %s (%s) failed on attempt %d after %.2fs: %s: %s",
+            name,
+            task_id,
+            attempt,
+            took,
+            type(exception).__name__,
+            exception,
+            exc_info=exception,
+        )
+        self._count(message, "failure")
+        data = {
+            "error": type(exception).__name__,
+            "message": str(exception)[:MESSAGE_LIMIT],
+            "duration": took,
+            "attempt": attempt,
+        }
+        self._publish(message, "error", "failed", data, is_error=True)
+
+    def post_execute(self, message: TaskiqMessage, result: TaskiqResult[Any]) -> None:
+        self._duration(message, result.execution_time)
+        if result.is_err:  # on_error already reported it
+            logger.debug("Task %s (%s) ended with an error", message.task_name, message.task_id)
+            return
+        logger.info(
+            "Task %s (%s) finished in %.2fs",
+            message.task_name,
+            message.task_id,
+            result.execution_time,
+        )
+        self._count(message, "success")
+        self._publish(message, "end", "finished", {"duration": result.execution_time})
+
+    def post_save(self, message: TaskiqMessage, result: TaskiqResult[Any]) -> None:
+        logger.debug("Task %s (%s) result saved", message.task_name, message.task_id)
+        self._publish(message, "result", "saved")  # no return value: it may be large or private
+
+    @staticmethod
+    def _count(message: TaskiqMessage, status: str) -> None:
+        try:
+            from tenxgraph.utils.metrics import counter
+
+            counter(RUNS_METRIC).inc(attributes={"task": message.task_name, "status": status})
+        except Exception:
+            logger.debug("Task metric not recorded", exc_info=True)
+
+    def _duration(self, message: TaskiqMessage, fallback_seconds: float) -> None:
+        started = self._started.pop(message.task_id, None)
+        seconds = fallback_seconds if started is None else time.perf_counter() - started
+        try:
+            from tenxgraph.utils.metrics import timer
+
+            # The facade has no public "record a measured value" call; ``timer`` only times a
+            # block, and the run is already measured. ``observe`` takes the value directly.
+            timer(DURATION_METRIC).metric.observe(seconds * 1000.0, {"task": message.task_name})
+        except Exception:
+            logger.debug("Task metric not recorded", exc_info=True)
+
+    def _publish(
+        self,
+        message: TaskiqMessage,
+        event_type: str,
+        phase: str,
+        data: dict[str, Any] | None = None,
+        is_error: bool = False,
+    ) -> None:
+        try:
+            from tenxgraph.runtime.publisher.base_publisher import BasePublisher
+            from tenxgraph.runtime.publisher.events import Event, EventModel, EventType
+            from tenxgraph.runtime.publisher.publish import publish_event
+            from tenxgraph.utils.background_task_manager import BackgroundTaskManager
+
+            container = state.container_for(self.broker)
+            publisher = container.try_get(BasePublisher)
+            manager = container.try_get(BackgroundTaskManager)
+            if publisher is None or manager is None:
+                return
+            event = EventModel(
+                event=Event.GRAPH_EXECUTION,
+                event_type=EventType(event_type),
+                node_name=message.task_name,
+                run_id=message.task_id,
+                user_id=state.parse_config(message.labels).get("user_id"),
+                is_error=is_error,
+                data=data or {},
+                metadata={"source": "task", "task_name": message.task_name, "phase": phase},
+            )
+            publish_event(event, publisher=publisher, task_manager=manager)
+        except Exception:
+            logger.debug("Task event not published", exc_info=True)

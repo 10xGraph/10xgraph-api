@@ -28,6 +28,8 @@ STORE_SCOPES = frozenset({"store:read", "store:write", "store:delete"})
 CHECKPOINTER_ADMIN_SCOPES = frozenset({"checkpointer:import"})
 # DELETE /v1/files/{file_id}. Core lists only files:read and files:upload, so it is added here.
 FILES_DELETE_SCOPES = frozenset({"files:delete"})
+# The /v1/tasks routes (background jobs); core does not list them.
+TASKS_SCOPES = frozenset({"tasks:invoke", "tasks:read", "tasks:cancel"})
 LEGACY_MEMORY_SCOPES = frozenset({"memory:read", "memory:write", "memory:delete"})
 # Core still lists it, but the setup endpoint was removed: no route checks it, so a role rule
 # for it would guard nothing.
@@ -43,6 +45,7 @@ def all_scopes() -> frozenset[str]:
         | STORE_SCOPES
         | CHECKPOINTER_ADMIN_SCOPES
         | FILES_DELETE_SCOPES
+        | TASKS_SCOPES
     )
 
 

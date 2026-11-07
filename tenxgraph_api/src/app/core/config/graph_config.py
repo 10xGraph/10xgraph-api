@@ -4,10 +4,14 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
+
+
+if TYPE_CHECKING:
+    from tenxgraph_api.jobs.config import WorkerConfig
 
 
 logger = logging.getLogger("tenxgraph_api")
@@ -807,6 +811,14 @@ class GraphConfig:
 
         if isinstance(self.data, dict):
             check_cache_store_settings(self.data)
+
+    @property
+    def worker(self) -> "WorkerConfig | None":
+        """``worker`` key (the jobs layer), parsed; None when absent."""
+        from tenxgraph_api.jobs.config import WorkerConfig
+
+        raw = self.data.get("worker")
+        return None if raw is None else WorkerConfig.model_validate(raw)
 
     @property
     def graph_path(self) -> str:
