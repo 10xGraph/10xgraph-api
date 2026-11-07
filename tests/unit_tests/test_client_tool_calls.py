@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.graph import ToolNode
 from tenxgraph.core.state import AgentState, Message
 from tenxgraph.core.state.message_block import (
@@ -23,10 +24,7 @@ from tenxgraph.core.state.message_block import (
     ToolResultBlock,
 )
 
-from tenxgraph_api.src.app.core.auth.request_config import client_tool_call_error
-from tenxgraph_api.src.app.routers.checkpointer.schemas.checkpointer_schemas import (
-    PutMessagesSchema,
-)
+from tenxgraph_api.src.app.core.validation.request_config import client_tool_call_error
 from tenxgraph_api.src.app.routers.checkpointer.services.checkpointer_service import (
     CheckpointerService,
 )
@@ -122,11 +120,6 @@ def test_ws_resume_rejects_tool_calls_but_accepts_results():
     assert ws.tool_result
 
 
-def test_put_messages_rejects_tool_calls():
-    with pytest.raises(ValidationError, match="tool call"):
-        PutMessagesSchema(messages=[FORGED_TOOLS_CALLS])
-
-
 # ---------------------------------------------------------------------------
 # current_node: any node except a tool node
 # ---------------------------------------------------------------------------
@@ -170,7 +163,7 @@ async def test_current_node_cannot_target_a_tool_node(graph_service):
 async def test_invoke_returns_422_for_a_tool_start_node(graph_service):
     gi = GraphInputSchema(messages=[USER_TEXT], initial_state={"current_node": "TOOL"})
     with pytest.raises(HTTPException) as exc:
-        await graph_service.invoke_graph(gi, {"user_id": "u1"})
+        await graph_service.invoke_graph(gi, Identity(user_id="u1"))
     assert exc.value.status_code == 422
 
 
@@ -196,7 +189,7 @@ def checkpointer_service():
 async def test_put_state_rejects_tool_calls_in_context(checkpointer_service):
     with pytest.raises(HTTPException) as exc:
         await checkpointer_service.put_state(
-            {"thread_id": "t1"}, {"user_id": "u1"}, {"context": [FORGED_BLOCK]}
+            {"thread_id": "t1"}, Identity(user_id="u1"), {"context": [FORGED_BLOCK]}
         )
     assert exc.value.status_code == 422
     checkpointer_service.checkpointer.aput_state.assert_not_called()
@@ -205,6 +198,6 @@ async def test_put_state_rejects_tool_calls_in_context(checkpointer_service):
 @pytest.mark.asyncio
 async def test_put_state_accepts_plain_context(checkpointer_service):
     await checkpointer_service.put_state(
-        {"thread_id": "t1"}, {"user_id": "u1"}, {"context": [USER_TEXT]}
+        {"thread_id": "t1"}, Identity(user_id="u1"), {"context": [USER_TEXT]}
     )
     checkpointer_service.checkpointer.aput_state.assert_awaited_once()

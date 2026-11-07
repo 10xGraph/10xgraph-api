@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import AgentState, Message
 from tenxgraph.storage.checkpointer import InMemoryCheckpointer
 
@@ -26,7 +27,7 @@ from tenxgraph_api.src.app.routers.checkpointer.services.checkpointer_service im
 from tenxgraph_api.src.app.utils.parse_output import parse_message_output, parse_state_output
 
 
-USER = {"user_id": "u1"}
+USER = Identity(user_id="u1")
 CFG = {"thread_id": "t1"}
 
 

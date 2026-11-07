@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from tenxgraph_api.cli.config_editor.schema import AUTHORIZATION_SCOPES
 from tenxgraph_api.src.app import loader
+from tenxgraph_api.src.app.core.auth.permissions_registry import ALL_PERMISSIONS
 
 
 @pytest.mark.asyncio
@@ -39,7 +39,7 @@ def test_skill_templates_do_not_tell_developers_to_set_the_checkpointer_key():
 
 
 def test_setup_scope_is_gone_from_the_editor():
-    assert "graph:setup" not in AUTHORIZATION_SCOPES
+    assert "graph:setup" not in ALL_PERMISSIONS
 
 
 # ---------------------------------------------------------------------------
@@ -101,9 +101,3 @@ def test_dev_command_warns_about_reload_and_open_host_in_production():
     assert len(warn("production", "0.0.0.0", True)) == 2
     assert warn("development", "0.0.0.0", True) == []
     assert warn("production", "127.0.0.1", False) == []
-
-
-def test_star_role_is_not_granted_the_removed_setup_scope():
-    from tenxgraph_api.src.app.core.auth.authorization import all_scopes
-
-    assert "graph:setup" not in all_scopes()

@@ -8,7 +8,7 @@ real ``MediaService``:
 - the media routes (download, info, signed URL, delete, list);
 - invoke, stream, the ``/v1/graph/ws`` WebSocket and AG-UI, all of which reach one shared
   ``GraphService._prepare_input`` -> ``preprocess_multimodal_messages``;
-- the checkpointer routes that write messages or state (the next run resolves them);
+- the checkpointer route that writes state (the next run resolves them);
 - the preprocessor and ``MediaService`` called directly;
 - ``/v1/graph/live``, which accepts no message or media reference at all.
 
@@ -42,14 +42,10 @@ from tenxgraph.storage.media.resolver import MediaRefResolver
 from tenxgraph.utils.constants import END
 from tenxgraph.utils.converter import resolve_media_refs
 
-from tenxgraph_api.src.app.core.auth.authorization import (
-    AuthorizationBackend,
-    DefaultAuthorizationBackend,
-)
 from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
-from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.core.config.media_settings import MediaSettings, MediaStorageType
+from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
 from tenxgraph_api.src.app.routers.checkpointer.router import router as checkpointer_router
 from tenxgraph_api.src.app.routers.graph.router import router as graph_router
 from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import (
@@ -66,8 +62,6 @@ SECRET_A = b"secret-of-alice-4f1c"
 SECRET_B = b"secret-of-bob-77aa"
 ALICE, BOB = "alice", "bob"
 LEAK = SECRET_A.decode()
-# POST /v1/threads/{id}/messages is admin-only (checkpointer:import).
-IMPORTER = {**user_headers(BOB), "X-Test-Scopes": "checkpointer:import"}
 
 
 # --------------------------------------------------------------------------- the app
@@ -119,7 +113,6 @@ class _Harness:
         for kind, value in (
             (MediaService, self.media),
             (BaseAuth, _Auth()),
-            (AuthorizationBackend, DefaultAuthorizationBackend()),
             (GraphConfig, self.config),
             (BaseCheckpointer, self.checkpointer),
             (CompiledGraph, self.graph),
@@ -448,22 +441,6 @@ def test_ag_ui_resolves_the_callers_own_file(h, keys):
 # --------------------------------------------------------------------------- checkpointer
 
 
-@pytest.mark.parametrize(
-    "variant", ["graph url", "legacy url", "file_id", "document file_id", "nested in a tool result"]
-)
-def test_writing_messages_into_a_thread_is_checked(h, keys, variant):
-    """A message written into a thread is resolved by the next run, so it is checked now."""
-    alice_key, _ = keys
-    message = {**_victim_variants(alice_key)[variant], "message_id": "m1"}
-    resp = h.client.post(
-        "/v1/threads/bob-thread/messages",
-        json={"messages": [message]},
-        headers=IMPORTER,
-    )
-    assert resp.status_code in (400, 422), f"{variant}: {resp.status_code} {resp.text[:200]}"
-    assert LEAK not in resp.text
-
-
 def test_writing_state_into_a_thread_is_checked(h, keys):
     alice_key, _ = keys
     message = {**_victim_variants(alice_key)["graph url"], "message_id": "m1"}
@@ -474,17 +451,6 @@ def test_writing_state_into_a_thread_is_checked(h, keys):
     )
     assert resp.status_code in (400, 422), f"{resp.status_code} {resp.text[:200]}"
     assert LEAK not in resp.text
-
-
-def test_writing_the_callers_own_file_into_a_thread_is_allowed(h, keys):
-    _, bob_key = keys
-    message = {**_image(f"graph://media/{bob_key}"), "message_id": "m1"}
-    resp = h.client.post(
-        "/v1/threads/bob-thread/messages",
-        json={"messages": [message]},
-        headers=IMPORTER,
-    )
-    assert resp.status_code == 200, resp.text
 
 
 # --------------------------------------------------------------------------- no media service
@@ -526,10 +492,12 @@ def test_writing_state_with_a_foreign_file_id_is_refused(h, keys, variant):
     assert resp.status_code in (400, 422), resp.text[:200]
 
 
-def test_writing_the_callers_own_file_id_is_allowed(h, keys):
+def test_writing_the_callers_own_file_id_into_state_is_allowed(h, keys):
     _, bob_key = keys
     message = {**_image(file_id=bob_key), "message_id": "m1"}
-    resp = h.client.post(
-        "/v1/threads/bob-thread/messages", json={"messages": [message]}, headers=IMPORTER
+    resp = h.client.put(
+        "/v1/threads/bob-thread/state",
+        json={"state": {"context": [message]}, "config": {}},
+        headers=user_headers(BOB),
     )
     assert resp.status_code == 200, resp.text

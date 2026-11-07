@@ -1,7 +1,8 @@
 """Token revocation: reject a credential before it expires.
 
 JWTs are self-contained, so a stolen or logged-out token stays valid until its ``exp``.
-Revocation closes that gap: ``RequirePermission`` checks every authenticated request, and
+Revocation closes that gap: ``RequirePermission`` and ``RequireIdentity`` check every
+authenticated request, and
 WebSocket runs check again before each run, so a socket opened with a token that is later
 revoked stops working too.
 
@@ -38,6 +39,8 @@ import logging
 from decimal import ROUND_CEILING, Decimal
 from typing import TYPE_CHECKING, Any
 
+from tenxgraph.core.authz import Identity
+
 from tenxgraph_api.src.app.core.config.graph_config import (
     DEFAULT_USER_REVOCATION_TTL,
     TokenRevocationConfig,
@@ -70,7 +73,7 @@ def _number(value: Any) -> float | None:
     return float(value)
 
 
-def _user_key_of(identity: dict[str, Any]) -> str | None:
+def _user_key_of(identity: Identity | dict[str, Any]) -> str | None:
     """The identity's ``user_id`` as a string, or None when it is missing or not usable."""
     user_id = identity.get("user_id")
     if isinstance(user_id, bool):
@@ -83,7 +86,7 @@ def _user_key_of(identity: dict[str, Any]) -> str | None:
 
 
 def _revoked_by_user_cutoff(
-    identity: dict[str, Any], cutoff: float | None, token_lifetime: float | None = None
+    identity: Identity | dict[str, Any], cutoff: float | None, token_lifetime: float | None = None
 ) -> bool:
     if cutoff is None:
         return False
@@ -141,7 +144,7 @@ async def _none() -> None:
 
 
 async def is_revoked(
-    cache: BaseCacheStore, identity: dict[str, Any], token_lifetime: float | None = None
+    cache: BaseCacheStore, identity: Identity | dict[str, Any], token_lifetime: float | None = None
 ) -> bool:
     """Whether ``identity``'s token was revoked (by ``jti`` or by a user cutoff).
 
@@ -183,20 +186,22 @@ def _bound() -> tuple[TokenRevocationConfig | None, BaseCacheStore | None]:
 
 
 async def token_revoked(
-    identity: dict[str, Any],
+    identity: Identity | dict[str, Any],
     cache: BaseCacheStore | None = None,
     config: TokenRevocationConfig | None = None,
 ) -> bool:
     """Whether ``identity``'s credential has been revoked.
 
-    ``cache`` and ``config`` default to the ones bound in the app's container. False when
-    token revocation is off or the identity is not a mapping. The ``jti`` is checked even when
-    ``user_id`` is missing or odd; per-user revocation applies when ``user_id`` is a valid
-    string. Raises :class:`TokenRevocationUnavailableError` when the cache store fails or none
-    is bound (fail closed).
+    ``identity`` is an ``Identity`` (``jti``, ``iat`` and ``exp`` are read from its claims) or
+    a claims dict; anything else raises ``TypeError`` rather than counting as "not revoked".
+    ``cache`` and ``config`` default to the ones bound in the app's container. False when token
+    revocation is off. The ``jti`` is checked even when ``user_id`` is missing or odd; per-user
+    revocation applies when ``user_id`` is a valid string. Raises
+    :class:`TokenRevocationUnavailableError` when the cache store fails or none is bound (fail
+    closed).
     """
-    if not isinstance(identity, dict):
-        return False
+    if not isinstance(identity, Identity | dict):
+        raise TypeError(f"expected Identity or dict, got {type(identity).__name__}")
     if cache is None or config is None:
         bound_config, bound_cache = _bound()
         config = config or bound_config

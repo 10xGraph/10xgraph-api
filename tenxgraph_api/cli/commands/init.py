@@ -520,17 +520,14 @@ class InitCommand(BaseCommand):
 
         auth = context["auth"]
         if auth == "jwt":
-            # JWT is configured with the bare string. The dict form requires a "path"
-            # (see GraphConfig.auth_config) and is only valid for method "custom".
-            config["auth"] = "jwt"
+            config["auth"] = {"method": "jwt"}
         elif auth == "custom":
             config["auth"] = {"method": "custom", "path": "auth.agent_auth:AgentAuth"}
 
-        if auth in ("jwt", "custom"):
-            # Secure by default in production: a thread is accessible only to its owner.
-            # Change to "allow_all" to let any authenticated user access any thread, or
-            # point at a custom AuthorizationBackend ("module:attr").
-            config["authorization"] = "ownership"
+        # Frontend tools are declared here (name and schema fixed by the server) instead of
+        # being accepted from each request. Add them under "remote_tools".
+        config["ag_ui"] = {"enabled": False, "allow_client_tools": False}
+        config["remote_tools"] = []
 
         config["thread_name_generator"] = "graph.thread_name_generator:MyNameGenerator"
         config["injectq"] = "graph.agent:container"

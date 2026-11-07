@@ -17,7 +17,7 @@ from taskiq_dependencies.dependency import Dependency
 
 
 # Run-config keys only the server writes (``config`` itself is filled from the message label).
-RESERVED_NAMES = frozenset({"config", "user", "user_id", "authz"})
+RESERVED_NAMES = frozenset({"config", "user", "user_id"})
 
 _POSITIONAL = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
 

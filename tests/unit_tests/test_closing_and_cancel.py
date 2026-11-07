@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import WebSocketDisconnect
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.graph import StateGraph
 from tenxgraph.core.state import AgentState, Message
 from tenxgraph.storage.checkpointer import InMemoryCheckpointer
@@ -26,7 +27,7 @@ from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import GraphInput
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
 
 
-ALICE = {"user_id": "alice"}
+ALICE = Identity(user_id="alice")
 MSG = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
 
 
@@ -92,7 +93,7 @@ def _ws(frames):
 async def test_closing_graph_ends_the_ndjson_stream_with_a_terminal_error_chunk(limiters):
     service = await _closed_service()
     # The route returns the response first (headers are sent); the refusal comes while streaming.
-    response = await stream_graph(graph_input=_input(), service=service, user=ALICE)
+    response = await stream_graph(graph_input=_input(), service=service, identity=ALICE)
     lines = [json.loads(line) async for line in response.body_iterator if line.strip()]
     assert len(lines) == 1
     assert lines[0]["event"] == "error"
@@ -107,7 +108,7 @@ async def test_closing_graph_sends_an_error_frame_then_closes_the_websocket(limi
     service = await _closed_service()
     frame = {"invoke_type": "fresh", "messages": MSG, "config": {"thread_id": "t1"}}
     ws = _ws([frame, WebSocketDisconnect()])
-    await websocket_graph(websocket=ws, service=service, user={})
+    await websocket_graph(websocket=ws, service=service, identity=None)
     sent = [json.loads(c.args[0]) for c in ws.send_text.call_args_list]
     assert [c["event"] for c in sent] == ["error"]  # no "done" frame
     assert sent[0]["data"]["code"] == "SERVICE_UNAVAILABLE"
@@ -139,7 +140,7 @@ def _blocking_node():
 
 async def _next_run_works(service) -> None:
     """A fresh run on the same thread starts and ends: the thread is not stuck."""
-    response = await stream_graph(graph_input=_input(), service=service, user=ALICE)
+    response = await stream_graph(graph_input=_input(), service=service, identity=ALICE)
     lines = [json.loads(line) async for line in response.body_iterator if line.strip()]
     assert lines[-1]["data"] == {"status": "done"}
 
@@ -148,7 +149,7 @@ async def _next_run_works(service) -> None:
 async def test_client_disconnect_during_a_stream_cancels_the_run_and_frees_the_thread(limiters):
     node, probe = _blocking_node()
     service = _service(_graph(node))
-    response = await stream_graph(graph_input=_input(), service=service, user=ALICE)
+    response = await stream_graph(graph_input=_input(), service=service, identity=ALICE)
     body = response.body_iterator
 
     await body.__anext__()  # the client got the first chunk, then leaves
@@ -166,7 +167,7 @@ async def test_client_disconnect_during_a_stream_cancels_the_run_and_frees_the_t
 async def test_cancelled_stream_request_releases_thread_lock_and_run_slot(limiters):
     node, probe = _blocking_node()
     service = _service(_graph(node))
-    response = await stream_graph(graph_input=_input(), service=service, user=ALICE)
+    response = await stream_graph(graph_input=_input(), service=service, identity=ALICE)
 
     async def read():
         async for _ in response.body_iterator:
@@ -195,7 +196,7 @@ async def test_cancelled_invoke_request_releases_thread_lock_and_run_slot(limite
     request.is_disconnected = AsyncMock(return_value=False)
 
     task = asyncio.create_task(
-        invoke_graph(request=request, graph_input=_input(), service=service, user=ALICE)
+        invoke_graph(request=request, graph_input=_input(), service=service, identity=ALICE)
     )
     await asyncio.wait_for(probe.started.wait(), 5)
     assert limiters.locks.held(thread_lock.thread_lock_key("t1")) == 1

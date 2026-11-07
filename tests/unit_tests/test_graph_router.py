@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import Request
+from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
 from tenxgraph_api.src.app.routers.graph.router import (
@@ -43,7 +44,7 @@ def mock_service():
 
 @pytest.fixture
 def mock_user():
-    return {"user_id": "user-123", "role": "admin"}
+    return Identity(user_id="user-123", roles=frozenset({"admin"}))
 
 
 @pytest.mark.asyncio
@@ -59,7 +60,7 @@ async def test_invoke_graph_endpoint(mock_request, mock_service, mock_user):
             request=mock_request,
             graph_input=graph_input,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
         assert res == {"status": "success"}
         mock_service.invoke_graph.assert_called_once_with(graph_input, mock_user)
@@ -82,7 +83,7 @@ async def test_stream_graph_endpoint(mock_service, mock_user):
         res = await stream_graph(
             graph_input=graph_input,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
         assert res == "streaming_response_obj"
         mock_service.stream_graph.assert_called_once_with(graph_input, mock_user)
@@ -98,7 +99,7 @@ async def test_graph_details_endpoint(mock_request, mock_service, mock_user):
         res = await graph_details(
             request=mock_request,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
         assert res == {"status": "success"}
         mock_service.graph_details.assert_called_once()
@@ -113,7 +114,7 @@ async def test_state_schema_endpoint(mock_request, mock_service, mock_user):
         res = await state_schema(
             request=mock_request,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
         assert res == {"status": "success"}
         mock_service.get_state_schema.assert_called_once()
@@ -130,7 +131,7 @@ async def test_stop_graph_endpoint(mock_request, mock_service, mock_user):
             request=mock_request,
             stop_request=stop_req,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
         assert res == {"status": "success"}
         mock_service.stop_graph.assert_called_once_with("thread-abc", mock_user, {"force": True})
@@ -147,7 +148,7 @@ async def test_fix_graph_endpoint(mock_request, mock_service, mock_user):
             request=mock_request,
             fix_request=fix_req,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
         assert res == {"status": "success"}
         mock_service.fix_graph.assert_called_once_with("thread-abc", mock_user, {"clean": True})
@@ -162,14 +163,14 @@ async def _call_thread_endpoints(which, request, service, user):
 
     if "observability" in which:
         await observability(
-            request=request, thread_id=FORGED_THREAD_ID, run_id=None, service=service, user=user
+            request=request, thread_id=FORGED_THREAD_ID, run_id=None, service=service, identity=user
         )
     if "stop" in which:
         await stop_graph(
             request=request,
             stop_request=GraphStopSchema.model_construct(thread_id=FORGED_THREAD_ID, config={}),
             service=service,
-            user=user,
+            identity=user,
         )
     if "fix" in which:
         await fix_graph(
@@ -178,7 +179,7 @@ async def _call_thread_endpoints(which, request, service, user):
                 thread_id=FORGED_THREAD_ID, config={}
             ),
             service=service,
-            user=user,
+            identity=user,
         )
 
 

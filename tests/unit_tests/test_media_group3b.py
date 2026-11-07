@@ -11,14 +11,15 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import Message
 from tenxgraph.core.state.message_block import ImageBlock, MediaRef
 from tenxgraph.storage.media.storage.base import MediaTooLargeError
 from tenxgraph.storage.media.storage.memory_store import InMemoryMediaStore
 
 from tenxgraph_api.src.app import main as main_module
-from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
 from tenxgraph_api.src.app.core.config.media_settings import MediaSettings, MediaStorageType
+from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
 from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import (
     internal_media_keys,
     preprocess_multimodal_messages,
@@ -305,7 +306,7 @@ async def test_pdf_cap_is_a_413_on_the_upload_route():
     file.size = 12
     file.read = AsyncMock(return_value=b"%PDF-1.4\nabcd")
     with pytest.raises(HTTPException) as exc:
-        await upload_file(MagicMock(), file, service, {"user_id": "a"})
+        await upload_file(MagicMock(), file, service, Identity(user_id="a"))
     assert exc.value.status_code == 413
 
 

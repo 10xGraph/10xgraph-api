@@ -1,11 +1,11 @@
 import time
 from typing import Any
 
-from fastapi import Request, Response
+from fastapi import Response
 from fastapi.security import HTTPAuthorizationCredentials
+from starlette.requests import HTTPConnection
 
 from tenxgraph_api.src.app.core import logger
-from tenxgraph_api.src.app.core.auth.authorization import ScopeClaimError, scopes_from_claims
 from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
 from tenxgraph_api.src.app.core.config.settings import Settings, get_settings
 from tenxgraph_api.src.app.core.exceptions import UserAccountError
@@ -161,32 +161,17 @@ class JwtAuth(BaseAuth):
 
     def authenticate(
         self,
-        request: Request,
-        response: Response,
-        credential: HTTPAuthorizationCredentials,
+        request: HTTPConnection,
+        response: Response | None,
+        credential: HTTPAuthorizationCredentials | None,
     ) -> dict[str, Any] | None:
-        """No authentication is required, so return None."""
-        """
-        Get the current user based on the provided HTTP
-        Authorization credentials.
-
-        Args:
-            res (Response): The response object to set headers if needed.
-            credential (HTTPAuthorizationCredentials): The HTTP Authorization
-            credentials obtained from the request.
-
-        Returns:
-            UserSchema: A UserSchema object containing the decoded user information.
+        """Verify the bearer JWT and return its claims.
 
         Raises:
-            HTTPException: If the credentials are missing.
-            UserAccountError: If there are token verification errors such as
-                RevokedIdTokenError,
-                UserDisabledError,
-                InvalidIdTokenError,
-                or any other unexpected exceptions.
+            UserAccountError: 401 for a missing, expired, malformed or unverifiable token, or
+                a missing or malformed ``user_id``. A malformed ``scope`` claim is refused by
+                the RBAC step that narrows permissions with it.
         """
-
         if credential is None:
             raise _unauthorized("Invalid token, please login again", "REVOKED_TOKEN")
 
@@ -230,14 +215,11 @@ class JwtAuth(BaseAuth):
             ):
                 raise _unauthorized("Token is too old, please login again", "EXPIRED_TOKEN")
 
-        response.headers["WWW-Authenticate"] = 'Bearer realm="auth_required"'
+        if response is not None:
+            response.headers["WWW-Authenticate"] = 'Bearer realm="auth_required"'
 
         # check if user_id exists in the token
         if "user_id" not in decoded_token:
             raise _unauthorized("Invalid token, user_id missing", "INVALID_TOKEN")
         decoded_token["user_id"] = _normalise_user_id(decoded_token["user_id"])
-        try:
-            scopes_from_claims(decoded_token)
-        except ScopeClaimError:
-            raise _unauthorized("Invalid token, scope claim is malformed", "INVALID_TOKEN")
         return decoded_token

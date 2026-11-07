@@ -195,9 +195,16 @@ def _expand_known(entries: list[str]) -> frozenset[str]:
 
 
 def _narrow(claims: dict[str, Any], granted: frozenset[str]) -> frozenset[str]:
-    """Token ``scope``/``scopes`` only narrow: granted intersected with permission-shaped scopes."""
+    """Token ``scope``/``scopes`` only narrow: granted intersected with permission-shaped scopes.
+
+    An entry is permission-shaped when it is ``*`` or contains ``:``. Unknown permission-shaped
+    entries still turn narrowing on and add nothing (a stale ``checkpointer:read`` never means
+    "no narrowing"). Plain OIDC scopes such as ``openid profile`` are ignored.
+    """
     entries = (_string_list(claims.get("scope"), "scope") or []) + (
         _string_list(claims.get("scopes"), "scopes") or []
     )
-    wanted = _expand_known(entries)
-    return granted & wanted if wanted else granted
+    shaped = [e for e in entries if e == "*" or ":" in e]
+    if not shaped:
+        return granted
+    return granted & _expand_known(shaped)

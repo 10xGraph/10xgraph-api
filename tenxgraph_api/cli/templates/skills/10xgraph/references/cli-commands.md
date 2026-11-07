@@ -70,7 +70,7 @@ agentflow = tenxgraph_api.cli.main:legacy_main   # deprecated alias, removed in 
 `10xgraph config`
 
 - Opens a browser UI to edit and validate `10xgraph.json` (created on first save). The one place for every server setting.
-- Sidebar: Get running (Core); Before production: Authentication, Authorization, Cache store (rate limiting, token revocation), Observability, Graph introspection; Runs and streaming: Runs, WebSocket, AG-UI, Remote tools, Media; Project wiring: Checkpointer, ID generation, Thread naming, Memory store, Dependency injection; Developer tools: Test, Evaluation.
+- Sidebar: Get running (Core); Before production: Authentication, Authorization, Cache store (rate limiting, token revocation), Observability; Runs and streaming: Runs, WebSocket, AG-UI, Remote tools, Media; Project wiring: Checkpointer, ID generation, Thread naming, Memory store, Dependency injection; Developer tools: Test, Evaluation.
 - The Cache store page picks the store type (Memory, Redis with an optional URL, Custom `module:attr`), then has Rate limiting and Token revocation tabs with their on/off switches.
 - Options include `--config/-c`, `--port/-p` (default: any free port), and `--open/--no-open`.
 

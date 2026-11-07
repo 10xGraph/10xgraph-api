@@ -17,7 +17,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.routing import APIRoute, APIWebSocketRoute
 
-from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
+from tenxgraph_api.src.app.core.auth.permissions import RequireIdentity
 
 
 logger = logging.getLogger("tenxgraph_api.route_guard")
@@ -32,9 +32,9 @@ DEFAULT_PUBLIC_PATHS = frozenset(
 
 
 def _has_permission_guard(dependant) -> bool:
-    """True if ``RequirePermission`` appears anywhere in the dependant subtree."""
+    """True if ``RequirePermission`` or ``RequireIdentity`` is anywhere in the dependant subtree."""
     for dep in getattr(dependant, "dependencies", ()):
-        if isinstance(getattr(dep, "call", None), RequirePermission):
+        if isinstance(getattr(dep, "call", None), RequireIdentity):
             return True
         if _has_permission_guard(dep):
             return True
@@ -42,8 +42,9 @@ def _has_permission_guard(dependant) -> bool:
 
 
 def _is_guard(dependency: object) -> bool:
-    """True for a ``Depends(RequirePermission(...))`` given at ``include_router`` time."""
-    return isinstance(getattr(dependency, "dependency", None), RequirePermission)
+    """True for a ``Depends(RequirePermission(...))`` or ``Depends(RequireIdentity())`` given at
+    ``include_router`` time."""
+    return isinstance(getattr(dependency, "dependency", None), RequireIdentity)
 
 
 def _iter_routes(routes, prefix: str = "", guarded: bool = False):

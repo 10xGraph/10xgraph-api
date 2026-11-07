@@ -5,12 +5,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import ImageBlock, MediaRef, Message
 
 from tenxgraph_api.src.app import main as app_main
 from tenxgraph_api.src.app.core import redis_client
 from tenxgraph_api.src.app.core.auth import revocation
-from tenxgraph_api.src.app.core.auth.ownership_resolver import ThreadOwnershipResolver
 from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore, RedisCacheStore
 from tenxgraph_api.src.app.core.leases import LeaseManager
 from tenxgraph_api.src.app.routers.checkpointer import router as cp_router
@@ -23,7 +23,7 @@ from tenxgraph_api.src.app.routers.graph.run_limits import run_slot_key
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import FixGraphRequestSchema
 
 
-USER = {"user_id": "alice"}
+USER = Identity(user_id="alice")
 
 
 @pytest.fixture(autouse=True)
@@ -69,7 +69,6 @@ async def test_guard_is_released_when_the_body_raises(fresh_locks):
 def _routes(service):
     from tenxgraph_api.src.app.routers.checkpointer.schemas.checkpointer_schemas import (
         ConfigSchema,
-        PutMessagesSchema,
         StateSchema,
     )
 
@@ -79,13 +78,6 @@ def _routes(service):
             request, "t1", StateSchema(state={}), service, USER
         ),
         "clear_state": lambda: cp_router.clear_state(request, "t1", service, USER),
-        "put_messages": lambda: cp_router.put_messages(
-            request,
-            "t1",
-            PutMessagesSchema(messages=[Message.text_message("x")]),
-            service,
-            USER,
-        ),
         "delete_message": lambda: cp_router.delete_message(
             request, "m1", "t1", ConfigSchema(), service, USER
         ),
@@ -96,16 +88,14 @@ def _routes(service):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "name", ["put_state", "clear_state", "put_messages", "delete_message", "delete_thread"]
-)
+@pytest.mark.parametrize("name", ["put_state", "clear_state", "delete_message", "delete_thread"])
 async def test_checkpointer_write_routes_answer_409_during_a_run(fresh_locks, name):
     service = MagicMock()
     lease = await _hold(fresh_locks, "t1")
     with pytest.raises(HTTPException) as exc:
         await _routes(service)[name]()
     assert exc.value.status_code == 409
-    for method in ("put_state", "clear_state", "put_messages", "delete_message", "delete_thread"):
+    for method in ("put_state", "clear_state", "delete_message", "delete_thread"):
         getattr(service, method).assert_not_called()
     lease.release()
 
@@ -147,11 +137,6 @@ def key_prefix(monkeypatch):
 
 def test_prefix_is_applied_to_every_api_redis_key(key_prefix):
     store = RedisCacheStore(client=MagicMock())
-    owner_key = store.redis_key(ThreadOwnershipResolver._owner_key("t:1"))
-    assert owner_key.startswith("prod-eu:af:authz:owner:id:")
-    assert ":" not in owner_key.split(":id:", 1)[1]
-    tomb_key = store.redis_key(ThreadOwnershipResolver._tombstone_key("t1"))
-    assert tomb_key.startswith("prod-eu:af:authz:owner:tomb:")
     assert store.redis_key(revocation.jti_key("j")).startswith("prod-eu:10xgraph:revoked:jti:")
     assert store.redis_key(revocation.user_key("u:1")) == "prod-eu:10xgraph:revoked:user:u%3A1"
     lease_key = "concurrency:" + thread_lock.thread_lock_key("t1")
@@ -160,7 +145,6 @@ def test_prefix_is_applied_to_every_api_redis_key(key_prefix):
 
 def test_no_prefix_keeps_the_existing_keys():
     store = RedisCacheStore(client=MagicMock())
-    assert store.redis_key(ThreadOwnershipResolver._owner_key("t1")) == "af:authz:owner:id:t1"
     assert store.redis_key(revocation.jti_key("j")) == "10xgraph:revoked:jti:j"
 
 

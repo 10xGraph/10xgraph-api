@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
+from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
 
 
 class Schedule(BaseModel):

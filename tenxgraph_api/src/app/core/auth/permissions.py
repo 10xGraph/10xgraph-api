@@ -1,29 +1,32 @@
-"""
-Unified authentication and authorization dependency for FastAPI endpoints.
+"""The one auth dependency for every route, on HTTP and WebSocket alike.
 
-This module provides a reusable dependency that combines authentication and
-authorization checks, reducing code duplication across routers.
+``RequirePermission(resource, action)`` and ``RequireIdentity()`` build the caller's
+:class:`Identity` once per request: credential, ``BaseAuth.authenticate``, ``resolve`` (roles,
+permissions, reach, token scope narrowing), reserved-id and revocation checks. Then
+``BaseAuth.authorize`` decides. With no ``BaseAuth`` bound (auth off) they return ``None`` and
+check nothing.
+
+A result verified earlier in the same request (the rate limiter, ``rate_limit.by == "user"``)
+is reused when the auth class sets ``reusable_within_request`` and defines its own
+``authenticate``: a class whose ``authenticate`` has side effects on the response (cookies,
+refreshed tokens) must keep the default ``False``.
 """
 
+import copy
 import email.message
-from collections.abc import Callable
 from typing import Any, NoReturn
 
 from fastapi import HTTPException, Response, WebSocket, WebSocketException
 from fastapi.security import HTTPAuthorizationCredentials
 from injectq.integrations import InjectAPI
-from starlette.requests import HTTPConnection
+from starlette.requests import HTTPConnection, Request
+from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.core import logger
-from tenxgraph_api.src.app.core.auth.auth_backend import BaseAuth
-from tenxgraph_api.src.app.core.auth.authorization import (
-    AuthorizationBackend,
-    ScopeClaimError,
-    resolve_isolation_scope,
-    scopes_from_claims,
-)
-from tenxgraph_api.src.app.core.auth.identity_cache import recall_identity
-from tenxgraph_api.src.app.core.auth.request_config import (
+from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
+from tenxgraph_api.src.app.core.auth.permissions_registry import ALL_PERMISSIONS
+from tenxgraph_api.src.app.core.auth.rbac import InvalidClaimsError, resolve
+from tenxgraph_api.src.app.core.validation.request_config import (
     ClientInputError,
     normalize_thread_id,
     resource_id_error,
@@ -37,9 +40,7 @@ from tenxgraph_api.src.app.core.auth.revocation import (
     TokenRevocationUnavailableError,
     token_revoked,
 )
-from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.core.exceptions.general_exception import GeneralException
-from tenxgraph_api.src.app.core.utils.log_sanitizer import sanitize_for_logging
 
 
 # Sec-WebSocket-Protocol sentinel carrying the bearer token for browser WebSocket clients.
@@ -119,31 +120,12 @@ def _is_websocket(connection: HTTPConnection) -> bool:
     scope = getattr(connection, "scope", None)
     if isinstance(scope, dict) and scope.get("type") == "websocket":
         return True
-    from fastapi import WebSocket
-
     return isinstance(connection, WebSocket)
 
 
 # RFC 6455 close code 1008 "Policy Violation" -- the right signal for an auth/authz
 # rejection at the WebSocket handshake.
 WS_POLICY_VIOLATION = 1008
-
-
-def _is_json_content_type(content_type: str | None) -> bool:
-    """Whether FastAPI parses a body with this content type as JSON.
-
-    Mirrors ``fastapi.routing``: a missing content type, ``application/json`` and any
-    ``application/*+json`` are all parsed as JSON. Reading fewer types here would let a
-    request skip the thread check while the route still receives its body.
-    """
-    if not content_type:
-        return True
-    message = email.message.Message()
-    message["content-type"] = content_type
-    if message.get_content_maintype() != "application":
-        return False
-    subtype = message.get_content_subtype()
-    return subtype == "json" or subtype.endswith("+json")
 
 
 def _reject(connection: HTTPConnection, status_code: int, detail: str) -> NoReturn:
@@ -159,323 +141,195 @@ def _reject(connection: HTTPConnection, status_code: int, detail: str) -> NoRetu
     raise HTTPException(status_code=status_code, detail=detail)
 
 
+_STATE_KEY = "tenxgraph_verified_claims"
+
+
+def _reusable(auth: BaseAuth) -> bool:
+    """Whether ``auth`` declared its own ``authenticate`` reusable.
+
+    The flag counts only when set by the class that defines the ``authenticate`` in use. A
+    subclass of ``JwtAuth`` that overrides ``authenticate`` (cookies, a DB lookup) inherits
+    ``JwtAuth``'s flag but not its purity, so it is not reused unless it sets the flag itself.
+    """
+    for cls in type(auth).__mro__:
+        if "authenticate" in vars(cls):
+            return vars(cls).get("reusable_within_request") is True
+    return False
+
+
+def remember_claims(
+    connection: HTTPConnection, auth: BaseAuth, token: str, claims: dict[str, Any]
+) -> None:
+    """Keep verified claims for the rest of this request (the rate limiter calls this)."""
+    scope = getattr(connection, "scope", None)
+    if not isinstance(scope, dict) or not _reusable(auth) or identity_is_reserved(claims):
+        return
+    scope.setdefault("state", {})[_STATE_KEY] = (id(auth), token, copy.deepcopy(claims))
+
+
+def _recall_claims(connection: HTTPConnection, auth: BaseAuth, token: str) -> dict[str, Any] | None:
+    scope = getattr(connection, "scope", None)
+    cached = scope.get("state", {}).get(_STATE_KEY) if isinstance(scope, dict) else None
+    if not cached or not _reusable(auth):
+        return None
+    auth_id, cached_token, claims = cached
+    if auth_id != id(auth) or cached_token != token or identity_is_reserved(claims):
+        return None
+    return copy.deepcopy(claims)
+
+
 def _authenticate(
-    auth_backend: BaseAuth,
-    connection: HTTPConnection,
-    response: Response,
-    credential: HTTPAuthorizationCredentials | None,
-) -> dict[str, Any] | None:
-    """Verify the credential, reusing a result this request already verified when allowed.
-
-    The rate limiter (``rate_limit.by == "user"``) verifies the same token first; for a backend
-    with ``reusable_within_request`` its result is reused instead of decoding the token twice.
-    """
-    if credential is not None:
-        cached = recall_identity(connection, auth_backend, credential.credentials)
-        if cached is not None:
-            return cached
-    return auth_backend.authenticate(connection, response, credential)  # type: ignore[arg-type]
-
-
-async def _reject_if_revoked(connection: HTTPConnection, user: dict[str, Any]) -> None:
-    """Refuse a credential that was revoked (401), when ``token_revocation`` is on.
-
-    When the cache store cannot answer, refuse with 503 instead of serving a token that might
-    have been revoked.
-    """
+    auth: BaseAuth, connection: HTTPConnection, response: Response | None
+) -> dict[str, Any]:
+    """The verified claims of this request, or a 401 (1008 on a WebSocket)."""
+    credential = _extract_credential(connection)
     try:
-        revoked = await token_revoked(user)
+        claims = _recall_claims(connection, auth, credential.credentials) if credential else None
+        if claims is None:
+            claims = auth.authenticate(connection, response, credential)
+    except HTTPException as exc:
+        _reject(connection, exc.status_code, str(exc.detail))
+    except GeneralException as exc:
+        # JwtAuth raises UserAccountError (401). HTTP routes render it through its exception
+        # handler; a WebSocket has no handler, so close it cleanly.
+        if isinstance(connection, WebSocket):
+            _reject(connection, exc.status_code, exc.message)
+        raise
+    if not claims:
+        _reject(connection, 401, "Authentication required")
+    if not isinstance(claims, dict):
+        logger.error("%s.authenticate returned %s, not a dict", type(auth).__name__, type(claims))
+        _reject(connection, 401, "Authentication failed")
+    return claims
+
+
+async def _identity(
+    connection: HTTPConnection, response: Response | None, auth: BaseAuth
+) -> Identity:
+    """Authenticate, resolve roles and permissions, refuse reserved ids and revoked tokens."""
+    claims = _authenticate(auth, connection, response)
+    try:
+        identity = resolve(claims, auth.rbac)
+    except InvalidClaimsError as exc:
+        logger.warning("Rejected token claims: %s", exc)
+        _reject(connection, 401, "Invalid token, please login again")
+    if identity_is_reserved(identity):
+        # Any auth class, any transport, cached or fresh: nobody acts as the shared owner.
+        log_reserved_rejection()
+        _reject(connection, 401, RESERVED_USER_ID_MESSAGE)
+    try:
+        revoked = await token_revoked(identity)
     except TokenRevocationUnavailableError:
         _reject(connection, 503, "Token revocation check unavailable")
     if revoked:
-        logger.warning("Rejected revoked credential for user %s", user.get("user_id"))
+        logger.warning("Rejected revoked credential for user %s", identity.user_id)
         _reject(connection, 401, "Token has been revoked, please login again")
+    return identity
 
 
-def _granted_scopes(
-    connection: HTTPConnection, authz: AuthorizationBackend, user: dict[str, Any]
-) -> list[str] | None:
-    """Scopes the backend grants this identity, or None for unrestricted.
+class RequireIdentity:
+    """Authenticate the caller and return its ``Identity``; no permission check.
 
-    A scope claim of the wrong type is a malformed token: 401.
-    """
-    scopes_fn = getattr(authz, "scopes_for", None)
-    try:
-        granted = scopes_fn(user) if callable(scopes_fn) else None
-        if granted is None:
-            granted = scopes_from_claims(user)  # backends without scopes_for
-    except ScopeClaimError as exc:
-        logger.warning("Rejected scope claim for user %s: %s", user.get("user_id"), exc)
-        _reject(connection, 401, "Invalid token, malformed scope claim")
-    return granted
-
-
-class RequirePermission:
-    """
-    FastAPI dependency that combines authentication and authorization.
-
-    This class-based dependency verifies user authentication and checks
-    authorization in a single step, reducing boilerplate code in endpoints.
-
-    Usage:
-        @router.post("/v1/resource")
-        async def endpoint(
-            user: dict = Depends(RequirePermission("resource", "action"))
-        ):
-            # User is authenticated and authorized
-            pass
-
-    Args:
-        resource: Resource type being accessed (e.g., "graph", "checkpointer", "store")
-        action: Action being performed (e.g., "invoke", "read", "write", "delete")
-        extract_resource_id: Optional function to extract resource_id from request
+    ``None`` when auth is off. Raises 401 on HTTP routes and closes with 1008 on WebSocket
+    routes (FastAPI does not translate an ``HTTPException`` on a WebSocket handshake).
     """
 
-    def __init__(
-        self,
-        resource: str,
-        action: str,
-        extract_resource_id: Callable[[HTTPConnection], str | None] | None = None,
-        *,
-        introspection: bool = False,
-        explicit_scope: bool = False,
-    ):
-        """
-        Initialize the permission requirement.
+    permission: str | None = None
 
-        Args:
-            resource: Resource type (graph, checkpointer, store)
-            action: Action type (invoke, stream, read, write, delete, etc.)
-            extract_resource_id: Optional callable that extracts resource_id from request
-            introspection: The route exposes the graph's internals (structure, tool schemas,
-                state schema). Under ``graph_introspection: "scoped"`` the caller must hold
-                the scope explicitly; an identity that declares no scopes is refused.
-            explicit_scope: Admin-only route. The caller must hold the scope explicitly, always:
-                an identity that declares no scopes (normally unrestricted) is refused.
-        """
-        self.resource = resource
-        self.action = action
-        self.extract_resource_id_fn = extract_resource_id
-        self.introspection = introspection
-        self.explicit_scope = explicit_scope
-
-    async def __call__(  # noqa: PLR0912, PLR0915
+    async def __call__(
         self,
         connection: HTTPConnection,
         response: Response,
-        config: GraphConfig = InjectAPI(GraphConfig),
-        auth_backend: BaseAuth = InjectAPI(BaseAuth),
-        authz: AuthorizationBackend = InjectAPI(AuthorizationBackend),
-    ) -> dict[str, Any]:
-        """
-        Verify authentication and authorization.
-
-        ``connection`` is typed as ``HTTPConnection`` (the common base of ``Request``
-        and ``WebSocket``) so this dependency resolves on both HTTP and WebSocket
-        routes; FastAPI cannot inject a ``Request`` on a WebSocket route.
-
-        Returns:
-            dict: User information if authenticated and authorized
-
-        Raises:
-            HTTPException: 401/403 on HTTP routes when auth or authz fails.
-            WebSocketException: close 1008 on WebSocket routes for the same failures
-                (FastAPI does not translate an HTTPException on a WS handshake).
-        """
-        # Extract bearer credentials from the Authorization header, with a
-        # ``?token=`` query fallback for browser WebSocket clients (see
-        # _extract_credential). Works for both HTTP and WebSocket connections.
-        credential = _extract_credential(connection)
-
-        # Step 1: Check if auth is configured
-        backend = config.auth_config()
-
-        # If auth is not configured, skip authentication and authorization entirely
-        if not backend:
-            logger.debug(
-                f"Auth not configured, skipping auth/authz for {self.resource}:{self.action}"
-            )
-            return {}
-
-        # Step 2: Authentication (reusing verify_current_user logic)
-        user = {}
-        if not auth_backend:
-            logger.error("Auth backend is not configured")
-            user = {}
-        else:
+        auth: BaseAuth | None = InjectAPI(BaseAuth),
+    ) -> Identity | None:
+        if auth is None:
+            return None
+        identity = await _identity(connection, response, auth)
+        if self.permission is not None:
+            resource_id = await _resource_id(connection)
             try:
-                user_result = _authenticate(auth_backend, connection, response, credential)
+                allowed = await auth.authorize(identity, self.permission, resource_id)
             except HTTPException as exc:
-                # JWT/custom backends signal auth failure with HTTPException; convert it
-                # to a clean WebSocket close on WS routes (see _reject).
                 _reject(connection, exc.status_code, str(exc.detail))
-            except GeneralException as exc:
-                # JwtAuth raises UserAccountError (401). HTTP routes render it through its
-                # exception handler; a WebSocket has no handler, so close it cleanly.
-                if isinstance(connection, WebSocket):
-                    _reject(connection, exc.status_code, exc.message)
-                raise
-            if user_result and "user_id" not in user_result:
-                logger.error("Authentication failed: 'user_id' not found in user info")
-            user = user_result or {}
-            if identity_is_reserved(user):
-                # Any backend, any transport, cached or fresh: nobody acts as the shared owner.
-                log_reserved_rejection()
-                _reject(connection, 401, RESERVED_USER_ID_MESSAGE)
+            if not allowed:
+                logger.warning("User %s lacks permission %s", identity.user_id, self.permission)
+                _reject(connection, 403, f"Missing required permission: {self.permission}")
+        return identity
 
-        # Step 2b: a verified credential may still have been revoked before it expires.
-        await _reject_if_revoked(connection, user)
 
-        # Step 3: Extract resource_id if available
-        resource_id = None
-        if self.extract_resource_id_fn:
-            resource_id = self.extract_resource_id_fn(connection)
-        else:
-            resource_id = self._extract_resource_id_from_path(connection)
-            if resource_id is None:
-                resource_id = await self._extract_resource_id_from_body(connection)
-            self._check_resource_ids(connection, resource_id)
+class RequirePermission(RequireIdentity):
+    """``RequireIdentity`` plus ``BaseAuth.authorize(identity, "resource:action", id)`` (403).
 
-        # Step 4: Scope check -- does this identity carry the permission for this
-        # endpoint at all? The required scope is "<resource>:<action>". Scopes come from
-        # the authenticated identity (the ``scope`` / ``scopes`` claims, merged into exact
-        # names). If the identity declares no scopes, we stay permissive (backward
-        # compatible) -- once scopes are issued, they are enforced.
-        required_scope = f"{self.resource}:{self.action}"
-        granted_scopes = _granted_scopes(connection, authz, user)
-        if granted_scopes is not None and required_scope not in set(granted_scopes):
-            logger.warning(f"Missing scope '{required_scope}' for user {user.get('user_id')}")
-            _reject(connection, 403, f"Missing required scope: {required_scope}")
-        if granted_scopes is None and (
-            self.explicit_scope
-            or (self.introspection and getattr(config, "introspection_scoped", False) is True)
-        ):
-            # No scopes declared would normally mean "permissive"; graph internals are not.
-            _reject(connection, 403, f"Missing required scope: {required_scope}")
+    Usage: ``identity = Depends(RequirePermission("graph", "invoke"))``. A permission the
+    registry does not know raises ``ValueError`` here, at import, not on the first request.
+    """
 
-        # Step 5: Object-level authorization (ownership etc.)
-        if not await authz.authorize(
-            user,
-            self.resource,
-            self.action,
-            resource_id=resource_id,
-        ):
-            logger.warning(
-                f"Authorization failed for user {user.get('user_id')} "
-                f"on {self.resource}:{self.action}"
-            )
-            _reject(
-                connection,
-                403,
-                f"Not authorized to {self.action} {self.resource}",
-            )
+    def __init__(self, resource: str, action: str):
+        permission = f"{resource}:{action}"
+        if permission not in ALL_PERMISSIONS:
+            raise ValueError(f"Unknown permission {permission!r}; see permissions_registry.py")
+        self.resource = resource
+        self.action = action
+        self.permission = permission
 
-        # Step 6: Stamp the trusted authz block into the user object. Every service copies
-        # this user into config["user"], so the isolation policy + scopes reach every
-        # downstream call (checkpointer, store, graph execution). Overwrites anything the
-        # client sent -- not hijackable.
-        # The isolation scope is chosen per caller: ``isolation_scope(user)`` (older backends
-        # take no argument; see ``resolve_isolation_scope``).
-        if isinstance(user, dict) and user.get("user_id"):
-            from tenxgraph.core.authz import build_authz
 
-            iso_scope = resolve_isolation_scope(authz, user)
-            try:
-                user["authz"] = build_authz(
-                    user["user_id"],
-                    scope=iso_scope,
-                    scopes=granted_scopes if granted_scopes is not None else [],
-                )
-            except ValueError as exc:
-                # A malformed scope (an unknown string such as "owners", or a bad column
-                # list) must never turn into "no isolation": refuse.
-                logger.error(
-                    "isolation_scope of %s returned an invalid scope: %s",
-                    type(authz).__name__,
-                    exc,
-                )
-                _reject(connection, 403, f"Not authorized to {self.action} {self.resource}")
+async def _resource_id(connection: HTTPConnection) -> str | None:
+    """The thread (or memory, namespace) id the request targets, validated (422).
 
-        # Log successful auth/authz (with sanitized user info)
-        logger.debug(
-            f"Auth/Authz success for {self.resource}:{self.action}, "
-            f"user: {sanitize_for_logging(user)}"
-        )
-
-        return user
-
-    @staticmethod
-    def _check_resource_ids(connection: HTTPConnection, resource_id: str | None) -> None:
-        """Refuse an id that breaks the shared resource-id rule (422 ``VALIDATION_ERROR``).
-
-        Covers the thread id from the path or body and the message and memory ids in the path.
-        """
-        problem = None
-        params = connection.path_params
-        for name in ("thread_id", "message_id", "memory_id"):
-            if name in params:
-                problem = resource_id_error(params[name], name) or problem
-        if problem is None:
-            problem = resource_id_error(resource_id, "thread_id")
-        if problem is None:
-            return
+    Path parameters win; otherwise the thread id from the JSON body. Ids that break the shared
+    resource-id rule are refused here, once, for every route.
+    """
+    params = connection.path_params
+    problem = None
+    for name in ("thread_id", "message_id", "memory_id"):
+        if name in params:
+            problem = resource_id_error(params[name], name) or problem
+    resource_id = next(
+        (str(params[n]) for n in ("thread_id", "memory_id", "namespace") if n in params), None
+    )
+    if resource_id is None:
+        resource_id = await _body_thread_id(connection)
+        problem = problem or resource_id_error(resource_id, "thread_id")
+    if problem is not None:
         if isinstance(connection, WebSocket):
             _reject(connection, 422, problem)
         raise ClientInputError(problem)
+    return resource_id
 
-    def _extract_resource_id_from_path(self, connection: HTTPConnection) -> str | None:
-        """
-        Extract resource ID from request path parameters.
 
-        Looks for common patterns like thread_id, memory_id in path params.
+def _is_json_content_type(content_type: str | None) -> bool:
+    """Whether FastAPI parses a body with this content type as JSON (so we read it too)."""
+    if not content_type:
+        return True
+    message = email.message.Message()
+    message["content-type"] = content_type
+    if message.get_content_maintype() != "application":
+        return False
+    subtype = message.get_content_subtype()
+    return subtype == "json" or subtype.endswith("+json")
 
-        Args:
-            connection: FastAPI request or WebSocket connection
 
-        Returns:
-            Resource ID as string, or None if not found
-        """
-        # Check path parameters
-        path_params = connection.path_params
+async def _body_thread_id(connection: HTTPConnection) -> str | None:
+    """The thread id a JSON body targets (root ``thread_id`` or ``config.thread_id``).
 
-        # Common resource ID patterns
-        for param_name in ["thread_id", "memory_id", "namespace"]:
-            if param_name in path_params:
-                return str(path_params[param_name])
-
+    A body naming two different threads is rejected (400) so the id checked here is the one the
+    service runs. No second parse: FastAPI reads the body first and Starlette caches it on this
+    Request (tests/integration_tests/test_body_parsed_once.py guards it).
+    """
+    if not isinstance(connection, Request):
         return None
-
-    async def _extract_resource_id_from_body(self, connection: HTTPConnection) -> str | None:
-        """Extract the thread ID a request body targets.
-
-        The body is read exactly when FastAPI would parse it as JSON, and the ID is normalised
-        the same way the services normalise it, so the thread checked here is the thread that
-        runs. Routes read either the root ``thread_id`` (stop, fix) or ``config.thread_id``
-        (invoke, stream); a body that names two different threads is rejected rather than
-        letting the check and the service pick different ones.
-        """
-        from starlette.requests import Request
-
-        if not isinstance(connection, Request):
-            return None
-        if not _is_json_content_type(connection.headers.get("content-type")):
-            return None
-
-        # No second parse: FastAPI reads a JSON body with ``request.json()`` before it resolves
-        # dependencies, and Starlette caches the result on this same Request object, so this
-        # returns the cached value. tests/integration_tests/test_body_parsed_once.py guards it.
-        try:
-            body = await connection.json()
-        except Exception as exc:
-            # FastAPI rejects a malformed body itself before the route runs.
-            logger.debug("Failed to parse request body for thread_id: %s", exc)
-            return None
-        if not isinstance(body, dict):
-            return None
-
-        root_id = normalize_thread_id(body.get("thread_id"))
-        cfg = body.get("config")
-        config_id = normalize_thread_id(cfg.get("thread_id")) if isinstance(cfg, dict) else None
-        if root_id and config_id and root_id != config_id:
-            _reject(connection, 400, "thread_id and config.thread_id must match")
-        return root_id or config_id
+    if not _is_json_content_type(connection.headers.get("content-type")):
+        return None
+    try:
+        body = await connection.json()
+    except Exception as exc:  # FastAPI rejects a malformed body itself before the route runs.
+        logger.debug("Failed to parse request body for thread_id: %s", exc)
+        return None
+    if not isinstance(body, dict):
+        return None
+    root_id = normalize_thread_id(body.get("thread_id"))
+    cfg = body.get("config")
+    config_id = normalize_thread_id(cfg.get("thread_id")) if isinstance(cfg, dict) else None
+    if root_id and config_id and root_id != config_id:
+        _reject(connection, 400, "thread_id and config.thread_id must match")
+    return root_id or config_id

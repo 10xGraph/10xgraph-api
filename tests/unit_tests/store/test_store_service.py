@@ -575,26 +575,26 @@ class TestListMemoriesFilters:
 
     async def test_valid_filters_reach_aget_all(self, store_service, schema_store, mock_user):
         await store_service.list_memories(
-            {}, mock_user, filters={"plan": "pro", "source": "chat", "OR": [{"source": "x"}, {"app_id": "b"}]}
+            {},
+            mock_user,
+            filters={"plan": "pro", "source": "chat", "OR": [{"source": "x"}, {"app_id": "b"}]},
         )
         kwargs = schema_store.aget_all.call_args.kwargs
         assert kwargs["filters"] == {"plan": "pro", "source": "chat", "OR": [{"source": "x"}]}
 
     @pytest.mark.parametrize("filters", [{"org_id": "x"}, {"user_id": "victim"}])
     async def test_isolation_keys_give_422(self, store_service, schema_store, mock_user, filters):
-        from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
+        from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
 
         with pytest.raises(ClientInputError):
             await store_service.list_memories({}, mock_user, filters=filters)
         schema_store.aget_all.assert_not_called()
 
     async def test_bad_operator_gives_422(self, store_service, schema_store, mock_user):
-        from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
+        from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
 
         with pytest.raises(ClientInputError):
-            await store_service.list_memories(
-                {}, mock_user, filters={"plan": {"nope": 1}}
-            )
+            await store_service.list_memories({}, mock_user, filters={"plan": {"nope": 1}})
         schema_store.aget_all.assert_not_called()
 
     async def test_no_filters_keeps_old_call(self, store_service, mock_store, mock_user):

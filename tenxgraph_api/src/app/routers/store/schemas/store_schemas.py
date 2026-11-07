@@ -14,7 +14,7 @@ from tenxgraph.storage.store.store_schema import (
     RetrievalStrategy,
 )
 
-from tenxgraph_api.src.app.core.auth.request_config import BoundedDict
+from tenxgraph_api.src.app.core.validation.request_config import BoundedDict
 
 
 # Upper bounds so one request cannot make the store (and the embedding / vector backend)

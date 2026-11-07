@@ -7,6 +7,7 @@ from pathlib import Path
 
 from tenxgraph_api.cli.commands.init import InitCommand
 from tenxgraph_api.cli.core.output import OutputFormatter
+from tenxgraph_api.src.app.core.auth.auth_config import check_auth_config
 
 
 def SilentOutput() -> OutputFormatter:
@@ -92,8 +93,11 @@ def test_production_template_defaults_to_recommended_setup(tmp_path: Path) -> No
     assert result == 0
 
     config = json.loads((target / "10xgraph.json").read_text())
-    assert config["auth"] == "jwt"
-    assert config["authorization"] == "ownership"
+    assert config["auth"] == {"method": "jwt"}
+    assert "authorization" not in config
+    assert config["ag_ui"] == {"enabled": False, "allow_client_tools": False}
+    assert config["remote_tools"] == []
+    assert check_auth_config(config, production=True) == []
     assert config["cache_store"]["type"] == "redis"
     assert "url" not in config["cache_store"]
     assert config["cache_store"]["rate_limit"]["enabled"] is True
@@ -190,8 +194,11 @@ def test_interactive_production_writes_the_recommended_config(monkeypatch, tmp_p
 
     context, _, _ = _run_prompts(monkeypatch)
     config = InitCommand(output=SilentOutput())._build_config(context, True)
-    assert config["auth"] == "jwt"
-    assert config["authorization"] == "ownership"
+    assert config["auth"] == {"method": "jwt"}
+    assert "authorization" not in config
+    assert config["ag_ui"] == {"enabled": False, "allow_client_tools": False}
+    assert config["remote_tools"] == []
+    assert check_auth_config(config, production=True) == []
     assert config["id_generator"] == "uuid"
     assert config["cache_store"] == {
         "type": "redis",
@@ -208,7 +215,14 @@ def test_interactive_production_writes_the_recommended_config(monkeypatch, tmp_p
     }
     template = Path(__file__).parents[2] / "tenxgraph_api/cli/templates/prod/10xgraph.json"
     static = json.loads(template.read_text(encoding="utf-8"))
-    for key in ("auth", "authorization", "id_generator", "cache_store", "thread_name_generator"):
+    for key in (
+        "auth",
+        "ag_ui",
+        "remote_tools",
+        "id_generator",
+        "cache_store",
+        "thread_name_generator",
+    ):
         assert static[key] == config[key], key
 
 

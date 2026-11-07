@@ -4,15 +4,16 @@ from typing import Any
 
 from fastapi import HTTPException
 from injectq import inject, singleton
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import Message
 from tenxgraph.storage.store import BaseStore
 
 from tenxgraph_api.src.app.core import logger
-from tenxgraph_api.src.app.core.auth.client_filters import (
+from tenxgraph_api.src.app.core.validation.client_filters import (
     check_store_filters,
     filter_errors_as_client_errors,
 )
-from tenxgraph_api.src.app.core.auth.request_config import client_config
+from tenxgraph_api.src.app.core.validation.request_config import client_config
 from tenxgraph_api.src.app.routers.store.schemas.store_schemas import (
     ForgetMemorySchema,
     MemoryCreateResponseSchema,
@@ -94,21 +95,22 @@ class StoreService:
             raise StoreUnavailableError()
         return self.store
 
-    def _config(self, config: dict[str, Any] | None, user: dict[str, Any]) -> dict[str, Any]:
-        # Client keys pass through; server-owned keys (authz, user, collection, internals)
-        # never do. The trusted user object carries the authz policy the store enforces.
+    def _config(self, config: dict[str, Any] | None, identity: Identity | None) -> dict[str, Any]:
+        # Client keys pass through; server-owned keys (user, collection, internals) never do.
+        # The Identity in ``config["user"]`` is what the store scopes by.
         cfg: dict[str, Any] = client_config(config)
-        cfg["user"] = user
-        cfg["user_id"] = user.get("user_id", "anonymous")
+        if identity is not None:
+            cfg["user"] = identity
+        cfg["user_id"] = identity.user_id if identity is not None else "anonymous"
         return cfg
 
     async def store_memory(
         self,
         payload: StoreMemorySchema,
-        user: dict[str, Any],
+        identity: Identity | None,
     ) -> MemoryCreateResponseSchema:
         store = self._get_store()
-        cfg = self._config(payload.config, user)
+        cfg = self._config(payload.config, identity)
         options = _client_options(payload.options)
 
         if isinstance(payload.content, Message):
@@ -130,10 +132,10 @@ class StoreService:
     async def search_memories(
         self,
         payload: SearchMemorySchema,
-        user: dict[str, Any],
+        identity: Identity | None,
     ) -> MemorySearchResponseSchema:
         store = self._get_store()
-        cfg = self._config(payload.config, user)
+        cfg = self._config(payload.config, identity)
         options = _client_options(payload.options)
         # Validated before anything runs (no embedding call for a bad filter); 422 when bad.
         check_store_filters(store, payload.filters)
@@ -158,18 +160,18 @@ class StoreService:
         self,
         memory_id: str,
         config: dict[str, Any] | None,
-        user: dict[str, Any],
+        identity: Identity | None,
         options: dict[str, Any] | None = None,
     ) -> MemoryItemResponseSchema:
         store = self._get_store()
-        cfg = self._config(config, user)
+        cfg = self._config(config, identity)
         result = await store.aget(cfg, memory_id, **_client_options(options))
         return MemoryItemResponseSchema(memory=result)
 
     async def list_memories(
         self,
         config: dict[str, Any] | None,
-        user: dict[str, Any],
+        identity: Identity | None,
         limit: int = 100,
         options: dict[str, Any] | None = None,
         offset: int = 0,
@@ -178,7 +180,7 @@ class StoreService:
         """One page of memories. The store has no offset, so it is asked for ``offset + limit
         + 1`` rows and the page is cut from those; the extra row only tells ``has_more``."""
         store = self._get_store()
-        cfg = self._config(config, user)
+        cfg = self._config(config, identity)
         check_store_filters(store, filters)
         list_kwargs: dict[str, Any] = {}
         client_filters = _client_filters(filters)
@@ -200,10 +202,10 @@ class StoreService:
         self,
         memory_id: str,
         payload: UpdateMemorySchema,
-        user: dict[str, Any],
+        identity: Identity | None,
     ) -> MemoryOperationResponseSchema:
         store = self._get_store()
-        cfg = self._config(payload.config, user)
+        cfg = self._config(payload.config, identity)
         options = _client_options(payload.options)
 
         result = await store.aupdate(
@@ -219,21 +221,21 @@ class StoreService:
         self,
         memory_id: str,
         config: dict[str, Any] | None,
-        user: dict[str, Any],
+        identity: Identity | None,
         options: dict[str, Any] | None = None,
     ) -> MemoryOperationResponseSchema:
         store = self._get_store()
-        cfg = self._config(config, user)
+        cfg = self._config(config, identity)
         result = await store.adelete(cfg, memory_id, **_client_options(options))
         return MemoryOperationResponseSchema(success=True, data=result)
 
     async def forget_memory(
         self,
         payload: ForgetMemorySchema,
-        user: dict[str, Any],
+        identity: Identity | None,
     ) -> MemoryOperationResponseSchema:
         store = self._get_store()
-        cfg = self._config(payload.config, user)
+        cfg = self._config(payload.config, identity)
         options = _client_options(payload.options)
         check_store_filters(store, payload.filters)
         forget_kwargs: dict[str, Any] = {

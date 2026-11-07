@@ -1,7 +1,7 @@
 """Shared harness for API integration tests.
 
 These build a real FastAPI app with the real ``RequirePermission`` dependency, a real
-``BaseAuth`` backend, a real ``AuthorizationBackend`` and real services -- deliberately
+``BaseAuth`` backend and real services -- deliberately
 NOT mocking the pieces that enforce isolation. That is the whole point: the earlier
 suite mocked the services, so it could never have caught a cross-user (IDOR) defect.
 """
@@ -17,10 +17,6 @@ from injectq import InjectQ
 from injectq.integrations.fastapi import setup_fastapi
 from tenxgraph.storage.checkpointer import BaseCheckpointer, InMemoryCheckpointer
 
-from tenxgraph_api.src.app.core.auth.authorization import (
-    AuthorizationBackend,
-    DefaultAuthorizationBackend,
-)
 from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.core.config.media_settings import MediaSettings, MediaStorageType
@@ -58,41 +54,6 @@ class HeaderAuth(BaseAuth):
         return info
 
 
-class OwnershipAuthz(AuthorizationBackend):
-    """Authorizes only the owner of a resource.
-
-    Records which ``resource_id`` belongs to which ``user_id``. A request with no
-    ``resource_id`` (create/list) is allowed; a request for a resource owned by
-    someone else is denied. This is the mechanism a developer wires up to get
-    object-level isolation, and it depends on ``RequirePermission`` handing it the
-    right ``resource_id`` -- including one carried in the request *body*.
-    """
-
-    def __init__(self) -> None:
-        self.owners: dict[str, str] = {}
-        self.seen_resource_ids: list[str | None] = []
-
-    def own(self, resource_id: str, user_id: str) -> None:
-        self.owners[str(resource_id)] = str(user_id)
-
-    async def authorize(
-        self,
-        user: dict[str, Any],
-        resource: str,
-        action: str,
-        resource_id: str | None = None,
-        **context: Any,
-    ) -> bool:
-        self.seen_resource_ids.append(resource_id)
-        if not user or "user_id" not in user:
-            return False
-        if resource_id is None:
-            return True
-        owner = self.owners.get(str(resource_id))
-        # Unknown resource: allow (nothing to protect yet). Known resource: owner only.
-        return owner is None or owner == str(user["user_id"])
-
-
 class _AuthOnConfig:
     """Minimal GraphConfig stand-in whose ``auth_config()`` is truthy (auth enabled)."""
 
@@ -103,11 +64,11 @@ class _AuthOnConfig:
 def build_app(
     *,
     routers: list[Any],
-    authz: AuthorizationBackend | None = None,
+    auth: BaseAuth | None = None,
     checkpointer: BaseCheckpointer | None = None,
     extra_bindings: dict[type, Any] | None = None,
 ) -> FastAPI:
-    """Assemble a test app with real auth/authz wiring and the given routers."""
+    """Assemble a test app with real auth wiring (``auth`` defaults to ``HeaderAuth``) and the given routers."""
     app = FastAPI()
     setup_middleware(app)
     # Same handlers as main.py, so a ClientInputError answers 422 as in production.
@@ -115,8 +76,7 @@ def build_app(
 
     container = InjectQ()
     container.bind_instance(GraphConfig, _AuthOnConfig())
-    container.bind_instance(BaseAuth, HeaderAuth())
-    container.bind_instance(AuthorizationBackend, authz or DefaultAuthorizationBackend())
+    container.bind_instance(BaseAuth, auth or HeaderAuth())
     container.bind_instance(BaseCheckpointer, checkpointer or InMemoryCheckpointer())
     for typ, inst in (extra_bindings or {}).items():
         container.bind_instance(typ, inst)

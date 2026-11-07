@@ -7,33 +7,333 @@ import {
 
 // ------------------------------------------------------------------ auth
 
-export function AuthWidget() {
-  const value = store.config.auth;
-  const mode = isObject(value) ? "custom" : "jwt";
+const REACH_OPTIONS = [["", "Choose reach"], ["own", "own"], ["tenant", "tenant"], ["all", "all"]];
+const nonEmpty = (v) => (Array.isArray(v) ? v.length > 0 : isObject(v) && Object.keys(v).length > 0);
+
+// The auth object as the editor edits it, whichever shape the file holds.
+function readAuth() {
+  const a = store.config.auth;
+  if (a === "jwt") return { method: "jwt" };
+  return isObject(a) ? a : { method: "none" };
+}
+
+// Edit a copy of the auth object. Method none is saved as null.
+function editAuth(mutate) {
+  commit((s) => {
+    const next = { ...readAuth() };
+    mutate(next);
+    s.config.auth = next.method === "none" ? null : next;
+  });
+}
+
+// Set a key, or drop it when the value is empty, so the file only holds what is used.
+function put(auth, key, value) {
+  if (value === null || value === undefined || value === "" || (typeof value !== "string" && !nonEmpty(value))) delete auth[key];
+  else auth[key] = value;
+}
+
+function sourceOf(a) {
+  if (a.roles_claim !== undefined || nonEmpty(a.roles)) return "roles";
+  if (a.permissions_claim !== undefined) return "permissions";
+  return "default";
+}
+
+const issuesUnder = (prefix) => store.issues.filter((i) => i.path === prefix || i.path.startsWith(`${prefix}.`));
+
+function Issues({ prefix }) {
+  return issuesUnder(prefix).map((issue, n) => <FieldIssue key={n} issue={issue} />);
+}
+
+// Renames apply on blur or Enter; the draft lives here so re-renders do not reset it.
+function NameInput({ id, label, name, onRename }) {
+  const [draft, setDraft] = useState(name);
+  useEffect(() => setDraft(name), [name]);
+  return (
+    <div>
+      <label for={id} class="sr-only">{label}</label>
+      <input
+        id={id} type="text" value={draft} class="input font-mono" autocomplete="off" spellcheck={false}
+        onInput={(e) => setDraft(e.currentTarget.value)}
+        onChange={(e) => { if (!onRename(e.currentTarget.value.trim())) setDraft(name); }}
+      />
+    </div>
+  );
+}
+
+const MiniLabel = ({ children }) => <span class="mb-1.5 block text-xs font-medium text-faint">{children}</span>;
+
+// Rename a key of an object keeping its order; false when the new name is empty or taken.
+function renameKey(obj, from, to) {
+  if (!to || (to !== from && to in obj)) return null;
+  return Object.fromEntries(Object.entries(obj).map(([k, v]) => [k === from ? to : k, v]));
+}
+
+export function AuthWidget({ sec }) {
+  const auth = readAuth();
+  const method = auth.method ?? "none";
+  const source = sourceOf(auth);
   return (
     <div class="space-y-6">
       <Group title="Method">
         <ChoiceGroup
-          name="auth" label="Authentication method" value={mode}
+          name="auth-method" label="Authentication method" value={method}
           options={[
+            ["none", "None", "Every request is accepted. For local development."],
             ["jwt", "JWT", "Verify bearer tokens signed with JWT_SECRET_KEY."],
-            ["custom", "Custom backend", "Your own BaseAuth subclass decides who is calling."],
+            ["custom", "Custom", "Your own BaseAuth subclass decides who is calling."],
           ]}
-          onPick={(m) => commit((s) => { s.config.auth = m === "jwt" ? "jwt" : { method: "custom", path: "" }; })}
+          onPick={(m) => editAuth((a) => {
+            a.method = m;
+            if (m === "custom") a.path = a.path ?? "";
+            else delete a.path;
+          })}
         />
       </Group>
-      {mode === "custom" ? (
-        <Group title="Backend">
+      {method === "custom" ? (
+        <Group title="Class">
           <div class="panel">
             <TextRow
-              id="auth-path" label="Auth class" path="auth.path" value={value.path} placeholder="auth.custom:MyAuth"
+              id="auth-path" label="Auth class" path="auth.path" value={auth.path} placeholder="auth.custom:MyAuth"
               help="Import path of a BaseAuth subclass, as module:attribute." issue={issueAt("auth.path")}
-              onInput={(v) => commit((s) => { s.config.auth = { ...s.config.auth, method: "custom", path: v }; })}
+              onInput={(v) => editAuth((a) => { a.path = v; })}
             />
           </div>
         </Group>
       ) : null}
+      {method !== "none" ? (
+        <>
+          <Group title="Permission source">
+            <ChoiceGroup
+              name="auth-source" label="Permission source" value={source}
+              options={[
+                ["default", "Default", "Every signed-in user, own data only."],
+                ["roles", "Roles from a claim", "Map the roles in the token to permissions."],
+                ["permissions", "Permissions from a claim", "The token already lists the permissions."],
+              ]}
+              onPick={(m) => editAuth((a) => {
+                delete a.roles_claim; delete a.permissions_claim; delete a.roles; delete a.default_role;
+                if (m === "roles") { a.roles_claim = "roles"; a.roles = { member: { permissions: [], reach: "own" } }; }
+                if (m === "permissions") a.permissions_claim = "permissions";
+              })}
+            />
+          </Group>
+          {source === "roles" ? <RolesTable auth={auth} registry={sec.registry} /> : null}
+          {source === "permissions" ? (
+            <Group title="Claim">
+              <div class="panel">
+                <TextRow
+                  id="auth-permissions-claim" label="Permissions claim" path="auth.permissions_claim"
+                  value={auth.permissions_claim} placeholder="permissions" issue={issueAt("auth.permissions_claim")}
+                  help="Token claim holding a list of permissions, such as graph:invoke."
+                  onInput={(v) => editAuth((a) => { a.permissions_claim = v; })}
+                />
+              </div>
+            </Group>
+          ) : null}
+          <Group title="Tenants">
+            <div class="panel divide-y divide-line">
+              <div class="px-5 py-4">
+                <FieldMeta
+                  label="Tenant claims" path="auth.tenant_claims" id="auth-tenant-claims"
+                  help="Token claims that name the tenant, such as org_id. Rows are separated by them."
+                />
+                <div class="mt-3">
+                  <Chips
+                    id="auth-tenant-claims" values={auth.tenant_claims ?? []} placeholder="org_id"
+                    onChange={(next) => editAuth((a) => put(a, "tenant_claims", next))}
+                  />
+                </div>
+                <Issues prefix="auth.tenant_claims" />
+              </div>
+              {source === "roles" ? <DefaultRole auth={auth} /> : null}
+            </div>
+          </Group>
+          <SystemIdentities auth={auth} />
+        </>
+      ) : null}
     </div>
+  );
+}
+
+function DefaultRole({ auth }) {
+  const names = Object.keys(isObject(auth.roles) ? auth.roles : {});
+  return (
+    <Row>
+      <FieldMeta
+        label="Default role" path="auth.default_role" id="auth-default-role"
+        help="Given to a signed-in user whose token carries no role."
+      />
+      <div class="min-w-0 sm:pt-0.5">
+        <Select
+          id="auth-default-role" value={auth.default_role ?? ""}
+          options={[["", "None"], ...names.map((n) => [n, n])]}
+          onChange={(v) => editAuth((a) => put(a, "default_role", v))}
+        />
+        <FieldIssue issue={issueAt("auth.default_role")} />
+      </div>
+    </Row>
+  );
+}
+
+function RolesTable({ auth, registry }) {
+  const roles = isObject(auth.roles) ? auth.roles : {};
+  const entries = Object.entries(roles);
+  const names = Object.keys(roles);
+  const permissionOptions = [
+    "*",
+    ...Object.entries(registry || {}).flatMap(([resource, actions]) => [`${resource}:*`, ...actions.map((a) => `${resource}:${a}`)]),
+  ];
+  const setRoles = (next) => editAuth((a) => { a.roles = next; });
+  const setRole = (name, patch) => setRoles({ ...roles, [name]: { ...roles[name], ...patch } });
+  const addRole = () => {
+    let n = entries.length + 1;
+    while (`role${n}` in roles) n++;
+    setRoles({ ...roles, [`role${n}`]: { permissions: [], reach: "own" } });
+  };
+  const rename = (name, renamed) => {
+    const next = renameKey(roles, name, renamed);
+    if (!next) return false;
+    // Keep references to the role pointing at it.
+    editAuth((a) => {
+      a.roles = Object.fromEntries(Object.entries(next).map(([k, r]) => [
+        k, r.inherits ? { ...r, inherits: r.inherits.map((p) => (p === name ? renamed : p)) } : r,
+      ]));
+      if (a.default_role === name) a.default_role = renamed;
+      if (isObject(a.system_identities)) {
+        a.system_identities = Object.fromEntries(Object.entries(a.system_identities).map(([k, i]) => [
+          k, { ...i, roles: (i.roles ?? []).map((r) => (r === name ? renamed : r)) },
+        ]));
+      }
+    });
+    return true;
+  };
+
+  return (
+    <Group title="Roles">
+      <div class="panel">
+        <div class="border-b border-line">
+          <TextRow
+            id="auth-roles-claim" label="Roles claim" path="auth.roles_claim" value={auth.roles_claim}
+            placeholder="roles" issue={issueAt("auth.roles_claim")}
+            help="Token claim holding the user's list of role names."
+            onInput={(v) => editAuth((a) => { a.roles_claim = v; })}
+          />
+        </div>
+        {entries.length ? (
+          <div class="divide-y divide-line">
+            {entries.map(([name, role], index) => (
+              <div key={index} class="space-y-3 px-5 py-4">
+                <div class="grid grid-cols-[minmax(0,1fr)_8rem_auto] items-start gap-3">
+                  <NameInput id={`role-name-${index}`} label="Role name" name={name} onRename={(to) => rename(name, to)} />
+                  <Select
+                    id={`role-reach-${index}`} value={role.reach ?? ""} options={REACH_OPTIONS}
+                    invalid={issueAt(`auth.roles.${name}.reach`)?.level === "error"}
+                    onChange={(v) => setRole(name, { reach: v })}
+                  />
+                  <button
+                    type="button" class="icon-btn hover:text-danger" aria-label={`Remove role ${name}`}
+                    onClick={() => setRoles(Object.fromEntries(entries.filter(([k]) => k !== name)))}
+                  >
+                    <Icon name="trash" />
+                  </button>
+                </div>
+                <div>
+                  <MiniLabel>Permissions</MiniLabel>
+                  <Chips
+                    id={`role-permissions-${index}`} values={role.permissions ?? []}
+                    placeholder="graph:invoke, threads:*, *" suggestions={permissionOptions}
+                    onChange={(next) => setRole(name, { permissions: next })}
+                  />
+                </div>
+                <div>
+                  <MiniLabel>Inherits</MiniLabel>
+                  <Chips
+                    id={`role-inherits-${index}`} values={role.inherits ?? []} placeholder="another role"
+                    suggestions={names.filter((n) => n !== name)}
+                    onChange={(next) => { const updated = { ...role }; put(updated, "inherits", next); setRoles({ ...roles, [name]: updated }); }}
+                  />
+                </div>
+                <Issues prefix={`auth.roles.${name}`} />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p class="px-5 py-6 text-center text-sm text-muted">No roles yet. Add one to use roles.</p>
+        )}
+        <div class="flex items-center justify-between gap-4 border-t border-line px-5 py-3">
+          <p class="text-[13px] text-muted">
+            Reach: <code class="font-mono">own</code> the user's rows, <code class="font-mono">tenant</code> every row
+            of their tenant, <code class="font-mono">all</code> every row.
+          </p>
+          <button type="button" class="btn btn-ghost" onClick={addRole}><Icon name="plus" />Add role</button>
+        </div>
+      </div>
+    </Group>
+  );
+}
+
+function SystemIdentities({ auth }) {
+  const identities = isObject(auth.system_identities) ? auth.system_identities : {};
+  const entries = Object.entries(identities);
+  const roleNames = Object.keys(isObject(auth.roles) ? auth.roles : {});
+  const setAll = (next) => editAuth((a) => put(a, "system_identities", next));
+  const setOne = (name, patch) => setAll({ ...identities, [name]: { ...identities[name], ...patch } });
+  const add = () => {
+    let n = entries.length + 1;
+    while (`job${n}` in identities) n++;
+    setAll({ ...identities, [`job${n}`]: { roles: [], tenant: {} } });
+  };
+  // Tenant is {claim: value}; the chips hold "claim=value" text.
+  const tenantChips = (tenant) => Object.entries(tenant ?? {}).map(([k, v]) => `${k}=${v}`);
+  const parseTenant = (chips) => Object.fromEntries(
+    chips.filter((c) => c.includes("=")).map((c) => [c.slice(0, c.indexOf("=")).trim(), c.slice(c.indexOf("=") + 1).trim()]),
+  );
+
+  return (
+    <Group title="System identities">
+      <div class="panel">
+        {entries.length ? (
+          <div class="divide-y divide-line">
+            {entries.map(([name, identity], index) => (
+              <div key={index} class="space-y-3 px-5 py-4">
+                <div class="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
+                  <NameInput
+                    id={`system-name-${index}`} label="Identity name" name={name}
+                    onRename={(to) => { const next = renameKey(identities, name, to); if (next) setAll(next); return !!next; }}
+                  />
+                  <button
+                    type="button" class="icon-btn hover:text-danger" aria-label={`Remove ${name}`}
+                    onClick={() => setAll(Object.fromEntries(entries.filter(([k]) => k !== name)))}
+                  >
+                    <Icon name="trash" />
+                  </button>
+                </div>
+                <div>
+                  <MiniLabel>Roles</MiniLabel>
+                  <Chips
+                    id={`system-roles-${index}`} values={identity.roles ?? []} placeholder="member"
+                    suggestions={roleNames} onChange={(next) => setOne(name, { roles: next })}
+                  />
+                </div>
+                <div>
+                  <MiniLabel>Tenant, as claim=value</MiniLabel>
+                  <Chips
+                    id={`system-tenant-${index}`} values={tenantChips(identity.tenant)} placeholder="org_id=acme"
+                    onChange={(next) => setOne(name, { tenant: parseTenant(next) })}
+                  />
+                </div>
+                <Issues prefix={`auth.system_identities.${name}`} />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p class="px-5 py-6 text-center text-sm text-muted">None. Scheduled jobs and other non-user callers can run as one.</p>
+        )}
+        <div class="flex justify-end border-t border-line px-5 py-3">
+          <button type="button" class="btn btn-ghost" onClick={add}><Icon name="plus" />Add identity</button>
+        </div>
+      </div>
+    </Group>
   );
 }
 
@@ -338,171 +638,6 @@ export function ChoiceWidget({ sec }) {
         </Group>
       ) : null}
     </div>
-  );
-}
-
-// ------------------------------------------------------------------ authorization
-
-function authzModeOf(v) {
-  if (isObject(v)) return "rbac";
-  if (typeof v === "string") {
-    const key = v.trim().toLowerCase();
-    if (key === "ownership") return "ownership";
-    if (["allow_all", "default", "none"].includes(key)) return "allow_all";
-  }
-  return v === undefined || v === null ? null : "custom";
-}
-
-const AUTHZ_PRESETS = {
-  ownership: () => "ownership",
-  allow_all: () => "allow_all",
-  custom: () => "",
-  rbac: () => ({
-    backend: "rbac",
-    roles: { admin: ["*"], member: ["graph:invoke", "graph:stream", "graph:read", "checkpointer:read"] },
-    default_scopes: [],
-    isolation: "owner",
-  }),
-};
-
-export function AuthorizationWidget({ sec }) {
-  const value = store.config.authorization;
-  const mode = authzModeOf(value) ?? "ownership";
-  return (
-    <div class="space-y-6">
-      <Group title="Policy">
-        <ChoiceGroup
-          name="authz" label="Authorization policy" value={mode}
-          options={[
-            ["ownership", "Ownership", "Users can only reach threads they created."],
-            ["allow_all", "Allow all", "Any authenticated user can do anything."],
-            ["rbac", "Roles and scopes", "Map roles to scopes, on top of owner isolation."],
-            ["custom", "Custom backend", "Your own AuthorizationBackend class."],
-          ]}
-          onPick={(m) => commit((s) => { s.config.authorization = AUTHZ_PRESETS[m](); })}
-        />
-      </Group>
-      {mode === "custom" ? (
-        <Group title="Backend">
-          <div class="panel">
-            <TextRow
-              id="authz-path" label="Backend class" path="authorization" placeholder="auth.permissions:MyBackend"
-              value={typeof value === "string" ? value : ""} issue={issueAt("authorization")}
-              help="Import path of an AuthorizationBackend, as module:attribute."
-              onInput={(v) => commit((s) => { s.config.authorization = v; })}
-            />
-          </div>
-        </Group>
-      ) : null}
-      {mode === "rbac" ? <Rbac sec={sec} value={value} /> : null}
-    </div>
-  );
-}
-
-// Renames apply on blur or Enter; the draft lives here so re-renders do not reset it.
-function RoleName({ id, name, onRename }) {
-  const [draft, setDraft] = useState(name);
-  useEffect(() => setDraft(name), [name]);
-  return (
-    <div>
-      <label for={id} class="sr-only">Role name</label>
-      <input
-        id={id} type="text" value={draft} class="input font-mono" autocomplete="off" spellcheck={false}
-        onInput={(e) => setDraft(e.currentTarget.value)}
-        onChange={(e) => { if (!onRename(e.currentTarget.value.trim())) setDraft(name); }}
-      />
-    </div>
-  );
-}
-
-function Rbac({ sec, value }) {
-  const roleKey = "roles" in value || !("role_scopes" in value) ? "roles" : "role_scopes";
-  const roles = isObject(value[roleKey]) ? value[roleKey] : {};
-  const scopeOptions = ["*", ...(sec.scopes || [])];
-  const entries = Object.entries(roles);
-  const setRoles = (next) => commit(() => { value[roleKey] = next; });
-  const addRole = () => {
-    let n = entries.length + 1;
-    while (`role${n}` in roles) n++;
-    setRoles({ ...roles, [`role${n}`]: [] });
-  };
-
-  return (
-    <>
-      <Group title="Roles">
-        <div class="panel">
-          <div class="hidden grid-cols-[10rem_minmax(0,1fr)_auto] gap-3 border-b border-line px-5 py-2.5 sm:grid">
-            <span class="text-xs font-medium text-faint">Role</span>
-            <span class="text-xs font-medium text-faint">Scopes</span>
-            <span class="w-9" />
-          </div>
-          {entries.length ? (
-            <div class="divide-y divide-line">
-              {entries.map(([name, scopes], index) => (
-                <div key={index} class="grid gap-3 px-5 py-4 sm:grid-cols-[10rem_minmax(0,1fr)_auto] sm:items-start">
-                  <RoleName
-                    id={`role-name-${index}`} name={name}
-                    onRename={(renamed) => {
-                      if (!renamed || (renamed !== name && renamed in roles)) return false;
-                      setRoles(Object.fromEntries(Object.entries(roles).map(([k, v]) => [k === name ? renamed : k, v])));
-                      return true;
-                    }}
-                  />
-                  <Chips
-                    id={`role-scopes-${index}`} values={Array.isArray(scopes) ? scopes : []}
-                    placeholder="Add a scope" suggestions={scopeOptions}
-                    onChange={(next) => setRoles({ ...roles, [name]: next })}
-                  />
-                  <button
-                    type="button" class="icon-btn justify-self-end hover:text-danger" aria-label={`Remove role ${name}`}
-                    onClick={() => setRoles(Object.fromEntries(Object.entries(roles).filter(([k]) => k !== name)))}
-                  >
-                    <Icon name="trash" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p class="px-5 py-6 text-center text-sm text-muted">No roles yet. Users only get the default scopes.</p>
-          )}
-          <div class="flex items-center justify-between gap-4 border-t border-line px-5 py-3">
-            <p class="text-[13px] text-muted">
-              Read from the user's roles (or role) claim. <code class="font-mono">*</code> grants every scope.
-            </p>
-            <button type="button" class="btn btn-ghost" onClick={addRole}><Icon name="plus" />Add role</button>
-          </div>
-        </div>
-      </Group>
-      <Group title="Defaults">
-        <div class="panel divide-y divide-line">
-          <div class="px-5 py-4">
-            <FieldMeta
-              label="Default scopes" path="authorization.default_scopes" id="rbac-default-scopes"
-              help="Granted to every authenticated user, even without a role."
-            />
-            <div class="mt-3">
-              <Chips
-                id="rbac-default-scopes" values={Array.isArray(value.default_scopes) ? value.default_scopes : []}
-                placeholder="graph:read" suggestions={scopeOptions}
-                onChange={(next) => commit(() => { value.default_scopes = next; })}
-              />
-            </div>
-          </div>
-          <Row>
-            <FieldMeta
-              label="Thread isolation" path="authorization.isolation" id="rbac-isolation"
-              help="owner keeps each user's threads private; none shares them."
-            />
-            <div class="min-w-0 sm:pt-0.5">
-              <Select
-                id="rbac-isolation" options={[["owner", "owner"], ["none", "none"]]} value={value.isolation ?? "owner"}
-                onChange={(v) => commit(() => { value.isolation = v; })}
-              />
-            </div>
-          </Row>
-        </div>
-      </Group>
-    </>
   );
 }
 

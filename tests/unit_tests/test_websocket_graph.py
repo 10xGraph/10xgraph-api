@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import WebSocketDisconnect
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import StreamChunk, StreamEvent
 
 from tenxgraph_api.src.app.routers.graph.router import websocket_graph
@@ -153,7 +154,7 @@ class TestWebSocketGraphEndpoint:
         ws = _make_websocket([_FRESH_REQUEST, WebSocketDisconnect()])
         service = _make_service([[chunk1, chunk2]])
 
-        await websocket_graph(websocket=ws, service=service, user={})
+        await websocket_graph(websocket=ws, service=service, identity=None)
 
         sent = [c.args[0] for c in ws.send_text.call_args_list]
         assert chunk1 in sent
@@ -168,7 +169,7 @@ class TestWebSocketGraphEndpoint:
         ws = _make_websocket([_RESUME_REQUEST, WebSocketDisconnect()])
         service = _make_service([[resume_chunk]])
 
-        await websocket_graph(websocket=ws, service=service, user={})
+        await websocket_graph(websocket=ws, service=service, identity=None)
 
         # stream_graph was called once with tool_result as its messages
         assert len(service._stream_calls) == 1
@@ -188,7 +189,7 @@ class TestWebSocketGraphEndpoint:
         ws = _make_websocket([_FRESH_REQUEST, _RESUME_REQUEST, WebSocketDisconnect()])
         service = _make_service([[chunk_fresh], [chunk_resume]])
 
-        await websocket_graph(websocket=ws, service=service, user={})
+        await websocket_graph(websocket=ws, service=service, identity=None)
 
         assert len(service._stream_calls) == 2
         sent = [c.args[0] for c in ws.send_text.call_args_list]
@@ -205,7 +206,7 @@ class TestWebSocketGraphEndpoint:
         ws = _make_websocket([bad_request, _FRESH_REQUEST, WebSocketDisconnect()])
         service = _make_service([[good_chunk]])
 
-        await websocket_graph(websocket=ws, service=service, user={})
+        await websocket_graph(websocket=ws, service=service, identity=None)
 
         sent = [c.args[0] for c in ws.send_text.call_args_list]
         first = json.loads(sent[0])
@@ -230,7 +231,7 @@ class TestWebSocketGraphEndpoint:
         ws = _make_websocket([bad_resume, WebSocketDisconnect()])
         service = _make_service([])
 
-        await websocket_graph(websocket=ws, service=service, user={})
+        await websocket_graph(websocket=ws, service=service, identity=None)
 
         sent = [c.args[0] for c in ws.send_text.call_args_list]
         assert any(json.loads(t).get("event") == StreamEvent.ERROR for t in sent)
@@ -243,7 +244,7 @@ class TestWebSocketGraphEndpoint:
         ws = _make_websocket([WebSocketDisconnect()])
         service = _make_service([])
 
-        await websocket_graph(websocket=ws, service=service, user={})
+        await websocket_graph(websocket=ws, service=service, identity=None)
 
         ws.accept.assert_called_once()
         ws.send_text.assert_not_called()
@@ -254,7 +255,7 @@ class TestWebSocketGraphEndpoint:
         ws = _make_websocket([Exception("boom")])
         service = _make_service([])
 
-        await websocket_graph(websocket=ws, service=service, user={})
+        await websocket_graph(websocket=ws, service=service, identity=None)
 
         ws.close.assert_called_once_with(code=1011)
 
@@ -264,7 +265,7 @@ class TestWebSocketGraphEndpoint:
         ws = _make_websocket([_FRESH_REQUEST, WebSocketDisconnect()])
         service = _make_service([[]])
 
-        await websocket_graph(websocket=ws, service=service, user={})
+        await websocket_graph(websocket=ws, service=service, identity=None)
 
         sent = [c.args[0] for c in ws.send_text.call_args_list]
         assert sent == [_DONE_JSON]
@@ -275,7 +276,7 @@ class TestWebSocketGraphEndpoint:
         ws = _make_websocket([_FRESH_REQUEST, WebSocketDisconnect()])
         service = _make_service([[]])
 
-        await websocket_graph(websocket=ws, service=service, user={})
+        await websocket_graph(websocket=ws, service=service, identity=None)
 
         sent = [c.args[0] for c in ws.send_text.call_args_list]
         done = json.loads(_DONE_JSON)
@@ -293,7 +294,7 @@ class TestWebSocketGraphEndpoint:
         service = _make_service([[]])
         service.is_live_agent = True
 
-        await websocket_graph(websocket=ws, service=service, user={})
+        await websocket_graph(websocket=ws, service=service, identity=None)
 
         # Rejected up front: error sent, socket closed 1008, stream never invoked.
         ws.close.assert_called_once_with(code=1008)
@@ -311,7 +312,7 @@ class TestWebSocketGraphEndpoint:
         ws = _make_websocket([_FRESH_REQUEST, _RESUME_REQUEST, WebSocketDisconnect()])
         service = _make_service([[], []])
 
-        await websocket_graph(websocket=ws, service=service, user={})
+        await websocket_graph(websocket=ws, service=service, identity=None)
 
         assert len(service._stream_calls) == 2
         # fresh run uses messages, resume run uses tool_result
@@ -334,7 +335,7 @@ class TestWebSocketFrameLimits:
         monkeypatch.setattr(mod.json, "loads", loads)
         service = _make_service([])
 
-        await websocket_graph(websocket=ws, service=service, user={})
+        await websocket_graph(websocket=ws, service=service, identity=None)
 
         ws.close.assert_awaited_with(code=1009)
         assert service._stream_calls == []
@@ -350,7 +351,7 @@ class TestWebSocketFrameLimits:
         ws.receive_text = AsyncMock(side_effect=[frame, WebSocketDisconnect()])
         service = _make_service([[]])
 
-        await websocket_graph(websocket=ws, service=service, user={})
+        await websocket_graph(websocket=ws, service=service, identity=None)
 
         assert len(service._stream_calls) == 1
 
@@ -361,7 +362,7 @@ class TestWebSocketFrameLimits:
         )
         service = _make_service([[]])
 
-        await websocket_graph(websocket=ws, service=service, user={})
+        await websocket_graph(websocket=ws, service=service, identity=None)
 
         first = ws.send_text.call_args_list[0].args[0]
         assert "not valid JSON" in first
@@ -395,9 +396,9 @@ class TestIdleAndInvalidFrames:
 
         ws.receive_text = AsyncMock(side_effect=never)
         service = _make_service([[]])
-        user = {"user_id": "u1", "exp": time.time() + 0.2}
+        user = Identity(user_id="u1", claims={"exp": time.time() + 0.2})
 
-        await asyncio.wait_for(websocket_graph(websocket=ws, service=service, user=user), 5)
+        await asyncio.wait_for(websocket_graph(websocket=ws, service=service, identity=user), 5)
 
         ws.close.assert_awaited()
         assert ws.close.call_args.kwargs["code"] == 1008
@@ -410,7 +411,7 @@ class TestIdleAndInvalidFrames:
         ws.receive_text = AsyncMock(side_effect=["{bad"] * (WS_MAX_INVALID_FRAMES + 5))
         service = _make_service([[]])
 
-        await websocket_graph(websocket=ws, service=service, user={})
+        await websocket_graph(websocket=ws, service=service, identity=None)
 
         ws.close.assert_awaited()
         assert ws.close.call_args.kwargs["code"] == 1008
@@ -426,7 +427,7 @@ class TestIdleAndInvalidFrames:
         ws.receive_text = AsyncMock(side_effect=["{bad", "{bad", "{bad"])
         service = _make_service([[]])
 
-        await websocket_graph(websocket=ws, service=service, user={})
+        await websocket_graph(websocket=ws, service=service, identity=None)
 
         assert ws.close.call_args.kwargs["code"] == 1013
         assert ws.receive_text.await_count == 1
@@ -444,6 +445,6 @@ class TestIdleAndInvalidFrames:
         ws.receive_text = AsyncMock(side_effect=frames)
         service = _make_service([[]])
 
-        await websocket_graph(websocket=ws, service=service, user={})
+        await websocket_graph(websocket=ws, service=service, identity=None)
 
         assert len(service._stream_calls) == 1

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import (
     AgentState,
     ExecutionStatus,
@@ -118,7 +119,7 @@ class TestFixGraph:
         )
         mock_checkpointer.aget_state.return_value = state
 
-        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
+        result = await graph_service.fix_graph("thread1", Identity(user_id="user1"))
 
         assert result["success"] is True
         assert result["removed_count"] == 0
@@ -137,7 +138,7 @@ class TestFixGraph:
         )
         mock_checkpointer.aget_state.return_value = state
 
-        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
+        result = await graph_service.fix_graph("thread1", Identity(user_id="user1"))
 
         assert result["removed_count"] == 1
         assert "Successfully removed 1 message(s)" in result["message"]
@@ -158,7 +159,7 @@ class TestFixGraph:
         )
         mock_checkpointer.aget_state.return_value = state
 
-        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
+        result = await graph_service.fix_graph("thread1", Identity(user_id="user1"))
 
         assert result["removed_count"] == 2
         assert self._roles(mock_checkpointer) == ["user", "assistant"]
@@ -176,7 +177,7 @@ class TestFixGraph:
         )
         mock_checkpointer.aget_state.return_value = state
 
-        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
+        result = await graph_service.fix_graph("thread1", Identity(user_id="user1"))
 
         assert result["removed_count"] == 1
         assert self._roles(mock_checkpointer) == ["user", "assistant"]
@@ -200,7 +201,7 @@ class TestFixGraph:
         )
         mock_checkpointer.aget_state.return_value = state
 
-        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
+        result = await graph_service.fix_graph("thread1", Identity(user_id="user1"))
 
         assert result["removed_count"] == 1
         assert self._roles(mock_checkpointer) == ["user", "assistant", "tool", "assistant"]
@@ -215,7 +216,7 @@ class TestFixGraph:
         )
         mock_checkpointer.aget_state.return_value = state
 
-        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
+        result = await graph_service.fix_graph("thread1", Identity(user_id="user1"))
 
         assert result["removed_count"] == 0
         mock_checkpointer.aput_state.assert_not_called()
@@ -235,7 +236,7 @@ class TestFixGraph:
         state.execution_meta.set_interrupt("TOOL", "interrupt", ExecutionStatus.INTERRUPTED_AFTER)
         mock_checkpointer.aget_state.return_value = state
 
-        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
+        result = await graph_service.fix_graph("thread1", Identity(user_id="user1"))
 
         assert result["removed_count"] == 1
         assert self._roles(mock_checkpointer) == ["user", "user", "assistant"]
@@ -251,7 +252,7 @@ class TestFixGraph:
         state = AgentState(context=[self._user(), self._assistant("c1")])
         mock_checkpointer.aget_state.return_value = state
 
-        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
+        result = await graph_service.fix_graph("thread1", Identity(user_id="user1"))
 
         assert result["removed_count"] == 0
         mock_checkpointer.aput_state.assert_not_called()
@@ -261,7 +262,7 @@ class TestFixGraph:
         state = AgentState(context=[self._user(), self._assistant("c1")])
         mock_checkpointer.aget_state.return_value = state
 
-        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
+        result = await graph_service.fix_graph("thread1", Identity(user_id="user1"))
 
         assert result["removed_count"] == 1
         assert self._roles(mock_checkpointer) == ["user"]
@@ -271,7 +272,7 @@ class TestFixGraph:
         """Test fix_graph when no state is found for thread."""
         mock_checkpointer.aget_state.return_value = None
 
-        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
+        result = await graph_service.fix_graph("thread1", Identity(user_id="user1"))
 
         assert result["success"] is False
         assert "No state found" in result["message"]
@@ -286,7 +287,7 @@ class TestFixGraph:
         mock_checkpointer.aget_state.return_value = mock_state
 
         extra_config = {"custom_key": "custom_value"}
-        result = await graph_service.fix_graph("thread1", {"user_id": "user1"}, extra_config)
+        result = await graph_service.fix_graph("thread1", Identity(user_id="user1"), extra_config)
 
         assert result["success"] is True
 
@@ -302,7 +303,7 @@ class TestFixGraph:
         mock_checkpointer.aget_state.side_effect = Exception("Database error")
 
         with pytest.raises(HTTPException) as exc_info:
-            await graph_service.fix_graph("thread1", {"user_id": "user1"})
+            await graph_service.fix_graph("thread1", Identity(user_id="user1"))
 
         assert exc_info.value.status_code == 500
         assert "Fix graph operation failed" in exc_info.value.detail
@@ -313,7 +314,7 @@ class TestFixGraph:
         state = AgentState(context=[Message.text_message("hi", role="user")])
         mock_checkpointer.aget_state.return_value = state
 
-        result = await graph_service.fix_graph("thread1", {"user_id": "user1"})
+        result = await graph_service.fix_graph("thread1", Identity(user_id="user1"))
 
         assert isinstance(result["state"], dict)
         assert result["state"]["context"][0]["role"] == "user"

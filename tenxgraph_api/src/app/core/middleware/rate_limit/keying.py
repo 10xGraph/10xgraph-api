@@ -85,41 +85,35 @@ def verified_user_id(connection: HTTPConnection) -> str | None:
     """Identify the caller from their credential, exactly as ``RequirePermission`` does.
 
     The rate limiter runs before any route dependency, so it cannot read an authenticated
-    user from request state. It verifies the credential itself with the configured auth
-    backend instead. Returns ``None`` when auth is not configured, no credential was sent, or
-    the credential does not verify; the caller is then limited by address, so forged tokens
-    cannot buy fresh buckets.
+    user from request state. It verifies the credential itself with the bound auth class
+    instead. Returns ``None`` when auth is off, no credential was sent, or the credential does
+    not verify; the caller is then limited by address, so forged tokens cannot buy fresh
+    buckets.
     """
     from injectq import InjectQ
 
     from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
-    from tenxgraph_api.src.app.core.auth.identity_cache import remember_identity
-    from tenxgraph_api.src.app.core.auth.permissions import _extract_credential
+    from tenxgraph_api.src.app.core.auth.permissions import _extract_credential, remember_claims
     from tenxgraph_api.src.app.core.auth.reserved_identity import identity_is_reserved
-    from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 
     credential = _extract_credential(connection)
     if credential is None:
         return None
     try:
-        container = InjectQ.get_instance()
-        graph_config = container.try_get(GraphConfig)
-        if graph_config is None or not graph_config.auth_config():
+        auth = InjectQ.get_instance().try_get(BaseAuth)
+        if auth is None:
             return None
-        auth_backend = container.try_get(BaseAuth)
-        if auth_backend is None:
-            return None
-        # A throwaway Response: anything the backend sets on it belongs to the real
-        # authentication in RequirePermission, which runs again for the route unless the
-        # backend allows reusing this result (identity_cache).
-        user = auth_backend.authenticate(connection, Response(), credential)
-        if identity_is_reserved(user):  # not a valid key; RequirePermission rejects it
-            return None
-        remember_identity(connection, auth_backend, credential.credentials, user)
-    except Exception as exc:  # invalid token, backend error: fall back to the address
+        # A throwaway Response: anything the auth class sets on it belongs to the real
+        # authentication in RequirePermission, which runs again for the route unless the class
+        # allows reusing this result (remember_claims).
+        claims = auth.authenticate(connection, Response(), credential)
+        if not isinstance(claims, dict) or identity_is_reserved(claims):
+            return None  # not a valid key; RequirePermission rejects it
+        remember_claims(connection, auth, credential.credentials, claims)
+    except Exception as exc:  # invalid token, auth error: fall back to the address
         logger.debug("Rate limit could not verify caller identity: %s", exc)
         return None
-    user_id = user.get("user_id") if isinstance(user, dict) else None
+    user_id = claims.get("user_id")
     return str(user_id) if user_id else None
 
 

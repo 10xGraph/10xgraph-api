@@ -246,15 +246,15 @@ async def lifespan(app: FastAPI):
     # once here.
     await _close_cache_store()
 
-    # A custom authorization backend may hold its own clients.
+    # A custom auth class may hold its own clients.
     try:
-        from tenxgraph_api.src.app.core.auth.authorization import AuthorizationBackend
+        from tenxgraph_api import BaseAuth
 
-        authz = container.try_get(AuthorizationBackend)
-        if authz is not None and hasattr(authz, "aclose"):
-            await authz.aclose()
+        auth = container.try_get(BaseAuth)
+        if auth is not None and hasattr(auth, "aclose"):
+            await auth.aclose()
     except Exception as exc:
-        logger.debug("Authorization backend close failed: %s", exc)
+        logger.debug("Auth close failed: %s", exc)
 
 
 app = FastAPI(

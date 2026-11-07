@@ -9,16 +9,12 @@ from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from injectq import InjectQ
 from injectq.integrations.fastapi import setup_fastapi
+from tenxgraph.core.authz import Identity
 
-from tenxgraph_api.src.app.core.auth.authorization import (
-    AuthorizationBackend,
-    DefaultAuthorizationBackend,
-)
 from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
-from tenxgraph_api.src.app.core.auth.request_config import resource_id_error
-from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.core.exceptions.handle_errors import init_errors_handler
+from tenxgraph_api.src.app.core.validation.request_config import resource_id_error
 
 
 class _Auth(BaseAuth):
@@ -26,33 +22,24 @@ class _Auth(BaseAuth):
         return {"user_id": "alice"}
 
 
-class _AuthOn:
-    introspection_scoped = False
-
-    def auth_config(self):
-        return {"method": "custom", "path": "x:y"}
-
-
 def _client() -> TestClient:
     container = InjectQ()
-    container.bind_instance(GraphConfig, _AuthOn())
     container.bind_instance(BaseAuth, _Auth())
-    container.bind_instance(AuthorizationBackend, DefaultAuthorizationBackend())
     app = FastAPI()
     setup_fastapi(container, app)
     init_errors_handler(app)
-    guard = Depends(RequirePermission("checkpointer", "read"))
+    guard = Depends(RequirePermission("threads", "read"))
 
     @app.get("/v1/threads/{thread_id}/messages/{message_id}")
-    async def message(thread_id: str, message_id: str, user: dict[str, Any] = guard):
+    async def message(thread_id: str, message_id: str, user: Identity | None = guard):
         return {"ok": True}
 
     @app.get("/v1/store/memories/{memory_id}")
-    async def memory(memory_id: str, user: dict[str, Any] = guard):
+    async def memory(memory_id: str, user: Identity | None = guard):
         return {"ok": True}
 
     @app.post("/v1/graph/stop")
-    async def stop(body: dict[str, Any], user: dict[str, Any] = guard):
+    async def stop(body: dict[str, Any], user: Identity | None = guard):
         return {"ok": True}
 
     return TestClient(app)

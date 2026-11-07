@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import HTTPException
 from pydantic import BaseModel
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.exceptions.media_exceptions import UnsupportedMediaInputError
 from tenxgraph.core.state import AgentState, Message, StreamChunk, StreamEvent
 from tenxgraph.storage.checkpointer import BaseCheckpointer
@@ -114,7 +115,7 @@ class TestGraphServiceMethods:
     @pytest.mark.asyncio
     async def test_stop_graph_success(self, service, mock_graph):
         mock_graph.astop.return_value = {"status": "stopped"}
-        user = {"user_id": "123"}
+        user = Identity(user_id="123")
         result = await service.stop_graph("thread-123", user, {"extra": "val"})
         assert result == {"status": "stopped"}
         mock_graph.astop.assert_called_once_with(
@@ -130,7 +131,7 @@ class TestGraphServiceMethods:
         )
         mock_graph.astop.side_effect = ValueError("invalid input")
         with pytest.raises(HTTPException) as exc:
-            await service.stop_graph("t", {})
+            await service.stop_graph("t", None)
         assert exc.value.status_code == 422
         assert "invalid input" in exc.value.detail
 
@@ -146,7 +147,7 @@ class TestGraphServiceMethods:
         )
         mock_graph.astop.side_effect = ValueError("pg://user:secret@db/internal")
         with pytest.raises(HTTPException) as exc:
-            await service.stop_graph("t", {})
+            await service.stop_graph("t", None)
         assert exc.value.status_code == 422
         assert exc.value.detail == "Invalid input provided."
 
@@ -154,7 +155,7 @@ class TestGraphServiceMethods:
     async def test_stop_graph_general_error(self, service, mock_graph):
         mock_graph.astop.side_effect = Exception("db crash")
         with pytest.raises(HTTPException) as exc:
-            await service.stop_graph("t", {})
+            await service.stop_graph("t", None)
         assert exc.value.status_code == 500
         assert "db crash" in exc.value.detail
 
@@ -209,7 +210,7 @@ class TestGraphServiceMethods:
             recursion_limit=10,
             config={"thread_id": "t1"},
         )
-        user = {"user_id": "u1"}
+        user = Identity(user_id="u1")
 
         mock_state = MagicMock(spec=AgentState)
         mock_state.model_dump.return_value = {"key": "val"}
@@ -249,19 +250,19 @@ class TestGraphServiceMethods:
             "provider", "model", "media_type", "source_kind"
         )
         with pytest.raises(HTTPException) as exc:
-            await service.invoke_graph(gi, {})
+            await service.invoke_graph(gi, None)
         assert exc.value.status_code == 422
 
         # ValueError
         mock_graph.ainvoke.side_effect = ValueError("bad format")
         with pytest.raises(HTTPException) as exc:
-            await service.invoke_graph(gi, {})
+            await service.invoke_graph(gi, None)
         assert exc.value.status_code == 422
 
         # Exception
         mock_graph.ainvoke.side_effect = Exception("failed")
         with pytest.raises(HTTPException) as exc:
-            await service.invoke_graph(gi, {})
+            await service.invoke_graph(gi, None)
         assert exc.value.status_code == 500
 
     @pytest.mark.asyncio
@@ -280,7 +281,7 @@ class TestGraphServiceMethods:
         mock_graph.astream = mock_stream
 
         chunks = []
-        async for c in service.stream_graph(gi, {}):
+        async for c in service.stream_graph(gi, None):
             chunks.append(c)
 
         # Naming runs in the background after the run: no extra chunk on the stream, only the
@@ -317,7 +318,7 @@ class TestGraphServiceMethods:
         mock_graph.astream = mock_stream_error
 
         chunks = []
-        async for c in service.stream_graph(gi, {}):
+        async for c in service.stream_graph(gi, None):
             chunks.append(c)
 
         assert len(chunks) == 1

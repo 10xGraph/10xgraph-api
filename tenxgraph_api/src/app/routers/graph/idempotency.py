@@ -30,12 +30,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from fastapi import HTTPException
+from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.core import logger
-from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.leases import Lease, lease_manager
 from tenxgraph_api.src.app.core.redis_client import key_part
+from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
 
 
 IDEMPOTENCY_HEADER = "Idempotency-Key"
@@ -132,7 +133,7 @@ class IdempotentRun:
 
 
 async def check(
-    user: dict[str, Any], key: str, kind: str, body: Any
+    user: Identity | None, key: str, kind: str, body: Any
 ) -> tuple[IdempotentRun | None, dict[str, Any] | None]:
     """Look the key up. Returns ``(run, None)`` to proceed, or ``(None, record)`` to replay.
 
@@ -142,8 +143,8 @@ async def check(
     """
     if problem := idempotency_key_error(key):
         raise ClientInputError(problem)
-    user_id = user.get("user_id") if isinstance(user, dict) else None
-    ident = f"{key_part(user_id or 'anonymous')}:{key_part(key)}"
+    user_id = user.user_id if user is not None else "anonymous"
+    ident = f"{key_part(user_id)}:{key_part(key)}"
     name = f"idempotency:{ident}"
     fp = fingerprint(kind, body)
 

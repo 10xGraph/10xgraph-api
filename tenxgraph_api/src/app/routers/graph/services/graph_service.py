@@ -10,6 +10,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 from injectq import InjectQ, inject, singleton
 from pydantic import BaseModel, TypeAdapter, ValidationError
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.exceptions import GraphClosedError
 from tenxgraph.core.exceptions.media_exceptions import UnsupportedMediaInputError
 from tenxgraph.core.graph import CompiledGraph
@@ -18,7 +19,15 @@ from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.utils import ResponseGranularity
 
 from tenxgraph_api.src.app.core import logger
-from tenxgraph_api.src.app.core.auth.request_config import (
+from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RunsConfig
+from tenxgraph_api.src.app.core.leases import Lease
+from tenxgraph_api.src.app.core.shutdown import (
+    KEEPALIVE_SECONDS,
+    cancel_and_wait,
+    end_on_shutdown,
+)
+from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
+from tenxgraph_api.src.app.core.validation.request_config import (
     ALWAYS_ALLOWED_CONFIG_KEYS,
     ClientInputError,
     InterruptConflictError,
@@ -33,14 +42,6 @@ from tenxgraph_api.src.app.core.auth.request_config import (
     tool_result_ids,
     unanswered_tool_calls,
 )
-from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RunsConfig
-from tenxgraph_api.src.app.core.leases import Lease
-from tenxgraph_api.src.app.core.shutdown import (
-    KEEPALIVE_SECONDS,
-    cancel_and_wait,
-    end_on_shutdown,
-)
-from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe, sanitize_for_logging
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     GraphInputSchema,
     GraphInvokeOutputSchema,
@@ -66,6 +67,13 @@ from tenxgraph_api.src.app.utils.run_trace import (
     telemetry_record,
 )
 from tenxgraph_api.src.app.utils.telemetry_store import TelemetryStore
+
+
+def _set_user(config: dict[str, Any], user: Identity | None) -> None:
+    """Put the caller into a run config: ``user_id`` ("anonymous" with auth off) and identity."""
+    config["user_id"] = user.user_id if user is not None else "anonymous"
+    if user is not None:
+        config["user"] = user
 
 
 def _run_tool_names(config: dict[str, Any]) -> set[str]:
@@ -595,7 +603,7 @@ class GraphService:
     async def stop_graph(
         self,
         thread_id: str,
-        user: dict[str, Any],
+        user: Identity | None,
         config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
@@ -603,7 +611,7 @@ class GraphService:
 
         Args:
             thread_id (str): The thread ID to stop
-            user (dict): User information for context
+            user: The caller's identity, or None when auth is off
             config (dict, optional): Additional configuration for the stop operation
 
         Returns:
@@ -614,17 +622,12 @@ class GraphService:
         """
         try:
             logger.info("Stopping graph execution for thread: %s", log_safe(thread_id))
-            logger.debug("User info: %s", log_safe(sanitize_for_logging(user)))
+            logger.debug("User id: %s", log_safe(user.user_id if user else None))
 
             # Start with client config if provided, then overlay trusted attributes
             stop_config = client_config(config)
-            stop_config.update(
-                {
-                    "thread_id": thread_id,
-                    "user": user,
-                    "user_id": user.get("user_id", "anonymous"),
-                }
-            )
+            stop_config["thread_id"] = thread_id
+            _set_user(stop_config, user)
 
             # Call the graph's astop method
             result = await self._graph.astop(stop_config)
@@ -804,7 +807,7 @@ class GraphService:
             )
 
     async def check_resume_target(
-        self, graph_input: GraphInputSchema, user: dict[str, Any]
+        self, graph_input: GraphInputSchema, user: Identity | None
     ) -> None:
         """409 for a resume aimed at the wrong interrupt, before a stream response starts.
 
@@ -818,9 +821,8 @@ class GraphService:
         if not graph_input.is_resume or graph_input.interrupt_id is None:
             return
         thread_id = normalize_thread_id((graph_input.config or {}).get("thread_id"))
-        user_id = user.get("user_id")
-        config = {"thread_id": thread_id, "user_id": user_id if user_id else "anonymous"}
-        config["user"] = user
+        config: dict[str, Any] = {"thread_id": thread_id}
+        _set_user(config, user)
         try:
             if thread_id is None:  # a new thread has nothing to resume
                 raise InterruptConflictError(
@@ -852,9 +854,8 @@ class GraphService:
     async def _prepare_input(
         self,
         graph_input: GraphInputSchema,
-        user_id: str | None = None,
+        user: Identity | None = None,
         server_config: dict[str, Any] | None = None,
-        user: dict[str, Any] | None = None,
     ):
         is_new_thread = False
         config = client_config(graph_input.config)
@@ -876,10 +877,8 @@ class GraphService:
 
         # The authenticated user, before any checkpointer read below: PgCheckpointer refuses a
         # config without ``user_id``. Never taken from the request (``client_config`` strips it).
-        config["user_id"] = user_id if user_id else "anonymous"
-        # Tenant and extra column values are read from ``config["user"]`` on every storage read.
-        if user is not None:
-            config["user"] = user
+        # Storage reads the identity (tenant values, reach) from ``config["user"]``.
+        _set_user(config, user)
 
         # check recursion limit set or not
         config["recursion_limit"] = graph_input.recursion_limit or 25
@@ -896,15 +895,15 @@ class GraphService:
         preprocessed = await preprocess_multimodal_messages(
             graph_input.messages,
             self.media_service,
-            user_id,
+            user.user_id if user else None,
             user=user,
         )
         # The accepted messages now use these files: record the thread on each (owned files
         # only; the ownership check above already ran).
-        if user_id and self.media_service is not None:
+        if user is not None and self.media_service is not None:
             keys = [k for m in preprocessed for k in internal_media_keys(m)]
             if keys:
-                await self.media_service.link_threads(keys, str(thread_id), str(user_id), user)
+                await self.media_service.link_threads(keys, str(thread_id), user.user_id, user)
         input_data: dict = {
             "messages": preprocessed,
         }
@@ -930,7 +929,7 @@ class GraphService:
     async def invoke_graph(  # noqa: PLR0912, PLR0915
         self,
         graph_input: GraphInputSchema,
-        user: dict[str, Any],
+        user: Identity | None,
     ) -> GraphInvokeOutputSchema:
         """
         Invokes the graph with the provided input and returns the final result.
@@ -951,11 +950,8 @@ class GraphService:
             logger.debug("Invoking graph with input: %s", log_safe(graph_input.messages))
 
             # Prepare the input
-            input_data, config, meta = await self._prepare_input(
-                graph_input, user.get("user_id"), user=user
-            )
+            input_data, config, meta = await self._prepare_input(graph_input, user)
             thread_lock = await self._lock_new_thread(meta)
-            config["user_id"] = user.get("user_id", "anonymous")
             await self._check_tool_results(input_data["messages"], config)
             await self._check_resume_target(graph_input, config)
 
@@ -1098,7 +1094,7 @@ class GraphService:
     async def stream_graph(
         self,
         graph_input: GraphInputSchema,
-        user: dict[str, Any],
+        user: Identity | None,
     ) -> AsyncIterable[str]:
         """
         Streams the graph execution with the provided input.
@@ -1141,7 +1137,7 @@ class GraphService:
     async def stream_chunks(  # noqa: PLR0912, PLR0915
         self,
         graph_input: GraphInputSchema,
-        user: dict[str, Any],
+        user: Identity | None,
         server_config: dict[str, Any] | None = None,
     ) -> AsyncIterable[StreamChunk]:
         """
@@ -1166,11 +1162,8 @@ class GraphService:
             logger.debug("Streaming graph with input: %s", log_safe(graph_input.messages))
 
             # Prepare the config
-            input_data, config, meta = await self._prepare_input(
-                graph_input, user.get("user_id"), server_config, user=user
-            )
+            input_data, config, meta = await self._prepare_input(graph_input, user, server_config)
             thread_lock = await self._lock_new_thread(meta)
-            config["user_id"] = user.get("user_id", "anonymous")
             await self._check_tool_results(input_data["messages"], config)
             await self._check_resume_target(graph_input, config)
 
@@ -1337,7 +1330,7 @@ class GraphService:
         self,
         input_queue: Any,
         init: dict[str, Any],
-        user: dict[str, Any],
+        user: Identity | None,
     ):
         """Bridge a realtime (audio) session over the compiled graph.
 
@@ -1347,11 +1340,8 @@ class GraphService:
         an ``AudioAgent``); otherwise ``arealtime`` raises.
         """
         thread_id = normalize_thread_id(init.get("thread_id")) or await self._new_thread_id()
-        config: dict[str, Any] = {
-            "thread_id": thread_id,
-            "user": user,
-            "user_id": user.get("user_id", "anonymous"),
-        }
+        config: dict[str, Any] = {"thread_id": thread_id}
+        _set_user(config, user)
         # Map the client init frame onto RealtimeConfig field names so the live agent can
         # apply per-session overrides (model/voice/modalities/vad/...). Only present keys
         # are forwarded; absent ones fall back to the agent's build-time config.
@@ -1648,7 +1638,7 @@ class GraphService:
     async def fix_graph(
         self,
         thread_id: str,
-        user: dict[str, Any],
+        user: Identity | None,
         config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
@@ -1664,7 +1654,7 @@ class GraphService:
 
         Args:
             thread_id (str): The thread ID to fix the graph state for
-            user (dict): User information for context
+            user: The caller's identity, or None when auth is off
             config (dict, optional): Additional configuration for the operation
 
         Returns:
@@ -1679,13 +1669,12 @@ class GraphService:
         """
         try:
             logger.info("Starting fix graph operation for thread: %s", log_safe(thread_id))
-            logger.debug("User info: %s", log_safe(sanitize_for_logging(user)))
+            logger.debug("User id: %s", log_safe(user.user_id if user else None))
 
             # Start with client config if provided, then overlay trusted attributes
             fix_config = client_config(config)
-            fix_config.update(
-                {"thread_id": thread_id, "user": user, "user_id": user.get("user_id", "anonymous")}
-            )
+            fix_config["thread_id"] = thread_id
+            _set_user(fix_config, user)
 
             logger.debug("Fetching current state from checkpointer")
             state: AgentState | None = await self.checkpointer.aget_state(fix_config)

@@ -15,24 +15,24 @@ from pathlib import Path
 from typing import Any
 
 from tenxgraph_api.cli.config_editor.schema import (
-    BUILTIN_AUTHORIZATION,
     ID_GENERATOR_NAMES,
     KNOWN_TOP_LEVEL_KEYS,
     THREAD_NAME_CHOICES,
     section_for_key,
 )
+from tenxgraph_api.src.app.core.auth.auth_config import check_auth_config
 
 
 Issue = dict[str, str]
 
 _IMPORT_PATH = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_][\w.]*$")
+# RbacConfig reports a bad role as "role 'name': ..." on the whole auth object.
+_ROLE_IN_MESSAGE = re.compile(r"role '([^']+)'")
 _OBSERVABILITY_LEVELS = ("spans", "standard", "full")
 _USER_ID_MODES = ("raw", "hash", "mask")
 _MAX_PERCENT = 100
 # Settings that live inside cache_store; at the top level the server refuses them.
 _CACHE_STORE_SETTINGS = ("redis", "rate_limit", "token_revocation")
-# Built-in authorization names that skip the per-thread ownership check.
-_OPEN_AUTHORIZATION = tuple(name for name in BUILTIN_AUTHORIZATION if name != "ownership")
 
 
 class _Collector:
@@ -73,9 +73,7 @@ def validate_config(config: Any, base_dir: Path | None = None) -> list[Issue]:
     _check_agent(config, out, base_dir)
     _check_env(config, out, base_dir)
     _check_auth(config, out, base_dir)
-    _check_authorization(config, out, base_dir)
     _check_cache_store(config, out, base_dir)
-    _check_graph_introspection(config, out)
     _check_websocket(config, out)
     _check_runs(config, out)
     _check_ag_ui(config, out)
@@ -98,24 +96,11 @@ def production_readiness_warnings(config: dict) -> list[Issue]:
     """Return warnings for settings that are fine locally but risky in production.
 
     Reads only the JSON, never ``.env`` or the environment. Auth stays the developer's
-    choice, so these are warnings, never errors.
+    choice, so these are warnings, never errors. The auth-off warning comes from
+    ``check_auth_config``, run in :func:`validate_config`.
     """
     out = _Collector()
-    auth = config.get("auth")
-    if not auth:
-        out.warning(
-            "auth",
-            "Auth is off, so any caller can use every endpoint. Fine for local development; "
-            'set "jwt" or a custom BaseAuth before production.',
-        )
-    else:
-        authorization = config.get("authorization")
-        if isinstance(authorization, str) and authorization.strip().lower() in _OPEN_AUTHORIZATION:
-            out.warning(
-                "authorization",
-                f"'{authorization}' lets any authenticated user read and delete any thread. "
-                'Use "ownership" or a custom backend in production.',
-            )
+    auth = _auth_is_on(config)
 
     cache_store = config.get("cache_store")
     cache_store = cache_store if isinstance(cache_store, dict) else {}
@@ -196,66 +181,27 @@ def _check_env(config: dict, out: _Collector, base_dir: Path | None) -> None:
         out.warning("env", f"Env file '{env}' does not exist yet.")
 
 
-def _check_auth(config: dict, out: _Collector, base_dir: Path | None) -> None:
+def _auth_is_on(config: dict) -> bool:
     auth = config.get("auth")
-    if not auth:
-        return
-    if isinstance(auth, str):
-        if "jwt" not in auth:
-            out.error("auth", f"Unsupported auth '{auth}'. Use 'jwt' or a custom object.")
-        return
     if isinstance(auth, dict):
-        method, path = auth.get("method"), auth.get("path")
-        if method != "custom":
-            out.error("auth.method", 'auth.method must be \'custom\'. For JWT use "auth": "jwt".')
-        if not path:
-            out.error("auth.path", "auth.path is required for custom auth.")
-        else:
-            _check_import_path("auth.path", path, out, base_dir)
-        return
-    out.error("auth", 'auth must be null, \'jwt\', or {"method": "custom", "path": ...}.')
+        return auth.get("method", "none") != "none"
+    return bool(auth)
 
 
-def _check_authorization(config: dict, out: _Collector, base_dir: Path | None) -> None:
-    value = config.get("authorization")
-    if value is None:
-        return
-    if isinstance(value, str):
-        if ":" in value:
-            _check_import_path("authorization", value, out, base_dir)
-        elif value.strip().lower() not in BUILTIN_AUTHORIZATION:
-            out.error(
-                "authorization",
-                f"Unknown authorization '{value}'. Use one of "
-                f"{', '.join(BUILTIN_AUTHORIZATION)} or a module:attribute path.",
-            )
-        return
-    if not isinstance(value, dict):
-        out.error("authorization", "authorization must be a string, an RBAC object, or null.")
-        return
-    _check_rbac(value, out)
+def _check_auth(config: dict, out: _Collector, base_dir: Path | None) -> None:
+    """Run the loader's own auth rules; each issue lands on the field it names.
 
-
-def _check_rbac(value: dict, out: _Collector) -> None:
-    backend = str(value.get("backend") or value.get("type") or "").lower()
-    if backend not in ("rbac", "role_based", "roles"):
-        out.error("authorization.backend", "authorization.backend must be 'rbac'.")
-    roles = value.get("roles") if "roles" in value else value.get("role_scopes")
-    if roles is not None:
-        if not isinstance(roles, dict):
-            out.error("authorization.roles", "roles must map role names to scope lists.")
-        else:
-            for role, scopes in roles.items():
-                if not _is_str_list(scopes):
-                    out.error(f"authorization.roles.{role}", "Scopes must be a list of strings.")
-    if not roles:
-        out.warning("authorization.roles", "No roles defined. Only default scopes apply.")
-    default_scopes = value.get("default_scopes")
-    if default_scopes is not None and not _is_str_list(default_scopes):
-        out.error("authorization.default_scopes", "default_scopes must be a list of strings.")
-    isolation = value.get("isolation", "owner")
-    if isolation not in ("owner", "none"):
-        out.error("authorization.isolation", "isolation must be 'owner' or 'none'.")
+    ``production=True`` so the editor always nudges about auth being off, as it did before.
+    """
+    for issue in check_auth_config(config, production=True):
+        field, named = issue.field, _ROLE_IN_MESSAGE.match(issue.message)
+        if field == "auth" and named:
+            field = f"auth.roles.{named[1]}"  # shown beside that role's row
+        out.add(issue.level, field, issue.message)
+    auth = config.get("auth")
+    path = auth.get("path") if isinstance(auth, dict) else None
+    if isinstance(path, str) and _IMPORT_PATH.match(path):
+        _check_import_path("auth.path", path, out, base_dir)
 
 
 def _check_websocket(config: dict, out: _Collector) -> None:
@@ -304,16 +250,10 @@ def _check_cache_store(config: dict, out: _Collector, base_dir: Path | None) -> 
             "cache_store.url",
             f"{parsed.url} is not set in this shell. Make sure it is set when the API runs.",
         )
-    if parsed.token_revocation is not None and not config.get("auth"):
+    if parsed.token_revocation is not None and not _auth_is_on(config):
         out.warning(
             "cache_store.token_revocation", "Auth is off, so there are no tokens to revoke."
         )
-
-
-def _check_graph_introspection(config: dict, out: _Collector) -> None:
-    value = config.get("graph_introspection")
-    if value is not None and value not in ("open", "scoped"):
-        out.error("graph_introspection", "graph_introspection must be open or scoped.")
 
 
 def _check_runs(config: dict, out: _Collector) -> None:
@@ -536,10 +476,6 @@ def _quietly(parse: Callable[[], Any], out: _Collector, path: str) -> Any:
 def _has_unresolved_env(value: str) -> bool:
     # Same rule as graph_config._expand_env, which raises for these at startup.
     return os.path.expandvars(value) == value and (value.startswith("$") or "${" in value)
-
-
-def _is_str_list(value: Any) -> bool:
-    return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
 def _is_int(value: Any) -> bool:

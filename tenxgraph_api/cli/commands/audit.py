@@ -35,6 +35,7 @@ from typing import Any
 from tenxgraph_api.cli.commands import BaseCommand
 from tenxgraph_api.cli.constants import DEFAULT_CONFIG_FILE, DEFAULT_PORT
 from tenxgraph_api.cli.core.config import resolve_default_config
+from tenxgraph_api.src.app.core.auth.auth_config import check_auth_config
 from tenxgraph_api.src.app.core.config.graph_config import validate_remote_tools
 
 
@@ -56,7 +57,7 @@ class Diagnostic:
 class AuditCommand(BaseCommand):
     """Audit the local CLI, core package, project config, and default port.
 
-    Runs seven checks in a fixed order and reports them twice: live, through the
+    Runs eight checks in a fixed order and reports them twice: live, through the
     step timeline, and again as a summary table once every check has finished.
 
     ============  ==========================================================
@@ -71,6 +72,9 @@ class AuditCommand(BaseCommand):
     config        ``10xgraph.json`` exists here, parses, declares an
                   ``agent`` key in ``module:attribute`` form, and contains
                   valid ``remote_tools`` definitions if present.
+    auth          The ``auth`` key against the shared auth rules
+                  (``core/auth/auth_config.py``): a rule that would stop the server
+                  booting fails, naming the rule; other findings warn.
     security      The settings in ``10xgraph.json`` that matter before production
                   (auth, authorization, rate limiting, token revocation), as
                   warnings only: they are the developer's choices, never failures.
@@ -102,6 +106,7 @@ class AuditCommand(BaseCommand):
             ("core", "Core framework", lambda: self._package_check("10xgraph")),
             ("evaluation", "Evaluation API", self._evaluation_api_check),
             ("config", "Project configuration", lambda: self._config_check(config)),
+            ("auth", "Auth configuration", lambda: self._auth_check(config)),
             ("security", "Security posture", lambda: self._security_check(config)),
             ("port", f"Port {DEFAULT_PORT}", lambda: self._port_check(DEFAULT_PORT)),
         )
@@ -199,6 +204,28 @@ class AuditCommand(BaseCommand):
         return Diagnostic("Project config", "pass", f"{config_path} ({len(tools)} remote tools)")
 
     @staticmethod
+    def _auth_check(config: str = DEFAULT_CONFIG_FILE) -> Diagnostic:
+        """Run the shared auth rules on the JSON only (no user code is imported).
+
+        Checked as for production, so "auth off" is a warning. Rules that need the loaded class
+        or the checkpointer (custom class type, tenant columns) are checked at boot.
+        """
+        config_path = resolve_default_config(config).resolve()
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return Diagnostic("Auth", "pass", "no readable config to check")
+        if not isinstance(data, dict):
+            return Diagnostic("Auth", "pass", "no readable config to check")
+        issues = check_auth_config(data, production=True)
+        errors = [i for i in issues if i.level == "error"]
+        if errors:
+            return Diagnostic("Auth", "fail", "; ".join(str(i) for i in errors))
+        if issues:
+            return Diagnostic("Auth", "warn", "; ".join(str(i) for i in issues))
+        return Diagnostic("Auth", "pass", "no auth findings")
+
+    @staticmethod
     def _security_check(config: str = DEFAULT_CONFIG_FILE) -> Diagnostic:
         """Warn about production-readiness gaps in ``10xgraph.json``.
 
@@ -214,7 +241,12 @@ class AuditCommand(BaseCommand):
             return Diagnostic("Security", "pass", "no readable config to check")
         if not isinstance(data, dict):
             return Diagnostic("Security", "pass", "no readable config to check")
-        issues = production_readiness_warnings(data)
+        # auth findings come from the shared auth rules (see _auth_check)
+        issues = [
+            i
+            for i in production_readiness_warnings(data)
+            if i["path"] not in ("auth", "authorization")
+        ]
         if not issues:
             return Diagnostic("Security", "pass", "no production-readiness warnings")
         return Diagnostic(

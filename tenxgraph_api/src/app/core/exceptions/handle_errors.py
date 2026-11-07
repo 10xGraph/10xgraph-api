@@ -19,7 +19,7 @@ from tenxgraph.core.exceptions import (
 from tenxgraph.utils.validators import ValidationError
 
 from tenxgraph_api.src.app.core import logger
-from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
+from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.exceptions.server_errors import (
     RETRY_AFTER_SECONDS,
@@ -139,7 +139,7 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
         # Get request ID for tracking
         request_id = getattr(request.state, "request_id", "unknown")
 
-        # A 4xx detail is written by the API for the client (401 bad token, 403 missing scope,
+        # A 4xx detail is written by the API for the client (401 bad token, 403 missing permission,
         # 404, 413, 422 bad input, 429): hiding it leaves the client unable to fix the request.
         # A 5xx detail may embed internals, so production replaces it.
         is_server_error = exc.status_code >= 500  # noqa: PLR2004

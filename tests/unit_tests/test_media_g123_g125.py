@@ -13,8 +13,8 @@ import pytest
 from tenxgraph.storage.media.storage.base import BaseMediaStore
 from tenxgraph.storage.media.storage.memory_store import InMemoryMediaStore
 
-from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
 from tenxgraph_api.src.app.core.config.media_settings import MediaSettings
+from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
 from tenxgraph_api.src.app.routers.media import MediaService, _BoundedCache
 
 

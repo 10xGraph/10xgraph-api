@@ -141,7 +141,7 @@ and scopes rows to the caller (`owner`), not at all (`none`), or by the listed c
 
 Tenant and extra column values (`org_id`, `project_id`, `public_id`) come only from `config["user"]`: return them from `BaseAuth.authenticate()` (or put them in the JWT claims; the decoded token is the user). Never read them from request config, metadata, state or model output.
 
-Server-owned config keys (`RESERVED_CONFIG_KEYS` in `core/auth/request_config.py`: `authz`, `user`, `user_id`, `remote_tools`, `file_tool_root`, `workspace_root`, `tool_timeout`, `node_timeout`, `max_parallel_tool_calls`, `collection`, plus any `_`-prefixed key) are dropped from client config by `client_config` on every route. They are ignored, not refused (debug log). A client never picks a Qdrant `collection`; see memory-and-store.md.
+Server-owned config keys (`RESERVED_CONFIG_KEYS` in `core/validation/request_config.py`: `authz`, `user`, `user_id`, `remote_tools`, `file_tool_root`, `workspace_root`, `tool_timeout`, `node_timeout`, `max_parallel_tool_calls`, `collection`, plus any `_`-prefixed key) are dropped from client config by `client_config` on every route. They are ignored, not refused (debug log). A client never picks a Qdrant `collection`; see memory-and-store.md.
 
 ## Guarantees
 

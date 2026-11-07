@@ -7,10 +7,11 @@ from typing import Any
 
 from ag_ui.core import RunAgentInput
 from ag_ui.encoder import EventEncoder
+from tenxgraph.core.authz import Identity
 from tenxgraph.utils import ResponseGranularity
 
 from tenxgraph_api.src.app.core import logger
-from tenxgraph_api.src.app.core.auth.request_config import tool_result_ids
+from tenxgraph_api.src.app.core.validation.request_config import tool_result_ids
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     KEEP_MESSAGE_IDS,
     GraphInputSchema,
@@ -21,10 +22,6 @@ from .converter import select_new_messages, to_tenxgraph_messages
 from .event_mapper import AgUiEventMapper
 
 
-# Graph config key holding the AG-UI request extras (frontend context, tools, forwarded props),
-# so graph nodes and tools can read them from ``config["ag_ui"]``.
-AG_UI_CONFIG_KEY = "ag_ui"
-
 # Client state keys that would overwrite the conversation or execution metadata.
 _RESERVED_STATE_KEYS = frozenset({"context", "context_summary", "execution_meta"})
 
@@ -32,7 +29,7 @@ _RESERVED_STATE_KEYS = frozenset({"context", "context_summary", "execution_meta"
 async def stream_ag_ui(
     service: GraphService,
     run_input: RunAgentInput,
-    user: dict[str, Any],
+    user: Identity | None,
     encoder: EventEncoder,
     allow_client_tools: bool = True,
 ) -> AsyncIterator[str]:
@@ -72,7 +69,7 @@ async def stream_ag_ui(
 async def _run_events(
     service: GraphService,
     run_input: RunAgentInput,
-    user: dict[str, Any],
+    user: Identity | None,
     mapper: AgUiEventMapper,
     initial_state: dict[str, Any] | None,
     allow_client_tools: bool,
@@ -100,9 +97,9 @@ async def _run_events(
                 yield event
         return
 
-    graph_input, server_config = _graph_request(run_input, messages, initial_state, resume)
-    if not allow_client_tools:
-        server_config = {}
+    graph_input, server_config = _graph_request(
+        run_input, messages, initial_state, resume, allow_client_tools
+    )
     async for chunk in service.stream_chunks(graph_input, user, server_config):
         for event in mapper.map(chunk):
             yield event
@@ -115,14 +112,12 @@ def _client_state(state: Any) -> dict[str, Any] | None:
     return cleaned or None
 
 
-async def _checkpoint_state(service: GraphService, thread_id: str, user: dict[str, Any]) -> Any:
+async def _checkpoint_state(service: GraphService, thread_id: str, user: Identity | None) -> Any:
     if service.checkpointer is None:
         return None
-    config = {
-        "thread_id": thread_id,
-        "user": user,
-        "user_id": user.get("user_id", "anonymous"),
-    }
+    config: dict[str, Any] = {"thread_id": thread_id, "user_id": "anonymous"}
+    if user is not None:
+        config.update(user=user, user_id=user.user_id)
     return await service.checkpointer.aget_state(config)
 
 
@@ -168,6 +163,7 @@ def _graph_request(
     messages: list[Any],
     initial_state: dict[str, Any] | None,
     resume: Any,
+    allow_client_tools: bool,
 ) -> tuple[GraphInputSchema, dict[str, Any]]:
     """The graph input for one AG-UI run, and the server-owned run config that goes with it."""
     extra: dict[str, Any] = {} if resume is _NO_RESUME else {"resume": resume}
@@ -184,13 +180,10 @@ def _graph_request(
     )
     # Server-owned keys go in after the client allow-list check (``runs.config_keys``), so that
     # setting cannot reject them, and clients of the plain graph routes cannot set them.
+    if not allow_client_tools:
+        return graph_input, {}
+    # The client's own tools, offered to the model for this run only.
     server_config = {
-        AG_UI_CONFIG_KEY: {
-            "context": [c.model_dump(mode="json") for c in run_input.context or []],
-            "tools": [t.model_dump(mode="json") for t in run_input.tools or []],
-            "forwarded_props": run_input.forwarded_props,
-        },
-        # The client's own tools, offered to the model for this run only.
         RUN_REMOTE_TOOLS_KEY: [
             {"name": t.name, "description": t.description, "parameters": t.parameters}
             for t in run_input.tools or []

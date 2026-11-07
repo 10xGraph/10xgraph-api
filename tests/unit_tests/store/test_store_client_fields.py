@@ -47,7 +47,7 @@ async def test_store_memory_strips_owned_metadata_and_options(store_service, moc
     assert kwargs["infer"] is False
     assert "collection" not in config
     assert config["plan"] == "pro"
-    assert config["user_id"] == mock_user["user_id"]
+    assert config["user_id"] == mock_user.user_id
 
 
 @pytest.mark.asyncio

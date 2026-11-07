@@ -12,6 +12,8 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from tenxgraph.core.authz import Identity
+
 from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
 from tenxgraph_api.src.app.core.leases import Lease
 from tenxgraph_api.src.app.routers.graph.run_limits import acquire_run_slot
@@ -24,7 +26,7 @@ from tenxgraph_api.src.app.routers.graph.thread_lock import (
 
 async def acquire_run_guard(
     *,
-    user: dict[str, Any],
+    user: Identity | None,
     runs: RunsConfig,
     thread_id: str | None,
     on_busy: OnBusy = "wait",

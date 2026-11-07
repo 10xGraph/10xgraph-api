@@ -88,7 +88,7 @@ async def test_client_cannot_supply_user_id():
     service = _strict_service(MagicMock())
     graph_input = GraphInputSchema(config={"thread_id": "t1", "user_id": "mallory"}, resume={})
     try:
-        _, config, _ = await service._prepare_input(graph_input, ALICE["user_id"])
+        _, config, _ = await service._prepare_input(graph_input, ALICE)
     except Exception:  # rejected outright is also fine
         return
     assert config["user_id"] == "alice"
@@ -104,7 +104,7 @@ async def test_resume_reads_state_with_user_for_tenant_columns():
     inner = service.checkpointer.aget_state.side_effect
 
     async def aget_state(config):
-        if not isinstance(config.get("user"), dict):
+        if config.get("user") != ALICE:
             raise ValueError("MissingColumnValueError: tenant value missing from config['user']")
         return await inner(config)
 

@@ -8,15 +8,13 @@ FastAPI cannot inject it on a WebSocket connection -- the previous failure mode 
 which endpoint-level unit tests (that pass ``user=...`` directly) could never surface.
 """
 
-from typing import Any
-
 from fastapi import Depends, FastAPI, WebSocket
 from fastapi.testclient import TestClient
 from injectq import InjectQ
 from injectq.integrations import setup_fastapi
+from tenxgraph.core.authz import Identity
 
-from tenxgraph_api.src.app.core.auth.auth_backend import BaseAuth
-from tenxgraph_api.src.app.core.auth.authorization import AuthorizationBackend
+from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
 from tenxgraph_api.src.app.core.auth.permissions import (
     RequirePermission,
     _extract_credential,
@@ -33,14 +31,6 @@ class _FakeAuth(BaseAuth):
         return {"user_id": credential.credentials}
 
 
-class _AllowAuthz(AuthorizationBackend):
-    def __init__(self):
-        pass
-
-    async def authorize(self, user, resource, action, resource_id=None):  # type: ignore[override]
-        return True
-
-
 def _build_client(auth_configured: bool) -> TestClient:
     container = InjectQ()
 
@@ -50,8 +40,8 @@ def _build_client(auth_configured: bool) -> TestClient:
         {"auth_config": staticmethod(lambda: "custom" if auth_configured else None)},
     )()
     container.bind_instance(GraphConfig, config, allow_none=True)
-    container.bind_instance(BaseAuth, _FakeAuth(), allow_none=True)
-    container.bind_instance(AuthorizationBackend, _AllowAuthz(), allow_none=True)
+    # Auth is on exactly when a BaseAuth is bound.
+    container.bind_instance(BaseAuth, _FakeAuth() if auth_configured else None, allow_none=True)
 
     app = FastAPI()
     setup_fastapi(container, app)
@@ -59,10 +49,10 @@ def _build_client(auth_configured: bool) -> TestClient:
     @app.websocket("/ws")
     async def ws(
         websocket: WebSocket,
-        user: dict[str, Any] = Depends(RequirePermission("graph", "stream")),
+        user: Identity | None = Depends(RequirePermission("graph", "stream")),
     ):
         await websocket.accept()
-        await websocket.send_json(user)
+        await websocket.send_json(user.model_dump(mode="json") if user else None)
         await websocket.close()
 
     return TestClient(app)
@@ -80,10 +70,10 @@ class TestWebSocketAuthResolves:
         with client.websocket_connect("/ws", headers={"Authorization": "Bearer bob"}) as conn:
             assert conn.receive_json()["user_id"] == "bob"
 
-    def test_auth_not_configured_yields_empty_user_on_websocket(self):
+    def test_auth_not_configured_yields_no_identity_on_websocket(self):
         client = _build_client(auth_configured=False)
         with client.websocket_connect("/ws") as conn:
-            assert conn.receive_json() == {}
+            assert conn.receive_json() is None
 
 
 class TestExtractCredential:

@@ -11,9 +11,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from tenxgraph_api.src.app.core.auth.request_config import MAX_NESTING_DEPTH, nesting_depth_error
 from tenxgraph_api.src.app.core.config.setup_middleware import RequestIDMiddleware
 from tenxgraph_api.src.app.core.exceptions.handle_errors import init_errors_handler
+from tenxgraph_api.src.app.core.validation.request_config import (
+    MAX_NESTING_DEPTH,
+    nesting_depth_error,
+)
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import GraphInputSchema
 
 

@@ -1,6 +1,6 @@
 """Shared fixtures for store integration tests."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -10,12 +10,14 @@ from injectq import InjectQ
 from injectq.integrations.fastapi import setup_fastapi
 from tenxgraph.storage.store import BaseStore, MemorySearchResult, MemoryType
 
-from tenxgraph_api.src.app.core.auth.authorization import (
-    AuthorizationBackend,
-    DefaultAuthorizationBackend,
-)
+from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.core.config.setup_middleware import setup_middleware
+
+
+class _NoAuthConfig:
+    def auth_config(self):
+        return None
 
 
 @pytest.fixture
@@ -25,126 +27,27 @@ def mock_store():
 
 
 @pytest.fixture
-def mock_auth_user():
-    """Mock authenticated user."""
-    return {
-        "user_id": "test-user-123",
-        "email": "test@example.com",
-        "name": "Test User",
-    }
-
-
-@pytest.fixture
-def app(mock_store, mock_auth_user):
-    """FastAPI test app with store router."""
-    # Import early before binding
-    from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
-
+def app(mock_store):
+    """FastAPI test app with the store router and auth disabled."""
     app = FastAPI()
     setup_middleware(app)
 
-    # Create a fresh container for this test
     container = InjectQ()
     container.bind_instance(BaseStore, mock_store)
-
-    class _NoAuthConfig:
-        def auth_config(self):
-            return None
-
     container.bind_instance(GraphConfig, _NoAuthConfig())
-    # RequirePermission injects AuthorizationBackend as a parameter (resolved before it
-    # runs), so it must be bound even when auth_config() short-circuits authz.
-    container.bind_instance(AuthorizationBackend, DefaultAuthorizationBackend())
-
-    # Create a mock BaseAuth instance
-    mock_auth = MagicMock(spec=BaseAuth)
-    mock_auth.authenticate.return_value = mock_auth_user
-    container.bind_instance(BaseAuth, mock_auth)
-
-    # Setup FastAPI with the container
+    container.bind_instance(BaseAuth, None, allow_none=True)  # auth off, as the loader does
     setup_fastapi(container, app)
 
-    # Mock authentication to provide a user
-    with patch(
-        "tenxgraph_api.src.app.core.auth.auth_backend.verify_current_user",
-        return_value=mock_auth_user,
-    ):
-        from tenxgraph_api.src.app.routers.store.router import router as store_router
+    from tenxgraph_api.src.app.routers.store.router import router as store_router
 
-        app.include_router(store_router)
-
-        # Debug: Check OpenAPI
-        openapi = app.openapi()
-        if "/v1/store/memories" in openapi.get("paths", {}):
-            endpoint = openapi["paths"]["/v1/store/memories"]["post"]
-            print(f"DEBUG: /v1/store/memories parameters: {endpoint.get('parameters', [])}")
-
-        yield app
+    app.include_router(store_router)
+    return app
 
 
 @pytest.fixture
 def client(app):
     """Test client for making requests."""
     return TestClient(app)
-
-
-@pytest.fixture
-def unauth_app(mock_store):
-    """FastAPI test app without auth patch, but with DI patched and safe defaults.
-
-    This allows testing endpoints without authentication while avoiding
-    serialization issues from AsyncMock default returns.
-    """
-    # Import early before binding
-    from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
-
-    app = FastAPI()
-    setup_middleware(app)
-
-    # Provide safe default return values to avoid pydantic/serialization issues
-    mock_store.astore.return_value = str(uuid4())
-    mock_store.asearch.return_value = []
-    mock_store.aget.return_value = None
-    mock_store.aget_all.return_value = []
-    mock_store.aupdate.return_value = {"updated": True}
-    mock_store.adelete.return_value = {"deleted": True}
-    mock_store.aforget_memory.return_value = {"count": 0}
-
-    # Setup InjectQ container and bind BaseStore to mocked store
-    container = InjectQ()
-    container.bind_instance(BaseStore, mock_store)
-
-    class _NoAuthConfig:
-        def auth_config(self):
-            return None
-
-    container.bind_instance(GraphConfig, _NoAuthConfig())
-    # RequirePermission injects AuthorizationBackend as a parameter (resolved before it
-    # runs), so it must be bound even when auth_config() short-circuits authz.
-    container.bind_instance(AuthorizationBackend, DefaultAuthorizationBackend())
-
-    # Create a mock BaseAuth instance
-    mock_auth = MagicMock(spec=BaseAuth)
-    mock_auth.authenticate.return_value = {}
-    container.bind_instance(BaseAuth, mock_auth)
-
-    setup_fastapi(container, app)
-
-    # Patch auth to no-op so BaseAuth DI is not required in unauthenticated tests
-    with patch(
-        "tenxgraph_api.src.app.core.auth.auth_backend.verify_current_user",
-        return_value={},
-    ):
-        from tenxgraph_api.src.app.routers.store.router import router as store_router
-
-        app.include_router(store_router)
-        yield app
-
-
-@pytest.fixture
-def unauth_client(unauth_app):
-    """Test client without auth override for authentication behavior tests."""
-    return TestClient(unauth_app)
 
 
 @pytest.fixture

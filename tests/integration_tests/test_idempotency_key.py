@@ -7,6 +7,7 @@ import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import StreamChunk, StreamEvent
 
 from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
@@ -130,7 +131,7 @@ def test_stream_replays_final_state_and_done():
 
 @pytest.mark.asyncio
 async def test_running_key_is_409_with_retry_after():
-    user = {"user_id": "alice"}
+    user = Identity(user_id="alice")
     run, record = await idempotency.check(user, "k", "invoke", {"a": 1})
     assert run is not None and record is None
     with pytest.raises(idempotency.IdempotencyConflict) as exc:
@@ -145,7 +146,7 @@ async def test_running_key_is_409_with_retry_after():
 
 @pytest.mark.asyncio
 async def test_oversized_result_is_marked_not_stored():
-    user = {"user_id": "alice"}
+    user = Identity(user_id="alice")
     run, _ = await idempotency.check(user, "big", "invoke", {})
     await run.complete("x" * (idempotency.MAX_STORED_BYTES + 1))
     run.release()
@@ -157,7 +158,7 @@ async def test_oversized_result_is_marked_not_stored():
 async def test_records_live_in_the_cache_store(monkeypatch):
     store = RecordingStore()
     monkeypatch.setattr(idempotency, "lease_manager", lambda: LeaseManager(store))
-    user = {"user_id": "alice"}
+    user = Identity(user_id="alice")
     run, _ = await idempotency.check(user, "r", "invoke", {})
     await run.complete("{}")
     run.release()
@@ -172,7 +173,7 @@ async def test_cache_store_errors_run_without_idempotency(monkeypatch, caplog):
     store = RecordingStore()
     store.fail = True
     monkeypatch.setattr(idempotency, "lease_manager", lambda: LeaseManager(store))
-    user = {"user_id": "alice"}
+    user = Identity(user_id="alice")
     with caplog.at_level(logging.WARNING):
         run, record = await idempotency.check(user, "down", "invoke", {})
         assert run is not None and record is None  # the request runs
@@ -209,7 +210,7 @@ async def test_ag_ui_repeat_of_a_finished_key_is_409_and_other_body_422():
         "context": [],
         "forwardedProps": {},
     }
-    user = {"user_id": "alice"}
+    user = Identity(user_id="alice")
     run, _ = await idempotency.check(user, "ak", "ag-ui", body)
     await run.complete(None)
     run.release()

@@ -12,17 +12,17 @@ from pathlib import Path
 from typing import Any, cast
 
 from injectq import InjectQ, inject, singleton
+from tenxgraph.core.authz import Identity
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.storage.media.config import DocumentHandling
 from tenxgraph.storage.media.offload import MediaOffloadPolicy, ensure_media_offloaded
 from tenxgraph.storage.media.security import check_image_pixels
 from tenxgraph.storage.media.storage.base import BaseMediaStore
 
-from tenxgraph_api.src.app.core.auth.authorization import identity_values, tenant_column_names
-from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
 from tenxgraph_api.src.app.core.config.graph_config import MediaConfig
 from tenxgraph_api.src.app.core.config.media_settings import MediaSettings, MediaStorageType
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
+from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
 from tenxgraph_api.src.app.utils.media.extractor import DocumentExtractor, DocumentTooLargeError
 from tenxgraph_api.src.app.utils.media.pipeline import DocumentPipeline
 
@@ -38,7 +38,7 @@ _EXTRACTION_NAMESPACE = "media:extraction"
 THREADS_KEY = "threads"
 # Metadata key holding the uploader's tenant values: ``{column: canonical text}`` for every
 # tenant column the bound checkpointer declares (``PgCheckpointer(tenant_columns=...)``).
-# Written only when tenant columns are declared; the values come from ``config["user"]``.
+# Written only when tenant columns are declared; the values come from ``Identity.tenant``.
 TENANT_KEY = "tenant"
 
 
@@ -316,20 +316,18 @@ class MediaService:
             checkpointer = self.checkpointer
         except AttributeError:  # a bare stand-in built without __init__
             return ()
-        return tenant_column_names(checkpointer)
+        return tuple(getattr(checkpointer, "tenant_column_names", ()))
 
-    def caller_tenant(self, user: dict[str, Any] | None) -> dict[str, str | None]:
+    def caller_tenant(self, user: Identity | None) -> dict[str, str | None]:
         """The caller's value for each declared tenant column, as canonical text.
 
-        Read from the authenticated user (``config["user"]``) only and converted with the
-        column's declared type, exactly as thread ownership compares them
-        (``authorization.identity_values``). Empty when no tenant columns are declared; a
-        missing or unconvertible value is None, which never matches a file.
+        Read from ``Identity.tenant`` only. Empty when no tenant columns are declared; a
+        missing value is None, which never matches a file.
         """
         columns = self.tenant_columns()
         if not columns:
             return {}
-        values = identity_values(self.checkpointer, user or {})
+        values = user.tenant if user is not None else {}
         return {column: values.get(column) for column in columns}
 
     @staticmethod
@@ -342,7 +340,7 @@ class MediaService:
     # ------------------------------------------------------------------
 
     async def ensure_can_access(
-        self, file_id: str, user_id: str | None, user: dict[str, Any] | None = None
+        self, file_id: str, user_id: str | None, user: Identity | None = None
     ) -> None:
         """Reject access to a file owned by a different user (or tenant).
 
@@ -399,7 +397,7 @@ class MediaService:
         filename: str,
         mime_type: str,
         user_id: str | None = None,
-        user: dict[str, Any] | None = None,
+        user: Identity | None = None,
     ) -> dict[str, Any]:
         """Upload a file: store binary + optionally extract text.
 
@@ -488,9 +486,7 @@ class MediaService:
 
         return result
 
-    def _upload_tenant(
-        self, user_id: str | None, user: dict[str, Any] | None
-    ) -> dict[str, str | None]:
+    def _upload_tenant(self, user_id: str | None, user: Identity | None) -> dict[str, str | None]:
         """The tenant values an upload records (empty without a user or tenant columns).
 
         Raises:
@@ -552,7 +548,7 @@ class MediaService:
         self,
         messages: list[Any],
         user_id: str | None = None,
-        user: dict[str, Any] | None = None,
+        user: Identity | None = None,
     ) -> None:
         """Move large inline base64 media in ``messages`` into the store, in place.
 
@@ -644,7 +640,7 @@ class MediaService:
         return await self._update_metadata(key, updates) if updates else True
 
     async def link_threads(
-        self, keys: list[str], thread_id: str, user_id: str, user: dict[str, Any] | None = None
+        self, keys: list[str], thread_id: str, user_id: str, user: Identity | None = None
     ) -> None:
         """Record ``thread_id`` on each file the caller owns that an accepted message references.
 
@@ -817,7 +813,7 @@ class MediaService:
         user_id: str | None,
         offset: int = 0,
         limit: int = 50,
-        user: dict[str, Any] | None = None,
+        user: Identity | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         """One page of the files ``user_id`` owns, newest first, and whether more follow.
 
@@ -860,7 +856,7 @@ class MediaService:
         return page, offset + limit < len(owned)
 
     async def get_file(
-        self, file_id: str, user_id: str | None = None, user: dict[str, Any] | None = None
+        self, file_id: str, user_id: str | None = None, user: Identity | None = None
     ) -> tuple[bytes, str]:
         """Retrieve file bytes and MIME type."""
         if user_id:
@@ -891,7 +887,7 @@ class MediaService:
         return (path, metadata["mime_type"]) if path.is_file() else None
 
     async def get_file_info(
-        self, file_id: str, user_id: str | None = None, user: dict[str, Any] | None = None
+        self, file_id: str, user_id: str | None = None, user: Identity | None = None
     ) -> dict[str, Any]:
         """Return metadata about a stored file."""
         if user_id:

@@ -100,7 +100,6 @@ Parsed by `tenxgraph_api/src/app/core/config/graph_config.py`. Supported keys:
 | `runs` | `RunsConfig`: `thread_ids` (`server` default = only existing ids may be named on REST invoke/stream, `/v1/graph/ws` and checkpointer writes, a new thread is started by omitting the id; enforced by the ownership/rbac backends via `OwnershipAuthorizationBackend(server_thread_ids=...)`. AG-UI and `/v1/graph/live` follow the same rule (a blank or `new` id gets a server id). `client` = any request may name a new thread, explicit opt-in), `config_keys` / `state_keys` (allow-lists for request config and `initial_state`/PUT state; 422 on other keys; `thread_id`, `run_id` always allowed), `max_concurrent_per_user` (HTTP invoke/stream/AG-UI runs in flight, default 10, 429 over it; `routers/graph/run_limits.py`), `timeout` (seconds; invoke 504, streams end with an error chunk), `max_parallel_tool_calls` (positive int, default unset = core's default 10 or env `TENXGRAPH_MAX_PARALLEL_TOOL_CALLS`; set into every run's config in `_prepare_input`, reserved from clients) |
 | `cache_store.token_revocation` | `true`, `false`, `null` or `{"enabled", "token_lifetime", "user_ttl"}` (`graph_config.TokenRevocationConfig`; a string is a config error). Read through `GraphConfig.token_revocation`. Revocations live in the cache store (`core/auth/revocation.py`: `revoke_token`, `revoke_user`, `is_revoked`), checked by `RequirePermission` (401), before every `/v1/graph/ws` run, and before and every 30 s during a `/v1/graph/live` session (`REALTIME_RECHECK_INTERVAL`, close 1008); cache store errors fail closed (503), and an unreachable cache store refuses the boot |
 | `media` | `delete_with_thread` (default true): delete an uploaded file when the last message or thread that references it is deleted. Links are recorded in the file's `threads` metadata (`MediaService.link_threads` / `unlink_threads`); files without a `threads` key (uploaded before link tracking) and stores without `update_metadata` (core older than the release that added it) are never auto-deleted. `false` still records links. Parsed by `graph_config.MediaConfig` |
-| `graph_introspection` | `"open"` or `"scoped"` (default scoped in production): `GET /v1/graph`, `/v1/graph/tools`, `/v1/graph:StateSchema` need an explicit `graph:read` scope (`RequirePermission(..., introspection=True)`) |
 
 `cache_store.rate_limit` object (read through `GraphConfig.rate_limit`, None when absent or
 `enabled: false`): `enabled`, `requests` (default 100), `window` secs (60), `by` (`ip` |
@@ -140,7 +139,7 @@ valid ones (`RATE_LIMIT_KEYS`).
   values) equal the caller's on every column the scope picks; a scope naming a column the
   checkpointer does not declare denies (fails closed).
 - **Client `filters`.** `GET /v1/threads?filters=<JSON>` (at most 8192 chars) and the store routes'
-  `filters` are checked by `core/auth/client_filters.py` with core's `sql_filter` validator before
+  `filters` are checked by `core/validation/client_filters.py` with core's `sql_filter` validator before
   any DB work: malformed JSON, non-filterable or tenant columns / `user_id`, a bad operator, or a
   checkpointer without filterable columns answer 422 (`ClientInputError`), never echoing values.
 - **Token claims are validated.** `JwtAuth` requires `user_id` to be a non-empty string or an int
@@ -188,7 +187,7 @@ valid ones (`RATE_LIMIT_KEYS`).
   ownership and size limits still apply. `PUT ... /messages/{message_id}` sets
   `metadata["feedback"]` only (body `{"feedback": {...}}`, 8 KB, depth 10, `checkpointer:write`;
   calls `aupdate_message_metadata`, 501 when the checkpointer lacks it, 404 for a missing message).
-- **Client input rules** (`core/auth/request_config.py`): `context_summary` and `execution_meta`
+- **Client input rules** (`core/validation/request_config.py`): `context_summary` and `execution_meta`
   are never client-writable (`reject_builtin_state_keys`, 422); client messages are user-only
   (`client_message_error`: no `assistant`/`system`; a `tool` message only as tool results, which
   must answer a pending remote call, `GraphService._check_tool_results`, also for PUT state

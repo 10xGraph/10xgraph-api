@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import WebSocketDisconnect
+from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
 from tenxgraph_api.src.app.routers.graph.router import realtime_graph_ws
@@ -78,7 +79,7 @@ class TestRealtimeWebSocket:
         ws = _make_websocket([WebSocketDisconnect()], init={"model": "gemini-2.5-flash-live"})
         service = _make_service(events)
 
-        await realtime_graph_ws(websocket=ws, service=service, user={"user_id": "u1"})
+        await realtime_graph_ws(websocket=ws, service=service, identity=Identity(user_id="u1"))
 
         ws.accept.assert_awaited()
         ws.send_bytes.assert_awaited_once_with(b"\x01\x02")
@@ -96,7 +97,7 @@ class TestRealtimeWebSocket:
         )
         service = _make_service([])  # downstream finishes immediately
 
-        await realtime_graph_ws(websocket=ws, service=service, user={"user_id": "u1"})
+        await realtime_graph_ws(websocket=ws, service=service, identity=Identity(user_id="u1"))
 
         q = service._captured["queue"]
         item = q.get_nowait()
@@ -118,7 +119,7 @@ class TestRealtimeWebSocket:
         )
         service = _make_service([])
 
-        await realtime_graph_ws(websocket=ws, service=service, user={"user_id": "u1"})
+        await realtime_graph_ws(websocket=ws, service=service, identity=Identity(user_id="u1"))
 
         q = service._captured["queue"]
         kinds = []
@@ -144,7 +145,7 @@ class TestRealtimeWebSocket:
         )
         service = _make_service([])
 
-        await realtime_graph_ws(websocket=ws, service=service, user={"user_id": "u1"})
+        await realtime_graph_ws(websocket=ws, service=service, identity=Identity(user_id="u1"))
 
         q = service._captured["queue"]
         kinds = []
@@ -169,7 +170,7 @@ class TestRealtimeWebSocket:
 
         service.realtime_graph = _boom
 
-        await realtime_graph_ws(websocket=ws, service=service, user={"user_id": "u1"})
+        await realtime_graph_ws(websocket=ws, service=service, identity=Identity(user_id="u1"))
 
         close_codes = [c.kwargs.get("code") for c in ws.close.call_args_list]
         assert 1011 in close_codes
@@ -179,7 +180,7 @@ class TestRealtimeWebSocket:
         ws = _make_websocket([WebSocketDisconnect()], init=["not", "a", "dict"])
         service = _make_service([])
 
-        await realtime_graph_ws(websocket=ws, service=service, user={"user_id": "u1"})
+        await realtime_graph_ws(websocket=ws, service=service, identity=Identity(user_id="u1"))
 
         close_codes = [c.kwargs.get("code") for c in ws.close.call_args_list]
         assert 1003 in close_codes
@@ -193,7 +194,7 @@ class TestRealtimeWebSocket:
         service = _make_service([])
         service.is_live_agent = False
 
-        await realtime_graph_ws(websocket=ws, service=service, user={"user_id": "u1"})
+        await realtime_graph_ws(websocket=ws, service=service, identity=Identity(user_id="u1"))
 
         # Rejected before the init frame is read; closed 1008 with a fatal error event.
         close_codes = [c.kwargs.get("code") for c in ws.close.call_args_list]
@@ -212,10 +213,10 @@ class TestRealtimeWebSocket:
         ws = _make_websocket([WebSocketDisconnect()], init=init)
         service = _make_service([])
 
-        await realtime_graph_ws(websocket=ws, service=service, user={"user_id": "u1"})
+        await realtime_graph_ws(websocket=ws, service=service, identity=Identity(user_id="u1"))
 
         assert service._captured["init"]["thread_id"] == "t-99"
-        assert service._captured["user"] == {"user_id": "u1"}
+        assert service._captured["user"] == Identity(user_id="u1")
 
     @pytest.mark.asyncio
     async def test_close_frame_does_not_truncate_final_events(self):
@@ -244,7 +245,7 @@ class TestRealtimeWebSocket:
             init={"model": "gemini-2.5-flash-live"},
         )
 
-        await realtime_graph_ws(websocket=ws, service=service, user={"user_id": "u1"})
+        await realtime_graph_ws(websocket=ws, service=service, identity=Identity(user_id="u1"))
 
         # All three trailing events must still reach the client.
         assert ws.send_bytes.await_count == 1
@@ -267,7 +268,7 @@ class TestRealtimeWebSocket:
 
         ws = _make_websocket([WebSocketDisconnect()], init={"model": "gemini-x"})
 
-        await realtime_graph_ws(websocket=ws, service=service, user={"user_id": "u1"})
+        await realtime_graph_ws(websocket=ws, service=service, identity=Identity(user_id="u1"))
 
         sent = [json.loads(c.args[0]) for c in ws.send_text.call_args_list]
         errors = [m for m in sent if m.get("type") == "error"]
@@ -276,22 +277,7 @@ class TestRealtimeWebSocket:
 
 
 class TestLiveThreadIds:
-    """G-113/R-113: /v1/graph/live follows ``runs.thread_ids`` and returns the thread id."""
-
-    @staticmethod
-    def _authz(monkeypatch, *, thread_ids):
-        from injectq import InjectQ
-        from tenxgraph.storage.checkpointer import InMemoryCheckpointer
-
-        from tenxgraph_api.src.app.core.auth.authorization import OwnershipAuthorizationBackend
-
-        container = MagicMock()
-        container.get.return_value = SimpleNamespace(auth_config=lambda: "jwt")
-        monkeypatch.setattr(InjectQ, "get_instance", staticmethod(lambda: container))
-        runs = RunsConfig(thread_ids=thread_ids)
-        return OwnershipAuthorizationBackend(
-            checkpointer=InMemoryCheckpointer(), server_thread_ids=runs.server_thread_ids
-        )
+    """/v1/graph/live returns the thread id (the ownership check on it arrives with Sprint 4)."""
 
     @staticmethod
     def _sent(ws):
@@ -299,14 +285,11 @@ class TestLiveThreadIds:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("init", [{}, {"thread_id": ""}, {"thread_id": "new"}])
-    async def test_no_id_gets_a_server_id_returned_first(self, monkeypatch, init):
-        authz = self._authz(monkeypatch, thread_ids="server")
+    async def test_no_id_gets_a_server_id_returned_first(self, init):
         ws = _make_websocket([WebSocketDisconnect()], init={"model": "m", **init})
         service = _make_service([_json_event("turn_complete")])
 
-        await realtime_graph_ws(
-            websocket=ws, service=service, user={"user_id": "u1"}, authz=authz
-        )
+        await realtime_graph_ws(websocket=ws, service=service, identity=Identity(user_id="u1"))
 
         service.new_thread_id.assert_awaited_once()
         assert service._captured["init"]["thread_id"] == "srv-1"
@@ -315,30 +298,11 @@ class TestLiveThreadIds:
         assert not any(e.get("code") == "not_authorized" for e in sent)
 
     @pytest.mark.asyncio
-    async def test_unknown_id_is_refused_under_server(self, monkeypatch):
-        authz = self._authz(monkeypatch, thread_ids="server")
-        ws = _make_websocket([WebSocketDisconnect()], init={"model": "m", "thread_id": "made-up"})
-        service = _make_service([])
-
-        await realtime_graph_ws(
-            websocket=ws, service=service, user={"user_id": "u1"}, authz=authz
-        )
-
-        sent = self._sent(ws)
-        assert any(e.get("code") == "not_authorized" for e in sent)
-        assert not any(e.get("type") == "session_started" for e in sent)
-        assert any(c.kwargs.get("code") == 1008 for c in ws.close.call_args_list)
-        assert "init" not in service._captured
-
-    @pytest.mark.asyncio
-    async def test_unknown_id_is_allowed_under_client(self, monkeypatch):
-        authz = self._authz(monkeypatch, thread_ids="client")
+    async def test_client_named_id_is_used(self):
         ws = _make_websocket([WebSocketDisconnect()], init={"model": "m", "thread_id": "mine"})
         service = _make_service([])
 
-        await realtime_graph_ws(
-            websocket=ws, service=service, user={"user_id": "u1"}, authz=authz
-        )
+        await realtime_graph_ws(websocket=ws, service=service, identity=Identity(user_id="u1"))
 
         service.new_thread_id.assert_not_awaited()
         assert service._captured["init"]["thread_id"] == "mine"
@@ -400,7 +364,7 @@ async def _realtime_config(init, **websocket):
     graph = MagicMock()
     graph.arealtime = _arealtime
     svc = GraphService(graph=graph, checkpointer=_checkpointer(), config=_config(**websocket))
-    async for _ in svc.realtime_graph(MagicMock(), init, {"user_id": "u1"}):
+    async for _ in svc.realtime_graph(MagicMock(), init, Identity(user_id="u1")):
         pass
     return captured["config"].get("realtime", {})
 
@@ -436,7 +400,7 @@ class TestRealtimeGraphService:
             "thread_id": "t1",
         }
 
-        async for _ in svc.realtime_graph(MagicMock(), init, {"user_id": "u1"}):
+        async for _ in svc.realtime_graph(MagicMock(), init, Identity(user_id="u1")):
             pass
 
         rt = captured["config"]["realtime"]
@@ -465,7 +429,7 @@ class TestRealtimeGraphService:
         # Client shorthand: a bare string instead of a list.
         init = {"model": "gemini-x", "modalities": "TEXT"}
 
-        async for _ in svc.realtime_graph(MagicMock(), init, {"user_id": "u1"}):
+        async for _ in svc.realtime_graph(MagicMock(), init, Identity(user_id="u1")):
             pass
 
         assert captured["config"]["realtime"]["response_modalities"] == ["TEXT"]
@@ -548,7 +512,7 @@ class TestRealtimeFrameLimits:
         ws.receive_text = AsyncMock(return_value="x" * (REALTIME_MAX_FRAME_BYTES + 1))
         service = _make_service([])
 
-        await realtime_graph_ws(websocket=ws, service=service, user={"user_id": "u1"})
+        await realtime_graph_ws(websocket=ws, service=service, identity=Identity(user_id="u1"))
 
         assert 1009 in [c.kwargs.get("code") for c in ws.close.call_args_list]
         assert "init" not in service._captured
@@ -605,7 +569,9 @@ class TestRealtimeCredentialRecheck:
         ws = _make_websocket([], init={"model": "m"})
         ws.receive = AsyncMock(side_effect=_hang)
         await asyncio.wait_for(
-            realtime_graph_ws(websocket=ws, service=self._slow_service(), user={"user_id": "u1"}),
+            realtime_graph_ws(
+                websocket=ws, service=self._slow_service(), identity=Identity(user_id="u1")
+            ),
             timeout=5,
         )
 
@@ -629,7 +595,9 @@ class TestRealtimeCredentialRecheck:
         ws = _make_websocket([], init={"model": "m"})
         ws.receive = AsyncMock(side_effect=_hang)
         await asyncio.wait_for(
-            realtime_graph_ws(websocket=ws, service=self._slow_service(), user={"user_id": "u1"}),
+            realtime_graph_ws(
+                websocket=ws, service=self._slow_service(), identity=Identity(user_id="u1")
+            ),
             timeout=5,
         )
 
@@ -643,7 +611,7 @@ class TestRealtimeCredentialRecheck:
         ws = _make_websocket([WebSocketDisconnect()], init={"model": "m"})
         service = _make_service([])
 
-        await realtime_graph_ws(websocket=ws, service=service, user={"user_id": "u1"})
+        await realtime_graph_ws(websocket=ws, service=service, identity=Identity(user_id="u1"))
 
         assert self._closes(ws)
         assert "queue" not in service._captured  # the model session never started
@@ -656,7 +624,7 @@ class TestRealtimeCredentialRecheck:
         ws = _make_websocket([WebSocketDisconnect()], init={"model": "m"})
         service = _make_service([_audio_event(b"\x01")])
 
-        await realtime_graph_ws(websocket=ws, service=service, user={"user_id": "u1"})
+        await realtime_graph_ws(websocket=ws, service=service, identity=Identity(user_id="u1"))
 
         ws.send_bytes.assert_awaited_once_with(b"\x01")
         assert not self._closes(ws)
@@ -744,7 +712,7 @@ class TestConcurrentLiveSessions:
             return [
                 e
                 async for e in svc.realtime_graph(
-                    queues[name], {"thread_id": name}, {"user_id": name}
+                    queues[name], {"thread_id": name}, Identity(user_id=name)
                 )
             ]
 

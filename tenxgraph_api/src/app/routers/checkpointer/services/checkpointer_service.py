@@ -1,19 +1,21 @@
-import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import HTTPException
 from injectq import inject, singleton
 from pydantic import BaseModel, ValidationError
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import AgentState, Message
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 
 from tenxgraph_api.src.app.core import logger
-from tenxgraph_api.src.app.core.auth.client_filters import (
+from tenxgraph_api.src.app.core.config.settings import get_settings
+from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
+from tenxgraph_api.src.app.core.validation.client_filters import (
     check_thread_filters,
     filter_errors_as_client_errors,
 )
-from tenxgraph_api.src.app.core.auth.request_config import (
+from tenxgraph_api.src.app.core.validation.request_config import (
     ClientInputError,
     client_config,
     client_message_error,
@@ -23,8 +25,6 @@ from tenxgraph_api.src.app.core.auth.request_config import (
     tool_result_ids,
     with_fresh_message_ids,
 )
-from tenxgraph_api.src.app.core.config.settings import get_settings
-from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe, sanitize_for_logging
 from tenxgraph_api.src.app.routers.checkpointer.schemas.checkpointer_schemas import (
     MessagesListResponseSchema,
     ResponseSchema,
@@ -39,19 +39,6 @@ from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import
     resolve_media_policy,
 )
 from tenxgraph_api.src.app.utils.parse_output import parse_state_output
-
-
-def _accepts_user_kwarg(func: Callable[..., Any]) -> bool:
-    """Whether ``func`` takes a ``user`` keyword (or ``**kwargs``)."""
-    try:
-        params = inspect.signature(func).parameters.values()
-    except (TypeError, ValueError):
-        return False
-    return any(
-        p.kind is inspect.Parameter.VAR_KEYWORD
-        or (p.name == "user" and p.kind is not inspect.Parameter.POSITIONAL_ONLY)
-        for p in params
-    )
 
 
 class CheckpointerUnavailableError(HTTPException, ValueError):
@@ -87,17 +74,18 @@ class CheckpointerService:
         self.checkpointer = checkpointer
         self.settings = get_settings()
 
-    def _config(self, config: dict[str, Any] | None, user: dict) -> dict[str, Any]:
+    def _config(self, config: dict[str, Any] | None, identity: Identity | None) -> dict[str, Any]:
         if not self.checkpointer:
             raise CheckpointerUnavailableError()
 
-        # Client keys pass through; server-owned keys (authz, user, internals) never do.
+        # Client keys pass through; server-owned keys (user, internals) never do.
         cfg: dict[str, Any] = client_config(config)
-        cfg["user"] = user
-        cfg["user_id"] = user.get("user_id", "anonymous")
+        if identity is not None:
+            cfg["user"] = identity
+        cfg["user_id"] = identity.user_id if identity is not None else "anonymous"
         return cfg
 
-    async def _claim_thread(self, cfg: dict[str, Any], user: dict) -> None:
+    async def _claim_thread(self, cfg: dict[str, Any], identity: Identity | None) -> None:
         """Record the caller as the owner of a thread nobody owns yet, before writing to it.
 
         Ownership authorization lets a write through to an unowned thread on the promise that
@@ -105,7 +93,7 @@ class CheckpointerService:
         their own, so without this the thread would stay ownerless and stay open to everyone.
         """
         thread_id = cfg.get("thread_id")
-        if not user.get("user_id") or thread_id is None:
+        if identity is None or thread_id is None:
             return
         try:
             owner = await self.checkpointer.aget_thread_owner(thread_id)
@@ -114,13 +102,14 @@ class CheckpointerService:
         if owner is None:
             await self.checkpointer.aput_thread(cfg, owned_thread_info(cfg, thread_id))
 
-    async def _check_media_references(self, messages: list[Any], user: dict) -> None:
+    async def _check_media_references(self, messages: list[Any], identity: Identity | None) -> None:
         """Messages written into a thread are resolved on the next run, so the files they
         reference must belong to the caller, exactly as for graph input."""
-        user_id = user.get("user_id")
-        if not user_id or not messages:
+        if identity is None or not messages:
             return
-        await check_media_references(messages, self._media_service(), str(user_id), user)
+        await check_media_references(
+            messages, self._media_service(), str(identity.user_id), identity
+        )
 
     def _check_media_urls(self, messages: list[Any]) -> None:
         """External media URLs in written messages get the same policy check as graph input
@@ -133,19 +122,20 @@ class CheckpointerService:
         )
         check_external_media_urls(messages, policy)
 
-    async def _link_media(self, messages: list[Any], cfg: dict[str, Any], user: dict) -> None:
+    async def _link_media(
+        self, messages: list[Any], cfg: dict[str, Any], identity: Identity | None
+    ) -> None:
         """Record the thread on every owned file the written messages reference."""
-        user_id = user.get("user_id")
         media = self._media_service()
         thread_id = cfg.get("thread_id")
-        if not user_id or media is None or thread_id is None:
+        if identity is None or media is None or thread_id is None:
             return
         keys = [k for m in messages for k in internal_media_keys(m)]
         if keys:
-            await media.link_threads(keys, str(thread_id), str(user_id), user)
+            await media.link_threads(keys, str(thread_id), str(identity.user_id), identity)
 
     async def _file_owners(
-        self, media: Any, thread_id: Any, cfg: dict[str, Any], user: dict
+        self, media: Any, thread_id: Any, identity: Identity | None
     ) -> list[tuple[str, dict[str, str | None]]]:
         """Identities whose files linked to the thread are released when it is deleted.
 
@@ -154,26 +144,26 @@ class CheckpointerService:
         ``none``-scope deleter thus releases the member's files, not only their own. A
         failed lookup leaves only the deleter. Never raises.
         """
-        from tenxgraph_api.src.app.core.auth.authorization import scope_lookup
         from tenxgraph_api.src.app.core.auth.ownership_resolver import to_scope
 
         owners: list[tuple[str, dict[str, str | None]]] = []
         try:
             columns = media.tenant_columns()
-            scope = to_scope(await scope_lookup(self.checkpointer)(thread_id))
+            lookup = getattr(self.checkpointer, "aget_thread_scope", None)
+            lookup = lookup or self.checkpointer.aget_thread_owner
+            scope = to_scope(await lookup(thread_id))
             if scope is not None and scope.get("user_id") is not None:
                 owners.append((str(scope["user_id"]), {c: scope.get(c) for c in columns}))
         except Exception as exc:
             logger.debug("Thread owner lookup for file cleanup failed: %s", exc)
-        caller = cfg.get("user_id")
-        if caller is not None:
+        if identity is not None:
             try:
-                identity = (str(caller), media.caller_tenant(user))
+                caller = (str(identity.user_id), media.caller_tenant(identity))
             except Exception as exc:
                 logger.debug("Caller tenant lookup for file cleanup failed: %s", exc)
             else:
-                if identity not in owners:
-                    owners.append(identity)
+                if caller not in owners:
+                    owners.append(caller)
         return owners
 
     @staticmethod
@@ -279,8 +269,10 @@ class CheckpointerService:
         except Exception:
             return None
 
-    async def get_state(self, config: dict[str, Any], user: dict) -> StateResponseSchema:
-        cfg = self._config(config, user)
+    async def get_state(
+        self, config: dict[str, Any], identity: Identity | None
+    ) -> StateResponseSchema:
+        cfg = self._config(config, identity)
 
         # this will return base pydantic model
         res = await self.checkpointer.aget_state(cfg)
@@ -303,10 +295,10 @@ class CheckpointerService:
     async def put_state(
         self,
         config: dict[str, Any],
-        user: dict,
+        identity: Identity | None,
         state: dict[str, Any],
     ) -> StateResponseSchema:
-        cfg = self._config(config, user)
+        cfg = self._config(config, identity)
         # The built-in fields are never client-writable; the thread's state is the next run's
         # state, so the initial_state allow-list applies to the rest.
         try:
@@ -330,8 +322,8 @@ class CheckpointerService:
             await self._check_context_tool_results(context, cfg)
             state = {**state, "context": with_fresh_message_ids(context)}
         self._check_media_urls(state.get("context") or [])
-        await self._check_media_references(state.get("context") or [], user)
-        await self._claim_thread(cfg, user)
+        await self._check_media_references(state.get("context") or [], identity)
+        await self._claim_thread(cfg, identity)
         old_state: AgentState | None = await self.checkpointer.aget_state(cfg)
         if not old_state:
             old_state = await self.checkpointer.aget_state_cache(cfg)
@@ -350,7 +342,7 @@ class CheckpointerService:
         res = await self.checkpointer.aput_state(cfg, to_store)  # type: ignore[arg-type]
         # update cache as well
         await self.checkpointer.aput_state_cache(cfg, to_store)  # type: ignore
-        await self._link_media(state.get("context") or [], cfg, user)
+        await self._link_media(state.get("context") or [], cfg, identity)
 
         return StateResponseSchema(
             state=parse_state_output(
@@ -359,34 +351,21 @@ class CheckpointerService:
             ),
         )
 
-    async def clear_state(self, config: dict[str, Any], user: dict) -> ResponseSchema:
-        cfg = self._config(config, user)
+    async def clear_state(
+        self, config: dict[str, Any], identity: Identity | None
+    ) -> ResponseSchema:
+        cfg = self._config(config, identity)
         res = await self.checkpointer.aclear_state(cfg)
         return ResponseSchema(success=True, message="State cleared successfully", data=res)
 
     # Messages
-    async def put_messages(
-        self,
-        config: dict[str, Any],
-        user: dict,
-        messages: list[Message],
-        metadata: dict[str, Any] | None = None,
-    ) -> ResponseSchema:
-        cfg = self._config(config, user)
-        self._check_media_urls(messages)
-        await self._check_media_references(messages, user)
-        await self._claim_thread(cfg, user)
-        res = await self.checkpointer.aput_messages(cfg, messages, metadata)
-        await self._link_media(messages, cfg, user)
-        return ResponseSchema(success=True, message="Messages put successfully", data=res)
-
     async def get_message(
         self,
         config: dict[str, Any],
-        user: dict,
+        identity: Identity | None,
         message_id: Any,
     ) -> Message:
-        cfg = self._config(config, user)
+        cfg = self._config(config, identity)
         return await self._read_message(cfg, message_id)
 
     async def _read_message(self, cfg: dict[str, Any], message_id: Any) -> Message:
@@ -411,7 +390,7 @@ class CheckpointerService:
     async def update_message_feedback(
         self,
         config: dict[str, Any],
-        user: dict,
+        identity: Identity | None,
         message_id: Any,
         feedback: dict[str, Any],
     ) -> Message:
@@ -421,7 +400,7 @@ class CheckpointerService:
             HTTPException: 501 when the checkpointer lacks ``aupdate_message_metadata``,
                 404 when the message is not in this thread.
         """
-        cfg = self._config(config, user)
+        cfg = self._config(config, identity)
         update = getattr(self.checkpointer, "aupdate_message_metadata", None)
         if not callable(update):
             raise HTTPException(
@@ -439,12 +418,12 @@ class CheckpointerService:
     async def get_messages(
         self,
         config: dict[str, Any],
-        user: dict,
+        identity: Identity | None,
         search: str | None = None,
         offset: int | None = None,
         limit: int | None = None,
     ) -> MessagesListResponseSchema:
-        cfg = self._config(config, user)
+        cfg = self._config(config, identity)
         res = await self.checkpointer.alist_messages(cfg, search, offset, limit)
         has_more = await _has_more(
             len(res), offset, limit, lambda o: self.checkpointer.alist_messages(cfg, search, o, 1)
@@ -456,10 +435,10 @@ class CheckpointerService:
     async def delete_message(
         self,
         config: dict[str, Any],
-        user: dict,
+        identity: Identity | None,
         message_id: Any,
     ) -> ResponseSchema:
-        cfg = self._config(config, user)
+        cfg = self._config(config, identity)
         # Read first: a missing message is a 404 on every checkpointer (Postgres alone would
         # delete silently), and its files are needed for the cleanup below. Any other read
         # failure just leaves the files in place.
@@ -486,11 +465,13 @@ class CheckpointerService:
         return ResponseSchema(success=True, message="Message deleted successfully", data=res)
 
     # Threads
-    async def get_thread(self, config: dict[str, Any], user: dict) -> ThreadResponseSchema:
-        cfg = self._config(config, user)
+    async def get_thread(
+        self, config: dict[str, Any], identity: Identity | None
+    ) -> ThreadResponseSchema:
+        cfg = self._config(config, identity)
         logger.debug(
             "User info: %s and thread config: %s",
-            log_safe(sanitize_for_logging(user)),
+            log_safe(identity.user_id if identity else None),
             log_safe(cfg),
         )
         res = await self.checkpointer.aget_thread(cfg)
@@ -498,7 +479,7 @@ class CheckpointerService:
 
     async def list_threads(
         self,
-        user: dict,
+        identity: Identity | None,
         search: str | None = None,
         offset: int | None = None,
         limit: int | None = None,
@@ -507,9 +488,9 @@ class CheckpointerService:
         """List the caller's threads, narrowed by ``filters`` (validated first, 422 when bad).
 
         ``filters`` only narrow: core ANDs them after the isolation conditions, which come from
-        the trusted ``config["user"]``, never from the client.
+        the ``Identity`` in ``config["user"]``, never from the client.
         """
-        cfg = self._config({}, user)
+        cfg = self._config({}, identity)
         check_thread_filters(self.checkpointer, filters)
         # Only pass filters when there are some, so a custom checkpointer written before
         # ``alist_threads`` took ``filters`` keeps working for plain listings.
@@ -532,13 +513,13 @@ class CheckpointerService:
     async def delete_thread(
         self,
         config: dict[str, Any],
-        user: dict,
+        identity: Identity | None,
         thread_id: Any,
     ) -> ResponseSchema:
-        cfg = self._config(config, user)
+        cfg = self._config(config, identity)
         logger.debug(
             "User info: %s and thread ID: %s",
-            log_safe(sanitize_for_logging(user)),
+            log_safe(identity.user_id if identity else None),
             log_safe(thread_id),
         )
         # Cleanup after the thread row is gone is best effort, but a delete that left data
@@ -554,7 +535,7 @@ class CheckpointerService:
                 incomplete.append("files")
                 logger.warning("File cleanup skipped for thread %s: %s", log_safe(thread_id), exc)
         # Whose files to release, read while the thread still exists.
-        owners = await self._file_owners(media, thread_id, cfg, user) if media is not None else []
+        owners = await self._file_owners(media, thread_id, identity) if media is not None else []
         res = await self.checkpointer.aclean_thread(cfg)
         if (
             thread_keys
@@ -581,29 +562,6 @@ class CheckpointerService:
             incomplete.append("traces")
             logger.warning(
                 "Telemetry store cleanup failed for thread %s: %s", log_safe(thread_id), exc
-            )
-
-        # Invalidate any cached ownership for this thread. Ownership is otherwise
-        # immutable, so deletion is the only event that must evict the cache.
-        try:
-            from tenxgraph_api.src.app.core.auth.authorization import AuthorizationBackend
-            from tenxgraph_api.src.app.core.utils.container import current_container
-
-            authz = current_container().try_get(AuthorizationBackend)
-            evict = getattr(authz, "evict", None)
-            if callable(evict):
-                # The built-in backend takes the whole user, so the delete tombstone records
-                # the deleter's tenant values too; a custom evict(thread_id, owner) gets the id.
-                if _accepts_user_kwarg(evict):
-                    pending = evict(str(thread_id), user.get("user_id"), user=user)
-                else:
-                    pending = evict(str(thread_id), user.get("user_id"))
-                if pending is not None:
-                    await pending
-        except Exception as exc:
-            incomplete.append("cache")
-            logger.warning(
-                "Ownership cache eviction failed for thread %s: %s", log_safe(thread_id), exc
             )
 
         if incomplete:

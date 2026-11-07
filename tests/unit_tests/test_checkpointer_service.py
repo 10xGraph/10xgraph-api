@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import AgentState, Message
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 
@@ -18,6 +19,9 @@ from tenxgraph_api.src.app.routers.checkpointer.services.checkpointer_service im
 )
 
 
+ALICE = Identity(user_id="123")
+
+
 class TestCheckpointerService:
     """Test cases for CheckpointerService."""
 
@@ -31,7 +35,6 @@ class TestCheckpointerService:
         checkpointer.aput_state = AsyncMock()
         checkpointer.aput_state_cache = AsyncMock()
         checkpointer.aclear_state = AsyncMock()
-        checkpointer.aput_messages = AsyncMock()
         checkpointer.aget_message = AsyncMock()
         checkpointer.alist_messages = AsyncMock()
         checkpointer.adelete_message = AsyncMock()
@@ -59,20 +62,25 @@ class TestCheckpointerService:
     def test_config_validation(self, checkpointer_service):
         """Test _config method validates checkpointer and adds user info."""
         config = {"thread_id": "test_thread"}
-        user = {"user_id": "123", "username": "test_user"}
 
-        result = checkpointer_service._config(config, user)
+        result = checkpointer_service._config(config, ALICE)
 
-        assert result["user"] == user
+        assert result["user"] == ALICE
+        assert result["user_id"] == "123"
         assert result["thread_id"] == "test_thread"
+
+    def test_config_without_identity_is_anonymous(self, checkpointer_service):
+        result = checkpointer_service._config({"thread_id": "test_thread"}, None)
+
+        assert "user" not in result
+        assert result["user_id"] == "anonymous"
 
     def test_config_validation_no_checkpointer(self, checkpointer_service_no_checkpointer):
         """Test _config method raises error when checkpointer is not configured."""
         config = {"thread_id": "test_thread"}
-        user = {"user_id": "123", "username": "test_user"}
 
         with pytest.raises(ValueError, match="Checkpointer is not configured"):
-            checkpointer_service_no_checkpointer._config(config, user)
+            checkpointer_service_no_checkpointer._config(config, ALICE)
 
     @pytest.mark.asyncio
     async def test_get_state_success(self, checkpointer_service, mock_checkpointer):
@@ -87,7 +95,7 @@ class TestCheckpointerService:
         ) as mock_parse:
             mock_parse.return_value = {"test": "data"}
 
-            result = await checkpointer_service.get_state({}, {"user_id": "123"})
+            result = await checkpointer_service.get_state({}, ALICE)
 
             assert isinstance(result, StateResponseSchema)
             assert result.state == {"test": "data"}
@@ -99,7 +107,7 @@ class TestCheckpointerService:
         mock_checkpointer.aget_state.return_value = None
         mock_checkpointer.aget_state_cache.return_value = {"cached": "data"}
 
-        result = await checkpointer_service.get_state({}, {"user_id": "123"})
+        result = await checkpointer_service.get_state({}, ALICE)
 
         assert isinstance(result, StateResponseSchema)
         assert result.state == {"cached": "data"}
@@ -110,33 +118,12 @@ class TestCheckpointerService:
         """Test clear_state returns success response."""
         mock_checkpointer.aclear_state.return_value = True
 
-        result = await checkpointer_service.clear_state({}, {"user_id": "123"})
+        result = await checkpointer_service.clear_state({}, ALICE)
 
         assert isinstance(result, ResponseSchema)
         assert result.success is True
         assert "cleared successfully" in result.message
         mock_checkpointer.aclear_state.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_put_messages_success(self, checkpointer_service, mock_checkpointer):
-        """Test put_messages returns success response."""
-        # Create a simple Message mock
-        messages = [MagicMock(spec=Message)]
-        metadata = {"timestamp": "2023-01-01"}
-        mock_checkpointer.aput_messages.return_value = True
-
-        result = await checkpointer_service.put_messages({}, {"user_id": "123"}, messages, metadata)
-
-        assert isinstance(result, ResponseSchema)
-        assert result.success is True
-        assert "put successfully" in result.message
-        # Validate aput_messages was called with a cfg containing both 'user' and 'user_id'
-        args, kwargs = mock_checkpointer.aput_messages.call_args
-        cfg_arg = args[0]
-        assert cfg_arg["user"] == {"user_id": "123"}
-        assert cfg_arg.get("user_id") == "123"
-        assert args[1] == messages
-        assert args[2] == metadata
 
     @pytest.mark.asyncio
     async def test_get_messages_success(self, checkpointer_service, mock_checkpointer):
@@ -145,7 +132,7 @@ class TestCheckpointerService:
         mock_checkpointer.alist_messages.return_value = mock_messages
 
         result = await checkpointer_service.get_messages(
-            {}, {"user_id": "123"}, search="test", offset=0, limit=10
+            {}, ALICE, search="test", offset=0, limit=10
         )
 
         assert isinstance(result, MessagesListResponseSchema)
@@ -153,7 +140,7 @@ class TestCheckpointerService:
         # Validate alist_messages was called with a cfg containing both 'user' and 'user_id'
         args, kwargs = mock_checkpointer.alist_messages.call_args
         cfg_arg = args[0]
-        assert cfg_arg["user"] == {"user_id": "123"}
+        assert cfg_arg["user"] == ALICE
         assert cfg_arg.get("user_id") == "123"
         assert args[1:] == ("test", 0, 10)
 
@@ -164,7 +151,7 @@ class TestCheckpointerService:
         mock_thread.model_dump.return_value = {"thread_id": "123", "data": "test"}
         mock_checkpointer.aget_thread.return_value = mock_thread
 
-        result = await checkpointer_service.get_thread({}, {"user_id": "123"})
+        result = await checkpointer_service.get_thread({}, ALICE)
 
         assert isinstance(result, ThreadResponseSchema)
         assert result.thread == {"thread_id": "123", "data": "test"}
@@ -177,9 +164,7 @@ class TestCheckpointerService:
         mock_thread.model_dump.return_value = {"thread_id": "123"}
         mock_checkpointer.alist_threads.return_value = [mock_thread]
 
-        result = await checkpointer_service.list_threads(
-            {"user_id": "123"}, search="test", offset=0, limit=10
-        )
+        result = await checkpointer_service.list_threads(ALICE, search="test", offset=0, limit=10)
 
         assert isinstance(result, ThreadsListResponseSchema)
         assert result.threads == [{"thread_id": "123"}]
@@ -190,7 +175,7 @@ class TestCheckpointerService:
         """Test delete_thread returns success response."""
         mock_checkpointer.aclean_thread.return_value = True
 
-        result = await checkpointer_service.delete_thread({}, {"user_id": "123"}, "thread_123")
+        result = await checkpointer_service.delete_thread({}, ALICE, "thread_123")
 
         assert isinstance(result, ResponseSchema)
         assert result.success is True
@@ -267,7 +252,7 @@ class TestClaimThread:
     async def test_unowned_thread_is_registered_to_the_caller(self):
         service = self._service(owner=None)
         cfg = {"thread_id": "t1", "user_id": "alice"}
-        await service._claim_thread(cfg, {"user_id": "alice"})
+        await service._claim_thread(cfg, Identity(user_id="alice"))
         args = service.checkpointer.aput_thread.await_args.args
         assert args[0] is cfg
         assert args[1].thread_id == "t1"
@@ -276,25 +261,29 @@ class TestClaimThread:
     @pytest.mark.asyncio
     async def test_owned_thread_is_left_alone(self):
         service = self._service(owner="alice")
-        await service._claim_thread({"thread_id": "t1", "user_id": "alice"}, {"user_id": "alice"})
+        await service._claim_thread(
+            {"thread_id": "t1", "user_id": "alice"}, Identity(user_id="alice")
+        )
         service.checkpointer.aput_thread.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_no_identity_skips_the_claim(self):
         service = self._service(owner=None)
-        await service._claim_thread({"thread_id": "t1"}, {})
+        await service._claim_thread({"thread_id": "t1"}, None)
         service.checkpointer.aget_thread_owner.assert_not_awaited()
         service.checkpointer.aput_thread.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_checkpointer_without_owner_lookup_skips_the_claim(self):
         service = self._service(owner_error=NotImplementedError)
-        await service._claim_thread({"thread_id": "t1", "user_id": "alice"}, {"user_id": "alice"})
+        await service._claim_thread(
+            {"thread_id": "t1", "user_id": "alice"}, Identity(user_id="alice")
+        )
         service.checkpointer.aput_thread.assert_not_awaited()
 
 
 def test_owned_thread_info_names_the_caller():
-    from tenxgraph_api.src.app.core.auth.request_config import owned_thread_info
+    from tenxgraph_api.src.app.core.validation.request_config import owned_thread_info
 
     info = owned_thread_info({"user_id": "alice"}, "t1", thread_name="Chat")
     assert (info.thread_id, info.user_id, info.thread_name) == ("t1", "alice", "Chat")

@@ -405,3 +405,14 @@ MALFORMED = st.one_of(
 def test_property_malformed_roles_claim_raises(value):
     with pytest.raises(InvalidClaimsError):
         resolve({**BASE, "org_id": "a", "roles": value}, rbac())
+
+
+@pytest.mark.parametrize("scope", ["checkpointer:read", "nope:read graph:bogus", "read:messages"])
+def test_unknown_permission_shaped_scope_narrows_to_nothing(scope):
+    identity = resolve({"user_id": "u1", "scope": scope}, None)
+    assert identity.permissions == frozenset()
+
+
+def test_unknown_scope_entry_does_not_add_to_known_one():
+    identity = resolve({"user_id": "u1", "scope": "openid threads:read checkpointer:write"}, None)
+    assert identity.permissions == frozenset({"threads:read"})

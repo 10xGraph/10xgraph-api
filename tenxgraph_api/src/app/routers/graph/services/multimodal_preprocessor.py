@@ -7,11 +7,12 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import Message
 from tenxgraph.core.state.message_block import DocumentBlock, TextBlock
 from tenxgraph.utils.media_scheme import MEDIA_SCHEME, is_internal_media_url, strip_media_scheme
 
-from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
+from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
 
 
 if TYPE_CHECKING:
@@ -155,7 +156,7 @@ async def _ensure_access(
     media_service: MediaService,
     file_id: str,
     user_id: str,
-    user: dict[str, Any] | None = None,
+    user: Identity | None = None,
 ) -> None:
     """Ownership check with one answer for missing and foreign files.
 
@@ -173,7 +174,7 @@ async def check_media_references(
     messages: list[Message] | list[dict[str, Any]],
     media_service: MediaService | None,
     user_id: str,
-    user: dict[str, Any] | None = None,
+    user: Identity | None = None,
 ) -> None:
     """Run the ownership check on every internal media reference a client sent.
 
@@ -219,7 +220,7 @@ async def _offload_inline(
     media_service: MediaService,
     messages: list[Message],
     user_id: str | None,
-    user: dict[str, Any] | None = None,
+    user: Identity | None = None,
 ) -> None:
     """Move large inline base64 blobs into the media store before anything copies them into state.
 
@@ -234,7 +235,7 @@ async def preprocess_multimodal_messages(
     messages: list[Message],
     media_service: MediaService | None,
     user_id: str | None = None,
-    user: dict[str, Any] | None = None,
+    user: Identity | None = None,
 ) -> list[Message]:
     """Resolve file_id references in messages before graph execution.
 

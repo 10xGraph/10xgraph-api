@@ -83,8 +83,7 @@ CORS combined with credentials in production. For anything else, in production s
 - `runs.timeout` and `runs.max_concurrent_per_user` to bound what one account can hold open
 - `token_revocation` if you need logout or stolen-token revocation before a JWT expires
 - `rate_limit.trusted_proxies` to your proxy's networks when `trusted_proxy_headers` is on
-- Keep `graph_introspection: "scoped"` (the production default) unless every user may see
-  the graph's structure and tool schemas
+- Grant `graph:read` only to users who may see the graph's structure and tool schemas
 
 ### Running more than one worker
 

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from injectq.integrations import InjectAPI
+from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
 from tenxgraph_api.src.app.utils.response_helper import success_response
@@ -42,11 +41,11 @@ async def create_memory(
     request: Request,
     payload: StoreMemorySchema,
     service: StoreService = InjectAPI(StoreService),
-    user: dict[str, Any] = Depends(RequirePermission("store", "write")),
+    identity: Identity | None = Depends(RequirePermission("store", "write")),
 ):
     """Store a memory item using the configured store."""
 
-    result = await service.store_memory(payload, user)
+    result = await service.store_memory(payload, identity)
     return success_response(result, request, message="Memory stored successfully")
 
 
@@ -61,13 +60,13 @@ async def search_memories(
     request: Request,
     payload: SearchMemorySchema,
     service: StoreService = InjectAPI(StoreService),
-    user: dict[str, Any] = Depends(RequirePermission("store", "read")),
+    identity: Identity | None = Depends(RequirePermission("store", "read")),
 ):
     """Search stored memories."""
     if not payload.query or (isinstance(payload.query, str) and not payload.query.strip()):
         raise HTTPException(status_code=422, detail="query is required and cannot be empty")
 
-    result = await service.search_memories(payload, user)
+    result = await service.search_memories(payload, identity)
     return success_response(result, request)
 
 
@@ -88,7 +87,7 @@ async def list_memories(
         description="Optional configuration, limit, and options for listing memories.",
     ),
     service: StoreService = InjectAPI(StoreService),
-    user: dict[str, Any] = Depends(RequirePermission("store", "read")),
+    identity: Identity | None = Depends(RequirePermission("store", "read")),
 ):
     """List stored memories."""
 
@@ -100,7 +99,12 @@ async def list_memories(
     cfg = payload.config or {}
     opts = payload.options
     result = await service.list_memories(
-        cfg, user, limit=payload.limit, options=opts, offset=payload.offset, filters=payload.filters
+        cfg,
+        identity,
+        limit=payload.limit,
+        options=opts,
+        offset=payload.offset,
+        filters=payload.filters,
     )
     return success_response(result, request)
 
@@ -117,13 +121,13 @@ async def update_memory(
     memory_id: str,
     payload: UpdateMemorySchema,
     service: StoreService = InjectAPI(StoreService),
-    user: dict[str, Any] = Depends(RequirePermission("store", "write")),
+    identity: Identity | None = Depends(RequirePermission("store", "write")),
 ):
     """Update a stored memory."""
     if not memory_id or not memory_id.strip():
         raise HTTPException(status_code=422, detail="memory_id is required and cannot be empty")
 
-    result = await service.update_memory(memory_id, payload, user)
+    result = await service.update_memory(memory_id, payload, identity)
     return success_response(result, request, message="Memory updated successfully")
 
 
@@ -142,7 +146,7 @@ async def delete_memory(
         description="Optional configuration overrides forwarded to the store backend.",
     ),
     service: StoreService = InjectAPI(StoreService),
-    user: dict[str, Any] = Depends(RequirePermission("store", "delete")),
+    identity: Identity | None = Depends(RequirePermission("store", "delete")),
 ):
     """Delete a stored memory."""
     if not memory_id or not memory_id.strip():
@@ -150,7 +154,9 @@ async def delete_memory(
 
     config_payload = payload.config if payload else {}
     options_payload = payload.options if payload else None
-    result = await service.delete_memory(memory_id, config_payload, user, options=options_payload)
+    result = await service.delete_memory(
+        memory_id, config_payload, identity, options=options_payload
+    )
     return success_response(result, request, message="Memory deleted successfully")
 
 
@@ -165,11 +171,11 @@ async def forget_memory(
     request: Request,
     payload: ForgetMemorySchema,
     service: StoreService = InjectAPI(StoreService),
-    user: dict[str, Any] = Depends(RequirePermission("store", "delete")),
+    identity: Identity | None = Depends(RequirePermission("store", "delete")),
 ):
     """Forget memories based on filters."""
 
-    result = await service.forget_memory(payload, user)
+    result = await service.forget_memory(payload, identity)
     return success_response(result, request, message="Memories removed successfully")
 
 
@@ -190,7 +196,7 @@ async def get_memory(
         description="Optional configuration and options for retrieving the memory.",
     ),
     service: StoreService = InjectAPI(StoreService),
-    user: dict[str, Any] = Depends(RequirePermission("store", "read")),
+    identity: Identity | None = Depends(RequirePermission("store", "read")),
 ):
     """Get a memory by ID."""
     if not memory_id or not memory_id.strip():
@@ -198,5 +204,5 @@ async def get_memory(
 
     cfg = payload.config if payload else {}
     opts = payload.options if payload else None
-    result = await service.get_memory(memory_id, cfg, user, options=opts)
+    result = await service.get_memory(memory_id, cfg, identity, options=opts)
     return success_response(result, request)

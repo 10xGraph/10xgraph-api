@@ -10,11 +10,12 @@ from fastapi.logger import logger
 from fastapi.responses import FileResponse, Response
 from injectq.integrations import InjectAPI
 from starlette.datastructures import UploadFile as StarletteUploadFile
+from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
-from tenxgraph_api.src.app.core.auth.request_config import client_error_detail
 from tenxgraph_api.src.app.core.config.media_settings import get_media_settings
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
+from tenxgraph_api.src.app.core.validation.request_config import client_error_detail
 from tenxgraph_api.src.app.routers.media import MediaService, MissingTenantError
 from tenxgraph_api.src.app.routers.media.schemas import (
     FileAccessUrlResponse,
@@ -128,13 +129,17 @@ def _file_download_response(file_id: str, path: Any, mime_type: str | None) -> R
     return FileResponse(path, media_type=mime, headers=headers)
 
 
+def _user_id(identity: Identity | None) -> str | None:
+    return identity.user_id if identity is not None else None
+
+
 # One instance, so FastAPI resolves the permission check once per request and the file
 # dependency below runs only after it passed.
 _UPLOAD_PERMISSION = RequirePermission("files", "upload")
 
 
 async def _uploaded_file(
-    request: Request, _user: dict[str, Any] = Depends(_UPLOAD_PERMISSION)
+    request: Request, _identity: Identity | None = Depends(_UPLOAD_PERMISSION)
 ) -> UploadFile:
     """The multipart ``file`` part, parsed only once the caller is authorized.
 
@@ -178,7 +183,7 @@ async def upload_file(
     request: Request,
     file: UploadFile = Depends(_uploaded_file),
     service: MediaService = InjectAPI(MediaService),
-    user: dict[str, Any] = Depends(_UPLOAD_PERMISSION),
+    identity: Identity | None = Depends(_UPLOAD_PERMISSION),
 ):
     if file.filename is None:
         raise HTTPException(status_code=400, detail="filename is required")
@@ -214,7 +219,7 @@ async def upload_file(
         # Record the uploader as the owner, so the file cannot later be read by a
         # different user who knows the id.
         result = await service.upload_file(
-            data, file.filename, mime, user_id=user.get("user_id"), user=user
+            data, file.filename, mime, user_id=_user_id(identity), user=identity
         )
     except MissingTenantError:
         # Tenant columns are declared but the identity carries no value: the file could not
@@ -247,11 +252,10 @@ async def list_files(
     limit: int = Query(50, ge=1, le=MAX_FILE_LIST_LIMIT),
     offset: int = Query(0, ge=0),
     service: MediaService = InjectAPI(MediaService),
-    user: dict[str, Any] = Depends(RequirePermission("files", "read")),
+    identity: Identity | None = Depends(RequirePermission("files", "read")),
 ):
-    user_id = user.get("user_id")
     try:
-        items, has_more = await service.list_files(user_id, offset, limit, user=user)
+        items, has_more = await service.list_files(_user_id(identity), offset, limit, user=identity)
     except NotImplementedError:
         raise HTTPException(status_code=501, detail="The configured media store cannot list files")
     payload = FileListResponse(
@@ -274,17 +278,17 @@ async def list_files(
 async def get_file(
     file_id: str,
     service: MediaService = InjectAPI(MediaService),
-    user: dict[str, Any] = Depends(RequirePermission("files", "read")),
+    identity: Identity | None = Depends(RequirePermission("files", "read")),
 ):
     try:
         # Authentication alone is not enough: without this, ANY authenticated user
         # who knew a file_id could download another user's file.
-        await service.ensure_can_access(file_id, user.get("user_id"), user)
+        await service.ensure_can_access(file_id, _user_id(identity), identity)
         local = await service.local_file(file_id)
         if local is not None:  # stream from disk instead of loading the whole file
             path, mime_type = local
             return _file_download_response(file_id, path, mime_type)
-        data, mime_type = await service.get_file(file_id, user.get("user_id"), user)
+        data, mime_type = await service.get_file(file_id, _user_id(identity), identity)
     except KeyError:
         raise HTTPException(status_code=404, detail="File not found")
     except PermissionError:
@@ -306,11 +310,11 @@ async def get_file_info(
     request: Request,
     file_id: str,
     service: MediaService = InjectAPI(MediaService),
-    user: dict[str, Any] = Depends(RequirePermission("files", "read")),
+    identity: Identity | None = Depends(RequirePermission("files", "read")),
 ):
     try:
-        await service.ensure_can_access(file_id, user.get("user_id"), user)
-        info = await service.get_file_info(file_id, user.get("user_id"), user)
+        await service.ensure_can_access(file_id, _user_id(identity), identity)
+        info = await service.get_file_info(file_id, _user_id(identity), identity)
     except KeyError:
         raise HTTPException(status_code=404, detail="File not found")
     except PermissionError:
@@ -328,13 +332,13 @@ async def get_file_access_url(
     request: Request,
     file_id: str,
     service: MediaService = InjectAPI(MediaService),
-    user: dict[str, Any] = Depends(RequirePermission("files", "read")),
+    identity: Identity | None = Depends(RequirePermission("files", "read")),
 ):
     try:
         # Especially important here: this hands out a *signed direct URL*, which
         # bypasses the API entirely. Handing one to a non-owner would leak the file
         # even after this check was added elsewhere.
-        await service.ensure_can_access(file_id, user.get("user_id"), user)
+        await service.ensure_can_access(file_id, _user_id(identity), identity)
         info = await service.get_file_info(file_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="File not found")
@@ -366,10 +370,10 @@ async def delete_file(
     request: Request,
     file_id: str,
     service: MediaService = InjectAPI(MediaService),
-    user: dict[str, Any] = Depends(RequirePermission("files", "delete")),
+    identity: Identity | None = Depends(RequirePermission("files", "delete")),
 ):
     try:
-        await service.ensure_can_access(file_id, user.get("user_id"), user)
+        await service.ensure_can_access(file_id, _user_id(identity), identity)
         deleted = await service.delete_file(file_id)
     except (KeyError, PermissionError, ValueError):
         # 404, not 403: do not confirm that someone else's file_id exists.
@@ -390,7 +394,7 @@ async def delete_file(
 )
 async def get_multimodal_config(
     request: Request,
-    user: dict[str, Any] = Depends(RequirePermission("config", "read")),
+    identity: Identity | None = Depends(RequirePermission("config", "read")),
 ):
     settings = get_media_settings()
     return success_response(

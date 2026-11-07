@@ -26,6 +26,7 @@ from tenxgraph_api.cli.templates.defaults import (
     generate_k8s_manifest_content,
     merge_ignore_patterns,
 )
+from tenxgraph_api.src.app.core.auth.auth_config import check_auth_config
 
 
 class BuildCommand(BaseCommand):
@@ -41,8 +42,13 @@ class BuildCommand(BaseCommand):
             return
         if not isinstance(config, dict):
             return
+        # auth findings come from the shared auth rules below
         for issue in production_readiness_warnings(config):
-            self.output.warning(f"{issue['path']}: {issue['message']}")
+            if issue["path"] not in ("auth", "authorization"):
+                self.output.warning(f"{issue['path']}: {issue['message']}")
+        for auth_issue in check_auth_config(config, production=True):
+            suffix = " (the image would not boot)" if auth_issue.level == "error" else ""
+            self.output.warning(f"{auth_issue}{suffix}")
 
     def execute(  # noqa: PLR0912, PLR0915
         self,

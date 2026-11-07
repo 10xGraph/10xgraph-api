@@ -121,12 +121,10 @@ def test_missing_pyjwt_fails_at_boot():
             check_jwt_settings(_settings())
 
 
-def test_auth_string_is_matched_exactly(monkeypatch):
-    from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
+def test_auth_string_is_matched_exactly():
+    from tenxgraph_api.src.app.core.auth.auth_config import AuthConfig
 
-    monkeypatch.setenv("JWT_SECRET_KEY", SECRET)
-    monkeypatch.setenv("JWT_ALGORITHM", "HS256")
-    assert GraphConfig._parse_auth_config("jwt") == {"method": "jwt"}
+    assert AuthConfig.parse("jwt").method == "jwt"
     for bad in ("JWT", " jwt", "no-jwt-here", "jwt_custom", "notjwt", "custom jwt"):
-        with pytest.raises(ValueError, match="Unsupported auth method"):
-            GraphConfig._parse_auth_config(bad)
+        with pytest.raises(ValueError, match="auth must be null"):
+            AuthConfig.parse(bad)
