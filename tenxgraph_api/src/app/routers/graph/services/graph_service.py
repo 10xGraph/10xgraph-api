@@ -877,6 +877,9 @@ class GraphService:
         # The authenticated user, before any checkpointer read below: PgCheckpointer refuses a
         # config without ``user_id``. Never taken from the request (``client_config`` strips it).
         config["user_id"] = user_id if user_id else "anonymous"
+        # Tenant and extra column values are read from ``config["user"]`` on every storage read.
+        if user is not None:
+            config["user"] = user
 
         # check recursion limit set or not
         config["recursion_limit"] = graph_input.recursion_limit or 25
@@ -952,8 +955,6 @@ class GraphService:
                 graph_input, user.get("user_id"), user=user
             )
             thread_lock = await self._lock_new_thread(meta)
-            # add user inside config
-            config["user"] = user
             config["user_id"] = user.get("user_id", "anonymous")
             await self._check_tool_results(input_data["messages"], config)
             await self._check_resume_target(graph_input, config)
@@ -1169,8 +1170,6 @@ class GraphService:
                 graph_input, user.get("user_id"), server_config, user=user
             )
             thread_lock = await self._lock_new_thread(meta)
-            # add user inside config
-            config["user"] = user
             config["user_id"] = user.get("user_id", "anonymous")
             await self._check_tool_results(input_data["messages"], config)
             await self._check_resume_target(graph_input, config)

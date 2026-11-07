@@ -92,3 +92,22 @@ async def test_client_cannot_supply_user_id():
     except Exception:  # rejected outright is also fine
         return
     assert config["user_id"] == "alice"
+
+
+@pytest.mark.asyncio
+async def test_resume_reads_state_with_user_for_tenant_columns():
+    # AUTH-S0-01: a tenant-column checkpointer reads tenant values from config["user"], so it
+    # must be set before the first state read (the static-pause check in _prepare_input).
+    graph = MagicMock()
+    graph.ainvoke = AsyncMock(return_value={"messages": [], "state": AgentState()})
+    service = _strict_service(graph)
+    inner = service.checkpointer.aget_state.side_effect
+
+    async def aget_state(config):
+        if not isinstance(config.get("user"), dict):
+            raise ValueError("MissingColumnValueError: tenant value missing from config['user']")
+        return await inner(config)
+
+    service.checkpointer.aget_state = AsyncMock(side_effect=aget_state)
+    await service.invoke_graph(_resume(interrupt_id="i1"), ALICE)
+    assert graph.ainvoke.call_args.args[0]["resume"] == {"ok": True}
