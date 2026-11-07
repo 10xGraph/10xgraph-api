@@ -370,7 +370,12 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
 
 
 def setup_otel_provider(settings) -> bool:
-    """Configure the OpenTelemetry tracer provider and exporter (API and worker share this).
+    """Configure OpenTelemetry traces and metrics (API and worker share this).
+
+    Metrics use a MeterProvider with the same resource and endpoint (OTLP gRPC, or the console
+    exporter when none), and are bridged to core's counters and timers. Point the endpoint at a
+    collector to forward them to Prometheus. The export interval honours the standard
+    OTEL_METRIC_EXPORT_INTERVAL env var.
 
     Reads OTEL_EXPORTER_OTLP_ENDPOINT from settings. If unset, falls back to
     the standard OTEL_EXPORTER_OTLP_ENDPOINT env var (honoured automatically
@@ -422,7 +427,37 @@ def setup_otel_provider(settings) -> bool:
         logger.info("OTEL: no endpoint configured, printing spans to console")
 
     trace.set_tracer_provider(provider)
+    _setup_otel_metrics(resource, endpoint)
     return True
+
+
+def _setup_otel_metrics(resource, endpoint: str | None) -> None:
+    """Install a MeterProvider and bridge core's metrics to it. Traces keep working on failure."""
+    try:
+        from opentelemetry import metrics
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import (
+            ConsoleMetricExporter,
+            PeriodicExportingMetricReader,
+        )
+        from tenxgraph.utils.metrics import setup_otel_metrics
+
+        if endpoint:
+            from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
+
+            exporter = OTLPMetricExporter(endpoint=endpoint)
+        else:
+            exporter = ConsoleMetricExporter()
+    except ImportError:
+        logger.warning(
+            "OTEL metrics are not exported: opentelemetry packages are missing. "
+            "Install with: pip install '10xgraph-api[otel]'"
+        )
+        return
+    reader = PeriodicExportingMetricReader(exporter)
+    metrics.set_meter_provider(MeterProvider(resource=resource, metric_readers=[reader]))
+    setup_otel_metrics()
+    logger.info("OTEL: metrics enabled")
 
 
 def _setup_otel(app: FastAPI, settings) -> None:

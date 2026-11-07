@@ -283,3 +283,86 @@ async def test_monitoring_never_raises_on_a_failing_publisher(monitored):
     env.container.bind_instance(BasePublisher, FakePublisher(fail=True))
     _, sync_job = add_tasks(env)
     assert (await (await kiq_with_id(sync_job, 9)).wait_result(timeout=5)).return_value == 9
+
+
+class FakeMeter:
+    """Records what core's metrics facade sends to OTEL."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, str, float, dict]] = []
+
+    def _instrument(self, kind: str, name: str):
+        meter = self
+
+        class Instrument:
+            def add(self, value, attributes):
+                meter.calls.append((kind, name, value, attributes))
+
+            record = add
+
+        return Instrument()
+
+    def create_counter(self, name, **_):
+        return self._instrument("counter", name)
+
+    def create_histogram(self, name, **_):
+        return self._instrument("histogram", name)
+
+
+@pytest.fixture
+def meter():
+    from tenxgraph.utils import metrics
+
+    fake = FakeMeter()
+    metrics.setup_otel_metrics(fake)
+    yield fake
+    metrics._OTEL_METER = None
+
+
+async def test_monitoring_records_run_counters_and_duration(monitored, meter):
+    env, manager = monitored
+    _, sync_job = add_tasks(env)
+
+    @env.broker.task
+    async def boom() -> None:
+        raise ValueError("bad")
+
+    @env.broker.task
+    async def stopped() -> None:
+        raise TaskCancelled("stop")
+
+    env.wrap()
+    for task in (sync_job, boom, stopped):
+        args = (1,) if task is sync_job else ()
+        await (await kiq_with_id(task, *args)).wait_result(timeout=5)
+    await manager.wait_for_all(timeout=5)
+
+    runs = {
+        (a["task"].rsplit(":", 1)[-1], a["status"])
+        for kind, name, _, a in meter.calls
+        if name == "tenxgraph.task.runs"
+    }
+    assert {t for t, _ in runs} == {"sync_job", "boom", "stopped"}
+    assert runs == {
+        ("sync_job", "queued"),
+        ("sync_job", "success"),
+        ("boom", "queued"),
+        ("boom", "failure"),
+        ("stopped", "queued"),
+        ("stopped", "cancelled"),
+    }
+    durations = [c for c in meter.calls if c[1] == "tenxgraph.task.duration_ms"]
+    assert len(durations) == 3
+    assert all(c[0] == "histogram" and c[2] >= 0 and set(c[3]) == {"task"} for c in durations)
+
+
+async def test_monitoring_never_raises_when_metrics_fail(monitored, monkeypatch):
+    env, _ = monitored
+    _, sync_job = add_tasks(env)
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("metrics down")
+
+    monkeypatch.setattr("tenxgraph.utils.metrics.counter", broken)
+    monkeypatch.setattr("tenxgraph.utils.metrics.timer", broken)
+    assert (await (await kiq_with_id(sync_job, 4)).wait_result(timeout=5)).return_value == 4

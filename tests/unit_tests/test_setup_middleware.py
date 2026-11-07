@@ -109,6 +109,9 @@ def test_setup_otel_with_endpoint():
         "opentelemetry.exporter.otlp.proto": MagicMock(__path__=[]),
         "opentelemetry.exporter.otlp.proto.grpc": MagicMock(__path__=[]),
         "opentelemetry.exporter.otlp.proto.grpc.trace_exporter": mock_exporter,
+        "opentelemetry.exporter.otlp.proto.grpc.metric_exporter": MagicMock(),
+        "opentelemetry.sdk.metrics": MagicMock(),
+        "opentelemetry.sdk.metrics.export": MagicMock(),
     }
 
     with patch.dict("sys.modules", modules):
@@ -670,3 +673,93 @@ def test_bind_publisher_replaces_one_already_resolved():
     replacement = ConsolePublisher({})
     _bind_publisher(container, replacement)
     assert container.try_get(BasePublisher) is replacement
+
+
+def _otel_modules(**extra):
+    modules = {
+        "opentelemetry": MagicMock(),
+        "opentelemetry.trace": MagicMock(),
+        "opentelemetry.metrics": MagicMock(),
+        "opentelemetry.sdk.resources": MagicMock(),
+        "opentelemetry.sdk.trace": MagicMock(),
+        "opentelemetry.sdk.trace.export": MagicMock(),
+        "opentelemetry.sdk.metrics": MagicMock(),
+        "opentelemetry.sdk.metrics.export": MagicMock(),
+    }
+    modules.update(extra)
+    modules["opentelemetry"].metrics = modules[
+        "opentelemetry.metrics"
+    ]  # `from opentelemetry import`
+    return modules
+
+
+def test_setup_otel_provider_sets_meter_provider_with_console_exporter():
+    from tenxgraph_api.src.app.core.config.setup_middleware import setup_otel_provider
+
+    settings = MagicMock()
+    settings.OTEL_SERVICE_NAME = "svc"
+    settings.OTEL_EXPORTER_OTLP_ENDPOINT = None
+    settings.MODE = "development"
+    modules = _otel_modules()
+    with (
+        patch.dict("sys.modules", modules),
+        patch("tenxgraph.utils.metrics.setup_otel_metrics") as bridge,
+    ):
+        assert setup_otel_provider(settings) is True
+
+    export = modules["opentelemetry.sdk.metrics.export"]
+    export.ConsoleMetricExporter.assert_called_once()
+    export.PeriodicExportingMetricReader.assert_called_once_with(
+        export.ConsoleMetricExporter.return_value
+    )
+    sdk_metrics = modules["opentelemetry.sdk.metrics"]
+    resource = modules["opentelemetry.sdk.resources"].Resource.create.return_value
+    sdk_metrics.MeterProvider.assert_called_once_with(
+        resource=resource, metric_readers=[export.PeriodicExportingMetricReader.return_value]
+    )
+    modules["opentelemetry.metrics"].set_meter_provider.assert_called_once_with(
+        sdk_metrics.MeterProvider.return_value
+    )
+    bridge.assert_called_once_with()
+
+
+def test_setup_otel_provider_exports_metrics_to_the_endpoint():
+    from tenxgraph_api.src.app.core.config.setup_middleware import setup_otel_provider
+
+    settings = MagicMock()
+    settings.OTEL_SERVICE_NAME = "svc"
+    settings.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector:4317"
+    metric_exporter = MagicMock()
+    modules = _otel_modules(
+        **{
+            "opentelemetry.exporter": MagicMock(__path__=[]),
+            "opentelemetry.exporter.otlp": MagicMock(__path__=[]),
+            "opentelemetry.exporter.otlp.proto": MagicMock(__path__=[]),
+            "opentelemetry.exporter.otlp.proto.grpc": MagicMock(__path__=[]),
+            "opentelemetry.exporter.otlp.proto.grpc.trace_exporter": MagicMock(),
+            "opentelemetry.exporter.otlp.proto.grpc.metric_exporter": metric_exporter,
+        }
+    )
+    with (
+        patch.dict("sys.modules", modules),
+        patch("tenxgraph.utils.metrics.setup_otel_metrics") as bridge,
+    ):
+        assert setup_otel_provider(settings) is True
+
+    metric_exporter.OTLPMetricExporter.assert_called_once_with(endpoint="http://collector:4317")
+    modules["opentelemetry.sdk.metrics.export"].ConsoleMetricExporter.assert_not_called()
+    bridge.assert_called_once_with()
+
+
+def test_setup_otel_provider_survives_missing_metrics_packages():
+    from tenxgraph_api.src.app.core.config import setup_middleware as module
+
+    settings = MagicMock()
+    settings.OTEL_SERVICE_NAME = "svc"
+    settings.OTEL_EXPORTER_OTLP_ENDPOINT = None
+    settings.MODE = "development"
+    modules = _otel_modules(**{"opentelemetry.sdk.metrics": None})
+    with patch.dict("sys.modules", modules), patch.object(module.logger, "warning") as warning:
+        assert module.setup_otel_provider(settings) is True  # traces still work
+
+    assert "metrics are not exported" in warning.call_args.args[0]
