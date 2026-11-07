@@ -11,7 +11,7 @@ REGISTRY: dict[str, tuple[str, ...]] = {
     "store": ("read", "write", "delete"),
     "files": ("read", "upload", "delete"),
     "config": ("read",),
-    "tasks": ("trigger", "read", "cancel", "pause"),
+    "tasks": ("trigger", "read", "cancel"),
     "admin": ("read", "write"),
 }
 
@@ -20,7 +20,7 @@ ALL_PERMISSIONS: frozenset[str] = frozenset(
 )
 
 DEFAULT_PERMISSIONS: frozenset[str] = frozenset(
-    p for p in ALL_PERMISSIONS if not p.startswith("admin:") and p != "tasks:pause"
+    p for p in ALL_PERMISSIONS if not p.startswith("admin:")
 )
 
 

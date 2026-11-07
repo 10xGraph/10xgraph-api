@@ -11,14 +11,18 @@ from tenxgraph_api.src.app.core.auth.permissions_registry import (
 
 
 def test_all_permissions_count():
-    assert len(ALL_PERMISSIONS) == 5 + 3 + 3 + 3 + 1 + 4 + 2
+    assert len(ALL_PERMISSIONS) == 5 + 3 + 3 + 3 + 1 + 3 + 2
     assert "graph:invoke" in ALL_PERMISSIONS
 
 
-def test_default_excludes_admin_and_pause():
-    assert not {p for p in DEFAULT_PERMISSIONS if p.startswith("admin:")}
-    assert "tasks:pause" not in DEFAULT_PERMISSIONS
-    assert ALL_PERMISSIONS - {"admin:read", "admin:write", "tasks:pause"} == DEFAULT_PERMISSIONS
+def test_default_excludes_admin_only():
+    assert ALL_PERMISSIONS - {"admin:read", "admin:write"} == DEFAULT_PERMISSIONS
+
+
+def test_tasks_pause_is_gone():
+    assert "tasks:pause" not in ALL_PERMISSIONS
+    with pytest.raises(ValueError, match="tasks:pause"):
+        expand(["tasks:pause"])
 
 
 def test_expand_star_resource_and_concrete():

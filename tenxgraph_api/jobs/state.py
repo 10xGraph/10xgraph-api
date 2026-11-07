@@ -41,23 +41,33 @@ class TaskStatus(BaseModel):
     task_name: str
     status: Status
     owner: str | None = None
+    # The owner's user_id and tenant values: what ``can_reach`` compares for reach tenant/all.
+    user_id: str | None = None
+    tenant: dict[str, str] = {}
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)
 
 
-def owner_of(config: dict[str, Any]) -> str | None:
-    """The run's owner as ``/v1/tasks`` compares it: ``identity_key`` of ``config["user"]``
-    (``user_id`` and tenant values), else the ``user_id`` alone."""
+def owner_fields(config: dict[str, Any]) -> dict[str, Any]:
+    """The run's owner as ``/v1/tasks`` compares it: ``owner`` is ``identity_key`` of
+    ``config["user"]`` (``user_id`` and tenant values), else the ``user_id`` alone; ``user_id``
+    and ``tenant`` are kept for reach checks."""
     from tenxgraph_api.src.app.routers.graph.run_limits import identity_key
 
     user = config.get("user")
-    if isinstance(user, dict):
+    if isinstance(user, dict | Identity):
         try:
-            return identity_key(Identity.model_validate(user))
+            identity = Identity.model_validate(user)
+            return {
+                "owner": identity_key(identity),
+                "user_id": identity.user_id,
+                "tenant": identity.tenant,
+            }
         except ValidationError:
             logger.warning("Ignoring a run config user that is not an Identity")
     user_id = config.get("user_id")
-    return None if user_id is None else str(user_id)
+    user_id = None if user_id is None else str(user_id)
+    return {"owner": user_id, "user_id": user_id, "tenant": {}}
 
 
 def parse_config(labels: dict[str, Any]) -> dict[str, Any]:
@@ -104,12 +114,15 @@ async def write_status(store: BaseCacheStore, record: TaskStatus) -> None:
 
 
 async def update_status(
-    store: BaseCacheStore, task_id: str, task_name: str, status: Status, owner: str | None
+    store: BaseCacheStore, task_id: str, task_name: str, status: Status, config: dict[str, Any]
 ) -> None:
-    """Set ``status``, keeping owner and created time of an existing record."""
+    """Set ``status``, keeping owner and created time of an existing record (a new record takes
+    its owner from the run ``config``)."""
     record = await read_status(store, task_id)
     if record is None:
-        record = TaskStatus(task_id=task_id, task_name=task_name, status=status, owner=owner)
+        record = TaskStatus(
+            task_id=task_id, task_name=task_name, status=status, **owner_fields(config)
+        )
     record.status = status
     await write_status(store, record)
 

@@ -1,8 +1,8 @@
 """``/v1/tasks``: run or schedule an ``http=True`` task, read it, change a schedule, cancel.
 
-Mounted only when 10xgraph.json has a ``worker`` key. Same auth as the graph routes. A caller
-sees only their own tasks and schedules; anything else answers 404, the same as an unknown id.
-Reach beyond ``own`` for tasks comes with the jobs auth work.
+Mounted only when 10xgraph.json has a ``worker`` key. Same auth as the graph routes. Reading and
+cancelling widen by the caller's reach (``tenant``, ``all``); running and changing a schedule
+stay ``own`` (A13). Anything else answers 404, the same as an unknown id.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from taskiq import AsyncTaskiqDecoratedTask, ScheduleSource
-from tenxgraph.core.authz import Identity
+from tenxgraph.core.authz import Identity, Reach, can_reach
 
 from tenxgraph_api.jobs import state
 from tenxgraph_api.jobs.arguments import ReservedArgumentError, check_arguments
@@ -45,13 +45,16 @@ def _store() -> BaseCacheStore:
     return store
 
 
-def _owner(identity: Identity | None) -> str:
-    """The caller key a task belongs to: ``user_id`` and tenant values (``identity_key``)."""
-    return identity_key(identity)
-
-
-def _visible(owner: str | None, identity: Identity | None) -> bool:
-    return owner == _owner(identity)
+def _visible(
+    record: state.TaskStatus | ScheduleRecord, identity: Identity | None, *, widen: bool
+) -> bool:
+    """The caller's own task or schedule (``identity_key``); with ``widen`` (reads, cancel)
+    also one the caller's reach covers."""
+    if record.owner == identity_key(identity):
+        return True
+    if not widen or identity is None or identity.reach is Reach.OWN:
+        return False
+    return can_reach({"user": identity}, record.user_id, record.tenant)
 
 
 def _http_task(name: str) -> AsyncTaskiqDecoratedTask[Any, Any]:
@@ -131,18 +134,18 @@ async def start_task(
     except ReservedArgumentError as exc:
         raise ClientInputError(str(exc)) from None
     store = _store()
-    owner = _owner(identity)
     config: dict[str, Any] = {"user_id": identity.user_id if identity is not None else "anonymous"}
     if identity is not None:
         # JSON for the worker, which rebuilds the Identity from it.
         config["user"] = identity.model_dump(mode="json")
+    owner = state.owner_fields(config)
 
     if body.schedule is not None:
         _source()  # refuse before writing a record
         record = ScheduleRecord(
             schedule_id=broker.id_generator(),
             task_name=task.task_name,
-            owner=owner,
+            **owner,
             schedule=body.schedule,
             args=body.args,
             kwargs=body.kwargs,
@@ -160,7 +163,7 @@ async def start_task(
     # Written before the send, so a fast worker never finds the task without its owner.
     await state.write_status(
         store,
-        state.TaskStatus(task_id=task_id, task_name=task.task_name, status="queued", owner=owner),
+        state.TaskStatus(task_id=task_id, task_name=task.task_name, status="queued", **owner),
     )
     try:
         await (
@@ -170,7 +173,7 @@ async def start_task(
             .kiq(*body.args, **body.kwargs)
         )
     except Exception:
-        await state.update_status(store, task_id, task.task_name, "failure", owner)
+        await state.update_status(store, task_id, task.task_name, "failure", config)
         raise
     return success_response({"task_id": task_id}, request, status_code=202)
 
@@ -184,10 +187,10 @@ async def get_task(
     """A schedule: its task, time and arguments. A task: status, progress, result, error."""
     store = _store()
     schedule = await _read_schedule(store, task_id)
-    if schedule is not None and _visible(schedule.owner, identity):
+    if schedule is not None and _visible(schedule, identity, widen=True):
         return success_response(schedule.model_dump(mode="json", exclude={"config"}), request)
     record = await state.read_status(store, task_id)
-    if schedule is not None or record is None or not _visible(record.owner, identity):
+    if schedule is not None or record is None or not _visible(record, identity, widen=True):
         raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
 
     data: dict[str, Any] = record.model_dump(mode="json")
@@ -214,7 +217,7 @@ async def change_schedule(
     update)."""
     store = _store()
     record = await _read_schedule(store, schedule_id)
-    if record is None or not _visible(record.owner, identity):
+    if record is None or not _visible(record, identity, widen=False):
         raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
     task = broker.find_task(record.task_name)
     if task is None:
@@ -237,12 +240,12 @@ async def cancel_task(
     ``ctx.cancelled()``."""
     store = _store()
     schedule = await _read_schedule(store, task_id)
-    if schedule is not None and _visible(schedule.owner, identity):
+    if schedule is not None and _visible(schedule, identity, widen=True):
         await _source().delete_schedule(task_id)
         await store.delete(_schedule_key(task_id))
         return success_response({"schedule_id": task_id, "deleted": True}, request)
     record = await state.read_status(store, task_id)
-    if schedule is not None or record is None or not _visible(record.owner, identity):
+    if schedule is not None or record is None or not _visible(record, identity, widen=True):
         raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
     await cancel(task_id)
     record = await state.read_status(store, task_id) or record

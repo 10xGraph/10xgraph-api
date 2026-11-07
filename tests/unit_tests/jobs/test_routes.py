@@ -71,11 +71,17 @@ class FakeSource(ScheduleSource):
 
 
 class Env:
-    def __init__(self, monkeypatch, auth: bool = True, auth_impl: BaseAuth | None = None) -> None:
+    def __init__(
+        self,
+        monkeypatch,
+        auth: bool = True,
+        auth_impl: BaseAuth | None = None,
+        graph_config: Any = None,
+    ) -> None:
         self.store = InMemoryCacheStore()
         self.source = FakeSource()
         container = InjectQ()
-        container.bind_instance(GraphConfig, AuthOn())
+        container.bind_instance(GraphConfig, graph_config or AuthOn())
         auth_impl = auth_impl or (TokenAuth() if auth else None)
         container.bind_instance(BaseAuth, auth_impl, allow_none=True)
         container.bind_instance(BaseCacheStore, self.store)
@@ -183,7 +189,7 @@ def test_same_user_id_in_another_tenant_gets_404(monkeypatch):
     assert env.call("GET", f"/v1/tasks/{schedule_id}", user="u1@a").status_code == 200
     # The worker records the same owner key for a run it creates (a scheduled run).
     label = json.loads(env.source.schedules[schedule_id].labels[state.CONFIG_LABEL])
-    assert state.owner_of(label) == "u1:org_id:a"
+    assert state.owner_fields(label)["owner"] == "u1:org_id:a"
 
 
 def test_cancel_a_queued_task(env, monkeypatch):

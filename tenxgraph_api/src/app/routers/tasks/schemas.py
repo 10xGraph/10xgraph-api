@@ -68,6 +68,8 @@ class ScheduleRecord(BaseModel):
     schedule_id: str
     task_name: str
     owner: str
+    user_id: str | None = None  # the owner's user_id and tenant values, for reach checks
+    tenant: dict[str, str] = {}
     schedule: Schedule
     args: list[Any]
     kwargs: dict[str, Any]
