@@ -67,6 +67,35 @@ Needs the `10xgraph` release that ships them.
   same validator when the store has a `filter_schema` (`PgVectorStore`): a tenant column,
   `user_id` or a bad condition is a 422 before the store (or the embedding call) runs. Stores
   without one (`QdrantStore`) are unchanged.
+- **Background tasks on TaskIQ.** `from tenxgraph_api.jobs import broker, TaskContext,
+  TaskCancelled, cancel`; write tasks with `@broker.task`. A new `worker` key in `10xgraph.json`
+  sets `broker.type` (`redis_stream`, `rabbitmq`, `kafka` or `memory`), `result_backend.type`
+  (`redis` or `memory`), `tasks` (modules or globs to import), `result_ttl` and `retries`. New
+  extras: `jobs` (Redis), `jobs-rabbitmq`, `jobs-kafka`.
+- The run config is passed only to tasks that declare a `config` parameter. `TaskContext`
+  (`task_id`, `task_name`, `config`, async `cancelled()`) and InjectQ values (`InjectTaskiq`) are
+  available as task parameters; progress uses TaskIQ's `ProgressTracker`.
+- `10xgraph worker` and `10xgraph scheduler` run TaskIQ's worker and scheduler on the project's
+  broker. Other flags pass through to TaskIQ; the process pool is refused. Run one scheduler
+  (`--update-interval` defaults to 10).
+- Redis Streams broker reclaims a dead worker's tasks on an idle queue and renews the lease of
+  running tasks, so a long task is not run twice.
+- HTTP routes, mounted only when `worker` is set and only for tasks declared with `http=True`:
+  `POST /v1/tasks/{name}` (run or schedule), `GET /v1/tasks/{task_id}`,
+  `PATCH /v1/tasks/{schedule_id}` and `POST /v1/tasks/{task_id}/cancel`. Scopes `tasks:invoke`,
+  `tasks:read` and `tasks:cancel`. Only the owner sees a task or schedule (404 otherwise); setting
+  an injected or reserved argument is a 422.
+- Monitoring: every TaskIQ hook is logged (errors with traceback) and sent as a publisher event
+  (queued, started, failed, cancelled, finished, saved) through the bound `BasePublisher`. The
+  worker sets up OTEL with the same `OTEL_*` settings as the API. The API and the worker export
+  `tenxgraph.task.runs` and `tenxgraph.task.duration_ms`, plus core's metrics through
+  `setup_otel_metrics()`.
+- `10xgraph config` has a "Worker (background tasks)" section with broker and result backend
+  selects.
+- Known limits: Kafka is at-most-once after its 5 s auto-commit, so a task is lost if its worker
+  dies mid-run. RabbitMQ redelivers a task left unacked longer than its `consumer_timeout`
+  (30 minutes by default). The cancel and argument guard does not reach process-pool workers.
+  Only one scheduler may run. There is no route to list schedules.
 
 ### Changed
 
@@ -87,6 +116,7 @@ Needs the `10xgraph` release that ships them.
 - With tenant columns declared, cached thread scopes live in the cache store for 5 minutes
   (`TENANT_L2_TTL_SECONDS`) instead of an hour, so a delete whose cache eviction failed leaves
   the old scope readable for minutes, not an hour. Without tenant columns the TTL stays 1 h.
+- The `redis` extra now allows `redis<9` (was `<7`), because `taskiq-redis` needs redis-py 8.
 
 ### Security
 
@@ -140,6 +170,10 @@ Needs the `10xgraph` release that ships them.
 - Stale docs said AG-UI and `/v1/graph/live` pass `client_thread_ids=True`; they follow
   `runs.thread_ids` like REST since G-113. The `client_thread_ids` authorize context flag stays
   for custom callers.
+- With a `BasePublisher` already bound in the container, `OTEL_ENABLED` and the Logfire /
+  LangSmith `observability` publishers silently did not attach, because InjectQ kept serving the
+  first resolved instance. `_bind_publisher` now rebinds the publisher and clears InjectQ's
+  cached instances (`clear_all_scopes()`) at boot, so anything resolved earlier is resolved again.
 
 ---
 
