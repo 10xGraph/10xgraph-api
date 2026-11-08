@@ -142,8 +142,8 @@ class Settings(BaseSettings):
     #################################
     ###### REDIS Config ##########
     #################################
-    # The API's cache store (run locks and caps, idempotency, rate limit, token revocation) comes from
-    # `cache_store` in 10xgraph.json; a Redis one names its URL
+    # The API's cache store (run locks and caps, idempotency, rate limit, token revocation)
+    # comes from `cache_store` in 10xgraph.json; a Redis one names its URL
     # there (`"url": "${REDIS_URL}"`). Limits for the Redis client of a RedisCacheStore (and
     # of `10xgraph revoke`) follow. Without them a Redis that stops
     # answering (not refusing) would hang each request that touches it. Seconds; 0 turns the

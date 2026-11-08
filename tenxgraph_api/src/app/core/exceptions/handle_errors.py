@@ -108,7 +108,7 @@ def _log_handled(
     A 4xx is the client's mistake: one WARNING line (method, path, status, code), no traceback
     and no body. A 5xx is a server fault: ERROR with the traceback.
     """
-    if status_code < 500:
+    if status_code < 500:  # noqa: PLR2004
         logger.warning(
             "%s: %s %s -> %s %s",
             label,
@@ -121,7 +121,7 @@ def _log_handled(
         logger.error(f"{label}: url: {request.base_url}", exc_info=exc)
 
 
-def init_errors_handler(app: FastAPI):
+def init_errors_handler(app: FastAPI):  # noqa: PLR0915
     """
     Initialize error handlers for the FastAPI application.
 
@@ -149,7 +149,7 @@ def init_errors_handler(app: FastAPI):
         # A 4xx detail is written by the API for the client (401 bad token, 403 missing permission,
         # 404, 413, 422 bad input, 429): hiding it leaves the client unable to fix the request.
         # A 5xx detail may embed internals, so production replaces it.
-        is_server_error = exc.status_code >= 500
+        is_server_error = exc.status_code >= 500  # noqa: PLR2004
         message = _sanitize_error_message(
             str(exc.detail), "HTTPException", is_production and is_server_error
         )
@@ -240,7 +240,7 @@ def init_errors_handler(app: FastAPI):
             message=exc.message,
             status_code=exc.status_code,
         )
-        if exc.status_code == 401:
+        if exc.status_code == 401:  # noqa: PLR2004
             response.headers["WWW-Authenticate"] = 'Bearer realm="auth_required"'
         return response
 
@@ -411,7 +411,7 @@ def init_errors_handler(app: FastAPI):
         logger.error(f"StorageError: url: {request.base_url}", exc_info=exc)
 
         kind = classify(exc)
-        if kind is not None and kind.status_code == 503:
+        if kind is not None and kind.status_code == 503:  # noqa: PLR2004
             # The database or cache could not be reached: retryable, not a bug.
             return unexpected_error_response(request, exc)
 

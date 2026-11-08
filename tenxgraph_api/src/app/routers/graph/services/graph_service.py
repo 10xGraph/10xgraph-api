@@ -958,7 +958,7 @@ class GraphService:
             },
         )
 
-    async def invoke_graph(
+    async def invoke_graph(  # noqa: PLR0912, PLR0915
         self,
         graph_input: GraphInputSchema,
         user: Identity | None,
@@ -1166,7 +1166,7 @@ class GraphService:
         async for line in end_on_shutdown(lines(), keepalive_seconds=KEEPALIVE_SECONDS):
             yield line
 
-    async def stream_chunks(
+    async def stream_chunks(  # noqa: PLR0912, PLR0915
         self,
         graph_input: GraphInputSchema,
         user: Identity | None,
