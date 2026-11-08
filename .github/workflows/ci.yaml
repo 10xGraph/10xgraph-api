@@ -146,6 +146,9 @@ jobs:
       - name: Smoke test the installed wheel
         run: |
           python -m venv /tmp/smoke
+          # Temporary: PyPI core 1.0.0rc4 has no `Identity`. Install core main first (it
+          # satisfies the >=1.0.0rc4 floor); remove this line once core rc5 is on PyPI.
+          /tmp/smoke/bin/pip install --quiet "10xgraph @ git+https://github.com/10xGraph/10xGraph@main"
           /tmp/smoke/bin/pip install --quiet dist/*.whl
           /tmp/smoke/bin/10xgraph version
           /tmp/smoke/bin/10xgraph --help
