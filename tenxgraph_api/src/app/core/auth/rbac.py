@@ -179,7 +179,8 @@ def _from_roles(
         else:
             logger.debug("Ignoring unknown role %r in token", name)
     permissions: frozenset[str] = frozenset().union(*(config.role_permissions(n) for n in held))
-    reach = max((config.roles[n].reach for n in held), key=_REACH_ORDER.get, default=Reach.OWN)
+    reaches = (config.roles[n].reach for n in held)
+    reach = max(reaches, key=_REACH_ORDER.__getitem__, default=Reach.OWN)
     return frozenset(held), permissions, reach
 
 

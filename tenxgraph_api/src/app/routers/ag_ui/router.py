@@ -74,8 +74,8 @@ async def run_ag_ui(
         raise HTTPException(status_code=422, detail=client_error_detail(exc)) from exc
 
     thread_id = normalize_thread_id(run_input.thread_id)
-    named = thread_id not in (None, NEW_THREAD)
-    if not named:
+    named = thread_id is not None and thread_id != NEW_THREAD
+    if thread_id is None or thread_id == NEW_THREAD:
         # The protocol makes threadId required, so a client that wants a server-made thread
         # sends it blank or "new". The new id comes back in RUN_STARTED.
         thread_id = await service.new_thread_id()
