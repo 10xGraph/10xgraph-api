@@ -6,7 +6,6 @@ what an application sends.
 
 A small set of keys is owned by the server instead, and a client must never set them:
 
-- ``authz``   -- the isolation policy and scopes; the trusted copy lives in ``user["authz"]``
 - ``user``    -- the verified identity
 - ``user_id`` -- derived from the verified identity
 - ``remote_tools`` -- per-run client tool schemas the model may call; only protocol adapters
@@ -63,7 +62,6 @@ from tenxgraph_api.src.app.core import logger
 
 RESERVED_CONFIG_KEYS: frozenset[str] = frozenset(
     {
-        "authz",
         "user",
         "user_id",
         "remote_tools",

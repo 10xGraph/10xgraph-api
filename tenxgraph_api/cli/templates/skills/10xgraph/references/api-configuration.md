@@ -20,9 +20,8 @@ Common full shape:
   "store": "graph.dependencies:my_store",
   "injectq": "graph.dependencies:container",
   "thread_name_generator": "graph.thread_name_generator:MyNameGenerator",
-  "authorization": "graph.auth:my_authorization_backend",
   "env": ".env",
-  "auth": "jwt",
+  "auth": { "method": "jwt", "roles": { "admin": { "permissions": ["*"], "reach": "tenant" } } },
   "id_generator": "uuid",
   "remote_tools": [],
   "cache_store": {
@@ -48,11 +47,11 @@ Common full shape:
 - `injectq`: optional import path to an `InjectQ` container.
 - `thread_name_generator`: `"random"` (the default when unset), `"first_message"` (the user's first message, whitespace collapsed, cut to at most 60 characters on a word boundary), `"none"` (threads stay unnamed) or a `module:attr` import path to a `ThreadNameGenerator` class/instance. Every generated name is saved on the thread. See `references/id-and-thread-name-generators.md`.
 - `id_generator`: unset keeps the graph's own generator. A built-in name (`uuid`, `hex`, `short`, `int`, `bigint`, `timestamp`, `snowflake`) or a `module:attr` import path to a `BaseIDGenerator` instance, subclass or zero-argument factory. New thread, message and memory ids all come from it. Set it here or in `StateGraph(id_generator=...)`, not both (the server refuses to start).
-- `authorization`: `null` (mode default: `ownership` in production, `allow_all` in dev), a built-in name (`"ownership"` | `"allow_all"`/`"default"`/`"none"`), an RBAC config object (`{"backend": "rbac", "roles": {...}, "default_scopes": [...], "isolation": "owner"}`), or a `module:attr` import path to a custom `AuthorizationBackend`. See `references/auth-and-authorization.md`.
+
 - `env`: optional `.env` path loaded before graph import.
-- `auth`: `null`, `"jwt"`, or `{"method": "custom", "path": "module:backend"}`.
+- `auth`: `null`, `"jwt"`, or an object: `method` (`none` | `jwt` | `custom`), `path` (custom only, a `BaseAuth` subclass), and the RBAC keys `roles`, `roles_claim`, `permissions_claim`, `tenant_claims`, `default_role`, `system_identities` (refused when auth is off). The top-level `authorization` and `graph_introspection` keys are removed and stop the server at boot. See `references/auth-and-authorization.md`.
 - `remote_tools`: validated client-executed tool schemas, attached once at startup.
-- `cache_store`: one object for the API's cache store and the features it backs. The store holds everything the API shares between workers: run locks and caps, idempotency records, the ownership cache, token revocation and rate-limit counters. Keys:
+- `cache_store`: one object for the API's cache store and the features it backs. The store holds everything the API shares between workers: run locks and caps, idempotency records, token revocation and rate-limit counters. Keys:
   - `type`: `"memory"` (the default when `cache_store` or `type` is absent; one process), `"redis"` (`RedisCacheStore`, also Valkey, Dragonfly, KeyDB; needs `pip install "10xgraph-api[redis]"`) or `"custom"`.
   - `url`: with type `redis` only, optional: leave it out to use the `REDIS_URL` environment variable, or set it to use a different Redis. Supports `$ENV_VAR` / `${ENV_VAR}`; an unset variable is a config error.
   - `path`: with type `custom` only, required. `module:attr` of your own `BaseCacheStore` (an instance or zero-argument factory).
@@ -75,8 +74,8 @@ one warning and the server starts with per-process locks and caps. `GET /health/
 1. Read `10xgraph.json`.
 2. Load `.env` when configured.
 3. Import the compiled graph from `agent`.
-4. Attach `remote_tools`, apply `id_generator`, then import and bind `store`, `injectq`, `thread_name_generator`, the cache store, and `authorization` when configured.
-5. Configure auth.
+4. Attach `remote_tools`, apply `id_generator`, then import and bind `store`, `injectq`, `thread_name_generator` and the cache store.
+5. Validate and configure auth (`check_auth_config`).
 6. Start FastAPI routes and services.
 
 ## Rules

@@ -90,7 +90,7 @@ Agent(
 }
 ```
 
-Set `"auth": {"method": "jwt"}` and `JWT_SECRET_KEY` in `.env` to enable JWT authentication.
+Set `"auth": {"method": "jwt"}` and `JWT_SECRET_KEY` in `.env` to enable JWT authentication. Roles, permissions and reach go in the same `auth` object (`roles`, `roles_claim`, `tenant_claims`, ...); custom rules override `BaseAuth.authorize(identity, permission, resource=None)`. The top-level `authorization` key is removed.
 
 ## Important conventions
 

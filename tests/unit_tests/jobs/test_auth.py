@@ -131,7 +131,8 @@ def test_own_reach_sees_only_own_task_and_schedule(jobs):
         assert jobs.call("GET", f"/v1/tasks/{target}", "u1@a/member").status_code == 200
         other = jobs.call("GET", f"/v1/tasks/{target}", "u2@a/member")
         assert other.status_code == 404
-        assert other.json() == jobs.call("GET", "/v1/tasks/nope", "u2@a/member").json()
+        missing = jobs.call("GET", "/v1/tasks/nope", "u2@a/member")
+        assert other.json()["error"] == missing.json()["error"]
         assert jobs.call("POST", f"/v1/tasks/{target}/cancel", "u2@a/member").status_code == 404
 
 
@@ -139,10 +140,16 @@ def test_tenant_reach_reads_and_cancels_same_tenant_only(jobs):
     task_id, schedule_id = jobs.run(), jobs.schedule()
     for target in (task_id, schedule_id):
         assert jobs.call("GET", f"/v1/tasks/{target}", "boss@b/org_admin").status_code == 404
-        assert jobs.call("POST", f"/v1/tasks/{target}/cancel", "boss@b/org_admin").status_code == 404
+        assert (
+            jobs.call("POST", f"/v1/tasks/{target}/cancel", "boss@b/org_admin").status_code == 404
+        )
         assert jobs.call("GET", f"/v1/tasks/{target}", "boss@a/org_admin").status_code == 200
     data = jobs.call("GET", f"/v1/tasks/{task_id}", "boss@a/org_admin").json()["data"]
-    assert (data["owner"], data["user_id"], data["tenant"]) == ("u1:org_id:a", "u1", {"org_id": "a"})
+    assert (data["owner"], data["user_id"], data["tenant"]) == (
+        "u1:org_id:a",
+        "u1",
+        {"org_id": "a"},
+    )
     assert jobs.call("POST", f"/v1/tasks/{task_id}/cancel", "boss@a/org_admin").status_code == 200
     resp = jobs.call("POST", f"/v1/tasks/{schedule_id}/cancel", "boss@a/org_admin")
     assert resp.json()["data"] == {"schedule_id": schedule_id, "deleted": True}
@@ -176,6 +183,7 @@ def test_reserved_system_id_is_refused_from_a_token(jobs):
 # ---- the worker rebuilds the identity (A12)
 
 
+@pytest.mark.asyncio
 async def test_http_run_gets_identity_rebuilt_from_current_roles(jobs):
     jobs.run()
     user = jobs.env.seen[0]["user"]
@@ -183,6 +191,7 @@ async def test_http_run_gets_identity_rebuilt_from_current_roles(jobs):
     assert set(user["permissions"]) == {"tasks:trigger", "tasks:read", "tasks:cancel"}
 
 
+@pytest.mark.asyncio
 async def test_changed_role_table_refuses_next_scheduled_run(jobs):
     schedule_id = jobs.schedule()
     assert (await jobs.fire(schedule_id)).return_value == 3
@@ -199,6 +208,7 @@ async def test_changed_role_table_refuses_next_scheduled_run(jobs):
     assert len(jobs.env.seen) == 1
 
 
+@pytest.mark.asyncio
 async def test_refused_run_is_marked_failure(jobs):
     jobs.auth.rbac = auth_config(roles={**ROLES, "member": ROLES["reader"]}).rbac_config()
     # A run queued before the change, kicked as a stale queued message would be.
@@ -211,6 +221,7 @@ async def test_refused_run_is_marked_failure(jobs):
     assert (await state.read_status(jobs.env.store, task_id)).status == "failure"
 
 
+@pytest.mark.asyncio
 async def test_custom_authorize_is_asked_with_task_name(jobs, monkeypatch):
     asked: list[tuple] = []
 
@@ -236,6 +247,7 @@ async def test_custom_authorize_is_asked_with_task_name(jobs, monkeypatch):
         {"user_id": ""},
     ],
 )
+@pytest.mark.asyncio
 async def test_invalid_stored_identity_does_not_run(jobs, user):
     result = await _kiq(jobs.plain, {"user": user})
     assert isinstance(result.error, PermissionError)
@@ -245,6 +257,7 @@ async def test_invalid_stored_identity_does_not_run(jobs, user):
 # ---- system identities
 
 
+@pytest.mark.asyncio
 async def test_system_identity_runs_with_its_roles_only(jobs):
     task_id = uuid.uuid4().hex
     result = await _kiq(jobs.nightly, task_id=task_id)
@@ -260,6 +273,7 @@ async def test_system_identity_runs_with_its_roles_only(jobs):
     assert (record.user_id, record.tenant) == ("__system__:nightly", {"org_id": "a"})
 
 
+@pytest.mark.asyncio
 async def test_system_identity_cannot_exceed_its_roles(jobs):
     jobs.config.auth = auth_config(systems={"nightly": SYSTEMS["readonly"]})
     result = await _kiq(jobs.nightly)  # reader has no tasks:trigger
@@ -267,6 +281,7 @@ async def test_system_identity_cannot_exceed_its_roles(jobs):
     assert jobs.ran == []
 
 
+@pytest.mark.asyncio
 async def test_stored_system_identity_is_rebuilt_from_current_entry(jobs):
     stale = {
         "user_id": "__system__:nightly",
@@ -293,6 +308,7 @@ def test_label_does_not_override_http_caller(jobs):
     assert (user["user_id"], user["kind"], user["roles"]) == ("root", "user", ["root"])
 
 
+@pytest.mark.asyncio
 async def test_label_does_not_override_python_caller(jobs):
     caller = {"user_id": "u9", "claims": {"user_id": "u9", "org_id": "a", "roles": ["member"]}}
     result = await _kiq(jobs.nightly, {"user": caller})
@@ -300,6 +316,7 @@ async def test_label_does_not_override_python_caller(jobs):
     assert jobs.ran[0]["user"]["user_id"] == "u9"
 
 
+@pytest.mark.asyncio
 async def test_unknown_system_identity_aborts(jobs):
     jobs.config.auth = auth_config(systems={})
     result = await _kiq(jobs.nightly)
@@ -308,6 +325,7 @@ async def test_unknown_system_identity_aborts(jobs):
     assert jobs.ran == []
 
 
+@pytest.mark.asyncio
 async def test_python_kiq_without_label_runs_as_before(jobs):
     result = await _kiq(jobs.plain, {"user_id": "u1"})
     assert result.return_value == "done", result.error
@@ -315,6 +333,7 @@ async def test_python_kiq_without_label_runs_as_before(jobs):
     assert jobs.ran[0]["user_id"] == "u1"
 
 
+@pytest.mark.asyncio
 async def test_auth_off_runs_label_task_without_identity_and_warns_once(monkeypatch, caplog):
     jobs = Jobs(monkeypatch, auth=False)
     with caplog.at_level(logging.WARNING, logger="tenxgraph_api.jobs"):

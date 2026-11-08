@@ -51,7 +51,7 @@ Treat https://10xgraph.com/ as the first source of truth for public package name
    ### API/CLI SDK
    - CLI commands and generated project files: `references/cli-commands.md`
    - `10xgraph.json` and dependency loading: `references/api-configuration.md`
-   - API auth and authorization: `references/auth-and-authorization.md`
+   - API auth, roles and permissions: `references/auth-and-authorization.md`
    - API environment, settings, and middleware: `references/api-settings-and-middleware.md`
    - Rate limiting (config, backends, headers, custom backend): `references/rate-limiting.md`
    - REST routes and error behavior: `references/rest-api-and-errors.md`

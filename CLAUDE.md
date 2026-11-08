@@ -139,10 +139,18 @@ valid ones (`RATE_LIMIT_KEYS`).
 - **Permissions** come from one registry (`core/auth/permissions_registry.py`): `graph`
   (read, invoke, stream, stop, fix), `threads` (read, write, delete), `store`, `files`
   (read, upload, delete), `config:read`, `tasks`, `admin`; wildcards `resource:*` and `*`.
-  Default set (no roles): everything except `admin:*` and `tasks:pause`. `rbac.py` resolves
+  Default set (no roles): everything except `admin:*`. `rbac.py` resolves
   roles (`RbacConfig`, `resolve`, `InvalidClaimsError`).
 - **Reach** (`own` | `tenant` | `all`) widens reads, lists, deletes and stop only. Runs and
-  state/message writes always stay `own`, admins included.
+  state/message writes always stay `own`, admins included. `/v1/tasks`: GET and cancel widen
+  by reach (`TaskStatus`/`ScheduleRecord` keep the owner's `user_id` and `tenant`); trigger and
+  PATCH stay own.
+- **Jobs worker** (`jobs/middleware.py::_run_identity`): with auth on, each run's
+  `config["user"]` is rebuilt from the stored claims with the current role config, then
+  `authorize(identity, "tasks:trigger", task_name)`; refused or invalid means the run fails
+  without executing. A task label `identity="<name>"` runs calls that have no `config["user"]`
+  as the system identity `__system__:<name>` from `auth.system_identities`; it never replaces
+  a caller's identity. Auth off: nothing changes.
 - **Ownership is enforced in storage** (every query filters by the caller's reach; a foreign
   thread, message, memory, file or run answers 404). No resolver, tombstone or ownership cache.
   Each thread route makes one scoped read, `core/threads.py::require_thread(checkpointer,

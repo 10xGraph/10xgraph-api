@@ -18,7 +18,7 @@ class AgentAuth(BaseAuth):
     Contract:
     - Return a dict with at least ``user_id``. It becomes the thread and memory owner, so it
       must come from the verified credential, never from a header or body field the client
-      sets. Optional ``roles`` / ``scopes`` feed the authorization backend.
+      sets. Roles come from the claim named by ``auth.roles_claim`` in 10xgraph.json.
     - Raise ``HTTPException(status_code=401)`` for a missing, invalid or expired credential.
     """
 
