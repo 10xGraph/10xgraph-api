@@ -12,6 +12,8 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from tenxgraph.core.authz import Identity
+
 from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
 from tenxgraph_api.src.app.core.leases import Lease
 from tenxgraph_api.src.app.routers.graph.run_limits import acquire_run_slot
@@ -24,12 +26,13 @@ from tenxgraph_api.src.app.routers.graph.thread_lock import (
 
 async def acquire_run_guard(
     *,
-    user: dict[str, Any],
+    user: Identity | None,
     runs: RunsConfig,
     thread_id: str | None,
     on_busy: OnBusy = "wait",
     stop: Callable[[], Awaitable[Any]] | None = None,
     is_disconnected: Callable[[], Awaitable[bool]] | None = None,
+    recheck: Callable[[], Awaitable[Any]] | None = None,
 ) -> Lease:
     """Lock ``thread_id`` and take a run slot for ``user``; release both with the one lease.
 
@@ -37,6 +40,10 @@ async def acquire_run_guard(
     once its id exists). Raises ``HTTPException``: 409 when the thread stays busy, 429 over the
     run cap, 499 when ``is_disconnected`` says the client left while waiting. Nothing stays held
     when it raises.
+
+    ``recheck`` runs once the thread is locked: the scoped thread read again
+    (``require_run_thread``), since under ``runs.thread_ids: "client"`` another user may have
+    created the id while this run waited for the lock. What it raises is raised here.
     """
     thread_lock = Lease(None)
     if thread_id is not None:
@@ -44,6 +51,8 @@ async def acquire_run_guard(
             thread_id, on_busy=on_busy, stop=stop, is_disconnected=is_disconnected
         )
     try:
+        if recheck is not None and thread_id is not None:
+            await recheck()
         slot = await acquire_run_slot(user, runs)
     except BaseException:
         thread_lock.release()

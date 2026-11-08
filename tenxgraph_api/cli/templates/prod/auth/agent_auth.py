@@ -1,9 +1,10 @@
 import logging
 from typing import Any
 
-from tenxgraph_api import BaseAuth
 from fastapi import HTTPException, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials
+from tenxgraph.core.authz import Identity
+from tenxgraph_api import BaseAuth
 
 
 logger = logging.getLogger(__name__)
@@ -17,7 +18,7 @@ class AgentAuth(BaseAuth):
     Contract:
     - Return a dict with at least ``user_id``. It becomes the thread and memory owner, so it
       must come from the verified credential, never from a header or body field the client
-      sets. Optional ``roles`` / ``scopes`` feed the authorization backend.
+      sets. Roles come from the claim named by ``auth.roles_claim`` in 10xgraph.json.
     - Raise ``HTTPException(status_code=401)`` for a missing, invalid or expired credential.
     """
 
@@ -44,3 +45,17 @@ class AgentAuth(BaseAuth):
         #
         # Remove the warning in __init__ once this is done.
         raise HTTPException(status_code=401, detail="Authentication is not configured")
+
+    async def authorize(
+        self, identity: Identity, permission: str, resource: str | None = None
+    ) -> bool:
+        """Optional. Delete this method to use the built-in role-based checks.
+
+        Example: let the built-in checks decide, then add a rule of your own, such as a lookup
+        in your database. ``resource`` is the thread id (or other id) the call is about.
+        """
+        if not await super().authorize(identity, permission, resource):
+            return False
+        # if permission == "threads:delete":
+        #     return await my_db.is_thread_owner_or_admin(identity.user_id, resource)
+        return True

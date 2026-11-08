@@ -20,7 +20,6 @@ from tenxgraph_api.cli.config_editor import (
     validate_config,
 )
 from tenxgraph_api.cli.config_editor.schema import (
-    AUTHORIZATION_SCOPES,
     KNOWN_TOP_LEVEL_KEYS,
     section_for_key,
 )
@@ -48,10 +47,18 @@ def test_schema_is_json_and_fields_live_under_their_section() -> None:
             assert field["path"][0] in KNOWN_TOP_LEVEL_KEYS
 
 
-def test_schema_scopes_match_api_scopes() -> None:
-    from tenxgraph_api.src.app.core.auth.authorization import all_scopes
+def test_schema_has_an_auth_tab_and_no_authorization_entry() -> None:
+    sections = {section["id"]: section for section in build_schema()["sections"]}
+    assert "authorization" not in sections
+    assert sections["auth"]["widget"] == "auth"
+    assert sections["auth"]["key"] == "auth"
 
-    assert set(AUTHORIZATION_SCOPES) == set(all_scopes())
+
+def test_schema_serves_the_permission_registry() -> None:
+    from tenxgraph_api.src.app.core.auth.permissions_registry import REGISTRY
+
+    registry = {s["id"]: s for s in build_schema()["sections"]}["auth"]["registry"]
+    assert registry == {resource: list(actions) for resource, actions in REGISTRY.items()}
 
 
 def _fields() -> dict[str, dict]:
@@ -108,7 +115,6 @@ def test_every_env_name_exists_in_the_source_tree() -> None:
 def test_tri_state_fields_have_no_default() -> None:
     fields = _fields()
     for path in (
-        "graph_introspection",
         "websocket.enabled",
         "observability.logfire.console",
     ):
@@ -337,43 +343,81 @@ def test_agent_must_be_an_import_path(value: object) -> None:
     assert _levels(validate_config({"agent": value}), "agent") == ["error"]
 
 
+RBAC = {
+    "method": "jwt",
+    "roles_claim": "roles",
+    "tenant_claims": ["org_id"],
+    "roles": {
+        "member": {"permissions": ["graph:*", "threads:read"], "reach": "own"},
+        "org_admin": {"inherits": ["member"], "permissions": ["admin:read"], "reach": "tenant"},
+    },
+    "default_role": "member",
+    "system_identities": {"nightly": {"roles": ["member"], "tenant": {"org_id": "acme"}}},
+}
+
+
+def _auth_issues(auth: object, **extra: object) -> list[dict]:
+    return validate_config({"agent": "graph.react:app", "auth": auth, **extra})
+
+
 @pytest.mark.parametrize(
     ("auth", "path", "expected"),
     [
         ("jwt", "auth", []),
+        (None, "auth", ["warning"]),
+        ({"method": "none"}, "auth", ["warning"]),
         ("basic", "auth", ["error"]),
         ({"method": "custom", "path": "auth.backend:Auth"}, "auth.path", []),
         ({"method": "custom"}, "auth.path", ["error"]),
-        ({"method": "jwt", "path": "x:y"}, "auth.method", ["error"]),
+        ({"method": "jwt", "path": "x:y"}, "auth.path", ["error"]),
+        ({"method": "none", "roles_claim": "roles"}, "auth", ["error", "warning"]),
         (123, "auth", ["error"]),
     ],
 )
 def test_auth_variants(auth: object, path: str, expected: list[str]) -> None:
-    issues = validate_config({"agent": "graph.react:app", "auth": auth})
-    assert _levels(issues, path) == expected
+    assert _levels(_auth_issues(auth), path) == expected
+
+
+def test_full_rbac_config_is_valid_and_warns_nothing_about_auth() -> None:
+    issues = _auth_issues(RBAC)
+    assert not [i for i in issues if i["section"] == "auth"]
 
 
 @pytest.mark.parametrize(
-    ("authorization", "path", "expected"),
+    ("role", "path"),
     [
-        ("ownership", "authorization", []),
-        ("ALLOW_ALL", "authorization", []),
-        ("auth.perm:Backend", "authorization", []),
-        ("everyone", "authorization", ["error"]),
-        ({"backend": "acl"}, "authorization.backend", ["error"]),
-        ({"backend": "rbac", "roles": {"admin": "*"}}, "authorization.roles.admin", ["error"]),
-        (
-            {"backend": "rbac", "roles": {"a": []}, "isolation": "x"},
-            "authorization.isolation",
-            ["error"],
-        ),
-        ({"backend": "rbac", "roles": {}}, "authorization.roles", ["warning"]),
-        ({"type": "rbac", "role_scopes": {"a": ["graph:read"]}}, "authorization.roles", []),
+        ({"permissions": ["x:y"], "reach": "own"}, "auth.roles.bad"),
+        ({"permissions": [], "reach": "everyone"}, "auth.roles.bad.reach"),
+        ({"permissions": [], "inherits": ["ghost"], "reach": "own"}, "auth.roles.bad"),
+        ({"permissions": [], "reach": "tenant"}, "auth.roles.bad"),
     ],
 )
-def test_authorization_variants(authorization: object, path: str, expected: list[str]) -> None:
-    issues = validate_config({"agent": "graph.react:app", "authorization": authorization})
-    assert _levels(issues, path) == expected
+def test_invalid_role_is_an_error_beside_the_role(role: dict, path: str) -> None:
+    issues = _auth_issues({"method": "jwt", "roles": {"bad": role}})
+    assert "error" in _levels(issues, path)
+    assert all(i["section"] == "auth" for i in issues if i["path"] == path)
+
+
+def test_tenant_reach_without_tenant_claims_is_an_error() -> None:
+    issues = _auth_issues({"method": "jwt", "roles": {"a": {"permissions": [], "reach": "tenant"}}})
+    assert any("tenant_claims" in i["message"] for i in issues if i["level"] == "error")
+
+
+def test_both_permission_sources_is_an_error() -> None:
+    issues = _auth_issues({**RBAC, "permissions_claim": "perms"})
+    assert [i for i in issues if i["level"] == "error" and i["section"] == "auth"]
+
+
+def test_unknown_system_identity_role_is_an_error_at_its_field() -> None:
+    auth = {**RBAC, "system_identities": {"job": {"roles": ["ghost"]}}}
+    assert _levels(_auth_issues(auth), "auth.system_identities.job.roles") == ["error"]
+
+
+def test_old_authorization_key_is_an_error_on_the_auth_tab() -> None:
+    issues = validate_config({"agent": "graph.react:app", "auth": "jwt", "authorization": "x"})
+    found = [i for i in issues if i["path"] == "authorization"]
+    assert [(i["level"], i["section"]) for i in found] == [("error", "auth")]
+    assert not [i for i in issues if "not read by" in i["message"]]
 
 
 def test_websocket_rejects_negative_limit() -> None:
@@ -628,6 +672,32 @@ def test_server_save_flow(editor: ConfigEditorServer) -> None:
     assert body["backup"]
     assert json.loads(editor.store.path.read_text()) == config
     assert list(body["config"]) == ["agent", "custom", "auth"]
+
+
+def test_server_refuses_to_save_an_invalid_role(editor: ConfigEditorServer) -> None:
+    _, state = _request(editor, "GET", "/api/state")
+    bad = {"method": "jwt", "roles": {"x": {"permissions": ["nope:read"], "reach": "own"}}}
+    status, body = _request(
+        editor,
+        "POST",
+        "/api/save",
+        {"config": {**state["config"], "auth": bad}, "version": state["version"]},
+    )
+    assert status == 422
+    assert any(i["path"] == "auth.roles.x" for i in body["issues"])
+
+
+def test_server_round_trips_a_full_rbac_config(editor: ConfigEditorServer) -> None:
+    _, state = _request(editor, "GET", "/api/state")
+    config = {**state["config"], "auth": RBAC}
+    status, body = _request(
+        editor, "POST", "/api/save", {"config": config, "version": state["version"]}
+    )
+    assert status == 200
+    assert json.loads(editor.store.path.read_text())["auth"] == RBAC
+    _, reloaded = _request(editor, "GET", "/api/state")
+    assert reloaded["config"]["auth"] == RBAC
+    assert not [i for i in reloaded["issues"] if i["level"] == "error"]
 
 
 # ---------------------------------------------------------------------------

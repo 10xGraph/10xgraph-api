@@ -20,7 +20,7 @@ def _protected_app() -> FastAPI:
     @app.get("/v1/threads/{thread_id}/state")
     async def _state(
         thread_id: str,
-        user: dict[str, Any] = Depends(RequirePermission("checkpointer", "read")),
+        user: dict[str, Any] = Depends(RequirePermission("threads", "read")),
     ):
         return {}
 
@@ -37,7 +37,7 @@ def _leaky_app() -> FastAPI:
     @app.get("/v1/threads/{thread_id}/state")
     async def _state(
         thread_id: str,
-        user: dict[str, Any] = Depends(RequirePermission("checkpointer", "read")),
+        user: dict[str, Any] = Depends(RequirePermission("threads", "read")),
     ):
         return {}
 

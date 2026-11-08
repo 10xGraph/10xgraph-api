@@ -7,7 +7,7 @@ import {
 } from "./store.js";
 import { Callout, Icon, IssueCallout, Segmented } from "./ui.jsx";
 import {
-  AuthWidget, AuthorizationWidget, CacheStoreWidget, ChoiceWidget, RemoteToolsWidget,
+  AuthWidget, CacheStoreWidget, ChoiceWidget, RemoteToolsWidget,
 } from "./widgets.jsx";
 
 const Heading = ({ children, code }) => (
@@ -48,10 +48,11 @@ function offText(id) {
 
 function authSummary() {
   const a = store.config.auth;
-  if (a === undefined || a === null) return { text: offText("auth") };
-  if (a === "jwt") return { text: "JWT bearer tokens." };
-  if (a && typeof a === "object") return { text: `Custom backend${a.path ? `: ${a.path}` : "."}` };
-  return { text: String(a) };
+  const method = a === "jwt" ? "jwt" : isObject(a) ? a.method ?? "none" : "none";
+  if (method === "none") return { text: offText("auth") };
+  const roles = isObject(a) && isObject(a.roles) ? Object.keys(a.roles).length : 0;
+  const base = method === "jwt" ? "JWT bearer tokens" : `Custom backend${a.path ? `: ${a.path}` : ""}`;
+  return { text: `${base}${roles ? `, ${roles} ${roles === 1 ? "role" : "roles"}` : ""}.` };
 }
 
 function cacheSummary() {
@@ -150,8 +151,7 @@ function EnvDisclosure({ vars, open }) {
 }
 
 function SectionWidget({ sec }) {
-  if (sec.widget === "auth") return <AuthWidget />;
-  if (sec.widget === "authorization") return <AuthorizationWidget sec={sec} />;
+  if (sec.widget === "auth") return <AuthWidget sec={sec} />;
   if (sec.widget === "remote_tools") return <RemoteToolsWidget />;
   if (sec.widget === "cache_store") return <CacheStoreWidget sec={sec} />;
   if (sec.widget === "id_generator" || sec.widget === "thread_name_generator") return <ChoiceWidget sec={sec} />;
@@ -162,7 +162,11 @@ function SectionWidget({ sec }) {
 export function generalIssues(sec) {
   const inline = new Set([...sec.fields.map((f) => f.path.join(".")), ...Object.keys(WIDGET_FIELD_IDS)]);
   const tabbed = new Set(["cache_store.rate_limit", "cache_store.token_revocation"]);
-  return issuesFor(sec.id).filter((i) => !inline.has(i.path) && !(sec.id === "cache_store" && tabbed.has(i.path)));
+  // The Auth widget shows issues for its roles and system identities beside their rows.
+  const authRow = (path) => path.startsWith("auth.roles.") || path.startsWith("auth.system_identities.");
+  return issuesFor(sec.id).filter(
+    (i) => !inline.has(i.path) && !(sec.id === "cache_store" && tabbed.has(i.path)) && !(sec.id === "auth" && authRow(i.path)),
+  );
 }
 
 // Fields and widget of a section, no heading. Shared by the page and search results.

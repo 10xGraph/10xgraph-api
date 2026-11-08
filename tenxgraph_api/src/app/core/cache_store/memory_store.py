@@ -14,8 +14,8 @@ whose feature segment is in ``protected_features`` (default ``concurrency``, eve
 thread locks, run and WebSocket caps, idempotency running state; and ``revoked``, so a revoked
 token cannot come back). They are bounded by real work in flight and by admin calls, not by
 anonymous traffic. If only protected entries are left, the table grows past its cap (with the
-warning) rather than break a lock. Everything else (rate-limit windows, idempotency records,
-ownership cache entries) may be dropped before its TTL at the cap.
+warning) rather than break a lock. Everything else (rate-limit windows, idempotency records)
+may be dropped before its TTL at the cap.
 
 Expired entries are swept in the background every ``SWEEP_EVERY_OPS`` operations or
 ``SWEEP_INTERVAL_SECONDS`` seconds, whichever comes first, in batches that yield to the loop.

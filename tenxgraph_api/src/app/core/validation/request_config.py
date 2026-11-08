@@ -6,7 +6,6 @@ what an application sends.
 
 A small set of keys is owned by the server instead, and a client must never set them:
 
-- ``authz``   -- the isolation policy and scopes; the trusted copy lives in ``user["authz"]``
 - ``user``    -- the verified identity
 - ``user_id`` -- derived from the verified identity
 - ``remote_tools`` -- per-run client tool schemas the model may call; only protocol adapters
@@ -63,7 +62,6 @@ from tenxgraph_api.src.app.core import logger
 
 RESERVED_CONFIG_KEYS: frozenset[str] = frozenset(
     {
-        "authz",
         "user",
         "user_id",
         "remote_tools",
@@ -448,9 +446,9 @@ def normalize_thread_id(value: Any) -> str | None:
 def owned_thread_info(config: dict[str, Any], thread_id: Any, **fields: Any) -> Any:
     """A ``ThreadInfo`` for ``thread_id`` that names the caller in ``config`` as its owner.
 
-    The in-memory and SQLite checkpointers answer ``aget_thread_owner`` from the stored
-    ``ThreadInfo.user_id``, so a thread saved without it has no owner and ownership checks
-    cannot protect it. Every thread the API saves goes through here.
+    Storage records the caller in ``config`` as the owner of a new thread whatever
+    ``user_id`` says; this keeps the saved ``ThreadInfo`` consistent with that owner. Every
+    thread the API saves goes through here.
     """
     from tenxgraph.utils.thread_info import ThreadInfo
 

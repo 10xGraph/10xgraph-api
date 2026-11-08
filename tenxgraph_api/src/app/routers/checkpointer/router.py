@@ -1,16 +1,16 @@
 """Checkpointer router module."""
 
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from injectq.integrations import InjectAPI
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import Message
 
-from tenxgraph_api.src.app.core.auth.client_filters import parse_filters_param
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
-from tenxgraph_api.src.app.core.auth.request_config import client_config
 from tenxgraph_api.src.app.core.config.settings import get_settings
-from tenxgraph_api.src.app.routers.graph.thread_lock import thread_write_guard
+from tenxgraph_api.src.app.core.validation.client_filters import parse_filters_param
+from tenxgraph_api.src.app.core.validation.request_config import client_config
 from tenxgraph_api.src.app.utils.parse_output import parse_message_output
 from tenxgraph_api.src.app.utils.response_helper import success_response
 from tenxgraph_api.src.app.utils.swagger_helper import generate_swagger_responses
@@ -19,7 +19,6 @@ from .schemas.checkpointer_schemas import (
     ConfigSchema,
     FeedbackSchema,
     MessagesListResponseSchema,
-    PutMessagesSchema,
     ResponseSchema,
     StateResponseSchema,
     StateSchema,
@@ -66,7 +65,7 @@ async def get_state(
     request: Request,
     thread_id: int | str,
     service: CheckpointerService = InjectAPI(CheckpointerService),
-    user: dict[str, Any] = Depends(RequirePermission("checkpointer", "read")),
+    identity: Identity | None = Depends(RequirePermission("threads", "read")),
 ):
     """Get state from checkpointer.
 
@@ -83,7 +82,7 @@ async def get_state(
 
     result = await service.get_state(
         config,
-        user,
+        identity,
     )
 
     return success_response(
@@ -104,7 +103,7 @@ async def put_state(
     thread_id: str | int,
     payload: StateSchema,
     service: CheckpointerService = InjectAPI(CheckpointerService),
-    user: dict[str, Any] = Depends(RequirePermission("checkpointer", "write")),
+    identity: Identity | None = Depends(RequirePermission("threads", "write")),
 ):
     """Put state to checkpointer.
 
@@ -112,22 +111,21 @@ async def put_state(
         request: Request object
         payload: Put state schema with configuration and state data
         service: Injected checkpointer service
-        user: Current authenticated user
+        identity: The caller, or None when auth is off
 
     Returns:
         Success response or error
     """
     validate_thread_id(thread_id)
-    # The path thread_id is the one RequirePermission checked; it is applied last so the
-    # body config cannot redirect the call to another thread.
+    # The path thread_id is applied last so the body config cannot redirect the call to
+    # another thread.
     config = {**client_config(payload.config), "thread_id": thread_id}
 
-    async with thread_write_guard(thread_id):
-        res = await service.put_state(
-            config,
-            user,
-            payload.state,
-        )
+    res = await service.put_state(
+        config,
+        identity,
+        payload.state,
+    )
 
     return success_response(
         res,
@@ -146,7 +144,7 @@ async def clear_state(
     request: Request,
     thread_id: int | str,
     service: CheckpointerService = InjectAPI(CheckpointerService),
-    user: dict[str, Any] = Depends(RequirePermission("checkpointer", "delete")),
+    identity: Identity | None = Depends(RequirePermission("threads", "delete")),
 ):
     """Clear state from checkpointer.
 
@@ -154,7 +152,7 @@ async def clear_state(
         request: Request object
         payload: Clear state schema with configuration
         service: Injected checkpointer service
-        user: Current authenticated user
+        identity: The caller, or None when auth is off
 
     Returns:
         Success response or error
@@ -162,11 +160,10 @@ async def clear_state(
     validate_thread_id(thread_id)
     config = {"thread_id": thread_id}
 
-    async with thread_write_guard(thread_id):
-        res = await service.clear_state(
-            config,
-            user,
-        )
+    res = await service.clear_state(
+        config,
+        identity,
+    )
 
     return success_response(
         res,
@@ -175,59 +172,6 @@ async def clear_state(
 
 
 # Now Handle Messages
-
-
-@router.post(
-    "/v1/threads/{thread_id}/messages",
-    status_code=status.HTTP_200_OK,
-    responses=generate_swagger_responses(ResponseSchema),
-    summary="Import messages into a thread (admin)",
-    description=(
-        "Append messages of any role to a thread, to import history. Admin only: the caller "
-        "must hold the `checkpointer:import` scope explicitly (an identity with no scopes is "
-        "refused). Tool calls are still refused."
-    ),
-)
-async def put_messages(
-    request: Request,
-    thread_id: str | int,
-    payload: PutMessagesSchema,
-    service: CheckpointerService = InjectAPI(CheckpointerService),
-    user: dict[str, Any] = Depends(
-        RequirePermission("checkpointer", "import", explicit_scope=True)
-    ),
-):
-    """Put messages to checkpointer.
-
-    Args:
-        request: Request object
-        payload: Put messages schema with configuration and messages
-        service: Injected checkpointer service
-        user: Current authenticated user
-
-    Returns:
-        Success response or error
-    """
-    validate_thread_id(thread_id)
-    if not payload.messages:
-        raise HTTPException(status_code=422, detail="messages must not be empty")
-
-    # The path thread_id is the one RequirePermission checked; it is applied last so the
-    # body config cannot redirect the call to another thread.
-    config = {**client_config(payload.config), "thread_id": thread_id}
-
-    async with thread_write_guard(thread_id):
-        res = await service.put_messages(
-            config,
-            user,
-            payload.messages,
-            payload.metadata,
-        )
-
-    return success_response(
-        res,
-        request,
-    )
 
 
 @router.get(
@@ -244,7 +188,7 @@ async def get_message(
     thread_id: str | int,
     message_id: str | int,
     service: CheckpointerService = InjectAPI(CheckpointerService),
-    user: dict[str, Any] = Depends(RequirePermission("checkpointer", "read")),
+    identity: Identity | None = Depends(RequirePermission("threads", "read")),
 ):
     """Get message from checkpointer.
 
@@ -252,7 +196,7 @@ async def get_message(
         request: Request object
         payload: Get message schema with configuration and message ID
         service: Injected checkpointer service
-        user: Current authenticated user
+        identity: The caller, or None when auth is off
 
     Returns:
         Message response with message data or error
@@ -265,7 +209,7 @@ async def get_message(
 
     result = await service.get_message(
         config,
-        user,
+        identity,
         message_id,
     )
 
@@ -292,7 +236,7 @@ async def put_message_feedback(
     message_id: str | int,
     payload: FeedbackSchema,
     service: CheckpointerService = InjectAPI(CheckpointerService),
-    user: dict[str, Any] = Depends(RequirePermission("checkpointer", "write")),
+    identity: Identity | None = Depends(RequirePermission("threads", "write")),
 ):
     """Set feedback on a message.
 
@@ -300,7 +244,7 @@ async def put_message_feedback(
         request: Request object
         payload: Feedback schema with the feedback object
         service: Injected checkpointer service
-        user: Current authenticated user
+        identity: The caller, or None when auth is off
 
     Returns:
         The updated message, or 404 when the thread has no such message
@@ -311,7 +255,7 @@ async def put_message_feedback(
 
     result = await service.update_message_feedback(
         {"thread_id": thread_id},
-        user,
+        identity,
         message_id,
         payload.feedback,
     )
@@ -337,7 +281,7 @@ async def list_messages(
     offset: int | None = None,
     limit: int | None = None,
     service: CheckpointerService = InjectAPI(CheckpointerService),
-    user: dict[str, Any] = Depends(RequirePermission("checkpointer", "read")),
+    identity: Identity | None = Depends(RequirePermission("threads", "read")),
 ):
     """List messages from checkpointer.
 
@@ -345,7 +289,7 @@ async def list_messages(
         request: Request object
         payload: List messages schema with configuration and optional filters
         service: Injected checkpointer service
-        user: Current authenticated user
+        identity: The caller, or None when auth is off
 
     Returns:
         Messages list response with messages data or error
@@ -360,7 +304,7 @@ async def list_messages(
 
     result = await service.get_messages(
         config,
-        user,
+        identity,
         search,
         offset,
         _clamp_limit(limit),
@@ -385,7 +329,7 @@ async def delete_message(
     thread_id: str | int,
     payload: ConfigSchema,
     service: CheckpointerService = InjectAPI(CheckpointerService),
-    user: dict[str, Any] = Depends(RequirePermission("checkpointer", "delete")),
+    identity: Identity | None = Depends(RequirePermission("threads", "delete")),
 ):
     """Delete message from checkpointer.
 
@@ -393,7 +337,7 @@ async def delete_message(
         request: Request object
         payload: Delete message schema with configuration and message ID
         service: Injected checkpointer service
-        user: Current authenticated user
+        identity: The caller, or None when auth is off
 
     Returns:
         Success response or error
@@ -402,16 +346,15 @@ async def delete_message(
     if not message_id or (isinstance(message_id, str) and not str(message_id).strip()):
         raise HTTPException(status_code=422, detail="message_id is required and cannot be empty")
 
-    # The path thread_id is the one RequirePermission checked; it is applied last so the
-    # body config cannot redirect the call to another thread.
+    # The path thread_id is applied last so the body config cannot redirect the call to
+    # another thread.
     config = {**client_config(payload.config), "thread_id": thread_id}
 
-    async with thread_write_guard(thread_id):
-        await service.delete_message(
-            config,
-            user,
-            message_id,
-        )
+    await service.delete_message(
+        config,
+        identity,
+        message_id,
+    )
 
     return success_response(
         {"success": True, "message": "Message deleted successfully"},
@@ -433,7 +376,7 @@ async def get_thread(
     request: Request,
     thread_id: str | int,
     service: CheckpointerService = InjectAPI(CheckpointerService),
-    user: dict[str, Any] = Depends(RequirePermission("checkpointer", "read")),
+    identity: Identity | None = Depends(RequirePermission("threads", "read")),
 ):
     """Get thread from checkpointer.
 
@@ -441,7 +384,7 @@ async def get_thread(
         request: Request object
         payload: Get thread schema with configuration and thread ID
         service: Injected checkpointer service
-        user: Current authenticated user
+        identity: The caller, or None when auth is off
 
     Returns:
         Thread response with thread data or error
@@ -449,7 +392,7 @@ async def get_thread(
     validate_thread_id(thread_id)
     result = await service.get_thread(
         {"thread_id": thread_id},
-        user,
+        identity,
     )
 
     return success_response(
@@ -483,7 +426,7 @@ async def list_threads(
         ),
     ] = None,
     service: CheckpointerService = InjectAPI(CheckpointerService),
-    user: dict[str, Any] = Depends(RequirePermission("checkpointer", "read")),
+    identity: Identity | None = Depends(RequirePermission("threads", "read")),
 ):
     """List threads from checkpointer.
 
@@ -491,7 +434,7 @@ async def list_threads(
         request: Request object
         payload: List threads schema with configuration and optional filters
         service: Injected checkpointer service
-        user: Current authenticated user
+        identity: The caller, or None when auth is off
 
     Returns:
         Threads list response with threads data or error
@@ -502,7 +445,7 @@ async def list_threads(
         raise HTTPException(status_code=422, detail="offset must be >= 0")
 
     result = await service.list_threads(
-        user,
+        identity,
         search,
         offset,
         _clamp_limit(limit),
@@ -527,7 +470,7 @@ async def delete_thread(
     thread_id: str | int,
     payload: ConfigSchema,
     service: CheckpointerService = InjectAPI(CheckpointerService),
-    user: dict[str, Any] = Depends(RequirePermission("checkpointer", "delete")),
+    identity: Identity | None = Depends(RequirePermission("threads", "delete")),
 ):
     """Delete thread from checkpointer.
 
@@ -535,22 +478,21 @@ async def delete_thread(
         request: Request object
         payload: Delete thread schema with configuration and thread ID
         service: Injected checkpointer service
-        user: Current authenticated user
+        identity: The caller, or None when auth is off
 
     Returns:
         Success response or error
     """
     validate_thread_id(thread_id)
-    # The path thread_id is the one RequirePermission checked; it is applied last so the
-    # body config cannot redirect the call to another thread.
+    # The path thread_id is applied last so the body config cannot redirect the call to
+    # another thread.
     config = {**client_config(payload.config), "thread_id": thread_id}
 
-    async with thread_write_guard(thread_id):
-        res = await service.delete_thread(
-            config,
-            user,
-            thread_id,
-        )
+    res = await service.delete_thread(
+        config,
+        identity,
+        thread_id,
+    )
 
     return success_response(
         res,

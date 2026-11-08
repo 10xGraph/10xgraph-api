@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from injectq import InjectQ
+from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.core.auth import revocation
 from tenxgraph_api.src.app.core.auth.revocation import (
@@ -154,7 +155,7 @@ async def test_ws_run_gate_closes_on_revocation(monkeypatch, revoked):
     websocket.send_text = AsyncMock()
     websocket.close = AsyncMock()
 
-    assert await graph_router._ws_run_gate(websocket, {"user_id": "a"}) == "close"
+    assert await graph_router._ws_run_gate(websocket, Identity(user_id="a")) == "close"
     websocket.close.assert_awaited_once_with(code=1008)
 
 

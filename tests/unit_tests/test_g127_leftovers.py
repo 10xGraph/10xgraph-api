@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from tenxgraph_api.src.app.core.auth.request_config import (
+from tenxgraph_api.src.app.core.validation.request_config import (
     MAX_CONTAINER_ITEMS,
     MAX_DICT_KEYS,
     structure_error,
@@ -71,8 +71,8 @@ async def test_ws_frame_with_a_bad_thread_id_gets_an_error_frame_and_skip():
     )
     websocket = MagicMock()
     websocket.send_text = AsyncMock()
-    skipped = await graph_router._next_ws_input(frames, websocket, 1_000_000, {})
+    skipped = await graph_router._next_ws_input(frames, websocket, 1_000_000, None)
     assert skipped is graph_router._WS_SKIP
     assert "thread_id" in websocket.send_text.await_args.args[0]
-    ok = await graph_router._next_ws_input(frames, websocket, 1_000_000, {})
+    ok = await graph_router._next_ws_input(frames, websocket, 1_000_000, None)
     assert ok.config["thread_id"] == "new"

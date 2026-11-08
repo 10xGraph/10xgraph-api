@@ -1,4 +1,4 @@
-"""Tenant isolation through the API: per-user isolation scopes, thread scopes and filters.
+"""Tenant isolation through the API: reach, tenant values and client filters.
 
 Two tenants hold a user with the same ``user_id`` (``alice`` in ``org-a`` and in ``org-b``).
 Every route family must keep them apart, the tenant always coming from the authenticated
@@ -6,8 +6,8 @@ identity (``config["user"]``) and never from request config or ``filters``.
 
 The checkpointer and store here are small in-memory stand-ins for ``PgCheckpointer`` /
 ``PgVectorStore`` with ``tenant_columns=["org_id"]``. They resolve values and isolation with
-the real core helpers (``ColumnSet.resolve``, ``isolation_columns``, ``isolation_conditions``,
-``validate_filters``), so what is tested is the API's side of the core contract.
+the real core helpers (``ColumnSet.resolve``, ``owner_filter``, ``validate_filters``), so what
+is tested is the API's side of the core contract.
 """
 
 from __future__ import annotations
@@ -19,76 +19,68 @@ from uuid import uuid4
 
 import anyio
 import pytest
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
-from injectq import InjectQ
-from injectq.integrations.fastapi import setup_fastapi
-from tenxgraph.core.authz import build_authz, isolation_columns
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from tenxgraph.core.authz import Identity, Reach, owner_filter
 from tenxgraph.core.state import AgentState, Message
-from tenxgraph.storage.checkpointer import BaseCheckpointer, InMemoryCheckpointer
-from tenxgraph.storage.columns import isolation_conditions, parse_columns
+from tenxgraph.storage.checkpointer import InMemoryCheckpointer
+from tenxgraph.storage.columns import parse_columns
 from tenxgraph.storage.sql_filter import FilterError, FilterSchema, validate_filters
 from tenxgraph.storage.store import BaseStore, MemorySearchResult
 from tenxgraph.utils.thread_info import ThreadInfo
 
-from tenxgraph_api.src.app.core.auth.authorization import (
-    AuthorizationBackend,
-    OwnershipAuthorizationBackend,
-)
 from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
+from tenxgraph_api.src.app.core.auth.rbac import RbacConfig, RoleConfig
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.core.config.settings import get_settings
-from tenxgraph_api.src.app.core.config.setup_middleware import setup_middleware
-from tenxgraph_api.src.app.core.exceptions.handle_errors import init_errors_handler
 from tenxgraph_api.src.app.routers.checkpointer.router import router as checkpointer_router
 from tenxgraph_api.src.app.routers.store.router import router as store_router
 
-from .conftest import make_client
+from .conftest import ClientThreadIdsConfig, build_app, make_client
 
 
 HTTP_OK = 200
-HTTP_FORBIDDEN = 403
+HTTP_UNAUTHORIZED = 401
+HTTP_NOT_FOUND = 404
 HTTP_UNPROCESSABLE = 422
 
 
 # ---------------------------------------------------------------------------
-# Auth, authorization and storage stand-ins
+# Auth and storage stand-ins
 # ---------------------------------------------------------------------------
 
 
 class TenantAuth(BaseAuth):
-    """Identity from headers: ``X-Test-User``, ``X-Test-Org`` and ``X-Test-Role``."""
+    """Claims from headers: ``X-Test-User``, ``X-Test-Org`` and ``X-Test-Role``.
+
+    ``org_admin`` has reach ``tenant`` (every thread and memory of the org); everyone else
+    has reach ``own``.
+    """
+
+    rbac = RbacConfig(
+        tenant_claims=["org_id"],
+        roles={
+            "member": RoleConfig(permissions=["*"], reach=Reach.OWN),
+            "org_admin": RoleConfig(permissions=["*"], reach=Reach.TENANT),
+        },
+        default_role="member",
+    )
 
     def authenticate(self, request: Request, response: Response, credential: Any) -> dict:
         user_id = request.headers.get("X-Test-User")
         if not user_id:
             raise HTTPException(status_code=401, detail="X-Test-User header required")
-        user: dict[str, Any] = {"user_id": user_id}
+        claims: dict[str, Any] = {"user_id": user_id}
         if org := request.headers.get("X-Test-Org"):
-            user["org_id"] = org
+            claims["org_id"] = org
         if role := request.headers.get("X-Test-Role"):
-            user["role"] = role
-        return user
+            claims["roles"] = [role]
+        return claims
 
 
-class TenantAuthz(OwnershipAuthorizationBackend):
-    """Owner scope for everyone; an org admin sees every thread and memory of the org."""
-
-    def isolation_scope(self, user=None):
-        if user and user.get("role") == "org_admin":
-            return ["org_id"]
-        return "owner"
-
-
-class _AuthOn:
-    def auth_config(self) -> str:
-        return "custom"
-
-
-def _seed_cfg(thread_id: str, user_id: str, org_id: str) -> dict[str, Any]:
-    user = {"user_id": user_id, "org_id": org_id}
-    user["authz"] = build_authz(user_id, scope="owner")
-    return {"thread_id": thread_id, "user_id": user_id, "user": user}
+def _seed_cfg(thread_id: str, user_id: str, org_id: str, plan: str = "pro") -> dict[str, Any]:
+    identity = Identity(user_id=user_id, tenant={"org_id": org_id}, claims={"plan": plan})
+    return {"thread_id": thread_id, "user_id": user_id, "user": identity}
 
 
 class TenantCheckpointer(InMemoryCheckpointer):
@@ -100,29 +92,33 @@ class TenantCheckpointer(InMemoryCheckpointer):
         self.tenant_column_names = self.columns.tenant_names
         self.filter_schema = FilterSchema.for_threads(self.columns)
         self.rows: dict[str, dict[str, Any]] = {}
-        self.scope_lookups = 0
         self.list_calls: list[Any] = []
 
     async def aput_thread(self, config, thread_info):
         # Values come from config["user"] only and are set once, at creation.
         values = self.columns.resolve(config, write=True)
-        self.rows.setdefault(str(config["thread_id"]), values)
+        row = {"user_id": str(config["user_id"]), **values}
+        self.rows.setdefault(str(config["thread_id"]), row)
         return await super().aput_thread(config, thread_info)
 
     async def aget_thread_scope(self, thread_id):
-        self.scope_lookups += 1
         owner = await self.aget_thread_owner(thread_id)
         if owner is None:
             return None
         return {"user_id": owner, "org_id": self.rows.get(str(thread_id), {}).get("org_id")}
 
     def _visible(self, config, thread_id) -> bool:
-        picked = isolation_columns(config, self.tenant_column_names)
-        conditions = isolation_conditions(
-            self.columns.scope_specs(picked), self.columns.resolve(config)
-        )
-        row = self.rows.get(str(thread_id), {})
-        return all(row.get(spec.name) == value for spec, value in conditions)
+        """Whether the row passes the caller's reach; a missing row is visible (brand new)."""
+        filters = owner_filter(config, self.tenant_column_names)
+        row = self.rows.get(str(thread_id))
+        if filters is None or row is None:
+            return True
+        return all(row.get(column) == value for column, value in filters.items())
+
+    async def aput_state(self, config, state):
+        if not self._visible(config, config.get("thread_id")):
+            raise PermissionError("thread belongs to another tenant")
+        return await super().aput_state(config, state)
 
     async def aget_thread(self, config):
         if not self._visible(config, config.get("thread_id")):
@@ -143,6 +139,14 @@ class TenantCheckpointer(InMemoryCheckpointer):
         if not self._visible(config, config.get("thread_id")):
             return []
         return await super().alist_messages(config, search, offset, limit)
+
+    async def aclean_thread(self, config):
+        if not self._visible(config, config.get("thread_id")):
+            return 0
+        deleted = await super().aclean_thread(config)
+        if deleted:  # the id is free again, for anyone
+            self.rows.pop(str(config["thread_id"]), None)
+        return deleted
 
     async def alist_threads(self, config, search=None, offset=None, limit=None, filters=None):
         self.list_calls.append(filters)
@@ -169,15 +173,10 @@ class TenantStore:
         self.calls: list[str] = []
 
     def _match(self, config, row) -> bool:
-        picked = isolation_columns(config, self.tenant_column_names)
-        if picked is None:
-            picked = ("user_id", *self.tenant_column_names)
-        if "user_id" in picked and row["user_id"] != str(config.get("user_id")):
-            return False
-        conditions = isolation_conditions(
-            self.columns.scope_specs(picked), self.columns.resolve(config)
-        )
-        return all(row[spec.name] == value for spec, value in conditions)
+        filters = owner_filter(config, self.tenant_column_names)
+        if filters is None:
+            filters = {"user_id": str(config["user_id"])}
+        return all(row[column] == value for column, value in filters.items())
 
     def _narrow(self, rows, filters):
         filters = filters or {}
@@ -250,42 +249,31 @@ class TenantStore:
 
 
 def _probe_router() -> APIRouter:
-    """Stand-ins for invoke / stream: the real permission check, then the stamped authz."""
+    """Stand-ins for invoke / stream: the real permission check, then the identity echoed."""
     probe = APIRouter()
 
     @probe.post("/v1/graph/invoke")
-    async def _invoke(payload: dict, user: dict = Depends(RequirePermission("graph", "invoke"))):
-        return {"authz": user.get("authz")}
-
-    @probe.post("/v1/graph/stream")
-    async def _stream(payload: dict, user: dict = Depends(RequirePermission("graph", "stream"))):
-        return {"authz": user.get("authz")}
+    async def _invoke(
+        payload: dict, identity: Identity = Depends(RequirePermission("graph", "invoke"))
+    ):
+        return {"reach": identity.reach, "tenant": identity.tenant}
 
     return probe
 
 
 def _app(
-    *,
-    checkpointer: Any = None,
-    store: Any = None,
-    authz: AuthorizationBackend | None = None,
+    *, checkpointer: Any = None, store: Any = None, client_ids: bool = False
 ) -> tuple[Any, TenantCheckpointer]:
     checkpointer = checkpointer if checkpointer is not None else TenantCheckpointer()
-    app = FastAPI()
-    setup_middleware(app)
-    init_errors_handler(app)
-    container = InjectQ()
-    container.bind_instance(GraphConfig, _AuthOn())
-    container.bind_instance(BaseAuth, TenantAuth())
-    container.bind_instance(
-        AuthorizationBackend,
-        authz if authz is not None else TenantAuthz(checkpointer=checkpointer),
+    bindings: dict[type, Any] = {BaseStore: store if store is not None else TenantStore()}
+    if client_ids:  # runs.thread_ids "client": PUT state may name a new thread
+        bindings[GraphConfig] = ClientThreadIdsConfig()
+    app = build_app(
+        routers=[checkpointer_router, store_router, _probe_router()],
+        auth=TenantAuth(),
+        checkpointer=checkpointer,
+        extra_bindings=bindings,
     )
-    container.bind_instance(BaseCheckpointer, checkpointer)
-    container.bind_instance(BaseStore, store if store is not None else TenantStore())
-    setup_fastapi(container, app)
-    for router in (checkpointer_router, store_router, _probe_router()):
-        app.include_router(router)
     return make_client(app), checkpointer
 
 
@@ -309,8 +297,7 @@ def _seed_two_tenants(cp: TenantCheckpointer) -> None:
         ("t-b", "alice", "org-b", "pro"),
         ("t-bob", "bob", "org-a", "free"),
     ):
-        cfg = _seed_cfg(thread_id, user, org)
-        cfg["user"]["plan"] = plan
+        cfg = _seed_cfg(thread_id, user, org, plan)
         anyio.run(cp.aput_thread, cfg, ThreadInfo(thread_id=thread_id, user_id=user))
         anyio.run(cp.aput_state, cfg, AgentState(context=[Message.text_message(f"hi {org}")]))
         anyio.run(cp.aput_messages, cfg, [Message.text_message(f"secret of {org}")])
@@ -335,76 +322,71 @@ def test_thread_listing_keeps_two_tenants_with_the_same_user_id_apart():
     assert _listed(client, ALICE_B) == {"t-b"}
 
 
-@pytest.mark.parametrize(
-    "path", ["/v1/threads/{t}", "/v1/threads/{t}/state", "/v1/threads/{t}/messages"]
-)
-def test_thread_reads_refuse_the_other_tenant(path):
+def test_thread_reads_show_nothing_of_the_other_tenant():
     client, cp = _app()
     _seed_two_tenants(cp)
 
-    assert client.get(path.format(t="t-a"), headers=ALICE_A).status_code == HTTP_OK
-    assert client.get(path.format(t="t-b"), headers=ALICE_B).status_code == HTTP_OK
-    assert client.get(path.format(t="t-b"), headers=ALICE_A).status_code == HTTP_FORBIDDEN
-    assert client.get(path.format(t="t-a"), headers=ALICE_B).status_code == HTTP_FORBIDDEN
+    def read(thread_id, path, headers):
+        resp = client.get(f"/v1/threads/{thread_id}{path}", headers=headers)
+        assert resp.status_code == HTTP_OK, resp.text
+        return resp.json()["data"]
+
+    def status(thread_id, path, headers):
+        return client.get(f"/v1/threads/{thread_id}{path}", headers=headers).status_code
+
+    assert read("t-a", "", ALICE_A)["thread_data"]["thread"] is not None
+    assert read("t-a", "/state", ALICE_A)["state"] is not None
+    assert read("t-a", "/messages", ALICE_A)["messages"]
+    for path in ("", "/state", "/messages"):
+        assert status("t-b", path, ALICE_A) == HTTP_NOT_FOUND
+        assert status("t-a", path, ALICE_B) == HTTP_NOT_FOUND
 
 
-def test_thread_writes_and_deletes_refuse_the_other_tenant():
+def test_thread_writes_and_deletes_do_not_touch_the_other_tenant():
     client, cp = _app()
     _seed_two_tenants(cp)
 
     put = client.put("/v1/threads/t-b/state", json={"state": {}}, headers=ALICE_A)
-    assert put.status_code == HTTP_FORBIDDEN
-    delete = client.request("DELETE", "/v1/threads/t-b", json={}, headers=ALICE_A)
-    assert delete.status_code == HTTP_FORBIDDEN
+    assert put.status_code != HTTP_OK
+    client.request("DELETE", "/v1/threads/t-b", json={}, headers=ALICE_A)
     assert "t-b" in cp.rows
     assert _listed(client, ALICE_B) == {"t-b"}
-
-
-@pytest.mark.parametrize("route", ["/v1/graph/invoke", "/v1/graph/stream"])
-def test_runs_refuse_a_thread_of_the_other_tenant(route):
-    client, cp = _app()
-    _seed_two_tenants(cp)
-
-    assert client.post(route, json={"thread_id": "t-a"}, headers=ALICE_A).status_code == HTTP_OK
-    assert (
-        client.post(route, json={"thread_id": "t-b"}, headers=ALICE_A).status_code == HTTP_FORBIDDEN
-    )
-    assert (
-        client.post(route, json={"config": {"thread_id": "t-a"}}, headers=ALICE_B).status_code
-        == HTTP_FORBIDDEN
-    )
+    state = client.get("/v1/threads/t-b/state", headers=ALICE_B).json()["data"]["state"]
+    assert state is not None
 
 
 def test_a_caller_without_the_tenant_value_is_refused():
-    """The owner scope picks org_id; an identity without one never matches (fail closed)."""
+    """The auth config names org_id as a tenant claim; a token without one is a 401."""
     client, cp = _app()
     _seed_two_tenants(cp)
 
-    assert client.get("/v1/threads/t-a", headers=_as("alice")).status_code == HTTP_FORBIDDEN
+    resp = client.get("/v1/threads/t-a", headers=_as("alice"))
+    assert resp.status_code == HTTP_UNAUTHORIZED
 
 
-def test_org_admin_scope_reaches_every_thread_of_the_org_only():
+def test_org_admin_reach_covers_every_thread_of_the_org_only():
     client, cp = _app()
     _seed_two_tenants(cp)
     admin_a = _as("carol", "org-a", "org_admin")
 
-    assert client.get("/v1/threads/t-a/state", headers=admin_a).status_code == HTTP_OK
-    assert client.get("/v1/threads/t-bob/messages", headers=admin_a).status_code == HTTP_OK
-    assert client.get("/v1/threads/t-b/state", headers=admin_a).status_code == HTTP_FORBIDDEN
+    def state(thread_id):
+        resp = client.get(f"/v1/threads/{thread_id}/state", headers=admin_a)
+        return resp.json()["data"]["state"] if resp.status_code == HTTP_OK else resp.status_code
+
+    assert state("t-a") is not None
+    assert state("t-bob") is not None
+    assert state("t-b") == HTTP_NOT_FOUND
     assert _listed(client, admin_a) == {"t-a", "t-bob"}
 
-    stamped = client.post("/v1/graph/invoke", json={}, headers=admin_a).json()["authz"]
-    assert stamped["scope"] == ["org_id"]
+    seen = client.post("/v1/graph/invoke", json={}, headers=admin_a).json()
+    assert seen["reach"] == "tenant"
+    assert seen["tenant"] == {"org_id": "org-a"}
 
 
-def test_thread_scope_lookups_are_cached():
-    client, cp = _app()
-    _seed_two_tenants(cp)
-
-    for _ in range(4):
-        client.get("/v1/threads/t-a/state", headers=ALICE_A)
-        client.get("/v1/threads/t-a/state", headers=ALICE_B)
-    assert cp.scope_lookups == 1
+def test_a_member_has_reach_own():
+    client, _ = _app()
+    seen = client.post("/v1/graph/invoke", json={}, headers=ALICE_A).json()
+    assert seen == {"reach": "own", "tenant": {"org_id": "org-a"}}
 
 
 # ---------------------------------------------------------------------------
@@ -413,14 +395,13 @@ def test_thread_scope_lookups_are_cached():
 
 
 FORGED_CONFIG = {
-    "user": {"user_id": "alice", "org_id": "org-b"},
+    "user": {"user_id": "alice", "tenant": {"org_id": "org-b"}, "reach": "all"},
     "org_id": "org-b",
-    "authz": {"user_id": "alice", "scope": "none", "scopes": []},
 }
 
 
 def test_client_config_user_and_tenant_keys_do_not_reach_stored_thread_values():
-    client, cp = _app()
+    client, cp = _app(client_ids=True)
     _seed_two_tenants(cp)
 
     resp = client.put(
@@ -431,7 +412,8 @@ def test_client_config_user_and_tenant_keys_do_not_reach_stored_thread_values():
     assert resp.status_code == HTTP_OK, resp.text
     assert cp.rows["t-new"]["org_id"] == "org-a"
     # The forged values reached neither the stored row nor anyone's view of it.
-    assert client.get("/v1/threads/t-new/state", headers=ALICE_B).status_code == HTTP_FORBIDDEN
+    other = client.get("/v1/threads/t-new/state", headers=ALICE_B)
+    assert other.status_code == HTTP_NOT_FOUND
     assert _listed(client, ALICE_B) == {"t-b"}
     assert _listed(client, ALICE_A) == {"t-a", "t-new"}
 
@@ -490,11 +472,11 @@ def test_store_routes_keep_two_tenants_with_the_same_user_id_apart():
     assert ids(client.post("/v1/store/search", json=search, headers=ALICE_B)) == []
     assert ids(client.post("/v1/store/memories/list", json={}, headers=ALICE_B)) == []
     got = client.post(f"/v1/store/memories/{memory_id}", json={}, headers=ALICE_B)
-    assert got.json()["data"]["memory"] is None
+    assert got.status_code == HTTP_NOT_FOUND
     upd = client.put(f"/v1/store/memories/{memory_id}", json={"content": "x"}, headers=ALICE_B)
     assert upd.json()["data"]["data"] is False
     gone = client.request("DELETE", f"/v1/store/memories/{memory_id}", json={}, headers=ALICE_B)
-    assert gone.json()["data"]["data"] is False
+    assert gone.status_code == HTTP_NOT_FOUND
     forget = client.post("/v1/store/memories/forget", json={}, headers=ALICE_B)
     assert forget.json()["data"]["data"] == 0
     assert list(store.rows) == [memory_id]
@@ -552,7 +534,7 @@ def test_unparseable_thread_filters_are_422(raw):
 
 def test_thread_filters_need_a_checkpointer_with_filterable_columns():
     cp = InMemoryCheckpointer()
-    client, _ = _app(checkpointer=cp, authz=TenantAuthz(checkpointer=cp))
+    client, _ = _app(checkpointer=cp)
 
     assert client.get("/v1/threads", headers=ALICE_A).status_code == HTTP_OK
     resp = client.get(
@@ -645,93 +627,3 @@ def test_a_store_without_a_filter_schema_keeps_its_own_filters():
     assert resp.status_code == HTTP_OK, resp.text
     # Unchanged behaviour: reserved owner keys are dropped, everything else is forwarded.
     assert store.asearch.await_args.kwargs["filters"] == {"org_id": "x", "AND": [{"a": 1}]}
-
-
-# ---------------------------------------------------------------------------
-# isolation_scope: per-user form, old no-arg form, bad scopes
-# ---------------------------------------------------------------------------
-
-
-def test_old_no_arg_isolation_scope_backend_still_works():
-    class _Legacy(OwnershipAuthorizationBackend):
-        def isolation_scope(self):  # pre-1.0 signature: no user
-            return "owner"
-
-    cp = TenantCheckpointer()
-    client, _ = _app(checkpointer=cp, authz=_Legacy(checkpointer=cp))
-    _seed_two_tenants(cp)
-
-    stamped = client.post("/v1/graph/invoke", json={}, headers=ALICE_A).json()["authz"]
-    assert stamped["scope"] == "owner"
-    assert client.get("/v1/threads/t-a/state", headers=ALICE_A).status_code == HTTP_OK
-    assert client.get("/v1/threads/t-b/state", headers=ALICE_A).status_code == HTTP_FORBIDDEN
-    assert _listed(client, ALICE_A) == {"t-a"}
-
-
-def test_old_no_arg_isolation_scope_on_a_plain_backend_still_works():
-    class _Shared(AuthorizationBackend):
-        async def authorize(self, user, resource, action, resource_id=None, **ctx):
-            return True
-
-        def isolation_scope(self):
-            return "none"
-
-    client, _ = _app(authz=_Shared())
-    stamped = client.post("/v1/graph/invoke", json={}, headers=ALICE_A).json()["authz"]
-    assert stamped["scope"] == "none"
-
-
-def test_isolation_scope_receives_the_authenticated_user():
-    seen: list[dict] = []
-
-    class _Recording(AuthorizationBackend):
-        async def authorize(self, user, resource, action, resource_id=None, **ctx):
-            return True
-
-        def isolation_scope(self, user):
-            seen.append(dict(user))
-            return ["user_id", "org_id"]
-
-    client, _ = _app(authz=_Recording())
-    stamped = client.post("/v1/graph/invoke", json={}, headers=ALICE_A).json()["authz"]
-    assert stamped["scope"] == ["user_id", "org_id"]
-    assert seen[-1]["org_id"] == "org-a"
-
-
-def test_a_malformed_scope_list_is_refused_not_turned_into_no_isolation():
-    class _Broken(AuthorizationBackend):
-        async def authorize(self, user, resource, action, resource_id=None, **ctx):
-            return True
-
-        def isolation_scope(self, user):
-            return ["org id; drop"]
-
-    client, _ = _app(authz=_Broken())
-    assert client.get("/v1/threads", headers=ALICE_A).status_code == HTTP_FORBIDDEN
-
-
-def test_a_scope_column_the_checkpointer_does_not_declare_denies_thread_access():
-    class _Team(TenantAuthz):
-        def isolation_scope(self, user=None):
-            return ["team_id"]
-
-    cp = TenantCheckpointer()
-    client, _ = _app(checkpointer=cp, authz=_Team(checkpointer=cp))
-    _seed_two_tenants(cp)
-
-    assert client.get("/v1/threads/t-a/state", headers=ALICE_A).status_code == HTTP_FORBIDDEN
-
-
-def test_a_checkpointer_that_cannot_answer_tenant_values_fails_closed():
-    """Declares org_id but answers only the owner (the base aget_thread_scope)."""
-
-    class _OwnerOnly(TenantCheckpointer):
-        async def aget_thread_scope(self, thread_id):
-            owner = await self.aget_thread_owner(thread_id)
-            return None if owner is None else {"user_id": owner}
-
-    cp = _OwnerOnly()
-    client, _ = _app(checkpointer=cp, authz=TenantAuthz(checkpointer=cp))
-    _seed_two_tenants(cp)
-
-    assert client.get("/v1/threads/t-a/state", headers=ALICE_A).status_code == HTTP_FORBIDDEN

@@ -11,26 +11,29 @@ from fastapi.responses import StreamingResponse
 from injectq import InjectQ
 from injectq.integrations import InjectAPI
 from pydantic import ValidationError
+from tenxgraph.core.authz import Identity
+from tenxgraph.core.exceptions import ThreadNotFoundError
 from tenxgraph.core.realtime.base import ErrorEvent
 from tenxgraph.core.realtime.queue import LiveInputQueue
 from tenxgraph.core.state import StreamChunk, StreamEvent
 
-from tenxgraph_api.src.app.core.auth.authorization import AuthorizationBackend
 from tenxgraph_api.src.app.core.auth.permissions import (
     RequirePermission,
+    authorize_resource,
     ws_bearer_subprotocol,
-)
-from tenxgraph_api.src.app.core.auth.request_config import (
-    ClientInputError,
-    normalize_thread_id,
-    resource_id_error,
 )
 from tenxgraph_api.src.app.core.auth.revocation import (
     TokenRevocationUnavailableError,
     token_revoked,
 )
 from tenxgraph_api.src.app.core.leases import Lease
+from tenxgraph_api.src.app.core.threads import require_thread
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe, summarize_validation_error
+from tenxgraph_api.src.app.core.validation.request_config import (
+    ClientInputError,
+    normalize_thread_id,
+    resource_id_error,
+)
 from tenxgraph_api.src.app.routers.graph import idempotency
 from tenxgraph_api.src.app.routers.graph.realtime_guard import (
     realtime_connection_guard,
@@ -224,9 +227,28 @@ async def _send_ws_error(websocket: WebSocket, reason: str) -> None:
     )
 
 
-def _seconds_until_expiry(user: dict[str, Any]) -> float | None:
+async def _send_thread_not_found(websocket: WebSocket) -> None:
+    code, message = _thread_not_found()
+    await websocket.send_text(
+        StreamChunk(
+            event=StreamEvent.ERROR, data={"reason": message, "code": code}
+        ).model_dump_json()
+    )
+
+
+def _thread_not_found() -> tuple[str, str]:
+    """``(code, message)`` of the 404 for a thread the caller cannot see, for socket frames."""
+    from tenxgraph_api.src.app.core.exceptions.handle_errors import (
+        THREAD_NOT_FOUND_CODE,
+        THREAD_NOT_FOUND_MESSAGE,
+    )
+
+    return THREAD_NOT_FOUND_CODE, THREAD_NOT_FOUND_MESSAGE
+
+
+def _seconds_until_expiry(identity: Identity | None) -> float | None:
     """Seconds until the identity's ``exp`` claim, or ``None`` when it has none."""
-    exp = user.get("exp") if isinstance(user, dict) else None
+    exp = identity.claims.get("exp") if identity is not None else None
     if isinstance(exp, bool) or not isinstance(exp, int | float):
         return None
     return max(float(exp) - time.time(), 0.0) + 0.5
@@ -236,20 +258,20 @@ class _SessionExpired(Exception):
     """The socket sat idle past its token's expiry."""
 
 
-async def _next_frame(frames: _WsFrames, websocket: WebSocket, user: dict[str, Any]) -> str:
+async def _next_frame(frames: _WsFrames, websocket: WebSocket, identity: Identity | None) -> str:
     """The next text frame; an idle socket is cut once its credential stops verifying.
 
     Without this, a socket that sends nothing keeps its slot long after the token that opened
     it expired (the per-run check only runs when a frame arrives).
     """
     while True:
-        wait = _seconds_until_expiry(user)
+        wait = _seconds_until_expiry(identity)
         if wait is None:
             return await frames.next()
         try:
             return await asyncio.wait_for(frames.next(), wait)
         except TimeoutError:
-            if not ws_identity_still_valid(websocket, user):
+            if not ws_identity_still_valid(websocket, identity):
                 raise _SessionExpired from None
 
 
@@ -270,7 +292,7 @@ async def _next_ws_input(
     frames: _WsFrames,
     websocket: WebSocket,
     max_frame: int,
-    user: dict[str, Any] | None = None,
+    identity: Identity | None = None,
 ) -> Any:
     """Read the next run request from ``/v1/graph/ws``.
 
@@ -279,7 +301,7 @@ async def _next_ws_input(
     left, sent a frame over the size cap (closed with 1009), or its token expired while idle.
     """
     try:
-        text = await _next_frame(frames, websocket, user or {})
+        text = await _next_frame(frames, websocket, identity)
         data = _parse_json_frame(text, max_frame)
     except _SessionExpired:
         await _close_expired(websocket)
@@ -344,29 +366,30 @@ async def _bind_ws_container() -> None:
 async def _http_run_guard(
     service: GraphService,
     graph_input: GraphInputSchema,
-    user: dict[str, Any],
+    identity: Identity | None,
     request: Request | None = None,
 ) -> Lease:
     """The thread lock and run slot for an HTTP run (``on_busy`` as the request set it)."""
     thread_id = requested_thread_id(graph_input.config)
     return await acquire_run_guard(
-        user=user,
+        user=identity,
         runs=service.runs_policy(),
         thread_id=thread_id,
         on_busy=graph_input.on_busy,
-        stop=lambda: service.stop_graph(thread_id, user),
+        stop=lambda: service.stop_graph(thread_id, identity),
         is_disconnected=request.is_disconnected if request is not None else None,
+        recheck=lambda: service.require_run_thread(thread_id, identity),
     )
 
 
 async def _idempotency(
-    request: Request, user: dict[str, Any], kind: str
+    request: Request, identity: Identity | None, kind: str
 ) -> tuple[idempotency.IdempotentRun | None, dict[str, Any] | None]:
     """Take the request's ``Idempotency-Key``, if it sent one: ``(run, replay_record)``."""
     key = request.headers.get(idempotency.IDEMPOTENCY_HEADER) if request is not None else None
     if not isinstance(key, str):
         return None, None
-    return await idempotency.check(user, key, kind, await request.body())
+    return await idempotency.check(identity, key, kind, await request.body())
 
 
 @router.post(
@@ -380,16 +403,18 @@ async def invoke_graph(
     request: Request,
     graph_input: GraphInputSchema,
     service: GraphService = InjectAPI(GraphService),
-    user: dict[str, Any] = Depends(RequirePermission("graph", "invoke")),
+    identity: Identity | None = Depends(RequirePermission("graph", "invoke")),
 ):
     """
     Invoke the graph with the provided input and return the final result.
     """
     logger.info(f"Graph invoke request received with {len(graph_input.messages)} messages")
     service.check_media_urls(graph_input.messages)
+    # A thread the caller cannot run on is a 404 before anything is held.
+    await service.require_run_thread(requested_thread_id(graph_input.config), identity)
 
     # Opt-in Idempotency-Key: a finished run's stored result is returned, a running one is 409.
-    idem, replay = await _idempotency(request, user, "invoke")
+    idem, replay = await _idempotency(request, identity, "invoke")
     if replay is not None:
         if not replay.get("stored"):
             raise idempotency.refuse_repeat()
@@ -399,7 +424,7 @@ async def invoke_graph(
 
     # One run at a time per thread (409 when it stays busy) and the per-user run cap (429).
     try:
-        guard = await _http_run_guard(service, graph_input, user, request)
+        guard = await _http_run_guard(service, graph_input, identity, request)
     except BaseException:
         if idem:
             idem.release()
@@ -407,7 +432,7 @@ async def invoke_graph(
     try:
         result: GraphInvokeOutputSchema = await service.invoke_graph(
             graph_input,
-            user,
+            identity,
         )
         if idem:
             await idem.complete(result.model_dump_json())
@@ -434,18 +459,20 @@ async def invoke_graph(
 async def stream_graph(
     graph_input: GraphInputSchema,
     service: GraphService = InjectAPI(GraphService),
-    user: dict[str, Any] = Depends(RequirePermission("graph", "stream")),
+    identity: Identity | None = Depends(RequirePermission("graph", "stream")),
     request: Request = None,  # type: ignore[assignment]  # injected by FastAPI
 ):
     """
     Stream the graph execution with real-time output.
     """
     logger.info(f"Graph stream request received with {len(graph_input.messages)} messages")
-    # Before the response starts, so a blocked URL is a real 400 and not an error chunk.
+    # Before the response starts, so a blocked URL is a real 400 and a thread the caller
+    # cannot run on a real 404, not an error chunk.
     service.check_media_urls(graph_input.messages)
+    await service.require_run_thread(requested_thread_id(graph_input.config), identity)
 
     # Opt-in Idempotency-Key: a finished run's final state is replayed, a running one is 409.
-    idem, replay = await _idempotency(request, user, "stream")
+    idem, replay = await _idempotency(request, identity, "stream")
     if replay is not None:
         if not replay.get("stored"):
             raise idempotency.refuse_repeat()
@@ -459,20 +486,20 @@ async def stream_graph(
     # Taken before the response starts, so a busy thread still gets a real 409 and an
     # over-cap request a 429.
     try:
-        guard = await _http_run_guard(service, graph_input, user, request)
+        guard = await _http_run_guard(service, graph_input, identity, request)
     except BaseException:
         if idem:
             idem.release()
         raise
     try:
         # Same for a resume aimed at the wrong interrupt: a 409, as invoke answers it.
-        await service.check_resume_target(graph_input, user)
+        await service.check_resume_target(graph_input, identity)
     except BaseException:
         guard.release()
         if idem:
             idem.release()
         raise
-    lines = service.stream_graph(graph_input, user)
+    lines = service.stream_graph(graph_input, identity)
     if idem:
         lines = idempotency.stream_with_record(lines, idem)
     result = release_when_done(lines, guard)
@@ -499,7 +526,7 @@ async def stream_graph(
 async def graph_details(
     request: Request,
     service: GraphService = InjectAPI(GraphService),
-    user: dict[str, Any] = Depends(RequirePermission("graph", "read", introspection=True)),
+    identity: Identity | None = Depends(RequirePermission("graph", "read")),
 ):
     """
     Invoke the graph with the provided input and return the final result.
@@ -529,7 +556,7 @@ async def graph_details(
 async def graph_tools(
     request: Request,
     service: GraphService = InjectAPI(GraphService),
-    user: dict[str, Any] = Depends(RequirePermission("graph", "read", introspection=True)),
+    identity: Identity | None = Depends(RequirePermission("graph", "read")),
 ):
     """List the tools exposed by the graph's tool nodes."""
     logger.info("Graph getting tools")
@@ -559,13 +586,13 @@ async def observability(
     thread_id: str,
     run_id: str | None = None,
     service: GraphService = InjectAPI(GraphService),
-    user: dict[str, Any] = Depends(RequirePermission("graph", "read")),
+    identity: Identity | None = Depends(RequirePermission("graph", "read")),
 ):
     """Return the reconstructed observability trace for a thread."""
     if not _is_production():
         logger.info("Observability requested for thread %s", log_safe(thread_id))
 
-    result: ObservabilitySchema = await service.get_observability(thread_id, run_id)
+    result: ObservabilitySchema = await service.get_observability(thread_id, identity, run_id)
 
     return success_response(
         result,
@@ -583,7 +610,7 @@ async def observability(
 async def state_schema(
     request: Request,
     service: GraphService = InjectAPI(GraphService),
-    user: dict[str, Any] = Depends(RequirePermission("graph", "read", introspection=True)),
+    identity: Identity | None = Depends(RequirePermission("graph", "read")),
 ):
     """
     Invoke the graph with the provided input and return the final result.
@@ -611,10 +638,14 @@ async def stop_graph(
     request: Request,
     stop_request: GraphStopSchema,
     service: GraphService = InjectAPI(GraphService),
-    user: dict[str, Any] = Depends(RequirePermission("graph", "stop")),
+    identity: Identity | None = Depends(RequirePermission("graph", "stop")),
 ):
     """
     Stop the graph execution for a specific thread.
+
+    Allowed on any thread the caller's reach covers (an admin with reach ``all`` may stop
+    another user's run). A thread the caller cannot reach or an unknown one answers 404; a
+    visible thread with no run answers 200 with ``ok: false``.
 
     Args:
         stop_request: Request containing thread_id and optional config
@@ -625,7 +656,8 @@ async def stop_graph(
     if not _is_production():
         logger.info("Graph stop request received for thread: %s", log_safe(stop_request.thread_id))
 
-    result = await service.stop_graph(stop_request.thread_id, user, stop_request.config)
+    await require_thread(service.checkpointer, identity, stop_request.thread_id)
+    result = await service.stop_graph(stop_request.thread_id, identity, stop_request.config)
 
     if not _is_production():
         logger.info("Graph stop completed for thread %s", log_safe(stop_request.thread_id))
@@ -651,7 +683,7 @@ async def fix_graph(
     request: Request,
     fix_request: FixGraphRequestSchema,
     service: GraphService = InjectAPI(GraphService),
-    user: dict[str, Any] = Depends(RequirePermission("graph", "fix")),
+    identity: Identity | None = Depends(RequirePermission("graph", "fix")),
 ):
     """
     Fix the graph execution state for a specific thread.
@@ -664,7 +696,7 @@ async def fix_graph(
         request: HTTP request object
         fix_request: Request containing thread_id and optional config
         service: Injected GraphService instance
-        user: Current authenticated user
+        identity: The caller's identity, or None when auth is off
 
     Returns:
         Status information about the fix operation, including:
@@ -680,10 +712,12 @@ async def fix_graph(
     if not _is_production():
         logger.info("Graph fix request received for thread: %s", log_safe(fix_request.thread_id))
 
+    # Fix writes state, so it stays in the caller's own threads whatever their reach.
+    await require_thread(service.checkpointer, identity, fix_request.thread_id, run=True)
     async with thread_write_guard(fix_request.thread_id):
         result = await service.fix_graph(
             fix_request.thread_id,
-            user,
+            identity,
             fix_request.config,
         )
 
@@ -701,21 +735,26 @@ async def fix_graph(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-async def _ws_token_revoked(user: dict[str, Any]) -> bool:
-    """Whether the socket's token was revoked since the handshake (an outage counts as yes)."""
+async def _ws_token_revoked(identity: Identity | None) -> bool:
+    """Whether the socket's token was revoked since the handshake (an outage counts as yes).
+
+    Never revoked when auth is off (``identity`` is ``None``).
+    """
+    if identity is None:
+        return False
     try:
-        return await token_revoked(user)
+        return await token_revoked(identity)
     except TokenRevocationUnavailableError:
         return True
 
 
-async def _ws_run_gate(websocket: WebSocket, user: dict[str, Any]) -> str:
+async def _ws_run_gate(websocket: WebSocket, identity: Identity | None) -> str:
     """Per-run checks for a WebSocket: ``"run"``, ``"skip"`` (rate limited) or ``"close"``.
 
     The handshake guard runs once, so a socket that stays open must be re-checked before each
     run: the token may have expired or been revoked, and every run counts against the limit.
     """
-    if not ws_identity_still_valid(websocket, user) or await _ws_token_revoked(user):
+    if not ws_identity_still_valid(websocket, identity) or await _ws_token_revoked(identity):
         logger.info("WebSocket credential no longer valid; closing")
         await websocket.send_text(
             StreamChunk(
@@ -766,42 +805,6 @@ def _resolve_ws_thread(frame: dict[str, Any]) -> str | None:
     return thread_id
 
 
-async def _ws_thread_authorized(
-    authz: AuthorizationBackend,
-    user: dict[str, Any],
-    thread_id: str | None,
-    action: str,
-) -> bool:
-    """Owner-check ``thread_id`` for a WebSocket run.
-
-    Follows ``runs.thread_ids`` like REST: under ``"server"`` (the default) an id the server
-    has never seen is refused; ``"client"`` lets the caller name a new thread.
-
-    Returns ``True`` when the run may proceed. Ownership is only enforced when auth is
-    configured (``GraphConfig.auth_config``); an unauthenticated dev graph and fresh
-    (``"new"``/absent) threads always pass. If the config cannot be read, the check runs
-    anyway: a lookup failure must not switch authorization off.
-    """
-    if not thread_id or thread_id == WS_NEW_THREAD:
-        return True
-
-    from injectq import InjectQ
-
-    has_auth = True
-    try:
-        from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
-
-        cfg = InjectQ.get_instance().get(GraphConfig)
-        has_auth = bool(cfg and cfg.auth_config())
-    except Exception as exc:
-        logger.warning("Could not resolve GraphConfig for WS auth check; enforcing it: %s", exc)
-
-    if not has_auth:
-        return True
-
-    return await authz.authorize(user, "graph", action, resource_id=str(thread_id))
-
-
 async def _ws_media_urls_allowed(
     websocket: WebSocket, service: GraphService, graph_input: GraphInputSchema
 ) -> bool:
@@ -840,7 +843,7 @@ async def _ws_run(
     websocket: WebSocket,
     service: GraphService,
     graph_input: GraphInputSchema,
-    user: dict[str, Any],
+    identity: Identity | None,
     frames: _WsFrames,
 ) -> bool:
     """Stream one run to the socket; ``False`` when the client left and the run was stopped.
@@ -850,7 +853,7 @@ async def _ws_run(
     write. The run generator is closed before this returns, so the caller can release the
     thread lock knowing the run is over.
     """
-    stream = service.stream_graph(graph_input, user=user)
+    stream = service.stream_graph(graph_input, user=identity)
 
     async def pump() -> None:
         async with contextlib.aclosing(stream):
@@ -881,8 +884,7 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
     _bind: None = Depends(_bind_ws_container),
     _guard: None = Depends(realtime_connection_guard),
     service: GraphService = InjectAPI(GraphService),
-    user: dict[str, Any] = Depends(RequirePermission("graph", "stream")),
-    authz: AuthorizationBackend = InjectAPI(AuthorizationBackend),
+    identity: Identity | None = Depends(RequirePermission("graph", "stream")),
 ):
     """
     WebSocket endpoint for streaming graph execution.
@@ -916,7 +918,9 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
 
     Every run on the socket counts against the same rate limit (an error chunk with
     ``retry_after_seconds`` is sent when over it), and the token is re-verified before each
-    run.
+    run. A run naming a thread the caller cannot run on (another user's, or an unknown id
+    under ``runs.thread_ids: "server"``) gets an error chunk with ``code: "THREAD_NOT_FOUND"``
+    and the socket stays open.
 
     Close codes
     -----------
@@ -928,16 +932,6 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
     """
     await websocket.accept(subprotocol=ws_bearer_subprotocol(websocket))
     logger.info("WebSocket graph connection accepted")
-
-    if hasattr(authz, "dependency"):
-        from injectq import InjectQ
-
-        try:
-            authz = InjectQ.get_instance().get(AuthorizationBackend)
-        except Exception:
-            from tenxgraph_api.src.app.core.auth.authorization import DefaultAuthorizationBackend
-
-            authz = DefaultAuthorizationBackend()
 
     # Wrong agent type for this endpoint: a live (realtime) graph cannot be driven over
     # the turn-based stream socket. Reject up front with a clear error instead of failing
@@ -963,7 +957,7 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
     invalid_frames = 0
     try:
         while True:
-            ws_input = await _next_ws_input(frames, websocket, max_frame, user)
+            ws_input = await _next_ws_input(frames, websocket, max_frame, identity)
             if ws_input is None:
                 break
             if ws_input is _WS_SKIP:
@@ -981,33 +975,32 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
             invalid_frames = 0
 
             # The handshake checks happen once; these apply to every run on the socket.
-            gate = await _ws_run_gate(websocket, user)
+            gate = await _ws_run_gate(websocket, identity)
             if gate == "close":
                 break
             if gate == "skip":
                 continue
 
             thread_id = _ws_run_thread_id(ws_input)
-            if not await _ws_thread_authorized(authz, user, thread_id, "stream"):
-                logger.warning(
-                    "WebSocket authorization failed for user %s on thread %s",
-                    log_safe(user.get("user_id")),
-                    log_safe(thread_id),
-                )
-                await websocket.send_text(
-                    StreamChunk(
-                        event=StreamEvent.ERROR,
-                        data={"reason": f"Not authorized to stream thread {thread_id}"},
-                    ).model_dump_json()
-                )
-                continue
-
             if not _is_production():
                 logger.info(
                     "WebSocket graph run: invoke_type=%s, thread_id=%s",
                     ws_input.invoke_type,
                     log_safe(thread_id),
                 )
+
+            # A thread the caller may not use or cannot run on: an error chunk, the socket
+            # stays open. The handshake authorized with no thread; this run names one.
+            try:
+                if thread_id is not None:
+                    await authorize_resource(identity, "graph:stream", thread_id)
+                await service.require_run_thread(thread_id, identity)
+            except HTTPException as exc:
+                await _send_ws_error(websocket, str(exc.detail))
+                continue
+            except ThreadNotFoundError:
+                await _send_thread_not_found(websocket)
+                continue
 
             graph_input = ws_input.to_graph_input()
             if not await _ws_media_urls_allowed(websocket, service, graph_input):
@@ -1016,7 +1009,7 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
             if ws_input.idempotency_key is not None:
                 try:
                     idem, _ = await idempotency.check(
-                        user,
+                        identity,
                         ws_input.idempotency_key,
                         "ws",
                         ws_input.model_dump(mode="json", exclude={"idempotency_key"}),
@@ -1031,11 +1024,12 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
                     continue
             try:
                 guard = await acquire_run_guard(
-                    user=user,
+                    user=identity,
                     runs=service.runs_policy(),
                     thread_id=thread_id,
                     on_busy=ws_input.on_busy,
-                    stop=lambda tid=thread_id: service.stop_graph(tid, user),
+                    stop=lambda tid=thread_id: service.stop_graph(tid, identity),
+                    recheck=lambda tid=thread_id: service.require_run_thread(tid, identity),
                 )
             except HTTPException as exc:
                 if idem:
@@ -1046,8 +1040,13 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
                     ).model_dump_json()
                 )
                 continue
+            except ThreadNotFoundError:
+                if idem:
+                    idem.release()
+                await _send_thread_not_found(websocket)
+                continue
             try:
-                finished = await _ws_run(websocket, service, graph_input, user, frames)
+                finished = await _ws_run(websocket, service, graph_input, identity, frames)
                 if idem and finished:
                     await idem.complete(None)
             finally:
@@ -1154,14 +1153,24 @@ class _ByteBoundedLiveInputQueue(LiveInputQueue):
             yield item
 
 
-async def _live_credential_error(websocket: WebSocket, user: dict[str, Any]) -> bool:
+async def _live_credential_error(websocket: WebSocket, identity: Identity | None) -> bool:
     """Whether a live session's credential no longer holds (expired, revoked or backend down).
 
     Same two checks as ``_ws_run_gate`` uses before each ``/v1/graph/ws`` run: the token is
     re-verified (catches expiry) and the revocation backend is asked (an outage counts as
     revoked, so it fails closed).
     """
-    return not ws_identity_still_valid(websocket, user) or await _ws_token_revoked(user)
+    return not ws_identity_still_valid(websocket, identity) or await _ws_token_revoked(identity)
+
+
+async def _close_live(websocket: WebSocket, code: str, message: str) -> None:
+    """End a live session before it starts: a fatal error event, then close 1008."""
+    with contextlib.suppress(Exception):
+        await websocket.send_text(
+            _realtime_event_json(ErrorEvent(code=code, message=message, fatal=True))
+        )
+    with contextlib.suppress(Exception):
+        await websocket.close(code=1008)
 
 
 def _dispatch_realtime_control(queue: Any, text: str) -> str | None:
@@ -1209,8 +1218,7 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
     _bind: None = Depends(_bind_ws_container),
     _guard: None = Depends(realtime_connection_guard),
     service: GraphService = InjectAPI(GraphService),
-    user: dict[str, Any] = Depends(RequirePermission("graph", "stream")),
-    authz: AuthorizationBackend = InjectAPI(AuthorizationBackend),
+    identity: Identity | None = Depends(RequirePermission("graph", "stream")),
 ):
     """Realtime (audio-to-audio) WebSocket bridge over ``CompiledGraph.arealtime``.
 
@@ -1219,7 +1227,8 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
     First frame  : JSON control  ``{model, thread_id?, voice?, modalities?, vad?, ...}``
                    (``thread_id`` absent, blank or ``"new"`` makes the server create the thread)
     First reply  : JSON ``{type:"session_started", thread_id}``; reconnect with that id to
-                   continue the thread
+                   continue the thread. A thread the caller cannot run on gets a fatal
+                   ``THREAD_NOT_FOUND`` error event and close 1008 instead
     Upstream     : binary frame   = PCM16 input audio
                    JSON control   = ``{type:"activity_start"|"activity_end"|"text"|"close", ...}``
     Downstream   : binary frame   = PCM16 model audio (``audio_delta``)
@@ -1234,16 +1243,6 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
     """
     await websocket.accept(subprotocol=ws_bearer_subprotocol(websocket))
     logger.info("Realtime WebSocket connection accepted")
-
-    if hasattr(authz, "dependency"):
-        from injectq import InjectQ
-
-        try:
-            authz = InjectQ.get_instance().get(AuthorizationBackend)
-        except Exception:
-            from tenxgraph_api.src.app.core.auth.authorization import DefaultAuthorizationBackend
-
-            authz = DefaultAuthorizationBackend()
 
     # Wrong agent type for this endpoint: the realtime bridge requires a graph rooted at a
     # LiveAgent. Reject a turn-based graph up front with a normalized fatal error instead
@@ -1296,25 +1295,6 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
             with contextlib.suppress(Exception):
                 await websocket.close(code=1003)
             return
-        if not await _ws_thread_authorized(authz, user, thread_id, "stream"):
-            logger.warning(
-                "Realtime WebSocket authorization failed for user %s on thread %s",
-                log_safe(user.get("user_id")),
-                log_safe(thread_id),
-            )
-            with contextlib.suppress(Exception):
-                await websocket.send_text(
-                    _realtime_event_json(
-                        ErrorEvent(
-                            code="not_authorized",
-                            message=f"Not authorized to stream thread {thread_id}",
-                            fatal=True,
-                        )
-                    )
-                )
-            with contextlib.suppress(Exception):
-                await websocket.close(code=1008)
-            return
 
     if not isinstance(init, dict):
         logger.warning("Realtime init frame must be a JSON object, got %s", type(init).__name__)
@@ -1322,9 +1302,10 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
             await websocket.close(code=1003)
         return
 
+    named_thread = thread_id is not None
     if thread_id is None:
         # No id (absent, blank or "new"): the server makes the thread, as AG-UI does, so there
-        # is nothing to owner-check. The id goes back to the client in ``session_started``.
+        # is nothing to check. The id goes back to the client in ``session_started``.
         thread_id = await service.new_thread_id()
         init["thread_id"] = thread_id
 
@@ -1345,16 +1326,45 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
 
     # The handshake guard ran before the init frame; re-check before the session (the run)
     # starts, then on a timer for as long as it lasts.
-    if await _live_credential_error(websocket, user):
+    if await _live_credential_error(websocket, identity):
         await close_session_expired()
         return
 
+    # A thread the caller cannot run on ends the session before anything is held. A storage
+    # error closes it too (1011): the check fails closed.
+    if named_thread:
+        try:
+            # The handshake authorized with no thread; the init frame names one.
+            await authorize_resource(identity, "graph:stream", thread_id)
+            await service.require_run_thread(thread_id, identity)
+        except HTTPException as exc:
+            await _close_live(websocket, "forbidden", str(exc.detail))
+            return
+        except ThreadNotFoundError:
+            await _close_live(websocket, *_thread_not_found())
+            return
+        except Exception as e:
+            logger.error("Realtime thread check failed: %s", e)
+            with contextlib.suppress(Exception):
+                await websocket.close(code=1011)
+            return
+
     # The same guard as every other run: one session at a time on a thread, and the session
-    # counts against the user's run cap for as long as it lasts.
+    # counts against the user's run cap for as long as it lasts. A named thread is read again
+    # once locked.
     try:
         guard = await acquire_run_guard(
-            user=user, runs=service.runs_policy(), thread_id=thread_id, on_busy="wait"
+            user=identity,
+            runs=service.runs_policy(),
+            thread_id=thread_id,
+            on_busy="wait",
+            recheck=(lambda: service.require_run_thread(thread_id, identity))
+            if named_thread
+            else None,
         )
+    except ThreadNotFoundError:
+        await _close_live(websocket, *_thread_not_found())
+        return
     except HTTPException as exc:
         busy = exc.status_code == 409  # noqa: PLR2004
         with contextlib.suppress(Exception):
@@ -1415,7 +1425,7 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
     async def downstream() -> None:
         """Stream normalized events back: audio as binary, everything else as JSON."""
         try:
-            async for event in service.realtime_graph(queue, init, user):
+            async for event in service.realtime_graph(queue, init, identity):
                 if getattr(event, "type", None) == "audio_delta":
                     await _ws_send_bytes(websocket, event.data)
                 else:
@@ -1436,7 +1446,7 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
         """End the session once its token expires or is revoked."""
         while True:
             await asyncio.sleep(REALTIME_RECHECK_INTERVAL)
-            if await _live_credential_error(websocket, user):
+            if await _live_credential_error(websocket, identity):
                 await close_session_expired()
                 return
 

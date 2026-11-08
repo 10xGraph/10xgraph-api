@@ -10,6 +10,7 @@ from tenxgraph_api.cli.config_editor import ConfigEditorServer
 from tenxgraph_api.cli.config_editor.validation import production_readiness_warnings
 from tenxgraph_api.cli.constants import DEFAULT_CONFIG_FILE, LEGACY_CONFIG_FILE
 from tenxgraph_api.cli.exceptions import ServerError
+from tenxgraph_api.src.app.core.auth.auth_config import check_auth_config
 
 
 class ConfigCommand(BaseCommand):
@@ -74,7 +75,10 @@ class ConfigCommand(BaseCommand):
         if not isinstance(data, dict):
             return
         for issue in production_readiness_warnings(data):
-            self.output.warning(f"{issue['path']}: {issue['message']}")
+            if issue["path"] not in ("auth", "authorization"):
+                self.output.warning(f"{issue['path']}: {issue['message']}")
+        for auth_issue in check_auth_config(data, production=True):
+            self.output.warning(str(auth_issue))
 
 
 def _file_note(config_path: Path, seeded: bool, seed_path: Path | None) -> str:

@@ -26,7 +26,9 @@ def mock_service():
 @pytest.fixture
 def mock_user():
     """Mock authenticated user."""
-    return {"id": "user-123", "user_id": "user-123", "name": "Test User"}
+    from tenxgraph.core.authz import Identity
+
+    return Identity(user_id="user-123")
 
 
 class TestUploadFileLogic:
@@ -46,7 +48,7 @@ class TestUploadFileLogic:
                 request=mock_request,
                 file=mock_file,
                 service=mock_service,
-                user=mock_user,
+                identity=mock_user,
             )
         assert exc_info.value.status_code == 400
         assert "filename" in exc_info.value.detail.lower()
@@ -65,7 +67,7 @@ class TestUploadFileLogic:
                 request=mock_request,
                 file=mock_file,
                 service=mock_service,
-                user=mock_user,
+                identity=mock_user,
             )
         assert exc_info.value.status_code == 400
         assert "empty" in exc_info.value.detail.lower()
@@ -98,7 +100,7 @@ class TestUploadFileLogic:
             request=mock_request,
             file=mock_file,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         mock_service.upload_file.assert_called_once()
@@ -121,7 +123,7 @@ class TestUploadFileLogic:
                 request=mock_request,
                 file=mock_file,
                 service=mock_service,
-                user=mock_user,
+                identity=mock_user,
             )
         assert exc_info.value.status_code == 413
 
@@ -139,10 +141,14 @@ class TestGetFileLogic:
         result = await get_file(
             file_id="file-1",
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
-        mock_service.get_file.assert_called_once_with("file-1", "user-123", mock_user)
+        # The route checks access by the caller's reach, then reads the file.
+        mock_service.ensure_can_access.assert_awaited_once_with(
+            "file-1", "user-123", mock_user, follow_reach=True
+        )
+        mock_service.get_file.assert_called_once_with("file-1")
         assert result.body == b"file content"
         assert result.media_type == "text/plain"
 
@@ -157,7 +163,7 @@ class TestGetFileLogic:
             await get_file(
                 file_id="file-1",
                 service=mock_service,
-                user=mock_user,
+                identity=mock_user,
             )
         assert exc_info.value.status_code == 404
 
@@ -186,10 +192,13 @@ class TestGetFileInfoLogic:
             request=mock_request,
             file_id="file-1",
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
-        mock_service.get_file_info.assert_called_once_with("file-1", "user-123", mock_user)
+        mock_service.ensure_can_access.assert_awaited_once_with(
+            "file-1", "user-123", mock_user, follow_reach=True
+        )
+        mock_service.get_file_info.assert_called_once_with("file-1")
 
     @pytest.mark.asyncio
     async def test_get_file_info_handles_not_found(self, mock_request, mock_service, mock_user):
@@ -203,7 +212,7 @@ class TestGetFileInfoLogic:
                 request=mock_request,
                 file_id="file-1",
                 service=mock_service,
-                user=mock_user,
+                identity=mock_user,
             )
         assert exc_info.value.status_code == 404
 
@@ -233,7 +242,7 @@ class TestGetFileAccessUrlLogic:
             request=mock_request,
             file_id="file-1",
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         mock_service.get_file_info.assert_called_once_with("file-1")
@@ -259,7 +268,7 @@ class TestGetFileAccessUrlLogic:
             request=mock_request,
             file_id="file-1",
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         mock_service.get_file_info.assert_called_once_with("file-1")
@@ -278,7 +287,7 @@ class TestGetFileAccessUrlLogic:
                 request=mock_request,
                 file_id="file-1",
                 service=mock_service,
-                user=mock_user,
+                identity=mock_user,
             )
         assert exc_info.value.status_code == 404
 
@@ -306,7 +315,7 @@ class TestGetMultimodalConfigLogic:
 
         result = await get_multimodal_config(
             request=mock_request,
-            user=mock_user,
+            identity=mock_user,
         )
 
         mock_get_settings.assert_called_once()

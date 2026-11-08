@@ -17,7 +17,7 @@ from .conftest import Service
 
 
 pytestmark = pytest.mark.asyncio
-CONFIG = {"user_id": "u1", "user": {"name": "Ann"}, "authz": {"ok": True}}
+CONFIG = {"user_id": "u1", "user": {"name": "Ann"}}
 
 
 def make_report(env):
@@ -48,7 +48,6 @@ def make_report(env):
         ((1,), {"ctx": "EVIL"}, "set by the server"),
         ((1,), {"config": {}}, "set by the server"),
         ((1,), {"user_id": "u2"}, "set by the server"),
-        ((1,), {"authz": {}}, "set by the server"),
         ((1, {}), {}, "at most 1 positional"),
     ],
 )

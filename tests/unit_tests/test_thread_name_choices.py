@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from injectq import InjectQ
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.graph import StateGraph
 from tenxgraph.core.state import AgentState, Message
 from tenxgraph.storage.checkpointer import InMemoryCheckpointer
@@ -153,7 +154,7 @@ async def _run(choice: str, *, stream: bool) -> tuple[GraphService, str | None]:
     graph_input = GraphInputSchema(
         messages=[{"role": "user", "content": [{"type": "text", "text": PROMPT}]}]
     )
-    user = {"user_id": "alice"}
+    user = Identity(user_id="alice")
     if stream:
         thread_id = None
         async for line in service.stream_graph(graph_input, user):

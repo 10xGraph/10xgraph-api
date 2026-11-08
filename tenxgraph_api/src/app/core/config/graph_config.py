@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError,
 
 if TYPE_CHECKING:
     from tenxgraph_api.jobs.config import WorkerConfig
+    from tenxgraph_api.src.app.core.auth.auth_config import AuthConfig
 
 
 logger = logging.getLogger("tenxgraph_api")
@@ -587,7 +588,6 @@ def _connection_limit(data: dict, key: str, default: int) -> int | None:
 # Finite default so one account cannot hold an unbounded number of HTTP graph runs open.
 DEFAULT_MAX_CONCURRENT_RUNS_PER_USER = 10
 THREAD_ID_MODES = ("client", "server")
-GRAPH_INTROSPECTION_MODES = ("open", "scoped")
 
 # Longest a graph run may take when MODE=production and ``runs.timeout`` is not set.
 DEFAULT_PRODUCTION_RUN_TIMEOUT_SECONDS = 300.0
@@ -623,14 +623,14 @@ class RunsConfig:
             "max_parallel_tool_calls": 10
         }
 
-    ``thread_ids`` decides who may name a new thread. ``"server"`` (the default) accepts only
-    ids of threads that already exist; a new thread is started by omitting the id (or sending
-    ``"new"`` over WebSocket), and the server picks it. ``"client"`` lets a request start a
-    thread under any id it picks; under owner-only authorization the first writer of an id then
-    owns it, so a user who claims a guessable id (``"default"``) first locks its intended owner
-    out, and a request on an unknown id answers differently from one on someone else's. AG-UI
+    ``thread_ids`` decides who may name a new thread, with auth on or off. ``"server"`` (the
+    default) accepts only ids of threads that already exist; a new thread is started by
+    omitting the id (or sending ``"new"`` over WebSocket), and the server picks it.
+    ``"client"`` lets a request start a thread under any id it picks; the first writer of an id
+    then owns it, so a user who claims a guessable id (``"default"``) first locks its intended
+    owner out. A thread the caller cannot see and an unknown one both answer 404. AG-UI
     (``POST /v1/ag-ui``) and realtime (``/v1/graph/live``) follow the same rule as REST: with
-    ``"server"`` an id the server has never seen is refused (403). An AG-UI client that has no
+    ``"server"`` an id the server has never seen is refused (404). An AG-UI client that has no
     thread yet sends ``threadId`` blank or ``"new"`` and reads the server's id from
     ``RUN_STARTED``; a frontend that makes its own ids needs ``"client"``.
 
@@ -918,70 +918,22 @@ class GraphConfig:
         """
         return self.data.get("observability", None)
 
-    @property
-    def authorization_path(self) -> str | None:
+    def auth_config(self) -> "AuthConfig | None":
+        """The parsed ``auth`` setting; None when auth is off. Called on every request, so the
+        result is cached by the raw ``auth`` value (a changed config is parsed again).
+
+        Only parses; ``check_auth_config`` reports rule violations at boot.
         """
-        Get the authorization backend selector from configuration.
+        from tenxgraph_api.src.app.core.auth.auth_config import AuthConfig
 
-        Accepts, in order of precedence:
-        - ``"module:attribute"`` -- a custom ``AuthorizationBackend`` to load.
-        - a built-in name: ``"ownership"`` (owner-only thread access) or
-          ``"allow_all"``/``"default"``/``"none"`` (any authenticated user).
-        - ``None`` (not configured) -- defaults by run mode: ``ownership`` in
-          production, ``allow_all`` in development.
-
-        Returns:
-            str | None: The configured selector, or None to use the mode default.
-        """
-        return self.data.get("authorization", None)
-
-    def auth_config(self) -> dict | None:
-        """The parsed ``auth`` setting. Called on every request, so the result is cached.
-
-        The cache is keyed by the raw ``auth`` value, so a changed config is parsed again. The
-        JWT environment check therefore runs once, not per request.
-        """
-        res = self.data.get("auth", None)
-        key = json.dumps(res, sort_keys=True, default=str)
+        raw = self.data.get("auth", None)
+        key = json.dumps(raw, sort_keys=True, default=str)
         cached = getattr(self, "_auth_config_cache", None)
-        if cached is not None and cached[0] == key:
-            return dict(cached[1]) if cached[1] is not None else None
-        parsed = self._parse_auth_config(res)
-        self._auth_config_cache = (key, parsed)
-        return dict(parsed) if parsed is not None else None
-
-    @staticmethod
-    def _parse_auth_config(res: Any) -> dict | None:
-        if not res:
-            return None
-
-        if isinstance(res, str) and res == "jwt":
-            # Now check jwt secret and algorithm available in env
-            secret = os.environ.get("JWT_SECRET_KEY", None)
-            algorithm = os.environ.get("JWT_ALGORITHM", None)
-            rotation_keys = os.environ.get("JWT_SECRET_KEYS", None)
-            if not (secret or rotation_keys) or not algorithm:
-                raise ValueError(
-                    "JWT_SECRET_KEY (or JWT_SECRET_KEYS) and JWT_ALGORITHM must be set in "
-                    "environment variables",
-                )
-            return {
-                "method": "jwt",
-            }
-
-        if isinstance(res, dict):
-            method = res.get("method", None)
-            path: str | None = res.get("path", None)
-            if not path or not method:
-                raise ValueError("Both method and path must be provided in auth config")
-
-            if method == "custom" and path:
-                return {
-                    "method": "custom",
-                    "path": path,
-                }
-
-        raise ValueError(f"Unsupported auth method: {res}")
+        if cached is None or cached[0] != key:
+            cached = (key, AuthConfig.parse(raw))
+            self._auth_config_cache = cached
+        parsed = cached[1]
+        return None if parsed.method == "none" else parsed
 
     @property
     def rate_limit(self) -> RateLimitConfig | None:
@@ -999,30 +951,6 @@ class GraphConfig:
         """
         data = self.data.get("websocket", None)
         return WebSocketConfig.from_dict({} if data is None else data)
-
-    @property
-    def graph_introspection(self) -> str:
-        """Who may read the graph's structure, tool schemas and state schema.
-
-        ``"open"``: any authenticated user. ``"scoped"``: only identities that carry the
-        ``graph:read`` scope (from JWT claims or an RBAC role); an identity with no scopes is
-        refused. Defaults to ``"scoped"`` in production and ``"open"`` in development. With
-        auth off there is no identity, so these routes stay open either way.
-        """
-        value = self.data.get("graph_introspection", None)
-        if value is None:
-            from tenxgraph_api.src.app.core.config.settings import get_settings
-
-            return "scoped" if get_settings().MODE == "production" else "open"
-        if value not in GRAPH_INTROSPECTION_MODES:
-            raise ValueError(
-                f"graph_introspection must be one of {list(GRAPH_INTROSPECTION_MODES)}"
-            )
-        return value
-
-    @property
-    def introspection_scoped(self) -> bool:
-        return self.graph_introspection == "scoped"
 
     @property
     def token_revocation(self) -> TokenRevocationConfig | None:

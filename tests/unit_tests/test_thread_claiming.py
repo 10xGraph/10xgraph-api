@@ -8,7 +8,6 @@
 # ruff: noqa: S101, PLR2004
 
 import importlib
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -80,15 +79,3 @@ def test_real_thread_id_is_normalised():
     frame = {"thread_id": "  t1 "}
     assert graph_router._resolve_ws_thread(frame) == "t1"
     assert frame == {"thread_id": "t1"}
-
-
-@pytest.mark.asyncio
-async def test_owner_check_runs_when_the_config_cannot_be_read(monkeypatch):
-    container = MagicMock()
-    container.get.side_effect = RuntimeError("config unavailable")
-    monkeypatch.setattr(InjectQ, "get_instance", staticmethod(lambda: container))
-    authz = SimpleNamespace(authorize=AsyncMock(return_value=False))
-
-    allowed = await graph_router._ws_thread_authorized(authz, {"user_id": "a"}, "t1", "stream")
-    assert allowed is False
-    authz.authorize.assert_awaited_once()

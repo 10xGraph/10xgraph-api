@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException, WebSocketDisconnect
 from pydantic import ValidationError
+from tenxgraph.core.authz import Identity
+from tenxgraph.core.exceptions import ThreadNotFoundError
 from tenxgraph.core.state import StreamChunk, StreamEvent
 
 from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
@@ -23,7 +25,7 @@ from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
 
 
-ALICE = {"user_id": "alice"}
+ALICE = Identity(user_id="alice")
 SECRET = "redis://:SECRET@10.0.0.6"
 MSG = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
 
@@ -49,6 +51,7 @@ def _request():
 
 def _service(invoke):
     service = MagicMock()
+    service.require_run_thread = AsyncMock()  # the caller's own thread
     service.runs_policy.return_value = RunsConfig()
     service.invoke_graph = invoke
     service.check_resume_target = AsyncMock()
@@ -57,7 +60,9 @@ def _service(invoke):
 
 
 def _call(service, graph_input):
-    return invoke_graph(request=_request(), graph_input=graph_input, service=service, user=ALICE)
+    return invoke_graph(
+        request=_request(), graph_input=graph_input, service=service, identity=ALICE
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -198,9 +203,9 @@ async def _items(*values):
 async def test_stream_route_answers_409_before_the_response_starts(fresh_locks):
     service = _service(None)
     service.stream_graph = MagicMock(side_effect=lambda *a, **k: _items("a"))
-    response = await stream_graph(graph_input=_input(), service=service, user=ALICE)
+    response = await stream_graph(graph_input=_input(), service=service, identity=ALICE)
     with pytest.raises(HTTPException) as exc:
-        await stream_graph(graph_input=_input(), service=service, user=ALICE)
+        await stream_graph(graph_input=_input(), service=service, identity=ALICE)
     assert exc.value.status_code == 409
     assert [c async for c in response.body_iterator] == ["a"]
     assert fresh_locks._held == {}
@@ -210,7 +215,7 @@ async def test_stream_route_answers_409_before_the_response_starts(fresh_locks):
 async def test_stream_lock_is_released_on_disconnect(fresh_locks):
     service = _service(None)
     service.stream_graph = MagicMock(side_effect=lambda *a, **k: _items("a", "b"))
-    response = await stream_graph(graph_input=_input(), service=service, user=ALICE)
+    response = await stream_graph(graph_input=_input(), service=service, identity=ALICE)
     assert await response.body_iterator.__anext__() == "a"
     assert fresh_locks.held(thread_lock.thread_lock_key("t1")) == 1
     await response.body_iterator.aclose()  # what Starlette does when the client goes away
@@ -226,9 +231,9 @@ async def test_stream_slot_refusal_gives_the_thread_back(fresh_locks, monkeypatc
     service = _service(None)
     service.runs_policy.return_value = RunsConfig(max_concurrent_per_user=1)
     service.stream_graph = MagicMock(side_effect=lambda *a, **k: _items("a"))
-    first = await stream_graph(graph_input=_input("a"), service=service, user=ALICE)
+    first = await stream_graph(graph_input=_input("a"), service=service, identity=ALICE)
     with pytest.raises(HTTPException) as exc:
-        await stream_graph(graph_input=_input("b"), service=service, user=ALICE)
+        await stream_graph(graph_input=_input("b"), service=service, identity=ALICE)
     assert exc.value.status_code == 429
     assert fresh_locks.held(thread_lock.thread_lock_key("b")) == 0
     [c async for c in first.body_iterator]
@@ -274,7 +279,7 @@ async def test_ws_busy_thread_sends_an_error_chunk_and_stays_open(fresh_locks):
     service.stream_graph = MagicMock(side_effect=lambda *a, **k: _items("ok\n"))
     frame = {"invoke_type": "fresh", "messages": MSG, "config": {"thread_id": "t1"}}
     ws = _ws([frame, WebSocketDisconnect()])
-    await websocket_graph(websocket=ws, service=service, user={})
+    await websocket_graph(websocket=ws, service=service, identity=None)
     sent = [c.args[0] for c in ws.send_text.call_args_list]
     chunk = json.loads(sent[0])
     assert chunk["event"] == "error"
@@ -292,8 +297,36 @@ async def test_ws_run_releases_the_lock_and_next_run_works(fresh_locks):
     service.stream_graph = MagicMock(side_effect=lambda *a, **k: _items("ok\n"))
     frame = {"invoke_type": "fresh", "messages": MSG, "config": {"thread_id": "t1"}}
     ws = _ws([frame, frame, WebSocketDisconnect()])
-    await websocket_graph(websocket=ws, service=service, user={})
+    await websocket_graph(websocket=ws, service=service, identity=None)
     assert service.stream_graph.call_count == 2
+    assert fresh_locks._held == {}
+
+
+@pytest.mark.asyncio
+async def test_invoke_reads_the_thread_again_once_locked(fresh_locks):
+    """runs.thread_ids "client": another user may create the id while this run waits."""
+    service = _service(AsyncMock())
+    service.require_run_thread = AsyncMock(side_effect=[None, ThreadNotFoundError("t1")])
+    with pytest.raises(ThreadNotFoundError):
+        await _call(service, _input())
+    assert service.require_run_thread.await_count == 2
+    service.invoke_graph.assert_not_awaited()
+    assert fresh_locks._held == {}
+
+
+@pytest.mark.asyncio
+async def test_ws_thread_taken_while_waiting_is_an_error_chunk(fresh_locks):
+    service = _service(None)
+    service.is_live_agent = False
+    service.require_run_thread = AsyncMock(side_effect=[None, ThreadNotFoundError("t1")])
+    service.stream_graph = MagicMock(side_effect=lambda *a, **k: _items("ok\n"))
+    frame = {"invoke_type": "fresh", "messages": MSG, "config": {"thread_id": "t1"}}
+    ws = _ws([frame, WebSocketDisconnect()])
+    await websocket_graph(websocket=ws, service=service, identity=None)
+    chunk = json.loads(ws.send_text.call_args_list[0].args[0])
+    assert chunk["data"]["code"] == "THREAD_NOT_FOUND"
+    service.stream_graph.assert_not_called()
+    ws.close.assert_not_awaited()
     assert fresh_locks._held == {}
 
 
@@ -319,19 +352,17 @@ async def test_ag_ui_busy_thread_answers_409_and_waits_by_default(fresh_locks):
     request = MagicMock()
     request.json = AsyncMock(return_value=body)
     request.headers = {}
-    config = SimpleNamespace(
-        auth_config=lambda: None, ag_ui=SimpleNamespace(allow_client_tools=True)
-    )
+    config = SimpleNamespace(ag_ui=SimpleNamespace(allow_client_tools=True))
     service = _service(None)
     service.check_media_urls = MagicMock()
     held = await thread_lock.acquire_thread_lock("t1")
     with pytest.raises(HTTPException) as exc:
-        await run_ag_ui(request, service, ALICE, MagicMock(), config)
+        await run_ag_ui(request, service, Identity(user_id="alice"), config)
     assert exc.value.status_code == 409
     assert exc.value.detail == "thread is busy"
     service.stop_graph.assert_not_awaited()
     held.release()
-    response = await run_ag_ui(request, service, ALICE, MagicMock(), config)
+    response = await run_ag_ui(request, service, Identity(user_id="alice"), config)
     assert fresh_locks.held(thread_lock.thread_lock_key("t1")) == 1
     del response  # never iterated: the finalizer gives the lock back
     gc.collect()
@@ -397,6 +428,7 @@ def _graph_service(astream):
     service.checkpointer = MagicMock()
     service.checkpointer.aput_thread = AsyncMock(return_value=True)
     service.checkpointer.aget_state = AsyncMock(return_value=None)
+    service.checkpointer.aget_thread = AsyncMock(return_value=object())  # the caller's thread
     service.thread_name_generator = None
     service._media_service = None
     service._telemetry = None
@@ -442,7 +474,7 @@ async def _ws_output(service):
             WebSocketDisconnect(),
         ]
     )
-    await websocket_graph(websocket=ws, service=service, user={})
+    await websocket_graph(websocket=ws, service=service, identity=None)
     return " ".join(c.args[0] for c in ws.send_text.call_args_list)
 
 
@@ -462,7 +494,7 @@ async def _ag_ui_output(service):
         context=[],
         forwarded_props={},
     )
-    events = stream_ag_ui(service, run_input, ALICE, EventEncoder())
+    events = stream_ag_ui(service, run_input, Identity(user_id="alice"), EventEncoder())
     return "".join([e async for e in events])
 
 

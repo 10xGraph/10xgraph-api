@@ -122,8 +122,7 @@ def test_unknown_keys_list_the_valid_ones():
 def test_string_token_revocation_says_what_is_valid():
     message = _error({"token_revocation": "redis"})
     assert message.startswith(
-        "token_revocation must be true, false, or an object with enabled, token_lifetime, "
-        "user_ttl"
+        "token_revocation must be true, false, or an object with enabled, token_lifetime, user_ttl"
     )
 
 

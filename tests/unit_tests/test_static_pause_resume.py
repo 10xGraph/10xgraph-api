@@ -26,7 +26,7 @@ async def _prepare(state, **fields):
     service = _service(MagicMock(), timeout=None)
     service.checkpointer.aget_state.return_value = state
     graph_input = GraphInputSchema(config={"thread_id": "t1"}, **fields)
-    input_data, _, _ = await service._prepare_input(graph_input, ALICE["user_id"])
+    input_data, _, _ = await service._prepare_input(graph_input, ALICE)
     return input_data
 
 

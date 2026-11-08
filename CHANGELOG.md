@@ -29,6 +29,73 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking changes: auth, RBAC and reach
+
+Needs the `10xgraph` release with `Identity` and `Reach` (`tenxgraph.core.authz`). The unreleased
+`RoleBasedAuthorizationBackend`, `authorization.isolation` and `isolation_scope` entries below
+describe code this section removes.
+
+- **One `auth` key; `authorization` is removed.** A top-level `authorization` key (including
+  `"ownership"` and the `rbac` backend) now refuses to boot. Migration: `"auth": "jwt"` still works
+  (default permission set, reach `own`); the object form is `{"method": "none" | "jwt" | "custom",
+  "path": "module:Class", ...}` with the RBAC keys (`roles`, `roles_claim`, `permissions_claim`,
+  `tenant_claims`, `default_role`, `system_identities`) next to it. For your own checks use
+  `"method": "custom"` with a `BaseAuth` subclass. `check_auth_config` is the one validator for boot,
+  `10xgraph config`, `audit` and `build`; the `prod` init template writes the new shape.
+- **`AuthorizationBackend`, `OwnershipAuthorizationBackend`, `ThreadOwnershipResolver`, tombstones
+  and the ownership cache keys are removed.** Ownership is enforced in storage by the caller's reach.
+  Subclass `BaseAuth` and override `authorize` instead.
+- **`graph_introspection` is removed** and refuses to boot. Reading the graph (`GET /v1/graph`,
+  state schema, nodes) needs `graph:read`; do not grant it to hide graph internals.
+- **`BaseAuth.authorize(identity, permission, resource=None)`** is new and async; it defaults to the
+  RBAC check (`identity.can(permission)`) and takes no request, so the jobs worker can call it.
+  Overriding it on a config with `roles` keeps the roles only if the override calls
+  `super().authorize`.
+- **Permission names changed.** Everything comes from one registry: `graph` (`read`, `invoke`,
+  `stream`, `stop`, `fix`), `threads` (`read`, `write`, `delete`), `store`, `files` (`read`,
+  `upload`, `delete`), `config:read`, `tasks` (`trigger`, `read`, `cancel`) and `admin` (`read`,
+  `write`), with `resource:*` and `*`. The old `checkpointer:*` names are now `threads:*`,
+  `tasks:invoke` is `tasks:trigger`, and `tasks:pause` is gone. A role or token scope naming an
+  unknown permission is refused at boot. With no roles the default set is everything except `admin:*`.
+  Token `scope` / `scopes` only narrow the granted permissions.
+- **Reach per role** (`own`, `tenant`, `all`) is required on every role and never a fallback; reach
+  `tenant` needs `tenant_claims`. `tenant_claims` must match the tenant columns declared on the
+  checkpointer and store both ways (refused in production, a warning otherwise). Roles with reach
+  `all` are logged at boot. A token missing a configured tenant claim, or with a malformed roles or
+  permissions claim, is 401.
+- **A foreign thread, message, memory, file or run answers 404**, not 403 or an empty result, on
+  every transport (`require_thread` in `core/threads.py`). `runs.thread_ids` is enforced with auth on
+  or off.
+- **`POST /v1/threads/{thread_id}/messages` (history import) is removed.**
+- **`config["user"]` is the core `Identity`**, not a dict; custom code that indexed it as a dict
+  keeps working through `identity.get` / `identity[key]`.
+- **Modules moved.** `request_config.py` and `client_filters.py` moved from `core/auth/` to
+  `core/validation/`; `authorization.py`, `ownership_resolver.py`, `identity_cache.py` and
+  `auth_backend.py` are deleted. `WebhookAuth` is dropped (the API has no route that uses it).
+- **`/v1/tasks`**: GET and cancel widen by reach; trigger and PATCH stay `own` (see Added).
+
+### Added: auth, RBAC and reach
+
+- `GET /v1/me`: `user_id`, `tenant`, `roles`, `permissions`, `reach` of the caller; `{"auth": "off"}`
+  with auth off.
+- `tenxgraph_api` exports `Identity`, `RequireIdentity` (authenticates and returns the `Identity`;
+  401 on HTTP, close 1008 on WebSocket) and `RequirePermission("resource", "action")` (adds the
+  `authorize` call, 403). One dependency builds the identity once per request for HTTP, stream,
+  WebSocket, AG-UI and live.
+- Role tables with inheritance (`inherits`; cycles refused), `roles_claim` or `permissions_claim`
+  (not both), and `default_role`; an unknown role reference is refused at boot.
+- `/v1/graph/stop` checks the thread first (404 for one the caller cannot reach) and may stop another
+  user's run when the caller's reach covers it. A visible thread with no run answers 200
+  `{"ok": false}`.
+- Jobs: with auth on, the worker rebuilds `config["user"]` from the stored claims with the current
+  role config before every run and checks `tasks:trigger` on the task name; a refused or invalid
+  identity, or a reserved id used as a user, fails the run without executing it. `system_identities`
+  plus a task label `identity="<name>"` runs a call that has no `config["user"]` as
+  `Identity(kind="system", user_id="__system__:<name>")`; a caller's identity always wins, and an
+  unknown name with auth on aborts. `TaskStatus` and `ScheduleRecord` keep the owner's `user_id` and
+  `tenant`, so `GET /v1/tasks/{task_id}` and cancel follow the caller's reach.
+- The production init template writes `ag_ui.allow_client_tools: false`.
+
 Tenant isolation and safe filters on top of core's tenant columns (`tenant_columns=` on
 `PgCheckpointer` / `PgVectorStore`) and filter language (`tenxgraph.storage.sql_filter`).
 Needs the `10xgraph` release that ships them.

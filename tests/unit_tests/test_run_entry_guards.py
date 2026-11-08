@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException, WebSocketDisconnect
+from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
 from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
@@ -25,7 +26,7 @@ from tenxgraph_api.src.app.routers.graph.router import (
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import GraphInputSchema
 
 
-ALICE = {"user_id": "alice"}
+ALICE = Identity(user_id="alice")
 MSG = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
 FRAME = {"invoke_type": "fresh", "messages": MSG, "config": {"thread_id": "t1"}}
 THREAD_KEY = "runs:thread:t1"
@@ -61,6 +62,7 @@ def _production(monkeypatch):
 
 def _service(runs=None):
     service = MagicMock()
+    service.require_run_thread = AsyncMock()  # the caller's own thread
     service.is_live_agent = False
     service.runs_policy.return_value = runs or RunsConfig(max_concurrent_per_user=1)
     service.stop_graph = AsyncMock(return_value={"ok": True})
@@ -112,7 +114,7 @@ async def test_ws_run_holds_a_run_slot_and_the_thread_lock(limiter):
     service = _service()
     service.stream_graph = stream
     ws = _ws([FRAME, WebSocketDisconnect()])
-    await websocket_graph(websocket=ws, service=service, user=ALICE)
+    await websocket_graph(websocket=ws, service=service, identity=ALICE)
     assert seen == {THREAD_KEY: 1, SLOT_KEY: 1}
     assert limiter._held == {}
 
@@ -123,7 +125,7 @@ async def test_ws_over_the_run_cap_sends_an_error_chunk_and_stays_open(limiter):
     service = _service()
     service.stream_graph = MagicMock()
     ws = _ws([FRAME, WebSocketDisconnect()])
-    await websocket_graph(websocket=ws, service=service, user=ALICE)
+    await websocket_graph(websocket=ws, service=service, identity=ALICE)
     chunk = _sent(ws)[0]
     assert chunk["event"] == "error"
     assert "Too many runs" in chunk["data"]["reason"]
@@ -139,7 +141,7 @@ async def test_ws_invalid_input_does_not_echo_the_validation_text_in_production(
     bad = {"invoke_type": "fresh", "messages": [], "config": {"api_key": "hunter2-secret"}}
     service = _service()
     ws = _ws([bad, WebSocketDisconnect()])
-    await websocket_graph(websocket=ws, service=service, user=ALICE)
+    await websocket_graph(websocket=ws, service=service, identity=ALICE)
     reason = _sent(ws)[0]["data"]["reason"]
     assert "messages must not be empty" not in reason
     assert "hunter2" not in reason
@@ -169,7 +171,7 @@ async def test_ws_lock_is_released_only_after_the_run_generator_closed(limiter):
     service.stream_graph = stream
     ws = _ws([FRAME, WebSocketDisconnect()])
     ws.send_text = AsyncMock(side_effect=[RuntimeError("socket gone")])
-    await websocket_graph(websocket=ws, service=service, user=ALICE)
+    await websocket_graph(websocket=ws, service=service, identity=ALICE)
     await asyncio.sleep(0.05)
     assert held_when_closed == [{THREAD_KEY: 1, SLOT_KEY: 1}]
     assert limiter._held == {}
@@ -200,7 +202,7 @@ async def test_ws_client_leaving_mid_run_cancels_the_run(limiter):
         raise WebSocketDisconnect
 
     ws.receive_text.side_effect = _frames_then(json.dumps(FRAME), disconnect_after_start)
-    await asyncio.wait_for(websocket_graph(websocket=ws, service=service, user=ALICE), 3)
+    await asyncio.wait_for(websocket_graph(websocket=ws, service=service, identity=ALICE), 3)
     assert closed.is_set()
     assert limiter._held == {}
 
@@ -236,7 +238,7 @@ async def test_ws_slow_consumer_is_cut_off_and_frees_the_lock(limiter, monkeypat
         await asyncio.sleep(30)
 
     ws.send_text = AsyncMock(side_effect=stalled)
-    await asyncio.wait_for(websocket_graph(websocket=ws, service=service, user=ALICE), 3)
+    await asyncio.wait_for(websocket_graph(websocket=ws, service=service, identity=ALICE), 3)
     ws.close.assert_awaited()
     assert limiter._held == {}
 
@@ -258,7 +260,7 @@ async def test_ws_handler_cancel_propagates_and_frees_everything(limiter):
     ws = _ws([FRAME])
     ws.receive_text.side_effect = _frames_then(json.dumps(FRAME), _forever)
     before = asyncio.all_tasks()
-    task = asyncio.create_task(websocket_graph(websocket=ws, service=service, user=ALICE))
+    task = asyncio.create_task(websocket_graph(websocket=ws, service=service, identity=ALICE))
     await asyncio.wait_for(started.wait(), 2)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -310,7 +312,7 @@ def _live_service(events=None, hold=None):
 async def test_live_session_takes_the_thread_lock_and_a_run_slot(limiter):
     service = _live_service(hold=limiter)
     ws = _live_ws({"model": "m", "thread_id": "t1"})
-    task = asyncio.create_task(realtime_graph_ws(websocket=ws, service=service, user=ALICE))
+    task = asyncio.create_task(realtime_graph_ws(websocket=ws, service=service, identity=ALICE))
     await _until(lambda: service._captured.get("started"))
     assert service._captured["held"] == {THREAD_KEY: 1, SLOT_KEY: 1}
     task.cancel()
@@ -324,7 +326,7 @@ async def test_live_session_on_a_busy_thread_is_refused(limiter):
     held = await thread_lock.acquire_thread_lock("t1")
     service = _live_service()
     ws = _live_ws({"model": "m", "thread_id": "t1"})
-    await realtime_graph_ws(websocket=ws, service=service, user=ALICE)
+    await realtime_graph_ws(websocket=ws, service=service, identity=ALICE)
     assert "started" not in service._captured
     sent = [json.loads(c.args[0]) for c in ws.send_text.call_args_list]
     assert sent[0]["code"] == "thread_busy"
@@ -338,7 +340,7 @@ async def test_live_session_over_the_run_cap_is_refused(limiter):
     held = await run_limits.acquire_run_slot(ALICE, RunsConfig(max_concurrent_per_user=1))
     service = _live_service()
     ws = _live_ws({"model": "m", "thread_id": "t1"})
-    await realtime_graph_ws(websocket=ws, service=service, user=ALICE)
+    await realtime_graph_ws(websocket=ws, service=service, identity=ALICE)
     assert "started" not in service._captured
     sent = [json.loads(c.args[0]) for c in ws.send_text.call_args_list]
     assert sent[0]["code"] == "too_many_runs"
@@ -351,7 +353,7 @@ async def test_live_handler_cancel_propagates_and_leaves_no_child_tasks(limiter)
     service = _live_service()
     ws = _live_ws({"model": "m", "thread_id": "t1"})
     before = asyncio.all_tasks()
-    task = asyncio.create_task(realtime_graph_ws(websocket=ws, service=service, user=ALICE))
+    task = asyncio.create_task(realtime_graph_ws(websocket=ws, service=service, identity=ALICE))
     await _until(lambda: service._captured.get("started"))
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -375,7 +377,7 @@ async def test_stream_interrupt_mismatch_is_a_real_409_and_frees_the_guard(limit
         config={"thread_id": "t1"}, resume={"ok": True}, interrupt_id="i-1"
     )
     with pytest.raises(HTTPException) as exc:
-        await stream_graph(graph_input=graph_input, service=service, user=ALICE)
+        await stream_graph(graph_input=graph_input, service=service, identity=ALICE)
     assert exc.value.status_code == 409
     service.stream_graph.assert_not_called()
     assert limiter._held == {}

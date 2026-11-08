@@ -6,6 +6,7 @@ from fastapi.routing import APIWebSocketRoute
 
 from .checkpointer.router import router as checkpointer_router
 from .graph import router as graph_router
+from .me import router as me_router
 from .media.router import router as media_router
 from .ping.router import router as ping_router
 from .store import router as store_router
@@ -93,6 +94,7 @@ def init_routes(
     app.include_router(_graph_router(websocket))
     app.include_router(checkpointer_router)
     app.include_router(store_router)
+    app.include_router(me_router)
     if ag_ui:
         app.include_router(_ag_ui_router())
     if tasks:

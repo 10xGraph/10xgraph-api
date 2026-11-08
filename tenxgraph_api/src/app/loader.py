@@ -25,13 +25,8 @@ from tenxgraph.utils.id_generator import (
 )
 
 from tenxgraph_api import BaseAuth
-from tenxgraph_api.src.app.core.auth.authorization import (
-    AuthorizationBackend,
-    DefaultAuthorizationBackend,
-    OwnershipAuthorizationBackend,
-    RoleBasedAuthorizationBackend,
-    assert_ownership_supported,
-)
+from tenxgraph_api.src.app.core.auth.auth_config import AuthConfig
+from tenxgraph_api.src.app.core.auth.rbac import log_reach_all_roles
 from tenxgraph_api.src.app.core.cache_store.base import BaseCacheStore
 from tenxgraph_api.src.app.core.cache_store.loader import load_and_bind_cache_store
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
@@ -230,7 +225,9 @@ def load_auth(path: str | None) -> BaseAuth | None:
         elif isinstance(entry_point_obj, BaseAuth):
             auth = entry_point_obj
         else:
-            raise TypeError("Loaded object is not a subclass or instance of BaseAuth.")
+            raise TypeError(
+                f"[custom-class] auth.path {path!r} is not a BaseAuth subclass or instance."
+            )
 
         logger.info(f"Successfully loaded BaseAuth '{function_name}' from {path}.")
     except ModuleNotFoundError as e:
@@ -244,44 +241,6 @@ def load_auth(path: str | None) -> BaseAuth | None:
         raise Exception(f"Failed to load BaseAuth from {path}: {e}")
 
     return auth
-
-
-def load_authorization(path: str | None) -> AuthorizationBackend | None:
-    """
-    Load authorization backend from the specified path.
-
-    Args:
-        path: Module path in format 'module:attribute' or None
-
-    Returns:
-        AuthorizationBackend instance or None if path is not provided
-
-    Raises:
-        Exception: If loading fails or object is not AuthorizationBackend
-    """
-    if not path:
-        return None
-
-    module_name_importable, function_name = path.split(":")
-
-    try:
-        module = importlib.import_module(module_name_importable)
-        entry_point_obj = getattr(module, function_name)
-
-        # If it's a class, instantiate it; if it's an instance, use as is
-        if inspect.isclass(entry_point_obj) and issubclass(entry_point_obj, AuthorizationBackend):
-            authorization = entry_point_obj()
-        elif isinstance(entry_point_obj, AuthorizationBackend):
-            authorization = entry_point_obj
-        else:
-            raise TypeError("Loaded object is not a subclass or instance of AuthorizationBackend.")
-
-        logger.info(f"Successfully loaded AuthorizationBackend '{function_name}' from {path}.")
-    except Exception as e:
-        logger.error(f"Error loading AuthorizationBackend from {path}: {e}")
-        raise Exception(f"Failed to load AuthorizationBackend from {path}: {e}")
-
-    return authorization
 
 
 def load_thread_name_generator(path: str | None) -> ThreadNameGenerator | None:
@@ -472,27 +431,60 @@ def apply_id_generator(
     return generator
 
 
-def load_and_bind_auth(container: InjectQ, auth_config: dict) -> None:
-    """Bind the authentication backend described by ``GraphConfig.auth_config()``.
+def load_and_bind_auth(container: InjectQ, auth_config: AuthConfig | None) -> None:
+    """Bind the ``BaseAuth`` instance for the parsed ``auth`` object (None when auth is off).
 
-    ``jwt`` needs no path; ``custom`` needs a ``path`` to a ``BaseAuth``. Any other method
-    is a configuration error and fails at startup rather than silently binding no backend.
+    The instance gets ``.rbac`` from the auth object's RBAC keys. Rule violations are checked
+    before this by :func:`check_auth_at_boot`.
     """
     from tenxgraph_api.src.app.core.auth.jwt_auth import JwtAuth, check_jwt_settings
     from tenxgraph_api.src.app.core.config.settings import get_settings
 
-    method = auth_config.get("method")
-    if method == "jwt":
-        check_jwt_settings(get_settings())
-        auth_backend: BaseAuth | None = JwtAuth()
-    elif method == "none":
-        auth_backend = None
-    elif method == "custom":
-        auth_backend = _load_custom_auth(auth_config.get("path"))
-    else:
-        raise ValueError(f"Unsupported auth method: {method!r}. Use 'jwt' or 'custom'.")
+    auth: BaseAuth | None = None
+    if auth_config is not None:
+        if auth_config.method == "jwt":
+            check_jwt_settings(get_settings())
+            auth = JwtAuth()
+        else:
+            auth = _load_custom_auth(auth_config.path)
+        auth.rbac = auth_config.rbac_config()
+    container.bind_instance(BaseAuth, auth, allow_none=True)
 
-    container.bind_instance(BaseAuth, auth_backend, allow_none=True)
+
+def check_auth_at_boot(
+    config: GraphConfig, checkpointer: object | None, store: object | None
+) -> None:
+    """Run the shared auth rules; log warnings, refuse to start on any error.
+
+    ``checkpointer`` and ``store`` are the bound backends, for the tenant-column rule.
+    """
+    from tenxgraph_api.src.app.core.auth.auth_config import (
+        AuthIssue,
+        check_auth_config,
+        check_tenant_claims,
+    )
+    from tenxgraph_api.src.app.core.config.settings import get_settings
+
+    production = get_settings().MODE == "production"
+    issues: list[AuthIssue] = check_auth_config(config.data, production=production)
+    auth = config.auth_config() if not any(i.level == "error" for i in issues) else None
+    if auth is not None:
+        issues += check_tenant_claims(
+            auth.tenant_claims,
+            checkpointer,
+            store,
+            production=production,
+            allow_mismatch=config.store_allow_tenant_mismatch,
+        )
+    errors = [i for i in issues if i.level == "error"]
+    if errors:
+        raise ValueError(
+            "Invalid auth configuration in 10xgraph.json:\n" + "\n".join(f"  {i}" for i in errors)
+        )
+    for issue in issues:
+        # reach-all roles are logged by log_reach_all_roles
+        if issue.rule != "reach-all":
+            logger.warning("%s", issue)
 
 
 def _load_custom_auth(path: str | None) -> BaseAuth:
@@ -522,135 +514,10 @@ def _load_custom_auth(path: str | None) -> BaseAuth:
     return auth
 
 
-# Built-in authorization backends selectable by name in ``10xgraph.json``.
-_BUILTIN_AUTHORIZATION = {
-    "ownership": OwnershipAuthorizationBackend,  # object-level: owner-only thread access
-    "allow_all": DefaultAuthorizationBackend,  # authenticated == authorized
-    "default": DefaultAuthorizationBackend,  # alias for allow_all
-    "none": DefaultAuthorizationBackend,  # alias for allow_all
-}
-
-
-def _resolve_authorization_backend(
-    authorization: str | dict | None,
-    cache: BaseCacheStore | None = None,
-    server_thread_ids: bool = False,
-    auth_enabled: bool = False,
-) -> AuthorizationBackend:
-    """Pick the authorization backend from config, defaulting by run mode.
-
-    Resolution order (developer choice always wins):
-
-    1. A dict ``{"backend": "rbac", "roles": {...}, ...}`` -> role-based access control.
-    2. ``"module:attr"`` -> the developer's custom :class:`AuthorizationBackend`.
-    3. A built-in name (``"ownership"``, ``"allow_all"``/``"default"``/``"none"``) ->
-       that backend, regardless of mode.
-    4. Not configured (``null``) -> secure by default
-       (:class:`OwnershipAuthorizationBackend`) whenever requests carry an identity
-       (``auth_enabled``) or ``MODE=production``. Only with auth off in development is it
-       :class:`DefaultAuthorizationBackend`, which then changes nothing: without an identity
-       no authorization check runs. Either can be overridden via (1)/(2)/(3).
-
-    The default used to depend on the mode alone, so a server shipped with the default
-    ``MODE=development`` and auth on ran ``allow_all``: the API stamped isolation scope
-    ``none`` and every authenticated user could read every thread and memory.
-
-    ``cache`` (the API's cache store) backs the ownership cache's shared L2 tier; the
-    built-in backends use it and never close it.
-    ``server_thread_ids`` (``runs.thread_ids == "server"``) makes the built-in ownership
-    backends refuse client-named ids for threads that do not exist yet.
-    """
-    # 1. Config-driven RBAC: {"backend": "rbac", "roles": {...}, "default_scopes": [...]}
-    if isinstance(authorization, dict):
-        backend_name = (authorization.get("backend") or authorization.get("type") or "").lower()
-        if backend_name in ("rbac", "role_based", "roles"):
-            logger.info("Using RoleBasedAuthorizationBackend (config-driven roles).")
-            try:
-                return RoleBasedAuthorizationBackend(
-                    role_scopes=authorization.get("roles")
-                    or authorization.get("role_scopes")
-                    or {},
-                    default_scopes=authorization.get("default_scopes") or (),
-                    # Unknown values (a typo, null) raise: the server must not boot with a
-                    # guessed isolation level.
-                    isolation=authorization.get("isolation", "owner"),
-                    cache=cache,
-                    server_thread_ids=server_thread_ids,
-                )
-            except ValueError as exc:
-                raise ValueError(f"authorization.isolation in 10xgraph.json: {exc}") from exc
-        raise ValueError(
-            f"Unknown authorization backend config: {authorization!r}. For RBAC use "
-            '{"backend": "rbac", "roles": {...}}.'
-        )
-
-    if authorization and ":" in authorization:
-        backend = load_authorization(authorization)
-        logger.info("Using custom AuthorizationBackend from '%s'.", authorization)
-        return backend  # type: ignore[return-value]
-
-    if authorization:
-        key = authorization.strip().lower()
-        builtin = _BUILTIN_AUTHORIZATION.get(key)
-        if builtin is None:
-            raise ValueError(
-                f"Unknown authorization backend '{authorization}'. Use a 'module:attr' "
-                f"path or one of: {', '.join(sorted(_BUILTIN_AUTHORIZATION))}."
-            )
-        logger.info("Using built-in '%s' authorization backend.", key)
-        if builtin is DefaultAuthorizationBackend and auth_enabled and _is_production():
-            logger.warning(
-                'authorization is "%s" with auth enabled in production: every authenticated '
-                'user can read and change every thread and memory. Use "ownership" or '
-                '"rbac" unless that is intended.',
-                key,
-            )
-        if builtin is OwnershipAuthorizationBackend:
-            return OwnershipAuthorizationBackend(cache=cache, server_thread_ids=server_thread_ids)
-        return builtin()
-
-    # Not configured: owner-only whenever there is an identity to own threads.
-    if auth_enabled or _is_production():
-        logger.info(
-            "No authorization configured; defaulting to OwnershipAuthorizationBackend "
-            "(owner-only thread access). Set "
-            '"authorization": "allow_all" to opt out.'
-        )
-        return OwnershipAuthorizationBackend(cache=cache, server_thread_ids=server_thread_ids)
-
-    logger.info(
-        "No authorization configured and auth is off; using DefaultAuthorizationBackend "
-        "(requests carry no identity, so there is nothing to authorize)."
-    )
-    return DefaultAuthorizationBackend()
-
-
 def _is_production() -> bool:
     from tenxgraph_api.src.app.core.config.settings import get_settings
 
     return get_settings().MODE == "production"
-
-
-def load_and_bind_authorization(
-    container: InjectQ,
-    authorization_path: str | None,
-    cache: BaseCacheStore | None = None,
-    server_thread_ids: bool = False,
-    auth_enabled: bool = False,
-) -> None:
-    """Bind the authorization backend; ``cache`` defaults to the bound ``BaseCacheStore``."""
-    if cache is None:
-        cache = container.try_get(BaseCacheStore)
-    backend = _resolve_authorization_backend(
-        authorization_path, cache, server_thread_ids, auth_enabled
-    )
-    if server_thread_ids and not isinstance(backend, OwnershipAuthorizationBackend):
-        logger.debug(
-            'runs.thread_ids is "server" but %s does not check thread ownership; client '
-            "thread ids are only refused by the built-in ownership and rbac backends.",
-            type(backend).__name__,
-        )
-    container.bind_instance(AuthorizationBackend, backend)
 
 
 def _enable_token_revocation(container: InjectQ, config: GraphConfig, auth_enabled: bool) -> None:
@@ -842,21 +709,18 @@ async def attach_all_modules(
     else:
         logger.info("Production mode: local telemetry store disabled (use OTEL/publisher)")
 
-    # load auth backend
+    # Auth: the shared rules first (errors refuse the boot), then bind the BaseAuth or None.
+    checkpointer = getattr(graph, "_checkpointer", None) or container.try_get(BaseCheckpointer)
+    check_auth_at_boot(config, checkpointer, store)
     auth_config = config.auth_config()
-    if auth_config:
-        load_and_bind_auth(container, auth_config)
-    else:
-        # Auth disabled is a legitimate choice (single-user / trusted network), but it
-        # must not be silent -- an operator who simply forgot to set `auth` should see
-        # it at startup. This warns; it does not force auth on.
+    load_and_bind_auth(container, auth_config)
+    log_reach_all_roles(auth_config.rbac_config() if auth_config else None)
+    if auth_config is None:
         logger.warning(
-            "⚠️  Authentication is DISABLED (no `auth` configured). Every request runs "
-            "as `anonymous` with no access control. This is fine for single-user or "
-            "trusted-network deployments; set `auth` in 10xgraph.json to enable it."
+            "Authentication is DISABLED (no `auth` configured). Every request runs as "
+            "`anonymous` with no access control and no thread has an owner. Fine for "
+            "single-user or trusted-network deployments; set `auth` in 10xgraph.json to enable it."
         )
-        # bind None
-        container.bind_instance(BaseAuth, None, allow_none=True)
 
     # Thread names: random by default; None (``"none"``) leaves new threads unnamed.
     container.bind_instance(
@@ -865,26 +729,9 @@ async def attach_all_modules(
         allow_none=True,
     )
 
-    # The cache store first: the ownership cache, token revocation and the rate limiter read
+    # The cache store first: token revocation and the rate limiter read
     # it from the container.
     load_and_bind_cache_store(container, config)
-
-    # load authorization backend. The ownership cache's shared L2 tier is the cache store
-    # (L1 only when it is in-memory).
-    authorization_path = config.authorization_path
-    load_and_bind_authorization(
-        container,
-        authorization_path,
-        container.get(BaseCacheStore),
-        server_thread_ids=config.runs.server_thread_ids,
-        auth_enabled=bool(auth_config),
-    )
-    # Owner checks only run for authenticated requests. With auth on, an ownership backend
-    # over a checkpointer that cannot name owners would deny every thread: fail at boot.
-    if auth_config:
-        assert_ownership_supported(
-            container.get(AuthorizationBackend), container.try_get(BaseCheckpointer)
-        )
 
     _enable_token_revocation(container, config, bool(auth_config))
     warn_per_process_state(container)

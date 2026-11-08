@@ -9,7 +9,6 @@ These drive the guard through FastAPI's real DI on a @app.websocket route.
 """
 
 import asyncio
-from typing import Any
 
 import pytest
 from fastapi import Depends, FastAPI, WebSocket
@@ -17,9 +16,9 @@ from fastapi.testclient import TestClient
 from injectq import InjectQ
 from injectq.integrations import setup_fastapi
 from starlette.websockets import WebSocketDisconnect
+from tenxgraph.core.authz import Identity
 
-from tenxgraph_api.src.app.core.auth.auth_backend import BaseAuth
-from tenxgraph_api.src.app.core.auth.authorization import AuthorizationBackend
+from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
 from tenxgraph_api.src.app.core.auth.permissions import (
     LEGACY_WS_BEARER_SUBPROTOCOL,
     WS_BEARER_SUBPROTOCOL,
@@ -36,14 +35,6 @@ from tenxgraph_api.src.app.routers.graph.realtime_guard import realtime_connecti
 class _FakeAuth(BaseAuth):
     def authenticate(self, request, response, credential):  # type: ignore[override]
         return {} if credential is None else {"user_id": credential.credentials}
-
-
-class _AllowAuthz(AuthorizationBackend):
-    def __init__(self):
-        pass
-
-    async def authorize(self, user, resource, action, resource_id=None):  # type: ignore[override]
-        return True
 
 
 class _FakeRateBackend(InMemoryCacheStore):
@@ -87,7 +78,6 @@ def _build_app(config, rate_backend=None, *, auth=False):
     container = InjectQ()
     container.bind_instance(GraphConfig, config, allow_none=True)
     container.bind_instance(BaseAuth, _FakeAuth(), allow_none=True)
-    container.bind_instance(AuthorizationBackend, _AllowAuthz(), allow_none=True)
 
     if rate_backend is not None:
         container.bind_instance(BaseCacheStore, rate_backend)
@@ -105,11 +95,13 @@ def _build_app(config, rate_backend=None, *, auth=False):
         _guard: None = deps[0],
         # Must stay a lambda: FastAPI resolves the dependency via
         # inspect.signature(call, eval_str=True), which fails on the `dict` builtin.
-        user: dict[str, Any] = (deps[1] if auth else Depends(lambda: {})),  # noqa: PIE807
+        user: Identity | None = (deps[1] if auth else Depends(lambda: None)),  # noqa: PIE807
     ):
         await websocket.accept(subprotocol=ws_bearer_subprotocol(websocket))
         active = realtime_guard.lease_manager().held("ws:all")
-        await websocket.send_json({"active": active, "user": user})
+        await websocket.send_json(
+            {"active": active, "user": user.model_dump(mode="json") if user else None}
+        )
         await websocket.close()
 
     return app

@@ -14,12 +14,12 @@ from tenxgraph.core.exceptions import (
     StateFormatVersionError,
     StorageError,
     StoredNodeMissingError,
+    ThreadNotFoundError,
     TransientStorageError,
 )
 from tenxgraph.utils.validators import ValidationError
 
 from tenxgraph_api.src.app.core import logger
-from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.exceptions.server_errors import (
     RETRY_AFTER_SECONDS,
@@ -27,6 +27,7 @@ from tenxgraph_api.src.app.core.exceptions.server_errors import (
     unexpected_error_response,
 )
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
+from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
 from tenxgraph_api.src.app.utils import error_response
 from tenxgraph_api.src.app.utils.schemas import ErrorSchemas
 
@@ -35,6 +36,12 @@ from .user_exception import (
     UserAccountError,
     UserPermissionError,
 )
+
+
+# The answer for a thread the caller cannot see: one body whether it is missing or another
+# user's, so the response never reveals that an id exists. Streams use the same code and text.
+THREAD_NOT_FOUND_CODE = "THREAD_NOT_FOUND"
+THREAD_NOT_FOUND_MESSAGE = "Thread not found"
 
 
 def _sanitize_error_message(message: str, error_code: str, is_production: bool) -> str:
@@ -139,7 +146,7 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
         # Get request ID for tracking
         request_id = getattr(request.state, "request_id", "unknown")
 
-        # A 4xx detail is written by the API for the client (401 bad token, 403 missing scope,
+        # A 4xx detail is written by the API for the client (401 bad token, 403 missing permission,
         # 404, 413, 422 bad input, 429): hiding it leaves the client unable to fix the request.
         # A 5xx detail may embed internals, so production replaces it.
         is_server_error = exc.status_code >= 500  # noqa: PLR2004
@@ -385,6 +392,18 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
             message=message,
             details=_context_details(exc) if not is_production else None,
             status_code=422,
+        )
+
+    @app.exception_handler(ThreadNotFoundError)
+    async def thread_not_found_exception_handler(request: Request, exc: ThreadNotFoundError):
+        # A subclass of StorageError: Starlette picks the handler of the closest class, so this
+        # one wins over the generic 500. No details: the context holds the thread id.
+        _log_handled(request, exc, 404, THREAD_NOT_FOUND_CODE, "ThreadNotFoundError")
+        return error_response(
+            request,
+            error_code=THREAD_NOT_FOUND_CODE,
+            message=THREAD_NOT_FOUND_MESSAGE,
+            status_code=404,
         )
 
     @app.exception_handler(StorageError)

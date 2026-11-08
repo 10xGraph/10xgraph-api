@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_va
 from tenxgraph.core.state import Message
 from tenxgraph.utils import ResponseGranularity
 
-from tenxgraph_api.src.app.core.auth.request_config import (
+from tenxgraph_api.src.app.core.validation.request_config import (
     BoundedDict,
     ClientInputError,
     client_message_error,

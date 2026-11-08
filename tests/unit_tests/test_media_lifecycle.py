@@ -11,11 +11,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException, UploadFile
+from tenxgraph.core.authz import Identity
+from tenxgraph.core.exceptions import ThreadNotFoundError
 from tenxgraph.core.state import Message
 from tenxgraph.core.state.message_block import ImageBlock, MediaRef, TextBlock
 from tenxgraph.storage.media.storage.memory_store import InMemoryMediaStore
+from tenxgraph.utils.thread_info import ThreadInfo
 
-from tenxgraph_api.src.app.core.auth.authorization import all_scopes
+from tenxgraph_api.src.app.core.auth.permissions_registry import expand
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, MediaConfig
 from tenxgraph_api.src.app.core.config.media_settings import MediaSettings
 from tenxgraph_api.src.app.routers.checkpointer.services.checkpointer_service import (
@@ -120,6 +123,7 @@ def _graph_service(policy: Any = None, media: Any = None) -> GraphService:
     srv._graph = SimpleNamespace(media_policy=policy if policy is not None else _Policy())
     srv.checkpointer = MagicMock()
     srv.checkpointer.aget_thread_owner = AsyncMock(return_value=None)
+    srv.checkpointer.aget_thread = AsyncMock(return_value=object())  # the caller's thread
     srv.config = MagicMock()
     srv.thread_name_generator = None
     srv._media_service = media
@@ -200,21 +204,21 @@ def test_old_core_without_any_policy_skips(monkeypatch):
 @pytest.mark.asyncio
 async def test_invoke_route_answers_400():
     with pytest.raises(HTTPException) as exc:
-        await invoke_graph(MagicMock(), _bad_input(), _graph_service(), {"user_id": "u1"})
+        await invoke_graph(MagicMock(), _bad_input(), _graph_service(), Identity(user_id="u1"))
     assert exc.value.status_code == 400
 
 
 @pytest.mark.asyncio
 async def test_invoke_service_backstop_answers_400():
     with pytest.raises(HTTPException) as exc:
-        await _graph_service().invoke_graph(_bad_input(), {"user_id": "u1"})
+        await _graph_service().invoke_graph(_bad_input(), Identity(user_id="u1"))
     assert exc.value.status_code == 400
 
 
 @pytest.mark.asyncio
 async def test_stream_route_answers_400_before_the_response_starts():
     with pytest.raises(HTTPException) as exc:
-        await stream_graph(_bad_input(), _graph_service(), {"user_id": "u1"})
+        await stream_graph(_bad_input(), _graph_service(), Identity(user_id="u1"))
     assert exc.value.status_code == 400
 
 
@@ -263,7 +267,7 @@ async def test_ag_ui_route_answers_400():
     request.json = AsyncMock(return_value=body)
     config = SimpleNamespace(auth_config=lambda: None)
     with pytest.raises(HTTPException) as exc:
-        await run_ag_ui(request, _graph_service(), {"user_id": "u1"}, MagicMock(), config)
+        await run_ag_ui(request, _graph_service(), Identity(user_id="u1"), config)
     assert exc.value.status_code == 400
 
 
@@ -276,7 +280,7 @@ def checkpointer_service(monkeypatch):
     cp.aput_state = AsyncMock(side_effect=lambda cfg, state: state)
     cp.aput_state_cache = AsyncMock()
     cp.aput_messages = AsyncMock(return_value=[])
-    cp.aget_thread_owner = AsyncMock(return_value="u1")
+    cp.aget_thread = AsyncMock(return_value=ThreadInfo(thread_id="t1", user_id="u1"))
     service.checkpointer = cp
     service.settings = MagicMock()
     monkeypatch.setattr(CheckpointerService, "_graph_service", staticmethod(_graph_service))
@@ -294,20 +298,10 @@ _BLOCKED_CTX = {
 async def test_put_state_answers_400(checkpointer_service):
     with pytest.raises(HTTPException) as exc:
         await checkpointer_service.put_state(
-            {"thread_id": "t1"}, {"user_id": "u1"}, {"context": [_BLOCKED_CTX]}
+            {"thread_id": "t1"}, Identity(user_id="u1"), {"context": [_BLOCKED_CTX]}
         )
     assert exc.value.status_code == 400
     checkpointer_service.checkpointer.aput_state.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_post_messages_answers_400(checkpointer_service):
-    with pytest.raises(HTTPException) as exc:
-        await checkpointer_service.put_messages(
-            {"thread_id": "t1"}, {"user_id": "u1"}, [_img("http://169.254.169.254/x")]
-        )
-    assert exc.value.status_code == 400
-    checkpointer_service.checkpointer.aput_messages.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -319,10 +313,10 @@ async def test_thread_writes_skip_the_check_when_no_policy_exists(
         "_graph_service",
         staticmethod(lambda: SimpleNamespace(media_policy=None)),
     )
-    await checkpointer_service.put_messages(
-        {"thread_id": "t1"}, {"user_id": "u1"}, [_img("http://169.254.169.254/x")]
+    await checkpointer_service.put_state(
+        {"thread_id": "t1"}, Identity(user_id="u1"), {"context": [_BLOCKED_CTX]}
     )
-    checkpointer_service.checkpointer.aput_messages.assert_awaited_once()
+    checkpointer_service.checkpointer.aput_state.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -346,8 +340,8 @@ async def test_accepted_graph_message_links_the_thread():
     graph_input = GraphInputSchema(
         messages=[_img(f"graph://media/{key}")], config={"thread_id": "t1"}
     )
-    await srv._prepare_input(graph_input, "alice")
-    await srv._prepare_input(graph_input, "alice")  # twice: still one link
+    await srv._prepare_input(graph_input, Identity(user_id="alice"))
+    await srv._prepare_input(graph_input, Identity(user_id="alice"))  # twice: still one link
     assert (await media.store.get_metadata(key))["threads"] == ["t1"]
 
 
@@ -359,7 +353,7 @@ async def test_legacy_url_form_is_linked_too():
     graph_input = GraphInputSchema(
         messages=[_img(f"agentflow://media/{key}")], config={"thread_id": "t9"}
     )
-    await srv._prepare_input(graph_input, "alice")
+    await srv._prepare_input(graph_input, Identity(user_id="alice"))
     assert (await media.store.get_metadata(key))["threads"] == ["t9"]
 
 
@@ -380,18 +374,6 @@ async def test_file_without_threads_key_is_not_tracked():
 
 
 @pytest.mark.asyncio
-async def test_post_messages_links_the_thread(checkpointer_service, monkeypatch):
-    media = _media()
-    key = await _upload(media)
-    media.ensure_can_access = AsyncMock()
-    monkeypatch.setattr(CheckpointerService, "_media_service", staticmethod(lambda: media))
-    await checkpointer_service.put_messages(
-        {"thread_id": "t1"}, {"user_id": "alice"}, [_img(f"graph://media/{key}")]
-    )
-    assert (await media.store.get_metadata(key))["threads"] == ["t1"]
-
-
-@pytest.mark.asyncio
 async def test_put_state_links_the_thread(checkpointer_service, monkeypatch):
     media = _media()
     key = await _upload(media)
@@ -402,7 +384,7 @@ async def test_put_state_links_the_thread(checkpointer_service, monkeypatch):
         "content": [{"type": "image", "media": {"kind": "url", "url": f"graph://media/{key}"}}],
     }
     await checkpointer_service.put_state(
-        {"thread_id": "t7"}, {"user_id": "alice"}, {"context": [context]}
+        {"thread_id": "t7"}, Identity(user_id="alice"), {"context": [context]}
     )
     assert (await media.store.get_metadata(key))["threads"] == ["t7"]
 
@@ -444,10 +426,13 @@ def _thread_service(monkeypatch, media, messages: list[Message]) -> Checkpointer
 
     async def adelete(cfg, message_id):
         state["messages"] = [m for m in state["messages"] if str(m.message_id) != str(message_id)]
+        return 1
 
     async def aclean(cfg):
         state["messages"] = []
+        return 1
 
+    cp.aget_thread = AsyncMock(return_value=ThreadInfo(thread_id="t1", user_id="alice"))
     cp.aget_state = AsyncMock(return_value=None)
     cp.alist_messages = AsyncMock(side_effect=alist)
     cp.aget_message = AsyncMock(side_effect=aget)
@@ -459,7 +444,7 @@ def _thread_service(monkeypatch, media, messages: list[Message]) -> Checkpointer
     return service
 
 
-_USER = {"user_id": "alice"}
+_USER = Identity(user_id="alice")
 
 
 @pytest.mark.asyncio
@@ -581,6 +566,23 @@ async def test_cleanup_failures_never_fail_the_delete(monkeypatch, delete_settin
 
 
 @pytest.mark.asyncio
+async def test_a_delete_whose_file_cleanup_failed_can_be_sent_again(monkeypatch, delete_setting):
+    media = _media()
+    key = await _upload(media)
+    other = await _upload(media, owner="bob")
+    await media.link_threads([key], "t1", "alice")
+    await media.link_threads([other], "t1", "bob")
+    service = _thread_service(monkeypatch, media, [])
+    # The first delete removed the thread but left the files linked; the thread is gone now.
+    service.checkpointer.aget_thread = AsyncMock(return_value=None)
+    with pytest.raises(ThreadNotFoundError):
+        await service.delete_thread({"thread_id": "t1"}, _USER, "t1")
+    assert not await media.store.exists(key)  # the caller's own file is released
+    assert await media.store.exists(other)  # nobody else's, whatever the caller's reach
+    service.checkpointer.aclean_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_old_core_store_never_deletes_on_thread_delete(monkeypatch, delete_setting):
     media = _media(InMemoryMediaStore())
     key = await media.store.store(b"x", "image/png", metadata={"owner_id": "alice"})
@@ -630,8 +632,8 @@ def test_log_safe_escapes_control_characters():
     assert log_safe("a\r\nb\x1b[31m\x00\tc") == "a\\r\\nb\\x1b[31m\\x00\tc"
 
 
-def test_files_delete_scope_is_granted_to_wildcard_roles():
-    assert "files:delete" in all_scopes()
+def test_files_delete_permission_is_granted_to_wildcard_roles():
+    assert "files:delete" in expand(["*"])
 
 
 def _request() -> MagicMock:
@@ -645,7 +647,7 @@ def _request() -> MagicMock:
 async def test_delete_file_owner_deletes_data_and_sidecar():
     media = _media()
     key = await _upload(media)
-    response = await delete_file(_request(), key, media, {"user_id": "alice"})
+    response = await delete_file(_request(), key, media, Identity(user_id="alice"))
     assert response.status_code == 200
     assert b'"deleted":true' in response.body.replace(b" ", b"")
     assert not await media.store.exists(key)
@@ -657,7 +659,7 @@ async def test_delete_file_foreign_or_missing_is_404_not_403():
     key = await _upload(media, owner="alice")
     for file_id, user in ((key, "mallory"), ("missing", "alice")):
         with pytest.raises(HTTPException) as exc:
-            await delete_file(_request(), file_id, media, {"user_id": user})
+            await delete_file(_request(), file_id, media, Identity(user_id=user))
         assert exc.value.status_code == 404
     assert await media.store.exists(key)
 
@@ -667,7 +669,7 @@ async def test_delete_file_ownerless_file_is_404_when_owner_required():
     media = _media()
     key = await media.store.store(b"x", "image/png", metadata={})
     with pytest.raises(HTTPException) as exc:
-        await delete_file(_request(), key, media, {"user_id": "alice"})
+        await delete_file(_request(), key, media, Identity(user_id="alice"))
     assert exc.value.status_code == 404
 
 
@@ -767,7 +769,7 @@ async def test_upload_route_rejects_a_mismatch_with_415():
             _request(),
             _upload_file("evil.png", "image/png", b"<script>alert(1)</script>"),
             service,
-            {"user_id": "alice"},
+            Identity(user_id="alice"),
         )
     assert exc.value.status_code == 415
     assert exc.value.detail == "file content does not match image/png"
@@ -788,12 +790,15 @@ async def test_upload_route_accepts_a_real_png_and_unknown_types():
         "direct_url_expires_at": None,
     }
     response = await upload_file(
-        _request(), _upload_file("a.png", "image/png", _PNG), service, {"user_id": "alice"}
+        _request(), _upload_file("a.png", "image/png", _PNG), service, Identity(user_id="alice")
     )
     assert response.status_code == 200
     service.upload_file.reset_mock()
     await upload_file(
-        _request(), _upload_file("n.txt", "text/plain", b"hello"), service, {"user_id": "alice"}
+        _request(),
+        _upload_file("n.txt", "text/plain", b"hello"),
+        service,
+        Identity(user_id="alice"),
     )
     service.upload_file.assert_awaited_once()
 
@@ -806,7 +811,7 @@ async def test_upload_route_escapes_the_filename_in_logs(caplog):
             _request(),
             _upload_file("\x1b[31mred.png", "image/png", b"nope"),
             service,
-            {"user_id": "alice"},
+            Identity(user_id="alice"),
         )
     assert caplog.records
     assert all("\x1b" not in record.getMessage() for record in caplog.records)

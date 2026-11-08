@@ -41,7 +41,7 @@ def _with(**changes: object) -> dict:
     return {**READY, "cache_store": {k: v for k, v in cache_store.items() if v is not None}}
 
 
-AUTH_OFF_TEXT = "Auth is off"
+AUTH_OFF_TEXT = "with auth off"
 
 
 def _paths(issues: list[dict], level: str = "warning") -> list[str]:
@@ -57,18 +57,6 @@ def test_validate_config_warns_when_auth_and_rate_limit_are_missing() -> None:
 def test_ready_config_has_no_readiness_warnings() -> None:
     assert production_readiness_warnings(READY) == []
     assert not [i for i in validate_config(READY) if i["level"] == "warning"]
-
-
-@pytest.mark.parametrize("value", ["allow_all", "default", "none"])
-def test_open_authorization_with_auth_warns(value: str) -> None:
-    issues = validate_config({**READY, "authorization": value})
-    assert _paths(issues) == ["authorization"]
-
-
-@pytest.mark.parametrize("value", [None, "ownership", "auth.perm:Backend"])
-def test_safe_authorization_does_not_warn(value: str | None) -> None:
-    config = {**READY, "authorization": value}
-    assert production_readiness_warnings(config) == []
 
 
 def test_disabled_rate_limit_warns() -> None:
@@ -134,10 +122,11 @@ def test_audit_reports_the_security_posture(tmp_path: Path, monkeypatch) -> None
     (tmp_path / "10xgraph.json").write_text(
         json.dumps({"agent": "graph.react:app", "auth": None}), encoding="utf-8"
     )
-    weak = AuditCommand._security_check()
+    weak = AuditCommand._auth_check()
     assert weak.status == "warn"
-    assert "auth" in weak.detail
+    assert "auth-off-production" in weak.detail
     (tmp_path / "10xgraph.json").write_text(json.dumps(READY), encoding="utf-8")
+    assert AuditCommand._auth_check().status == "pass"
     assert AuditCommand._security_check().status == "pass"
 
 
@@ -245,7 +234,7 @@ def _run_config(tmp_path: Path, monkeypatch, content: str | None) -> str:
 
 def test_config_command_prints_readiness_warnings(tmp_path: Path, monkeypatch) -> None:
     text = _run_config(tmp_path, monkeypatch, json.dumps({"agent": "graph.react:app"}))
-    assert AUTH_OFF_TEXT in text
+    assert "auth-off-production" in text
 
 
 @pytest.mark.parametrize("content", [None, "{not json"])

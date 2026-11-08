@@ -1,9 +1,8 @@
 """``/v1/tasks``: run or schedule an ``http=True`` task, read it, change a schedule, cancel.
 
-Mounted only when 10xgraph.json has a ``worker`` key. Same auth as the graph routes. A caller
-sees only their own tasks and schedules; anything else answers 404, the same as an unknown id.
-Under ``isolation_scope(user) == "none"`` every caller sees everything; a list of columns is
-treated as owner-only (tasks carry no tenant columns).
+Mounted only when 10xgraph.json has a ``worker`` key. Same auth as the graph routes. Reading and
+cancelling widen by the caller's reach (``tenant``, ``all``); running and changing a schedule
+stay ``own`` (A13). Anything else answers 404, the same as an unknown id.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from taskiq import AsyncTaskiqDecoratedTask, ScheduleSource
+from tenxgraph.core.authz import Identity, Reach, can_reach
 
 from tenxgraph_api.jobs import state
 from tenxgraph_api.jobs.arguments import ReservedArgumentError, check_arguments
@@ -21,9 +21,10 @@ from tenxgraph_api.jobs.context import cancel
 from tenxgraph_api.jobs.scheduler import sources
 from tenxgraph_api.jobs.worker import broker
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
-from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
 from tenxgraph_api.src.app.core.cache_store import BaseCacheStore
 from tenxgraph_api.src.app.core.config.settings import get_settings
+from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
+from tenxgraph_api.src.app.routers.graph.run_limits import identity_key
 from tenxgraph_api.src.app.utils.response_helper import success_response
 
 from .schemas import Schedule, ScheduleChange, ScheduleRecord, TaskCall
@@ -44,14 +45,16 @@ def _store() -> BaseCacheStore:
     return store
 
 
-def _owner(user: dict[str, Any]) -> str:
-    return str(user.get("user_id") or "anonymous")
-
-
-def _visible(owner: str | None, user: dict[str, Any]) -> bool:
-    authz = user.get("authz")
-    shared = isinstance(authz, dict) and authz.get("scope") == "none"
-    return shared or owner == _owner(user)
+def _visible(
+    record: state.TaskStatus | ScheduleRecord, identity: Identity | None, *, widen: bool
+) -> bool:
+    """The caller's own task or schedule (``identity_key``); with ``widen`` (reads, cancel)
+    also one the caller's reach covers."""
+    if record.owner == identity_key(identity):
+        return True
+    if not widen or identity is None or identity.reach is Reach.OWN:
+        return False
+    return can_reach({"user": identity}, record.user_id, record.tenant)
 
 
 def _http_task(name: str) -> AsyncTaskiqDecoratedTask[Any, Any]:
@@ -121,7 +124,7 @@ async def start_task(
     request: Request,
     name: str,
     body: TaskCall,
-    user: dict[str, Any] = Depends(RequirePermission("tasks", "invoke")),
+    identity: Identity | None = Depends(RequirePermission("tasks", "trigger")),
 ):
     """Run the task now (``{task_id}``), or schedule it when ``schedule`` is set
     (``{schedule_id}``)."""
@@ -131,15 +134,18 @@ async def start_task(
     except ReservedArgumentError as exc:
         raise ClientInputError(str(exc)) from None
     store = _store()
-    config = {"user_id": user.get("user_id") or "anonymous", "user": user}
-    owner = _owner(user)
+    config: dict[str, Any] = {"user_id": identity.user_id if identity is not None else "anonymous"}
+    if identity is not None:
+        # JSON for the worker, which rebuilds the Identity from it.
+        config["user"] = identity.model_dump(mode="json")
+    owner = state.owner_fields(config)
 
     if body.schedule is not None:
         _source()  # refuse before writing a record
         record = ScheduleRecord(
             schedule_id=broker.id_generator(),
             task_name=task.task_name,
-            owner=owner,
+            **owner,
             schedule=body.schedule,
             args=body.args,
             kwargs=body.kwargs,
@@ -157,7 +163,7 @@ async def start_task(
     # Written before the send, so a fast worker never finds the task without its owner.
     await state.write_status(
         store,
-        state.TaskStatus(task_id=task_id, task_name=task.task_name, status="queued", owner=owner),
+        state.TaskStatus(task_id=task_id, task_name=task.task_name, status="queued", **owner),
     )
     try:
         await (
@@ -167,7 +173,7 @@ async def start_task(
             .kiq(*body.args, **body.kwargs)
         )
     except Exception:
-        await state.update_status(store, task_id, task.task_name, "failure", owner)
+        await state.update_status(store, task_id, task.task_name, "failure", config)
         raise
     return success_response({"task_id": task_id}, request, status_code=202)
 
@@ -176,15 +182,15 @@ async def start_task(
 async def get_task(
     request: Request,
     task_id: str,
-    user: dict[str, Any] = Depends(RequirePermission("tasks", "read")),
+    identity: Identity | None = Depends(RequirePermission("tasks", "read")),
 ):
     """A schedule: its task, time and arguments. A task: status, progress, result, error."""
     store = _store()
     schedule = await _read_schedule(store, task_id)
-    if schedule is not None and _visible(schedule.owner, user):
+    if schedule is not None and _visible(schedule, identity, widen=True):
         return success_response(schedule.model_dump(mode="json", exclude={"config"}), request)
     record = await state.read_status(store, task_id)
-    if schedule is not None or record is None or not _visible(record.owner, user):
+    if schedule is not None or record is None or not _visible(record, identity, widen=True):
         raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
 
     data: dict[str, Any] = record.model_dump(mode="json")
@@ -205,13 +211,13 @@ async def change_schedule(
     request: Request,
     schedule_id: str,
     body: ScheduleChange,
-    user: dict[str, Any] = Depends(RequirePermission("tasks", "invoke")),
+    identity: Identity | None = Depends(RequirePermission("tasks", "trigger")),
 ):
     """Delete and add again with the same id, arguments and run config (TaskIQ has no
     update)."""
     store = _store()
     record = await _read_schedule(store, schedule_id)
-    if record is None or not _visible(record.owner, user):
+    if record is None or not _visible(record, identity, widen=False):
         raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
     task = broker.find_task(record.task_name)
     if task is None:
@@ -228,18 +234,18 @@ async def change_schedule(
 async def cancel_task(
     request: Request,
     task_id: str,
-    user: dict[str, Any] = Depends(RequirePermission("tasks", "cancel")),
+    identity: Identity | None = Depends(RequirePermission("tasks", "cancel")),
 ):
     """A schedule is deleted. A queued task is not run; a running one sees
     ``ctx.cancelled()``."""
     store = _store()
     schedule = await _read_schedule(store, task_id)
-    if schedule is not None and _visible(schedule.owner, user):
+    if schedule is not None and _visible(schedule, identity, widen=True):
         await _source().delete_schedule(task_id)
         await store.delete(_schedule_key(task_id))
         return success_response({"schedule_id": task_id, "deleted": True}, request)
     record = await state.read_status(store, task_id)
-    if schedule is not None or record is None or not _visible(record.owner, user):
+    if schedule is not None or record is None or not _visible(record, identity, widen=True):
         raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
     await cancel(task_id)
     record = await state.read_status(store, task_id) or record

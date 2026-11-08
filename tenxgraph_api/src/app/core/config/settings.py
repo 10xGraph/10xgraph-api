@@ -142,8 +142,8 @@ class Settings(BaseSettings):
     #################################
     ###### REDIS Config ##########
     #################################
-    # The API's cache store (run locks and caps, idempotency, rate limit, token revocation,
-    # ownership cache) comes from `cache_store` in 10xgraph.json; a Redis one names its URL
+    # The API's cache store (run locks and caps, idempotency, rate limit, token revocation)
+    # comes from `cache_store` in 10xgraph.json; a Redis one names its URL
     # there (`"url": "${REDIS_URL}"`). Limits for the Redis client of a RedisCacheStore (and
     # of `10xgraph revoke`) follow. Without them a Redis that stops
     # answering (not refusing) would hang each request that touches it. Seconds; 0 turns the
@@ -155,7 +155,7 @@ class Settings(BaseSettings):
     REDIS_POOL_TIMEOUT: float = Field(default=5.0, ge=0.0)
     REDIS_HEALTH_CHECK_INTERVAL: float = Field(default=30.0, ge=0.0)
     # Put in front of every key a RedisCacheStore writes (run locks and caps, idempotency,
-    # rate limit, ownership cache, token revocation), so two deployments that share one Redis
+    # rate limit, token revocation), so two deployments that share one Redis
     # cannot read each other's entries. Empty means no prefix. Give the core checkpointer the
     # same value through its ``redis_key_prefix`` option so its cache keys are separated too.
     REDIS_KEY_PREFIX: str = ""

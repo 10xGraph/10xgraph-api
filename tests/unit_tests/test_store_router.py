@@ -47,7 +47,7 @@ class TestCreateMemoryLogic:
             request=mock_request,
             payload=payload,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         mock_service.store_memory.assert_called_once()
@@ -72,7 +72,7 @@ class TestSearchMemoriesLogic:
                 request=mock_request,
                 payload=payload,
                 service=mock_service,
-                user=mock_user,
+                identity=mock_user,
             )
         assert exc_info.value.status_code == 422
         assert "empty" in exc_info.value.detail.lower()
@@ -92,7 +92,7 @@ class TestSearchMemoriesLogic:
                 request=mock_request,
                 payload=payload,
                 service=mock_service,
-                user=mock_user,
+                identity=mock_user,
             )
         assert exc_info.value.status_code == 422
 
@@ -113,7 +113,7 @@ class TestSearchMemoriesLogic:
             request=mock_request,
             payload=payload,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         mock_service.search_memories.assert_called_once()
@@ -135,7 +135,7 @@ class TestGetMemoryLogic:
                 memory_id="",
                 payload=None,
                 service=mock_service,
-                user=mock_user,
+                identity=mock_user,
             )
         assert exc_info.value.status_code == 422
         assert "empty" in exc_info.value.detail.lower()
@@ -153,7 +153,7 @@ class TestGetMemoryLogic:
                 memory_id="   ",
                 payload=None,
                 service=mock_service,
-                user=mock_user,
+                identity=mock_user,
             )
         assert exc_info.value.status_code == 422
 
@@ -173,7 +173,7 @@ class TestGetMemoryLogic:
             memory_id="mem-1",
             payload=None,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         mock_service.get_memory.assert_called_once()
@@ -197,7 +197,7 @@ class TestListMemoriesLogic:
             request=mock_request,
             payload=None,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         mock_service.list_memories.assert_called_once()
@@ -219,7 +219,7 @@ class TestListMemoriesLogic:
             request=mock_request,
             payload=payload,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         call_args = mock_service.list_memories.call_args
@@ -247,7 +247,7 @@ class TestUpdateMemoryLogic:
                 memory_id="",
                 payload=payload,
                 service=mock_service,
-                user=mock_user,
+                identity=mock_user,
             )
         assert exc_info.value.status_code == 422
         assert "empty" in exc_info.value.detail.lower()
@@ -270,7 +270,7 @@ class TestUpdateMemoryLogic:
             memory_id="mem-1",
             payload=payload,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         mock_service.update_memory.assert_called_once_with("mem-1", payload, mock_user)
@@ -292,7 +292,7 @@ class TestDeleteMemoryLogic:
                 memory_id="",
                 payload=None,
                 service=mock_service,
-                user=mock_user,
+                identity=mock_user,
             )
         assert exc_info.value.status_code == 422
         assert "empty" in exc_info.value.detail.lower()
@@ -310,7 +310,7 @@ class TestDeleteMemoryLogic:
                 memory_id="   ",
                 payload=None,
                 service=mock_service,
-                user=mock_user,
+                identity=mock_user,
             )
         assert exc_info.value.status_code == 422
 
@@ -330,7 +330,7 @@ class TestDeleteMemoryLogic:
             memory_id="mem-1",
             payload=None,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         mock_service.delete_memory.assert_called_once()
@@ -353,7 +353,7 @@ class TestDeleteMemoryLogic:
             memory_id="mem-1",
             payload=payload,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         call_args = mock_service.delete_memory.call_args
@@ -382,7 +382,7 @@ class TestForgetMemoryLogic:
             request=mock_request,
             payload=payload,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         mock_service.forget_memory.assert_called_once_with(payload, mock_user)

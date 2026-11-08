@@ -52,7 +52,7 @@ Public exports from the package root (`from tenxgraph_api import ...`): `BaseAut
 | Command | Purpose | Notable options |
 |---|---|---|
 | `10xgraph dev` | The only server command: local Uvicorn dev server (reload on) via `commands/api.py::APICommand`, opens the hosted playground when ready. `api` and `play` were removed (use `dev --no-open` / `dev`); production runs Gunicorn in the `10xgraph build` image | `--config/-c` (default `10xgraph.json`), `--host/-H`, `--port/-p` (8000), `--reload/--no-reload`, `--open/--no-open`, `-v/-q` |
-| `10xgraph init` | Interactively scaffold a project. Asks only agent name, template (Quick Start \| Production) and AI provider. Quick Start writes no `cache_store`. Production writes the recommended setup without asking: `auth` jwt, `authorization` ownership, `id_generator` uuid, `cache_store` redis (no `url`: `REDIS_URL`) with `rate_limit` (100 per 60 s, by user, fail closed) and `token_revocation`; the summary table lists these. The next steps point to `10xgraph config` for WebSocket, AG-UI, ID generator, thread naming and every other setting. Flags are scripted overrides only | `--path/-p`, `--force/-f`, `--name`, `--template` (quick-start\|production), `--auth` (none\|jwt\|custom), `--cache-store` (memory\|redis, production default redis), `--rate-limit/--no-rate-limit` (production default on; adds `cache_store.rate_limit`), `--token-revocation/--no-token-revocation` (production default on with auth, ignored with auth none; adds `cache_store.token_revocation`), quick-start ignores these three, `--provider` (google\|openai\|anthropic), `--websocket/--no-websocket` (default off; writes `websocket.enabled`). Prod `pyproject.toml` depends on `10xgraph[<provider>]` and `10xgraph-api[jwt,redis,websocket]` as chosen, `--yes/-y`, `--non-interactive`, `--dry-run`. There is **no `--prod` flag** |
+| `10xgraph init` | Interactively scaffold a project. Asks only agent name, template (Quick Start \| Production) and AI provider. Quick Start writes no `cache_store`. Production writes the recommended setup without asking: `auth` jwt, `id_generator` uuid, `cache_store` redis (no `url`: `REDIS_URL`) with `rate_limit` (100 per 60 s, by user, fail closed) and `token_revocation`; the summary table lists these. The next steps point to `10xgraph config` for WebSocket, AG-UI, ID generator, thread naming and every other setting. Flags are scripted overrides only | `--path/-p`, `--force/-f`, `--name`, `--template` (quick-start\|production), `--auth` (none\|jwt\|custom), `--cache-store` (memory\|redis, production default redis), `--rate-limit/--no-rate-limit` (production default on; adds `cache_store.rate_limit`), `--token-revocation/--no-token-revocation` (production default on with auth, ignored with auth none; adds `cache_store.token_revocation`), quick-start ignores these three, `--provider` (google\|openai\|anthropic), `--websocket/--no-websocket` (default off; writes `websocket.enabled`). Prod `pyproject.toml` depends on `10xgraph[<provider>]` and `10xgraph-api[jwt,redis,websocket]` as chosen, `--yes/-y`, `--non-interactive`, `--dry-run`. There is **no `--prod` flag** |
 | `10xgraph build` | Generate a `Dockerfile` (and optionally `docker-compose.yml` / `k8s.yaml`). The builder stage strips CLI assets, runs `tenxgraph_api/_slim_image.py` (uninstalls typer/rich/questionary and what only they need, unless another package needs them) and removes pip, so the image carries no CLI code paths | `--output/-o`, `--force/-f`, `--python-version` (3.13), `--port`, `--docker-compose/--no-docker-compose`, `--k8s/--no-k8s`, `--service-name` |
 | `10xgraph eval` | Run agent evaluations; discovers `*_eval.py`/`eval_*.py`, runs cases (optionally `--parallel`), writes JSON and HTML reports to `eval_reports/` and opens the HTML report in the browser (only at an interactive terminal: skipped with `--no-open`, `--no-report`, `-q`, json/jsonl, `--non-interactive`, `CI`, non-TTY; `evaluation.open_report` in `10xgraph.json` sets the default). Simulations print per-turn step lines via `ProgressRun.step` | `--output/-o`, `--no-report`, `--threshold/-t`, `--parallel/-p`, `--max-concurrency/-c`, `--open/--no-open` |
 | `10xgraph test` | Run project tests via pytest (args after `--` forwarded verbatim) | `--coverage/-C`, `--html`, `-k`, path arg |
@@ -88,19 +88,18 @@ Parsed by `tenxgraph_api/src/app/core/config/graph_config.py`. Supported keys:
 | `env` | Path to a `.env` file, loaded at config-load time |
 | `thread_name_generator` | `"random"` (default, also when unset: `DefaultThreadNameGenerator`), `"first_message"` (`FirstMessageThreadNameGenerator`: the user's first message, whitespace collapsed, cut to at most 60 characters on a word boundary; random when there is no text), `"none"` (threads stay unnamed but are saved) or `"module:attr"` -> a `ThreadNameGenerator` subclass or instance. Chosen by `loader.resolve_thread_name_generator`; `GraphService._save_thread_name` saves every generated name with `aput_thread`, in the background after the run. The generator gets the user's message texts first, then the replies |
 | `id_generator` | Unset: the graph keeps the generator it was compiled with. A name (`graph_config.ID_GENERATOR_NAMES`: `uuid`, `hex`, `short`, `int`, `bigint`, `timestamp`, `snowflake` = `SnowFlakeIdGenerator`, needs the `snowflakekit` extra, reads `SNOWFLAKE_*` env vars) or `"module:attr"` (a `BaseIDGenerator` instance, subclass or zero-arg factory). `loader.apply_id_generator` rebinds `BaseIDGenerator`, `"generated_id_type"` and `"generated_id"` as factories in the graph's container, the API container and `InjectQ.get_instance()`, so thread ids (`GraphService._new_thread_id`), message ids (core `Message` default factory) and memory ids use it. Refuses to boot when the graph is compiled with a non-default generator too, or when a `PgCheckpointer`'s `id_type` cannot hold the ids |
-| `auth` | `null`, the string `"jwt"`, or `{"method": "custom", "path": "module:attr"}` |
-| `authorization` | `"module:attr"` -> an `AuthorizationBackend` (RBAC / per-tool access) |
+| `auth` | `null`, the string `"jwt"`, or an object: `method` (`none` \| `jwt` \| `custom`; `custom` needs `path` = `"module:attr"` -> a `BaseAuth` subclass) plus the RBAC keys `roles`, `roles_claim`, `permissions_claim`, `tenant_claims`, `default_role`, `system_identities`. See "Auth" |
+| `authorization` | Removed. Any value refuses to boot, pointing to `auth.method: custom` and `auth.roles` |
 | `checkpointer` | `"module:attr"` -> a `BaseCheckpointer` |
 | `injectq` | `"module:attr"` -> an InjectQ container |
 | `store` | `"module:attr"` -> a `BaseStore` |
 | `store_allow_tenant_mismatch` | Boolean, default false. The loader runs core `check_tenant_columns` on the store bound from `store` against the graph checkpointer (and a container-bound one): a tenant-column mismatch refuses to boot under `MODE=production` and warns otherwise. `true` logs the mismatch at INFO and boots (for a store that holds only shared data, such as a RAG knowledge base) |
-| `cache_store` | One object, `graph_config.CacheStoreConfig`: `type` (`memory` default \| `redis` \| `custom`), `url` (type redis only, optional: empty uses the `REDIS_URL` environment variable, a set value wins; `$VAR` / `${VAR}` expanded when the store is built, unset variable is a config error; `RedisCacheStore`, also Valkey, Dragonfly, KeyDB), `path` (type custom only, required; `"module:attr"` -> a `BaseCacheStore` instance or zero-arg factory), `rate_limit` (object, see below), `token_revocation` (see its row). No key or no `type`: `InMemoryCacheStore` (per process). Unknown keys are config errors listing the valid ones. Nothing else picks the store (`REDIS_URL` alone does not). Selected and bound at boot by `core/cache_store/loader.py::load_and_bind_cache_store` (one INFO line `Cache store: <class> (<config key>, <endpoint>)`, e.g. `cache_store.url`), closed once in the lifespan; type redis without the `redis` package refuses to boot. Holds the run locks and caps, idempotency, ownership cache L2, token revocation and rate-limit counters. Top-level `redis`, `rate_limit` and `token_revocation` keys are config errors at `GraphConfig` load (`check_cache_store_settings`) saying where the setting goes |
+| `cache_store` | One object, `graph_config.CacheStoreConfig`: `type` (`memory` default \| `redis` \| `custom`), `url` (type redis only, optional: empty uses the `REDIS_URL` environment variable, a set value wins; `$VAR` / `${VAR}` expanded when the store is built, unset variable is a config error; `RedisCacheStore`, also Valkey, Dragonfly, KeyDB), `path` (type custom only, required; `"module:attr"` -> a `BaseCacheStore` instance or zero-arg factory), `rate_limit` (object, see below), `token_revocation` (see its row). No key or no `type`: `InMemoryCacheStore` (per process). Unknown keys are config errors listing the valid ones. Nothing else picks the store (`REDIS_URL` alone does not). Selected and bound at boot by `core/cache_store/loader.py::load_and_bind_cache_store` (one INFO line `Cache store: <class> (<config key>, <endpoint>)`, e.g. `cache_store.url`), closed once in the lifespan; type redis without the `redis` package refuses to boot. Holds the run locks and caps, idempotency, token revocation and rate-limit counters. Top-level `redis`, `rate_limit` and `token_revocation` keys are config errors at `GraphConfig` load (`check_cache_store_settings`) saying where the setting goes |
 | `ag_ui` | `{"enabled": bool}`, default off. Mounts `POST /v1/ag-ui` (AG-UI protocol, for CopilotKit and other AG-UI clients). Needs the `ag-ui` extra |
 | `websocket` | `enabled` (`false` leaves out `/v1/graph/ws` and `/v1/graph/live`; `true` without `websockets`/`wsproto` refuses to boot; unset keeps them and warns if no library; `routers/setup_router.py::_graph_router`), `max_connections` (1000), `max_connections_per_user` (10), `realtime_models` (models a `/v1/graph/live` client may pick), `realtime_client_overrides` (init options a client may set; default `voice`, `modalities`, `vad`; add `system_prompt` only for trusted callers) |
-| `runs` | `RunsConfig`: `thread_ids` (`server` default = only existing ids may be named on REST invoke/stream, `/v1/graph/ws` and checkpointer writes, a new thread is started by omitting the id; enforced by the ownership/rbac backends via `OwnershipAuthorizationBackend(server_thread_ids=...)`. AG-UI and `/v1/graph/live` follow the same rule (a blank or `new` id gets a server id). `client` = any request may name a new thread, explicit opt-in), `config_keys` / `state_keys` (allow-lists for request config and `initial_state`/PUT state; 422 on other keys; `thread_id`, `run_id` always allowed), `max_concurrent_per_user` (HTTP invoke/stream/AG-UI runs in flight, default 10, 429 over it; `routers/graph/run_limits.py`), `timeout` (seconds; invoke 504, streams end with an error chunk), `max_parallel_tool_calls` (positive int, default unset = core's default 10 or env `TENXGRAPH_MAX_PARALLEL_TOOL_CALLS`; set into every run's config in `_prepare_input`, reserved from clients) |
+| `runs` | `RunsConfig`: `thread_ids` (`server` default = only existing ids may be named on REST invoke/stream, `/v1/graph/ws` and checkpointer writes, a new thread is started by omitting the id; enforced by `require_thread` with auth on or off. AG-UI and `/v1/graph/live` follow the same rule (a blank or `new` id gets a server id). `client` = any request may name a new thread, explicit opt-in), `config_keys` / `state_keys` (allow-lists for request config and `initial_state`/PUT state; 422 on other keys; `thread_id`, `run_id` always allowed), `max_concurrent_per_user` (HTTP invoke/stream/AG-UI runs in flight, default 10, 429 over it; `routers/graph/run_limits.py`), `timeout` (seconds; invoke 504, streams end with an error chunk), `max_parallel_tool_calls` (positive int, default unset = core's default 10 or env `TENXGRAPH_MAX_PARALLEL_TOOL_CALLS`; set into every run's config in `_prepare_input`, reserved from clients) |
 | `cache_store.token_revocation` | `true`, `false`, `null` or `{"enabled", "token_lifetime", "user_ttl"}` (`graph_config.TokenRevocationConfig`; a string is a config error). Read through `GraphConfig.token_revocation`. Revocations live in the cache store (`core/auth/revocation.py`: `revoke_token`, `revoke_user`, `is_revoked`), checked by `RequirePermission` (401), before every `/v1/graph/ws` run, and before and every 30 s during a `/v1/graph/live` session (`REALTIME_RECHECK_INTERVAL`, close 1008); cache store errors fail closed (503), and an unreachable cache store refuses the boot |
 | `media` | `delete_with_thread` (default true): delete an uploaded file when the last message or thread that references it is deleted. Links are recorded in the file's `threads` metadata (`MediaService.link_threads` / `unlink_threads`); files without a `threads` key (uploaded before link tracking) and stores without `update_metadata` (core older than the release that added it) are never auto-deleted. `false` still records links. Parsed by `graph_config.MediaConfig` |
-| `graph_introspection` | `"open"` or `"scoped"` (default scoped in production): `GET /v1/graph`, `/v1/graph/tools`, `/v1/graph:StateSchema` need an explicit `graph:read` scope (`RequirePermission(..., introspection=True)`) |
 
 `cache_store.rate_limit` object (read through `GraphConfig.rate_limit`, None when absent or
 `enabled: false`): `enabled`, `requests` (default 100), `window` secs (60), `by` (`ip` |
@@ -114,62 +113,64 @@ valid ones (`RATE_LIMIT_KEYS`).
 
 ## Auth
 
-- `"auth": "jwt"` requires `JWT_SECRET_KEY` and `JWT_ALGORITHM` in the environment (raises at
-  load if missing). JWT logic lives in `core/auth/jwt_auth.py`.
-- `"auth": {"method": "custom", "path": "module:attr"}` loads your `BaseAuth` subclass
-  (`from tenxgraph_api import BaseAuth`).
-- Authorization (RBAC / object-level) is separate: `core/auth/authorization.py`
-  (`AuthorizationBackend` / `DefaultAuthorizationBackend` / `OwnershipAuthorizationBackend`),
-  wired via the `authorization` key. That key accepts `"module:attr"` (custom), a built-in
-  name (`"ownership"` = owner-only thread access; `"allow_all"`/`"default"`/`"none"`), or
-  `null`. When unset it is `ownership` whenever auth is configured or `MODE=production`, and
-  `allow_all` only with auth off in development (no identity, so nothing to authorize).
-  Selection lives in `loader._resolve_authorization_backend`; `RequirePermission` passes
-  `resource_id` (thread_id from path or body) to `authorize`.
-- **Isolation defaults to owner.** `AuthorizationBackend.isolation_scope(user)` is called per request and
-  returns `"owner"` by default, so a custom backend with only `authorize()` still scopes threads and
-  memories per user; return `"none"` on purpose to share (`DefaultAuthorizationBackend` / `allow_all`
-  does), or a list of `user_id` and declared tenant columns (e.g. `["org_id"]` for an org admin).
-  Backends with the old no-argument `isolation_scope(self)` still work (signature decides, no
-  retry on `TypeError`). `core.authz.Isolation` is the `OWNER` / `NONE` StrEnum; an unknown scope
-  raises (`RoleBasedAuthorizationBackend(isolation=...)` raises at construction, so the server
-  refuses to boot). The result is stamped in `config["user"]["authz"]`. Tenant column values come
-  only from `config["user"]` (the `BaseAuth` result or JWT claims).
-- **Ownership compares scope columns.** `OwnershipAuthorizationBackend` allows a thread when its
-  values (`BaseCheckpointer.aget_thread_scope`, cached by `ThreadOwnershipResolver` with the tenant
-  values) equal the caller's on every column the scope picks; a scope naming a column the
-  checkpointer does not declare denies (fails closed).
+- **One `auth` key.** `method` picks the class: `none` (or `"auth": null`), `jwt` (needs
+  `JWT_SECRET_KEY` and `JWT_ALGORITHM`, `core/auth/jwt_auth.py`), or `custom` + `path` to a
+  `BaseAuth` subclass (`from tenxgraph_api import BaseAuth`). RBAC keys sit next to it and apply
+  to any class. `"auth": "jwt"` = default permission set, reach `own`.
+- **`check_auth_config`** (`core/auth/auth_config.py`) is the one validator for boot,
+  `10xgraph config`, `audit` and `build`. Refuses: RBAC keys with auth off; any top-level
+  `authorization` key; `custom` without a valid `path`, or `path` with another method; both
+  `roles_claim` and `permissions_claim`; `default_role`, `inherits` or `system_identities`
+  naming an unknown role; inheritance cycles; unknown permission or reach (reach is required
+  per role and never a fallback); reach `tenant` without `tenant_claims`; `graph_introspection`
+  (removed, it is `graph:read`). `tenant_claims` and the tenant columns declared on the
+  checkpointer and store must match both ways (boot only, `check_tenant_claims`; it needs the
+  bound backends): refuse in production, warn in development. Reach `all` roles are logged at boot.
+- **`BaseAuth`**: `authenticate(request, response, credential)` returns claims (must include
+  `user_id`); `async authorize(identity, permission, resource=None)` defaults to RBAC
+  (`identity.can(permission)`) and takes no request, so the jobs worker can call it. Overriding
+  it with `roles` set only keeps roles if it calls `super().authorize`. `rbac` is set by the
+  loader. A token without a configured tenant claim, or a malformed roles/permissions claim, is
+  401. Token `scope`/`scopes` only narrow the granted permissions.
+- **Dependencies** (`core/auth/permissions.py`): `RequireIdentity` authenticates and returns
+  the core `Identity` (None with auth off; 401 on HTTP, close 1008 on WebSocket).
+  `RequirePermission("resource", "action")` adds `authorize` (403) and passes `resource_id`.
+  `config["user"]` is the `Identity`.
+- **Permissions** come from one registry (`core/auth/permissions_registry.py`): `graph`
+  (read, invoke, stream, stop, fix), `threads` (read, write, delete), `store`, `files`
+  (read, upload, delete), `config:read`, `tasks`, `admin`; wildcards `resource:*` and `*`.
+  Default set (no roles): everything except `admin:*`. `rbac.py` resolves
+  roles (`RbacConfig`, `resolve`, `InvalidClaimsError`).
+- **Reach** (`own` | `tenant` | `all`) widens reads, lists, deletes and stop only. Runs and
+  state/message writes always stay `own`, admins included. `/v1/tasks`: GET and cancel widen
+  by reach (`TaskStatus`/`ScheduleRecord` keep the owner's `user_id` and `tenant`); trigger and
+  PATCH stay own.
+- **Jobs worker** (`jobs/middleware.py::_run_identity`): with auth on, each run's
+  `config["user"]` is rebuilt from the stored claims with the current role config, then
+  `authorize(identity, "tasks:trigger", task_name)`; refused or invalid means the run fails
+  without executing. A task label `identity="<name>"` runs calls that have no `config["user"]`
+  as the system identity `__system__:<name>` from `auth.system_identities`; it never replaces
+  a caller's identity. Auth off: nothing changes.
+- **Ownership is enforced in storage** (every query filters by the caller's reach; a foreign
+  thread, message, memory, file or run answers 404). No resolver, tombstone or ownership cache.
+  Each thread route makes one scoped read, `core/threads.py::require_thread(checkpointer,
+  identity, thread_id, run=...)`, before the run lock and any response header: it gives the
+  404 and enforces `runs.thread_ids`. `/v1/graph/stop` calls it first; a visible thread with no
+  run then answers 200 `{ok: false}` (core `reason: "no-state"`).
+- **`runs.thread_ids`** is enforced with auth on or off.
+- **`GET /v1/me`** (`routers/me.py`): `user_id`, `tenant`, `roles`, `permissions`, `reach`;
+  `{"auth": "off"}` with auth off. There is no history import route
+  (`POST /v1/threads/{id}/messages` is gone).
 - **Client `filters`.** `GET /v1/threads?filters=<JSON>` (at most 8192 chars) and the store routes'
-  `filters` are checked by `core/auth/client_filters.py` with core's `sql_filter` validator before
+  `filters` are checked by `core/validation/client_filters.py` with core's `sql_filter` validator before
   any DB work: malformed JSON, non-filterable or tenant columns / `user_id`, a bad operator, or a
   checkpointer without filterable columns answer 422 (`ClientInputError`), never echoing values.
 - **Token claims are validated.** `JwtAuth` requires `user_id` to be a non-empty string or an int
   (stored as a string), else 401. `token_revoked` checks `jti` even with an odd `user_id`.
-  Scopes come from `authorization.scopes_from_claims`: the `scope` claim (space-separated) and
-  `scopes` (list or space-separated string) merge into exact names, checked with `in` (no
-  substrings); a wrong-typed claim is a 401 (`ScopeClaimError`), no claim means unrestricted.
-- **Ownership fails closed.** No checkpointer, or one whose `aget_thread_owner` raises
-  `NotImplementedError`, denies thread requests; with auth on the loader refuses to boot in that
-  setup (`authorization.assert_ownership_supported`). A thread with no owner allows only
-  `CREATE_ACTIONS` (`graph:invoke`, `graph:stream`, `checkpointer:write`, `checkpointer:import`); checkpointer state and
-  message writes claim the thread first (`CheckpointerService._claim_thread`). Every saved
-  thread carries its owner via `request_config.owned_thread_info` (the in-memory and SQLite
-  checkpointers read the owner from `ThreadInfo.user_id`).
-- **Ownership is object-level and enforced on every thread-touching step** (invoke/stream/
-  stop/fix + all checkpointer read/write/delete): a thread is accessible only to its owner;
-  a foreign `invoke`/`stream` is rejected up front (403), never reaching the graph.
-- **Scalable, not a DB call per request.** Ownership is immutable, so it is cached by
-  `core/auth/ownership_resolver.py::ThreadOwnershipResolver`: in-process LRU (L1) + the
-  cache store as L2 (skipped when it is in-memory). The backing lookup is
-  `BaseCheckpointer.aget_thread_owner` (implemented in pg/in-memory/sqlite; base raises
-  `NotImplementedError`). Cache is evicted on thread delete (`CheckpointerService.delete_thread`),
-  which also leaves a tombstone for one L1 TTL (L1 + cache store) so the deleted id cannot be
-  recreated by someone else while another worker still caches the old owner
-  (`ThreadOwnershipResolver.recently_deleted`); the resolver never closes the cache store.
 - **Identity reuse:** with `cache_store.rate_limit.by == "user"` the limiter's verified identity is reused by
-  `RequirePermission` for backends with `BaseAuth.reusable_within_request = True` (`JwtAuth`),
-  see `core/auth/identity_cache.py`. Look up the app container inside a request with
-  `core/utils/container.py::current_container()`, not `InjectQ.get_instance()`.
+  `RequirePermission` for auth classes with `BaseAuth.reusable_within_request = True` (`JwtAuth`).
+  Look up the app container inside a request with `core/utils/container.py::current_container()`,
+  not `InjectQ.get_instance()`.
 - **Secure by construction:** `core/auth/route_guard.py::assert_all_routes_protected` runs at
   boot (`main.py` after `init_routes`) and refuses to start if any non-public route lacks a
   `RequirePermission` guard (`/ping` and `/health/ready` are the only public paths).
@@ -181,14 +182,10 @@ valid ones (`RATE_LIMIT_KEYS`).
   `WS /v1/graph/ws`.
 - **Checkpointer / threads**: `GET/POST /v1/threads`, `GET/DELETE /v1/threads/{thread_id}`,
   `GET/PUT/DELETE /v1/threads/{thread_id}/state`, `GET /v1/threads/{thread_id}/messages`,
-  `GET/DELETE ... /messages/{message_id}`. `POST /v1/threads/{thread_id}/messages` (import
-  history, any role) is admin-only: `RequirePermission("checkpointer", "import",
-  explicit_scope=True)`, so the caller must hold `checkpointer:import` explicitly (no scopes
-  means 403; `"*"` roles get it, `authorization.CHECKPOINTER_ADMIN_SCOPES`). Tool calls, media
-  ownership and size limits still apply. `PUT ... /messages/{message_id}` sets
-  `metadata["feedback"]` only (body `{"feedback": {...}}`, 8 KB, depth 10, `checkpointer:write`;
+  `GET/DELETE ... /messages/{message_id}`. `PUT ... /messages/{message_id}` sets
+  `metadata["feedback"]` only (body `{"feedback": {...}}`, 8 KB, depth 10, `threads:write`;
   calls `aupdate_message_metadata`, 501 when the checkpointer lacks it, 404 for a missing message).
-- **Client input rules** (`core/auth/request_config.py`): `context_summary` and `execution_meta`
+- **Client input rules** (`core/validation/request_config.py`): `context_summary` and `execution_meta`
   are never client-writable (`reject_builtin_state_keys`, 422); client messages are user-only
   (`client_message_error`: no `assistant`/`system`; a `tool` message only as tool results, which
   must answer a pending remote call, `GraphService._check_tool_results`, also for PUT state
@@ -222,12 +219,11 @@ valid ones (`RATE_LIMIT_KEYS`).
 - **Media / files** (`tags=["Files"]`): `POST /v1/files/upload` (first bytes must match the
   declared type for formats with a signature, else 415; table in `utils/media/signatures.py`),
   `GET /v1/files/{file_id}`, `/{file_id}/info`, `/{file_id}/url`, `DELETE /v1/files/{file_id}`
-  (owner only, 404 otherwise, scope `files:delete`, added in `authorization.FILES_DELETE_SCOPES`
-  until core lists it), `GET /v1/config/multimodal`. Deleting a message or thread also releases
+  (owner only, 404 otherwise, permission `files:delete`), `GET /v1/config/multimodal`. Deleting a message or thread also releases
   the files it referenced (`CheckpointerService.delete_message` / `delete_thread`; a thread delete
   releases the thread owner's files too, read with `aget_thread_scope` before the delete). With
   tenant columns on the bound checkpointer, files are tenant-scoped: upload records
-  `metadata["tenant"]` (canonical values from `config["user"]`, `authorization.identity_values`),
+  `metadata["tenant"]` (canonical values from the `Identity`),
   and access, list, quota, `graph://media/` / `file_id` references and `link_threads` require a
   match on every tenant column (`media.tenant_matches`); a file without tenant values is denied.
 - **AG-UI** (`tags=["AG-UI"]`, only when `ag_ui.enabled`): `POST /v1/ag-ui`. `routers/ag_ui/`:

@@ -6,10 +6,9 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 from tenxgraph.core.state import Message
 
-from tenxgraph_api.src.app.core.auth.request_config import (
+from tenxgraph_api.src.app.core.validation.request_config import (
     BoundedDict,
     ClientInputError,
-    client_message_error,
     request_size_error,
 )
 
@@ -39,28 +38,6 @@ class StateSchema(ConfigSchema):
         # ``context`` is client-written messages: same size limits as a run request.
         if error := request_size_error(v.get("context"), "state.context"):
             raise ClientInputError(error)
-        return v
-
-
-class PutMessagesSchema(ConfigSchema):
-    """Schema for putting messages."""
-
-    messages: list[Message] = Field(..., description="List of messages to store")
-    metadata: BoundedDict | None = Field(None, description="Optional metadata")
-
-    @field_validator("messages", mode="before")
-    @classmethod
-    def messages_within_limits(cls, v: Any) -> Any:
-        if error := request_size_error(v):
-            raise ClientInputError(error)
-        return v
-
-    @field_validator("messages")
-    @classmethod
-    def messages_must_not_call_tools(cls, v: list[Message]) -> list[Message]:
-        # Admin import of history: any role is fine, but a tool call would still run on resume.
-        if error := client_message_error(v, user_only=False):
-            raise ValueError(error)
         return v
 
 

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 from typing import Any
 
 import pytest
@@ -17,11 +18,8 @@ from taskiq import InMemoryBroker, ScheduledTask, ScheduleSource
 
 from tenxgraph_api.jobs import state
 from tenxgraph_api.jobs.middleware import TaskMiddleware, wrap_tasks
-from tenxgraph_api.src.app.core.auth.authorization import (
-    AuthorizationBackend,
-    DefaultAuthorizationBackend,
-)
 from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
+from tenxgraph_api.src.app.core.auth.rbac import RbacConfig
 from tenxgraph_api.src.app.core.auth.route_guard import _iter_routes, find_unprotected_routes
 from tenxgraph_api.src.app.core.cache_store import BaseCacheStore, InMemoryCacheStore
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
@@ -43,14 +41,17 @@ class TokenAuth(BaseAuth):
         return {"user_id": credential.credentials} if credential else {}
 
 
-class OwnerOnly(AuthorizationBackend):
-    async def authorize(self, user, resource, action, resource_id=None, **context):
-        return bool(user.get("user_id"))
+class TenantTokenAuth(BaseAuth):
+    """The bearer token is ``user_id@org_id``; ``org_id`` is a tenant claim."""
+
+    rbac = RbacConfig(tenant_claims=["org_id"])
+
+    def authenticate(self, request, response, credential):
+        user_id, _, org_id = credential.credentials.partition("@")
+        return {"user_id": user_id, "org_id": org_id}
 
 
 class AuthOn:
-    introspection_scoped = False
-
     def auth_config(self):
         return {"method": "custom", "path": "x:y"}
 
@@ -70,13 +71,19 @@ class FakeSource(ScheduleSource):
 
 
 class Env:
-    def __init__(self, monkeypatch, authz: AuthorizationBackend) -> None:
+    def __init__(
+        self,
+        monkeypatch,
+        auth: bool = True,
+        auth_impl: BaseAuth | None = None,
+        graph_config: Any = None,
+    ) -> None:
         self.store = InMemoryCacheStore()
         self.source = FakeSource()
         container = InjectQ()
-        container.bind_instance(GraphConfig, AuthOn())
-        container.bind_instance(BaseAuth, TokenAuth())
-        container.bind_instance(AuthorizationBackend, authz)
+        container.bind_instance(GraphConfig, graph_config or AuthOn())
+        auth_impl = auth_impl or (TokenAuth() if auth else None)
+        container.bind_instance(BaseAuth, auth_impl, allow_none=True)
         container.bind_instance(BaseCacheStore, self.store)
         self.broker = InMemoryBroker(await_inplace=True).with_middlewares(TaskMiddleware())
         self.seen: list[dict] = []
@@ -109,7 +116,7 @@ class Env:
 
 @pytest.fixture
 def env(monkeypatch):
-    return Env(monkeypatch, OwnerOnly())
+    return Env(monkeypatch)
 
 
 def test_run_then_read_status_and_result(env):
@@ -122,11 +129,20 @@ def test_run_then_read_status_and_result(env):
     assert data["result"] == 5
     assert data["error"] is None
     assert data["owner"] == "u1"
-    # The run config is built on the server, with the authz block RequirePermission stamps.
+    # The run config is built on the server from the caller's Identity.
     config = env.seen[0]
     assert config["user_id"] == "u1"
     assert config["task_id"] == task_id
-    assert config["user"]["authz"]["scope"] == "owner"
+    assert config["user"]["user_id"] == "u1"
+
+
+def test_auth_off_runs_as_anonymous(monkeypatch):
+    off = Env(monkeypatch, auth=False)
+    task_id = off.client.post(f"/v1/tasks/{ADD}", json={"args": [1, 1]}).json()["data"]["task_id"]
+    data = off.client.get(f"/v1/tasks/{task_id}").json()["data"]
+    assert data["owner"] == "anonymous"
+    assert off.seen[0]["user_id"] == "anonymous"
+    assert "user" not in off.seen[0]
 
 
 def test_task_without_http_label_and_unknown_task_are_404(env):
@@ -153,6 +169,29 @@ def test_other_user_gets_404_on_task(env):
     assert env.call("GET", "/v1/tasks/missing").status_code == 404
 
 
+def test_same_user_id_in_another_tenant_gets_404(monkeypatch):
+    env = Env(monkeypatch, auth_impl=TenantTokenAuth())
+    resp = env.call("POST", f"/v1/tasks/{ADD}", user="u1@a", json={"args": [1, 1]})
+    task_id = resp.json()["data"]["task_id"]
+    assert env.call("GET", f"/v1/tasks/{task_id}", user="u1@a").status_code == 200
+    assert env.call("GET", f"/v1/tasks/{task_id}", user="u1@b").status_code == 404
+    assert env.call("POST", f"/v1/tasks/{task_id}/cancel", user="u1@b").status_code == 404
+
+    body = {"args": [1, 2], "schedule": {"every": 3}}
+    resp = env.call("POST", f"/v1/tasks/{ADD}", user="u1@a", json=body)
+    schedule_id = resp.json()["data"]["schedule_id"]
+    change = {"schedule": {"every": 5}}
+    assert env.call("GET", f"/v1/tasks/{schedule_id}", user="u1@b").status_code == 404
+    assert (
+        env.call("PATCH", f"/v1/tasks/{schedule_id}", user="u1@b", json=change).status_code == 404
+    )
+    assert env.call("POST", f"/v1/tasks/{schedule_id}/cancel", user="u1@b").status_code == 404
+    assert env.call("GET", f"/v1/tasks/{schedule_id}", user="u1@a").status_code == 200
+    # The worker records the same owner key for a run it creates (a scheduled run).
+    label = json.loads(env.source.schedules[schedule_id].labels[state.CONFIG_LABEL])
+    assert state.owner_fields(label)["owner"] == "u1:org_id:a"
+
+
 def test_cancel_a_queued_task(env, monkeypatch):
     async def no_worker(message):  # the message waits in the queue
         return None
@@ -165,14 +204,6 @@ def test_cancel_a_queued_task(env, monkeypatch):
     assert resp.json()["data"] == {"task_id": task_id, "status": "cancelled"}
 
 
-def test_shared_isolation_lets_others_read(monkeypatch):
-    shared = Env(monkeypatch, DefaultAuthorizationBackend())
-    task_id = shared.call("POST", f"/v1/tasks/{ADD}", json={"args": [1, 1]}).json()["data"][
-        "task_id"
-    ]
-    assert shared.call("GET", f"/v1/tasks/{task_id}", user="u2").status_code == 200
-
-
 def test_schedule_create_read_patch_cancel(env):
     body = {"args": [1, 2], "schedule": {"every": 3}}
     resp = env.call("POST", f"/v1/tasks/{ADD}", json=body)
@@ -181,7 +212,9 @@ def test_schedule_create_read_patch_cancel(env):
     added = env.source.schedules[schedule_id]
     assert added.interval == 3
     assert added.args == [1, 2]
-    assert '"user_id": "u1"' in added.labels[state.CONFIG_LABEL]
+    label = json.loads(added.labels[state.CONFIG_LABEL])
+    assert label["user_id"] == "u1"
+    assert label["user"]["user_id"] == "u1"
 
     data = env.call("GET", f"/v1/tasks/{schedule_id}").json()["data"]
     assert data["schedule"]["every"] == 3
@@ -250,10 +283,10 @@ def test_routes_only_with_worker_and_all_guarded():
     assert find_unprotected_routes(with_tasks) == []
 
 
-def test_tasks_scopes_are_known():
-    from tenxgraph_api.src.app.core.auth.authorization import all_scopes
+def test_tasks_permissions_are_known():
+    from tenxgraph_api.src.app.core.auth.permissions_registry import ALL_PERMISSIONS
 
-    assert {"tasks:invoke", "tasks:read", "tasks:cancel"} <= all_scopes()
+    assert {"tasks:trigger", "tasks:read", "tasks:cancel"} <= set(ALL_PERMISSIONS)
 
 
 def test_boot_imports_modules_and_globs(tmp_path, monkeypatch):

@@ -28,10 +28,10 @@ from typing import Any, Literal
 from fastapi import HTTPException
 
 from tenxgraph_api.src.app.core import logger
-from tenxgraph_api.src.app.core.auth.request_config import normalize_thread_id
 from tenxgraph_api.src.app.core.leases import Lease, lease_manager
 from tenxgraph_api.src.app.core.redis_client import key_part
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
+from tenxgraph_api.src.app.core.validation.request_config import normalize_thread_id
 
 
 HTTP_CONFLICT = 409

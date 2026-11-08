@@ -14,8 +14,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import AgentState, Message
 from tenxgraph.storage.checkpointer import InMemoryCheckpointer
+from tenxgraph.utils.thread_info import ThreadInfo
 
 from tenxgraph_api.src.app.routers.checkpointer.schemas.checkpointer_schemas import (
     MessagesListResponseSchema,
@@ -26,11 +28,17 @@ from tenxgraph_api.src.app.routers.checkpointer.services.checkpointer_service im
 from tenxgraph_api.src.app.utils.parse_output import parse_message_output, parse_state_output
 
 
-USER = {"user_id": "u1"}
+USER = Identity(user_id="u1")
 CFG = {"thread_id": "t1"}
 
 
 def _service(checkpointer: Any) -> CheckpointerService:
+    # Thread routes read the caller's thread first; give them one.
+    if isinstance(checkpointer, MagicMock):
+        checkpointer.aget_thread = AsyncMock(return_value=ThreadInfo(thread_id="t1", user_id="u1"))
+    else:
+        owner_cfg = {**CFG, "user_id": USER.user_id, "user": USER}
+        checkpointer.put_thread(owner_cfg, ThreadInfo(thread_id="t1"))
     service = CheckpointerService.__new__(CheckpointerService)
     service.checkpointer = checkpointer
     service.settings = MagicMock()
@@ -204,9 +212,8 @@ def test_non_model_responses_pass_through():
 
 
 @pytest.mark.asyncio
-async def test_put_state_response_has_no_raw_or_extra_internal_data():
-    service = _service(InMemoryCheckpointer())
-    res = await service.put_state(
+async def test_put_state_response_has_no_raw_or_extra_internal_data(state_service):
+    res = await state_service.put_state(
         CFG, USER, {"context": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]}
     )
     assert "raw" not in res.state["context"][0]

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import Message
 from tenxgraph.storage.store import BaseStore, MemorySearchResult, MemoryType
 
@@ -25,12 +26,8 @@ def store_service(mock_store):
 
 @pytest.fixture
 def mock_user():
-    """Mock user data."""
-    return {
-        "user_id": "test-user-123",
-        "email": "test@example.com",
-        "name": "Test User",
-    }
+    """Caller identity."""
+    return Identity(user_id="test-user-123", claims={"email": "test@example.com"})
 
 
 @pytest.fixture

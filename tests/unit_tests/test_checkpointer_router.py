@@ -99,7 +99,7 @@ class TestGetStateLogic:
             request=mock_request,
             thread_id="thread-123",
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         mock_service.get_state.assert_called_once_with({"thread_id": "thread-123"}, mock_user)
@@ -114,7 +114,7 @@ class TestGetStateLogic:
                 request=mock_request,
                 thread_id=-1,
                 service=mock_service,
-                user=mock_user,
+                identity=mock_user,
             )
 
 
@@ -141,7 +141,7 @@ class TestPutStateLogic:
             thread_id="thread-123",
             payload=payload,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         call_args = mock_service.put_state.call_args
@@ -165,7 +165,7 @@ class TestPutStateLogic:
                 thread_id="",
                 payload=payload,
                 service=mock_service,
-                user=mock_user,
+                identity=mock_user,
             )
 
 
@@ -187,37 +187,10 @@ class TestClearStateLogic:
             request=mock_request,
             thread_id="thread-123",
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         mock_service.clear_state.assert_called_once_with({"thread_id": "thread-123"}, mock_user)
-
-
-class TestPutMessagesLogic:
-    """Test POST messages endpoint logic."""
-
-    @pytest.mark.asyncio
-    async def test_put_messages_validates_empty_messages(
-        self, mock_request, mock_service, mock_user
-    ):
-        """Test that put_messages rejects empty messages."""
-        from tenxgraph_api.src.app.routers.checkpointer.router import put_messages
-        from tenxgraph_api.src.app.routers.checkpointer.schemas.checkpointer_schemas import (
-            PutMessagesSchema,
-        )
-
-        payload = PutMessagesSchema(messages=[], metadata=None, config=None)
-
-        with pytest.raises(HTTPException) as exc_info:
-            await put_messages(
-                request=mock_request,
-                thread_id="thread-123",
-                payload=payload,
-                service=mock_service,
-                user=mock_user,
-            )
-        assert exc_info.value.status_code == 422
-        assert "not be empty" in exc_info.value.detail
 
 
 class TestGetMessageLogic:
@@ -236,7 +209,7 @@ class TestGetMessageLogic:
                 thread_id="thread-123",
                 message_id="",
                 service=mock_service,
-                user=mock_user,
+                identity=mock_user,
             )
         assert exc_info.value.status_code == 422
 
@@ -256,7 +229,7 @@ class TestGetMessageLogic:
             thread_id="thread-123",
             message_id="msg-1",
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         mock_service.get_message.assert_called_once()
@@ -283,7 +256,7 @@ class TestListMessagesLogic:
             offset=10,
             limit=20,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         call_args = mock_service.get_messages.call_args
@@ -312,7 +285,7 @@ class TestDeleteMessageLogic:
                 message_id="",
                 payload=payload,
                 service=mock_service,
-                user=mock_user,
+                identity=mock_user,
             )
         assert exc_info.value.status_code == 422
 
@@ -337,7 +310,7 @@ class TestDeleteMessageLogic:
             message_id="msg-1",
             payload=payload,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         call_args = mock_service.delete_message.call_args
@@ -363,7 +336,7 @@ class TestGetThreadLogic:
             request=mock_request,
             thread_id="thread-123",
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         mock_service.get_thread.assert_called_once()
@@ -389,7 +362,7 @@ class TestListThreadsLogic:
             offset=5,
             limit=10,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         call_args = mock_service.list_threads.call_args
@@ -421,7 +394,7 @@ class TestDeleteThreadLogic:
             thread_id="thread-123",
             payload=payload,
             service=mock_service,
-            user=mock_user,
+            identity=mock_user,
         )
 
         call_args = mock_service.delete_thread.call_args
@@ -444,5 +417,5 @@ class TestDeleteThreadLogic:
                 thread_id="",
                 payload=payload,
                 service=mock_service,
-                user=mock_user,
+                identity=mock_user,
             )

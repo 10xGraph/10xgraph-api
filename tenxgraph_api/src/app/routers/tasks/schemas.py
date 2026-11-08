@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
+from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
 
 
 class Schedule(BaseModel):
@@ -68,6 +68,8 @@ class ScheduleRecord(BaseModel):
     schedule_id: str
     task_name: str
     owner: str
+    user_id: str | None = None  # the owner's user_id and tenant values, for reach checks
+    tenant: dict[str, str] = {}
     schedule: Schedule
     args: list[Any]
     kwargs: dict[str, Any]

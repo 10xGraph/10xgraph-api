@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 import anyio
+from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
 
@@ -43,7 +44,7 @@ def test_fix_graph_ignores_client_supplied_user_id():
     anyio.run(
         service.fix_graph,
         "thread-A",
-        {"user_id": "alice"},  # authenticated user
+        Identity(user_id="alice"),  # authenticated user
         {"user_id": "victim", "thread_id": "thread-A"},  # attacker-controlled config
     )
 
@@ -72,7 +73,7 @@ def test_stop_graph_sets_trusted_user_id_over_client_config():
     anyio.run(
         service.stop_graph,
         "thread-A",
-        {"user_id": "alice"},
+        Identity(user_id="alice"),
         {"user_id": "victim"},
     )
 

@@ -17,12 +17,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from uuid import UUID
 
 import anyio
 import pytest
 from fastapi.testclient import TestClient
 from injectq import InjectQ
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.graph import CompiledGraph, StateGraph
 from tenxgraph.core.state import AgentState, Message, TextBlock
 from tenxgraph.storage.checkpointer import BaseCheckpointer, InMemoryCheckpointer
@@ -30,9 +30,8 @@ from tenxgraph.storage.columns import parse_columns
 from tenxgraph.utils.constants import END
 from tenxgraph.utils.thread_info import ThreadInfo
 
-from tenxgraph_api.src.app.core.auth.authorization import AuthorizationBackend
 from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
-from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
+from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.core.config.media_settings import MediaSettings, MediaStorageType
 from tenxgraph_api.src.app.routers.checkpointer.router import router as checkpointer_router
@@ -44,12 +43,14 @@ from tenxgraph_api.src.app.routers.media import TENANT_KEY, MediaService
 from tenxgraph_api.src.app.routers.media.router import router as media_router
 
 from .conftest import build_app, make_client
-from .test_tenant_isolation import TenantAuth, TenantAuthz, TenantCheckpointer, _as, _seed_cfg
+from .test_tenant_isolation import TenantAuth, TenantCheckpointer, _as, _seed_cfg
 
 
 ALICE_A = _as("alice", "org-a")
 ALICE_B = _as("alice", "org-b")
 SECRET_A = b"secret-of-alice-in-org-a"
+USER_A = Identity(user_id="alice", tenant={"org_id": "org-a"})
+USER_B = Identity(user_id="alice", tenant={"org_id": "org-b"})
 
 
 class _Harness:
@@ -79,11 +80,9 @@ class _Harness:
         graph.add_edge("MAIN", END)
         compiled = graph.compile(checkpointer=self.checkpointer)
 
-        authz = TenantAuthz(checkpointer=self.checkpointer)
         bindings = {
             MediaService: self.media,
             BaseAuth: TenantAuth(),
-            AuthorizationBackend: authz,
             GraphConfig: config,
             BaseCheckpointer: self.checkpointer,
             CompiledGraph: compiled,
@@ -93,7 +92,7 @@ class _Harness:
             active.bind_instance(kind, value, allow_none=True)
         app = build_app(
             routers=[media_router, graph_router, checkpointer_router],
-            authz=authz,
+            auth=TenantAuth(),
             checkpointer=self.checkpointer,
             extra_bindings=bindings,
         )
@@ -170,15 +169,18 @@ def test_listing_keeps_the_two_tenants_apart(h):
     assert _listed(h, ALICE_B) == [key_b]
 
 
-def test_upload_without_a_tenant_value_is_refused(h):
-    resp = h.upload(_as("alice"))
-    assert resp.status_code == 403
-    assert h.client.get("/v1/files", headers=_as("alice")).json()["data"]["files"] == []
+def test_a_token_without_a_tenant_claim_is_refused(h):
+    assert h.upload(_as("alice")).status_code == 401
+    assert h.client.get("/v1/files", headers=_as("alice")).status_code == 401
 
 
-def test_a_caller_without_a_tenant_value_cannot_read_the_file(h):
+@pytest.mark.asyncio
+async def test_an_identity_without_a_tenant_value_cannot_use_the_file(h):
     key = h.upload_key(ALICE_A)
-    assert h.client.get(f"/v1/files/{key}", headers=_as("alice")).status_code == 404
+    no_tenant = Identity(user_id="alice")
+    with pytest.raises(PermissionError):
+        await h.media.ensure_can_access(key, "alice", no_tenant)
+    assert await h.media.list_files("alice", user=no_tenant) == ([], False)
 
 
 def test_quotas_are_counted_per_tenant(tmp_path):
@@ -226,8 +228,7 @@ def test_put_state_cannot_reference_the_other_tenants_file(h):
 async def test_reference_checks_and_links_compare_tenant_values(h):
     key = h.upload_key(ALICE_A)
     message = Message.model_validate(_image(key))
-    user_a = {"user_id": "alice", "org_id": "org-a"}
-    user_b = {"user_id": "alice", "org_id": "org-b"}
+    user_a, user_b = USER_A, USER_B
 
     with pytest.raises(ClientInputError, match="not found"):
         await check_media_references([message], h.media, "alice", user_b)
@@ -248,7 +249,7 @@ async def test_reference_checks_and_links_compare_tenant_values(h):
 async def test_a_file_without_tenant_values_is_denied_under_tenant_columns(h):
     """Uploaded before tenant tracking: no recorded tenant, so no tenant may use it."""
     key = await h.media.store.store(b"legacy", "text/plain", metadata={"owner_id": "alice"})
-    user_a = {"user_id": "alice", "org_id": "org-a"}
+    user_a = USER_A
     with pytest.raises(PermissionError):
         await h.media.ensure_can_access(key, "alice", user_a)
     assert await h.media.list_files("alice", user=user_a) == ([], False)
@@ -261,7 +262,7 @@ async def test_an_ownerless_file_is_denied_under_tenant_columns_even_in_developm
         h.media._settings.MEDIA_REQUIRE_OWNER = False
         key = await h.media.store.store(b"legacy", "text/plain", metadata={})
         with pytest.raises(PermissionError):
-            await h.media.ensure_can_access(key, "alice", {"user_id": "alice", "org_id": "org-a"})
+            await h.media.ensure_can_access(key, "alice", USER_A)
 
 
 class _UuidCheckpointer(InMemoryCheckpointer):
@@ -272,21 +273,18 @@ class _UuidCheckpointer(InMemoryCheckpointer):
 
 
 @pytest.mark.asyncio
-async def test_typed_tenant_columns_compare_after_conversion(tmp_path):
-    org = "6F9619FF-8B86-D011-B42D-00CF4FC964FF"
+async def test_typed_tenant_columns_record_and_compare_the_identity_text(tmp_path):
+    org = "6f9619ff-8b86-d011-b42d-00cf4fc964ff"
     with InjectQ.test_mode():
         h = _Harness(tmp_path, checkpointer=_UuidCheckpointer())
-        result = await h.media.upload_file(
-            b"x", "a.txt", "text/plain", user_id="alice", user={"user_id": "alice", "org_id": org}
-        )
+        owner = Identity(user_id="alice", tenant={"org_id": org})
+        result = await h.media.upload_file(b"x", "a.txt", "text/plain", user_id="alice", user=owner)
         key = result["file_id"]
-        meta = await h.media.store.get_metadata(key)
-        assert meta[TENANT_KEY] == {"org_id": str(UUID(org))}
-        # Lower case and UUID objects are the same tenant; a malformed value is none.
-        await h.media.ensure_can_access(key, "alice", {"user_id": "alice", "org_id": org.lower()})
-        await h.media.ensure_can_access(key, "alice", {"user_id": "alice", "org_id": UUID(org)})
+        assert (await h.media.store.get_metadata(key))[TENANT_KEY] == {"org_id": org}
+        await h.media.ensure_can_access(key, "alice", owner)
+        other = Identity(user_id="alice", tenant={"org_id": "nope"})
         with pytest.raises(PermissionError):
-            await h.media.ensure_can_access(key, "alice", {"user_id": "alice", "org_id": "nope"})
+            await h.media.ensure_can_access(key, "alice", other)
 
 
 @pytest.mark.asyncio
@@ -297,7 +295,9 @@ async def test_no_tenant_columns_records_no_tenant_and_checks_the_owner_only(tmp
         key = result["file_id"]
         assert TENANT_KEY not in await h.media.store.get_metadata(key)
         await h.media.ensure_can_access(key, "alice")
-        await h.media.ensure_can_access(key, "alice", {"user_id": "alice", "org_id": "any"})
+        await h.media.ensure_can_access(
+            key, "alice", Identity(user_id="alice", tenant={"org_id": "any"})
+        )
         with pytest.raises(PermissionError):
             await h.media.ensure_can_access(key, "bob")
 
@@ -311,7 +311,7 @@ def test_org_admin_thread_delete_releases_the_members_files(h):
     cfg = _seed_cfg("t-a", "alice", "org-a")
     anyio.run(h.checkpointer.aput_thread, cfg, ThreadInfo(thread_id="t-a", user_id="alice"))
     # Linked through a message that is gone since: only the metadata scan finds it.
-    anyio.run(h.media.link_threads, [key], "t-a", "alice", {"user_id": "alice", "org_id": "org-a"})
+    anyio.run(h.media.link_threads, [key], "t-a", "alice", USER_A)
     assert h.metadata(key)["threads"] == ["t-a"]
 
     admin = _as("carol", "org-a", "org_admin")
@@ -323,9 +323,7 @@ def test_org_admin_thread_delete_releases_the_members_files(h):
 def test_thread_delete_keeps_the_same_user_ids_file_in_another_tenant(h):
     """A file of alice@org-b linked to the same thread id is not alice@org-a's to release."""
     key_b = h.upload_key(ALICE_B, b"secret-of-alice-in-org-b")
-    anyio.run(
-        h.media.link_threads, [key_b], "t-a", "alice", {"user_id": "alice", "org_id": "org-b"}
-    )
+    anyio.run(h.media.link_threads, [key_b], "t-a", "alice", USER_B)
     cfg = _seed_cfg("t-a", "alice", "org-a")
     anyio.run(h.checkpointer.aput_thread, cfg, ThreadInfo(thread_id="t-a", user_id="alice"))
 

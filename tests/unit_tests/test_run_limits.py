@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import StreamChunk, StreamEvent
 
 from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
@@ -26,15 +27,15 @@ from tenxgraph_api.src.app.routers.graph.services.graph_service import (
 )
 
 
-ALICE = {"user_id": "alice"}
+ALICE = Identity(user_id="alice")
 
 
 class _Slots(LeaseManager):
     def __init__(self):
         super().__init__(InMemoryCacheStore())
 
-    def held(self, user_id):  # tests count by user id
-        return super().held(run_limits.run_slot_key(user_id))
+    def held(self, user_id):  # tests count by user id (no tenant values)
+        return super().held(run_limits.run_slot_key(Identity(user_id=user_id)))
 
 
 @pytest.fixture(autouse=True)
@@ -58,7 +59,7 @@ async def test_cap_is_enforced_per_user(fresh_slots):
         await acquire_run_slot(ALICE, runs)
     assert exc.value.status_code == 429
     # Another user has their own budget.
-    await acquire_run_slot({"user_id": "bob"}, runs)
+    await acquire_run_slot(Identity(user_id="bob"), runs)
     # Releasing frees a slot; releasing twice does not free two.
     first.release()
     first.release()
@@ -68,7 +69,7 @@ async def test_cap_is_enforced_per_user(fresh_slots):
         await acquire_run_slot(ALICE, runs)
 
 
-@pytest.mark.parametrize(("user", "limit"), [({}, 1), ({"user_id": ""}, 1), (ALICE, None)])
+@pytest.mark.parametrize(("user", "limit"), [(None, 1), (ALICE, None)])
 @pytest.mark.asyncio
 async def test_anonymous_or_unlimited_runs_are_not_counted(fresh_slots, user, limit):
     runs = RunsConfig(max_concurrent_per_user=limit)
@@ -152,17 +153,18 @@ async def test_second_concurrent_invoke_gets_429(fresh_slots):
         return {"messages": []}
 
     service = MagicMock()
+    service.require_run_thread = AsyncMock()
     service.runs_policy.return_value = RunsConfig(max_concurrent_per_user=1)
     service.invoke_graph = slow_invoke
     request = MagicMock()
     request.state = SimpleNamespace(request_id="r", timestamp="t")
 
     first = asyncio.create_task(
-        invoke_graph(request=request, graph_input=_input(), service=service, user=ALICE)
+        invoke_graph(request=request, graph_input=_input(), service=service, identity=ALICE)
     )
     await started.wait()
     with pytest.raises(HTTPException) as exc:
-        await invoke_graph(request=request, graph_input=_input(), service=service, user=ALICE)
+        await invoke_graph(request=request, graph_input=_input(), service=service, identity=ALICE)
     assert exc.value.status_code == 429
     finish.set()
     await first
@@ -174,13 +176,14 @@ async def test_stream_route_refuses_before_streaming(fresh_slots):
     from tenxgraph_api.src.app.routers.graph.router import stream_graph
 
     service = MagicMock()
+    service.require_run_thread = AsyncMock()
     service.runs_policy.return_value = RunsConfig(max_concurrent_per_user=1)
     service.check_resume_target = AsyncMock()
     service.stream_graph = MagicMock(return_value=_items("a"))
 
-    response = await stream_graph(graph_input=_input(), service=service, user=ALICE)
+    response = await stream_graph(graph_input=_input(), service=service, identity=ALICE)
     with pytest.raises(HTTPException) as exc:
-        await stream_graph(graph_input=_input(), service=service, user=ALICE)
+        await stream_graph(graph_input=_input(), service=service, identity=ALICE)
     assert exc.value.status_code == 429
     # Draining the first stream frees the slot.
     assert [c async for c in response.body_iterator] == ["a"]

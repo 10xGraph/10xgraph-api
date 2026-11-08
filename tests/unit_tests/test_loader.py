@@ -9,17 +9,13 @@ from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.storage.store import BaseStore
 
 from tenxgraph_api import BaseAuth
-from tenxgraph_api.src.app.core.auth.authorization import (
-    AuthorizationBackend,
-    DefaultAuthorizationBackend,
-)
+from tenxgraph_api.src.app.core.auth.auth_config import AuthConfig
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RemoteToolConfig
 from tenxgraph_api.src.app.loader import (
     attach_all_modules,
+    check_auth_at_boot,
     load_and_bind_auth,
-    load_and_bind_authorization,
     load_auth,
-    load_authorization,
     load_checkpointer,
     load_container,
     load_graph,
@@ -215,44 +211,13 @@ def test_load_auth():
     # TypeError
     mock_module.auth = "not auth"
     with patch("importlib.import_module", return_value=mock_module):
-        with pytest.raises(
-            Exception, match="Loaded object is not a subclass or instance of BaseAuth"
-        ):
+        with pytest.raises(Exception, match=r"\[custom-class\].*not a BaseAuth subclass"):
             load_auth("mod:auth")
 
     # ModuleNotFoundError
     with patch("importlib.import_module", side_effect=ModuleNotFoundError()):
         with pytest.raises(ModuleNotFoundError):
             load_auth("mod:auth")
-
-
-def test_load_authorization():
-    assert load_authorization(None) is None
-
-    class CustomAuthorization(AuthorizationBackend):
-        def authorize(self, *args, **kwargs):
-            pass
-
-    # Class subclass
-    mock_module = MagicMock()
-    mock_module.authorization = CustomAuthorization
-    with patch("importlib.import_module", return_value=mock_module):
-        result = load_authorization("mod:authorization")
-        assert isinstance(result, CustomAuthorization)
-
-    # Instance
-    auth_instance = CustomAuthorization()
-    mock_module.authorization = auth_instance
-    with patch("importlib.import_module", return_value=mock_module):
-        assert load_authorization("mod:authorization") == auth_instance
-
-    # TypeError
-    mock_module.authorization = "not authorization"
-    with patch("importlib.import_module", return_value=mock_module):
-        with pytest.raises(
-            Exception, match="Loaded object is not a subclass or instance of AuthorizationBackend"
-        ):
-            load_authorization("mod:authorization")
 
 
 def test_load_thread_name_generator():
@@ -287,33 +252,26 @@ def test_load_thread_name_generator():
 def test_load_and_bind_auth():
     container = MagicMock(spec=InjectQ)
 
-    # custom needs a path
-    with pytest.raises(ValueError, match="requires a 'path'"):
-        load_and_bind_auth(container, {"method": "custom"})
-
     # Path existence check failure
     with patch("pathlib.Path.exists", return_value=False):
         with pytest.raises(ValueError, match="Custom auth path does not exist"):
-            load_and_bind_auth(container, {"method": "custom", "path": "custom_path.py:auth"})
+            load_and_bind_auth(container, AuthConfig(method="custom", path="custom_path.py:auth"))
 
-    # Dotted path conversion to py file check
+    # Dotted path conversion to py file check; the RBAC part is set on the instance
     with patch("pathlib.Path.exists", return_value=True):
         with patch("tenxgraph_api.src.app.loader.load_auth") as mock_load_auth:
             mock_auth_instance = MagicMock(spec=BaseAuth)
             mock_load_auth.return_value = mock_auth_instance
 
-            load_and_bind_auth(container, {"method": "custom", "path": "my.auth.path:auth"})
+            load_and_bind_auth(container, AuthConfig(method="custom", path="my.auth.path:auth"))
             container.bind_instance.assert_called_with(
                 BaseAuth, mock_auth_instance, allow_none=True
             )
+            assert mock_auth_instance.rbac is not None
 
-    # "none" binds no backend
-    load_and_bind_auth(container, {"method": "none"})
+    # auth off binds None
+    load_and_bind_auth(container, None)
     container.bind_instance.assert_called_with(BaseAuth, None, allow_none=True)
-
-    # An unknown method fails at startup instead of silently binding no backend
-    with pytest.raises(ValueError, match="Unsupported auth method"):
-        load_and_bind_auth(container, {"method": "oauth"})
 
 
 def test_load_and_bind_auth_jwt_needs_no_path(monkeypatch, tmp_path):
@@ -332,39 +290,18 @@ def test_load_and_bind_auth_jwt_needs_no_path(monkeypatch, tmp_path):
     args, kwargs = container.bind_instance.call_args
     assert args[0] == BaseAuth
     assert isinstance(args[1], JwtAuth)
-
-
-def test_load_and_bind_authorization(monkeypatch):
-    from tenxgraph_api.src.app.core.config import settings as settings_module
-
-    # The unconfigured default depends on MODE; do not depend on which test cached the
-    # settings first.
-    development = settings_module.Settings(MODE="development", _env_file=None)
-    monkeypatch.setattr(settings_module, "get_settings", lambda: development)
-    container = MagicMock(spec=InjectQ)
-
-    # Path provided
-    mock_auth_backend = MagicMock(spec=AuthorizationBackend)
-    with patch("tenxgraph_api.src.app.loader.load_authorization", return_value=mock_auth_backend):
-        load_and_bind_authorization(container, "mod:auth")
-        container.bind_instance.assert_called_once_with(AuthorizationBackend, mock_auth_backend)
-
-    # Path is None
-    container.reset_mock()
-    load_and_bind_authorization(container, None)
-    args, kwargs = container.bind_instance.call_args
-    assert args[0] == AuthorizationBackend
-    assert isinstance(args[1], DefaultAuthorizationBackend)
+    assert args[1].rbac is not None
 
 
 @pytest.mark.asyncio
 async def test_attach_all_modules():
     config = MagicMock(spec=GraphConfig)
     config.graph_path = "mod:graph"
-    config.auth_config.return_value = {"method": "none", "path": "path.py:auth"}
+    config.auth_config.return_value = None
+    config.data = {}
+    config.store_allow_tenant_mismatch = False
     config.thread_name_generator = "mod:generator"
     config.id_generator = None
-    config.authorization_path = "mod:authorization"
     config.store_path = None
     config.cache_store = None
     config.remote_tools = [
@@ -379,14 +316,12 @@ async def test_attach_all_modules():
 
     mock_graph = MagicMock(spec=CompiledGraph)
     mock_generator = MagicMock(spec=ThreadNameGenerator)
-    mock_auth_backend = MagicMock(spec=AuthorizationBackend)
 
     with (
         patch("tenxgraph_api.src.app.loader.load_graph", return_value=mock_graph),
         patch(
             "tenxgraph_api.src.app.loader.load_thread_name_generator", return_value=mock_generator
         ),
-        patch("tenxgraph_api.src.app.loader.load_authorization", return_value=mock_auth_backend),
         patch("pathlib.Path.exists", return_value=True),
         patch(
             "tenxgraph_api.src.app.core.config.media_settings.get_media_settings"
@@ -405,7 +340,6 @@ async def test_attach_all_modules():
         container.bind_instance.assert_any_call(
             ThreadNameGenerator, mock_generator, allow_none=True
         )
-        container.bind_instance.assert_any_call(AuthorizationBackend, mock_auth_backend)
 
         # Test branch where config has no thread name generator and no auth config
         config.thread_name_generator = "none"
@@ -419,47 +353,58 @@ async def test_attach_all_modules():
 
 
 # ---------------------------------------------------------------------------
-# Boot check: ownership authz needs a checkpointer that can name owners
+# Boot check: the shared auth rules
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("auth_on", [True, False])
-async def test_attach_refuses_ownership_without_owner_lookup(auth_on):
-    from tenxgraph.storage.checkpointer import BaseCheckpointer
+def _config(data: dict) -> GraphConfig:
+    config = object.__new__(GraphConfig)  # skip reading a file
+    config.data = data
+    return config
 
-    from tenxgraph_api.src.app.core.auth.authorization import OwnershipAuthorizationBackend
 
-    class _Bare(BaseCheckpointer):  # type: ignore[misc]
-        pass
+@pytest.mark.parametrize(
+    ("data", "rule"),
+    [
+        ({"authorization": "ownership"}, "authorization-removed"),
+        ({"auth": {"roles_claim": "roles"}}, "rbac-without-auth"),
+        ({"auth": {"method": "custom"}}, "custom-path"),
+    ],
+)
+def test_boot_refuses_naming_the_rule(data, rule):
+    with pytest.raises(ValueError, match=rule):
+        check_auth_at_boot(_config(data), None, None)
 
-    _Bare.__abstractmethods__ = frozenset()
 
-    config = MagicMock(spec=GraphConfig)
-    config.graph_path = "mod:graph"
-    config.auth_config.return_value = {"method": "jwt"} if auth_on else None
-    config.thread_name_generator = "none"
-    config.id_generator = None
-    config.authorization_path = "ownership"
-    config.store_path = None
-    config.cache_store = None
-    config.remote_tools = []
+def test_boot_passes_with_auth_off():
+    check_auth_at_boot(_config({}), None, None)
 
-    container = InjectQ()
-    container.bind_instance(BaseCheckpointer, _Bare())
 
-    with (
-        patch("tenxgraph_api.src.app.loader.load_graph", return_value=MagicMock()),
-        patch("tenxgraph_api.src.app.loader.load_and_bind_auth"),
-        patch("tenxgraph_api.src.app.core.config.media_settings.get_media_settings"),
-    ):
-        if auth_on:
-            with pytest.raises(RuntimeError, match="Refusing to start"):
-                await attach_all_modules(config, container)
-        else:
-            # Auth off: no owner checks ever run, so nothing to refuse.
-            await attach_all_modules(config, container)
-            assert isinstance(container.get(AuthorizationBackend), OwnershipAuthorizationBackend)
+def test_boot_refuses_tenant_claim_without_column_in_production(monkeypatch):
+    from tenxgraph_api.src.app.core.config import settings as settings_module
+
+    monkeypatch.setattr(settings_module, "get_settings", lambda: MagicMock(MODE="production"))
+    data = {
+        "auth": {
+            "method": "jwt",
+            "roles": {"member": {"permissions": ["graph:*"], "reach": "tenant"}},
+            "tenant_claims": ["org_id"],
+        }
+    }
+    with pytest.raises(ValueError, match="tenant-columns"):
+        check_auth_at_boot(_config(data), MagicMock(tenant_column_names=()), None)
+
+
+def test_boot_refuses_tenant_column_without_claim_in_production(monkeypatch):
+    """Tenant columns on the checkpointer and auth on with no tenant_claims: every thread
+    request would fail, so the boot refuses."""
+    from tenxgraph_api.src.app.core.config import settings as settings_module
+
+    monkeypatch.setattr(settings_module, "get_settings", lambda: MagicMock(MODE="production"))
+    with pytest.raises(ValueError, match="not in auth.tenant_claims"):
+        check_auth_at_boot(
+            _config({"auth": "jwt"}), MagicMock(tenant_column_names=("org_id",)), None
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@ Section shape::
         "optional": True,  # renders an on/off toggle for the whole key
         "off_summary": "...",  # what happens while the key is absent
         "default": {...},  # value written when the toggle is switched on
-        "widget": None,  # custom renderer: "auth", "authorization", "remote_tools",
+        "widget": None,  # custom renderer: "auth", "remote_tools",
         # "cache_store", "id_generator", "thread_name_generator"
         "choices": [["value", "Label", "One line of help"]],  # widget sections with a dropdown
         "fields": [...],  # generic fields, paths are relative to the root
@@ -56,34 +56,10 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from tenxgraph_api.src.app.core.auth.permissions_registry import REGISTRY
+
 
 DOCS_URL = "https://10xgraph.com/docs/reference/api-cli/configuration"
-
-# Mirrors authorization.all_scopes(); kept in sync by a unit test so the
-# editor never imports the core framework just to render suggestions.
-AUTHORIZATION_SCOPES: tuple[str, ...] = (
-    "checkpointer:delete",
-    "checkpointer:import",
-    "checkpointer:read",
-    "checkpointer:write",
-    "config:read",
-    "files:delete",
-    "files:read",
-    "files:upload",
-    "graph:fix",
-    "graph:invoke",
-    "graph:read",
-    "graph:stop",
-    "graph:stream",
-    "store:delete",
-    "store:read",
-    "store:write",
-    "tasks:cancel",
-    "tasks:invoke",
-    "tasks:read",
-)
-
-BUILTIN_AUTHORIZATION: tuple[str, ...] = ("ownership", "allow_all", "default", "none")
 
 # Mirrors graph_config.ID_GENERATOR_NAMES and THREAD_NAME_CHOICES; kept in sync by a unit test.
 ID_GENERATOR_NAMES: tuple[str, ...] = (
@@ -103,8 +79,7 @@ KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
         "agent",
         "env",
         "auth",
-        "authorization",
-        "graph_introspection",
+        "authorization",  # removed; check_auth_config reports it with a pointer to auth.roles
         "cache_store",
         "id_generator",
         "websocket",
@@ -151,14 +126,18 @@ _SECTIONS: list[dict[str, Any]] = [
     },
     {
         "id": "auth",
-        "title": "Authentication",
-        "description": "Who is calling the API. Leave off for local development.",
+        "title": "Auth",
+        "description": (
+            "Who is calling the API and what each caller may do. Leave the method on None for "
+            "local development."
+        ),
         "key": "auth",
-        "optional": True,
+        "optional": False,
         "off_summary": "Every request is accepted without authentication.",
-        "default": "jwt",
         "widget": "auth",
         "fields": [],
+        # The permission picker reads this, so the UI never hard-codes a permission.
+        "registry": {resource: list(actions) for resource, actions in REGISTRY.items()},
         "notes": [
             "JWT needs JWT_SECRET_KEY and JWT_ALGORITHM in your .env file.",
             "Custom auth points at a BaseAuth subclass, as module:attribute.",
@@ -183,24 +162,6 @@ _SECTIONS: list[dict[str, Any]] = [
         ],
     },
     {
-        "id": "authorization",
-        "title": "Authorization",
-        "description": (
-            "What an authenticated user may do. When off, ownership is enforced whenever "
-            "auth is on (and always in production)."
-        ),
-        "key": "authorization",
-        "optional": True,
-        "off_summary": (
-            "Ownership checks are enforced when auth is on or in production; with auth off in "
-            "development there is no identity to check."
-        ),
-        "default": "ownership",
-        "widget": "authorization",
-        "fields": [],
-        "scopes": list(AUTHORIZATION_SCOPES),
-    },
-    {
         "id": "cache_store",
         "title": "Cache store",
         "subtitle": "rate limiting, token revocation",
@@ -220,8 +181,7 @@ _SECTIONS: list[dict[str, Any]] = [
                 "type": "select",
                 "options": ["memory", "redis", "custom"],
                 "help": (
-                    "memory keeps state in this process. redis and custom share it between "
-                    "workers."
+                    "memory keeps state in this process. redis and custom share it between workers."
                 ),
             },
             {
@@ -367,26 +327,6 @@ _SECTIONS: list[dict[str, Any]] = [
                 "name": "REDIS_URL",
                 "purpose": "The Redis URL when the cache store type is redis and "
                 "cache_store.url is empty. It does not select a store on its own.",
-            },
-        ],
-    },
-    {
-        "id": "graph_introspection",
-        "title": "Graph introspection",
-        "description": "Who may read the graph structure, tool schemas and state schema.",
-        "key": None,
-        "optional": False,
-        "fields": [
-            {
-                "path": ["graph_introspection"],
-                "label": "Graph introspection",
-                "type": "select",
-                "options": ["open", "scoped"],
-                "unset_label": "Automatic: scoped in production, open in development",
-                "help": (
-                    "Who may read the graph structure, tool schemas and state schema. scoped "
-                    "requires the graph:read scope."
-                ),
             },
         ],
     },
@@ -1335,6 +1275,8 @@ def build_schema() -> dict[str, Any]:
 
 def section_for_key(key: str) -> str:
     """Map a top-level config key to the id of the section that renders it."""
+    if key == "authorization":  # removed key; its error is shown on the Auth tab
+        return "auth"
     for section in _SECTIONS:
         if section["key"] == key:
             return section["id"]

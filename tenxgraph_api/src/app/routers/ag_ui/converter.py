@@ -26,12 +26,12 @@ from tenxgraph.core.state import (
 )
 from tenxgraph.core.state.message_block import MediaRef
 
-from tenxgraph_api.src.app.core.auth.request_config import (
+from tenxgraph_api.src.app.core.utils.log_sanitizer import summarize_validation_error
+from tenxgraph_api.src.app.core.validation.request_config import (
     MAX_AG_UI_HISTORY_MESSAGES,
     ClientInputError,
     request_size_error,
 )
-from tenxgraph_api.src.app.core.utils.log_sanitizer import summarize_validation_error
 
 
 _MEDIA_BLOCKS = {

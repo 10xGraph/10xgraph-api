@@ -1,11 +1,13 @@
 {
   "agent": "graph.agent:app",
   "env": ".env",
-  "auth": "jwt",
-  "authorization": "ownership",
+  "auth": {
+    "method": "jwt"
+  },
   "remote_tools": [],
   "ag_ui": {
-    "enabled": false
+    "enabled": false,
+    "allow_client_tools": false
   },
   "thread_name_generator": "graph.thread_name_generator:MyNameGenerator",
   "injectq": "graph.agent:container",

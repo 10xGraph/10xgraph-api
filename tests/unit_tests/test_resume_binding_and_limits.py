@@ -22,9 +22,10 @@ import pytest
 from fastapi import HTTPException, WebSocketDisconnect
 from pydantic import ValidationError
 from tenxgraph.core import exceptions as core_exceptions
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import StreamEvent
 
-from tenxgraph_api.src.app.core.auth.request_config import (
+from tenxgraph_api.src.app.core.validation.request_config import (
     MAX_BLOCKS_PER_MESSAGE,
     MAX_MESSAGES,
     MAX_TEXT_CHARS,
@@ -33,7 +34,6 @@ from tenxgraph_api.src.app.core.auth.request_config import (
 )
 from tenxgraph_api.src.app.routers.ag_ui.converter import parse_run_input
 from tenxgraph_api.src.app.routers.checkpointer.schemas.checkpointer_schemas import (
-    PutMessagesSchema,
     StateSchema,
 )
 from tenxgraph_api.src.app.routers.graph.router import websocket_graph
@@ -112,7 +112,7 @@ def _resume(**kwargs: Any) -> GraphInputSchema:
     return GraphInputSchema(resume={"ok": True}, **kwargs)
 
 
-USER = {"user_id": "u1"}
+USER = Identity(user_id="u1")
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +280,7 @@ class TestWsInterruptId:
         ws.send_text = AsyncMock()
         frame = {"invoke_type": "fresh", "resume": True, "interrupt_id": "i-1"}
         ws.receive_text = AsyncMock(side_effect=[json.dumps(frame), WebSocketDisconnect()])
-        await websocket_graph(websocket=ws, service=srv, user={})
+        await websocket_graph(websocket=ws, service=srv, identity=None)
         sent = [json.loads(c.args[0]) for c in ws.send_text.call_args_list]
         assert sent[0]["event"] == StreamEvent.ERROR
         assert "does not match the open interrupt" in sent[0]["data"]["reason"]
@@ -381,12 +381,6 @@ def test_put_state_without_context_is_fine():
     assert StateSchema(state={"plan": "pro"}).state == {"plan": "pro"}
 
 
-@pytest.mark.parametrize(("make", "needle"), CASES)
-def test_post_messages_over_a_limit(make, needle):
-    with pytest.raises(ValidationError, match=needle):
-        PutMessagesSchema(**make())
-
-
 def _ag_ui_body(messages: list[Any]) -> dict[str, Any]:
     return {
         "threadId": "t",
@@ -450,7 +444,7 @@ def test_ag_ui_trailing_turn_gets_the_normal_limits():
 
 
 def test_ag_ui_history_has_a_loose_cap():
-    from tenxgraph_api.src.app.core.auth.request_config import MAX_AG_UI_HISTORY_MESSAGES
+    from tenxgraph_api.src.app.core.validation.request_config import MAX_AG_UI_HISTORY_MESSAGES
 
     history = [_ag_assistant("a", i) for i in range(MAX_AG_UI_HISTORY_MESSAGES)]
     history.append(_ag_user("b"))

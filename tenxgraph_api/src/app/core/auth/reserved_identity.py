@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from tenxgraph.core.authz import Identity
+
 from tenxgraph_api.src.app.core import logger
 
 
@@ -34,9 +36,15 @@ def is_reserved_user_id(value: Any) -> bool:
     return str(value).strip().startswith(SYSTEM_USER_PREFIX)
 
 
-def identity_is_reserved(identity: Any) -> bool:
-    """Whether an authenticated identity (the dict an auth backend returns) is a reserved one."""
-    return isinstance(identity, dict) and is_reserved_user_id(identity.get("user_id"))
+def identity_is_reserved(identity: Identity | dict[str, Any]) -> bool:
+    """Whether a caller (an ``Identity``, or the claims dict an auth class returns) is reserved.
+
+    Anything else raises ``TypeError``: a check that answers "not reserved" for a type it does
+    not understand would fail open.
+    """
+    if not isinstance(identity, Identity | dict):
+        raise TypeError(f"expected Identity or dict, got {type(identity).__name__}")
+    return is_reserved_user_id(identity.get("user_id"))
 
 
 def log_reserved_rejection() -> None:

@@ -7,7 +7,7 @@
 // are pages of their own rather than schema sections.
 export const NAV = [
   { label: null, items: ["get-running"] },
-  { label: "Before production", items: ["auth", "authorization", "cache_store", "observability", "graph_introspection"] },
+  { label: "Before production", items: ["auth", "cache_store", "observability"] },
   { label: "Runs and streaming", items: ["runs", "websocket", "ag_ui", "remote_tools", "media"] },
   { label: "Project wiring", items: ["checkpointer", "id_generator", "thread_name_generator", "store", "injectq"] },
   { label: "Developer tools", items: ["test", "evaluation"] },
@@ -26,7 +26,7 @@ export const PAGES = {
 };
 
 // Issues a widget renders beside its own input rather than at the top of the section.
-export const WIDGET_FIELD_IDS = { "auth.path": "auth-path", authorization: "authz-path" };
+export const WIDGET_FIELD_IDS = { "auth.path": "auth-path" };
 
 // The page token arrives in the URL hash (#token=...). Read it once, keep it in memory, and
 // mirror it to sessionStorage so a reload still works after the hash switches to page routing.
@@ -154,6 +154,7 @@ export const fieldChanged = (f) => {
 };
 export const sectionChanged = (sec) => {
   if (sec.id === "core") return false;
+  if (sec.id === "auth") return store.config.auth != null;
   return sec.optional ? isOn(sec) : sec.fields.some(fieldChanged);
 };
 // Highest-severity issue of a section, or null.

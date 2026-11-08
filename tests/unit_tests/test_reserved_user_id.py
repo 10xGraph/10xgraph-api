@@ -2,26 +2,23 @@
 
 # ruff: noqa: S101
 
-from typing import Any
 from unittest.mock import patch
 
 import pytest
 from fastapi import Depends, FastAPI, WebSocket
-from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.testclient import TestClient
 from injectq import InjectQ
 from injectq.integrations.fastapi import setup_fastapi
 from starlette.requests import Request
 from starlette.websockets import WebSocketDisconnect
+from tenxgraph.core.authz import Identity
 
-from tenxgraph_api.src.app.core.auth.auth_backend import verify_current_user
-from tenxgraph_api.src.app.core.auth.authorization import (
-    AuthorizationBackend,
-    DefaultAuthorizationBackend,
-)
 from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
-from tenxgraph_api.src.app.core.auth.identity_cache import recall_identity, remember_identity
-from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
+from tenxgraph_api.src.app.core.auth.permissions import (
+    RequirePermission,
+    _recall_claims,
+    remember_claims,
+)
 from tenxgraph_api.src.app.core.auth.reserved_identity import (
     SYSTEM_USER_PREFIX,
     identity_is_reserved,
@@ -57,8 +54,6 @@ class _ReusableTokenAuth(_TokenAuth):
 
 
 class _AuthOn:
-    introspection_scoped = False
-
     def auth_config(self):
         return {"method": "custom", "path": "x:y"}
 
@@ -67,7 +62,6 @@ def _container(auth: BaseAuth) -> InjectQ:
     container = InjectQ()
     container.bind_instance(GraphConfig, _AuthOn())
     container.bind_instance(BaseAuth, auth)
-    container.bind_instance(AuthorizationBackend, DefaultAuthorizationBackend())
     return container
 
 
@@ -82,17 +76,17 @@ def _app(auth: BaseAuth, *, rate_limit_by_user: bool = False) -> tuple[FastAPI, 
     setup_fastapi(container, app)
 
     @app.get("/v1/threads")
-    async def threads(user: dict[str, Any] = Depends(RequirePermission("checkpointer", "read"))):
-        return {"user_id": user["user_id"]}
+    async def threads(user: Identity | None = Depends(RequirePermission("threads", "read"))):
+        return {"user_id": user.user_id}
 
     # /v1/graph/ws and /v1/graph/live both authenticate their handshake with this dependency.
     @app.websocket("/v1/graph/live")
     async def live(
         websocket: WebSocket,
-        user: dict[str, Any] = Depends(RequirePermission("graph", "stream")),
+        user: Identity | None = Depends(RequirePermission("graph", "stream")),
     ):
         await websocket.accept()
-        await websocket.send_json(user)
+        await websocket.send_json({"user_id": user.user_id})
         await websocket.close()
 
     return app, container
@@ -140,11 +134,14 @@ def test_is_reserved_user_id(value, expected):
     assert is_reserved_user_id(value) is expected
 
 
-def test_identity_is_reserved_needs_a_dict():
+def test_identity_is_reserved_takes_an_identity_or_claims():
     assert identity_is_reserved({"user_id": "__system__"})
+    assert identity_is_reserved(Identity(user_id="__system__:kb"))
     assert not identity_is_reserved({"user_id": "alice"})
-    assert not identity_is_reserved(None)
-    assert not identity_is_reserved("__system__")
+    assert not identity_is_reserved(Identity(user_id="alice"))
+    for other in (None, "__system__"):
+        with pytest.raises(TypeError):
+            identity_is_reserved(other)  # type: ignore[arg-type]
 
 
 # --- HTTP ---------------------------------------------------------------------------------
@@ -166,20 +163,6 @@ def test_http_still_accepts_ordinary_users_and_anonymous():
         resp = client.get("/v1/threads", headers=_bearer(name))
         assert resp.status_code == HTTP_OK
         assert resp.json() == {"user_id": name}
-
-
-def test_verify_current_user_refuses_reserved_identity():
-    from fastapi import HTTPException
-
-    cred = HTTPAuthorizationCredentials(scheme="Bearer", credentials="__system__")
-    with pytest.raises(HTTPException) as exc:
-        verify_current_user(_request("__system__"), None, cred, _AuthOn(), _TokenAuth())  # type: ignore[arg-type]
-    assert exc.value.status_code == HTTP_UNAUTHORIZED
-    assert "__system__" not in str(exc.value.detail)
-
-    alice = HTTPAuthorizationCredentials(scheme="Bearer", credentials="alice")
-    ok = verify_current_user(_request("alice"), None, alice, _AuthOn(), _TokenAuth())  # type: ignore[arg-type]
-    assert ok == {"user_id": "alice"}
 
 
 def test_rejection_is_logged_at_warning_without_the_name(caplog):
@@ -226,34 +209,34 @@ def test_live_recheck_fails_for_a_reserved_identity():
     """The periodic live/ws re-verification treats a reserved id as no longer valid."""
     container = _container(_TokenAuth())
     with patch("injectq.InjectQ.get_instance", return_value=container):
-        assert ws_identity_still_valid(_request("alice"), {"user_id": "alice"})
-        assert not ws_identity_still_valid(_request("__system__"), {"user_id": "__system__"})
+        assert ws_identity_still_valid(_request("alice"), Identity(user_id="alice"))
+        assert not ws_identity_still_valid(_request("__system__"), Identity(user_id="__system__"))
 
 
 # --- identity cache and rate-limit keying -------------------------------------------------
 
 
-def test_cache_never_stores_or_returns_a_reserved_identity():
+def test_cache_never_stores_or_returns_reserved_claims():
     backend = _ReusableTokenAuth()
     req = _request("tok")
-    remember_identity(req, backend, "tok", {"user_id": "__system__"})
-    assert recall_identity(req, backend, "tok") is None
+    remember_claims(req, backend, "tok", {"user_id": "__system__"})
+    assert _recall_claims(req, backend, "tok") is None
 
     # an entry that somehow got in (older state, another writer) is still not served
-    req.scope["state"]["tenxgraph_verified_identity"] = (
+    req.scope.setdefault("state", {})["tenxgraph_verified_claims"] = (
         id(backend),
         "tok",
         {"user_id": "__system__"},
     )
-    assert recall_identity(req, backend, "tok") is None
+    assert _recall_claims(req, backend, "tok") is None
 
 
 def test_rate_limit_key_does_not_use_a_reserved_user():
     container = _container(_ReusableTokenAuth())
     with patch("injectq.InjectQ.get_instance", return_value=container):
-        assert keying.verified_user_id(_request("alice")) == "alice"
-        assert keying.verified_user_id(_request("__system__")) is None
-        assert keying.verified_user_id(_request("  __system__")) is None
+        assert keying.verified_caller_key(_request("alice")) == "alice"
+        assert keying.verified_caller_key(_request("__system__")) is None
+        assert keying.verified_caller_key(_request("  __system__")) is None
 
 
 def test_reusable_backend_with_rate_limit_by_user_is_still_refused():

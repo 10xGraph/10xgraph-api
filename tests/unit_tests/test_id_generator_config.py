@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from injectq import InjectQ
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.graph import StateGraph
 from tenxgraph.core.state import AgentState, Message
 from tenxgraph.storage.checkpointer import BaseCheckpointer, InMemoryCheckpointer
@@ -282,7 +283,7 @@ async def test_new_thread_and_message_ids_come_from_the_configured_generator(lea
     graph_input = GraphInputSchema(
         messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
     )
-    result = await service.invoke_graph(graph_input, {"user_id": "alice"})
+    result = await service.invoke_graph(graph_input, Identity(user_id="alice"))
 
     thread_id = result.meta["thread_id"]
     assert thread_id.startswith("cfg-")
@@ -307,7 +308,7 @@ async def test_integer_ids_on_a_real_run(leases, monkeypatch, name):
     graph_input = GraphInputSchema(
         messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
     )
-    result = await service.invoke_graph(graph_input, {"user_id": "alice"})
+    result = await service.invoke_graph(graph_input, Identity(user_id="alice"))
     assert result.meta["thread_id"].isdigit()
     assert all(isinstance(m.message_id, int) for m in result.messages)
     await graph.aclose()

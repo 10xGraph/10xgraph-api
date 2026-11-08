@@ -1,210 +1,139 @@
-"""API-layer scope enforcement: each endpoint requires its `<resource>:<action>` scope."""
+"""Permission enforcement: each thread route needs its ``threads:<action>`` permission."""
 
 from __future__ import annotations
 
+import pytest
+from tenxgraph.core.authz import Identity
 from tenxgraph.storage.checkpointer import InMemoryCheckpointer
+from tenxgraph.utils.thread_info import ThreadInfo
 
+from tenxgraph_api.src.app.core.auth.rbac import RbacConfig
 from tenxgraph_api.src.app.routers.checkpointer.router import router as checkpointer_router
 
-from .conftest import build_app, make_client
+from .conftest import HeaderAuth, build_app, make_client
 
 
-HTTP_OK = 200
 HTTP_FORBIDDEN = 403
-HTTP_UNPROCESSABLE = 422
+HTTP_OK = 200
+
+THREAD_ACTIONS = ("read", "write", "delete")
+
+# (method, path, json body, permission the route requires)
+ROUTES = [
+    ("GET", "/v1/threads", None, "threads:read"),
+    ("GET", "/v1/threads/t1", None, "threads:read"),
+    ("GET", "/v1/threads/t1/state", None, "threads:read"),
+    ("GET", "/v1/threads/t1/messages", None, "threads:read"),
+    ("GET", "/v1/threads/t1/messages/m1", None, "threads:read"),
+    ("PUT", "/v1/threads/t1/state", {"state": {}}, "threads:write"),
+    ("PUT", "/v1/threads/t1/messages/m1", {"message": {}}, "threads:write"),
+    ("DELETE", "/v1/threads/t1/state", {}, "threads:delete"),
+    ("DELETE", "/v1/threads/t1/messages/m1", {}, "threads:delete"),
+    ("DELETE", "/v1/threads/t1", {}, "threads:delete"),
+]
 
 
-def _headers(user_id: str, scopes: str | None) -> dict[str, str]:
-    h = {"X-Test-User": user_id}
+def _headers(user_id: str, scopes: str | None = None) -> dict[str, str]:
+    headers = {"X-Test-User": user_id}
     if scopes is not None:
-        h["X-Test-Scopes"] = scopes
-    return h
+        headers["X-Test-Scopes"] = scopes
+    return headers
 
 
-def _client():
-    app = build_app(routers=[checkpointer_router], checkpointer=InMemoryCheckpointer())
+def _client(auth: HeaderAuth | None = None):
+    # alice owns t1, so an allowed call reaches the thread instead of a 404.
+    checkpointer = InMemoryCheckpointer()
+    owner = {"thread_id": "t1", "user_id": "alice", "user": Identity(user_id="alice")}
+    checkpointer.put_thread(owner, ThreadInfo(thread_id="t1"))
+    app = build_app(routers=[checkpointer_router], auth=auth, checkpointer=checkpointer)
     return make_client(app)
 
 
-def test_read_scope_allows_read():
-    client = _client()
-    r = client.get("/v1/threads/t1/state", headers=_headers("alice", "checkpointer:read"))
-    assert r.status_code == HTTP_OK
+def _call(client, method: str, path: str, body, headers):
+    if body is None:
+        return client.request(method, path, headers=headers)
+    return client.request(method, path, json=body, headers=headers)
 
 
-def test_missing_read_scope_is_forbidden():
-    client = _client()
-    # Has write but not read -> reading is denied.
-    r = client.get("/v1/threads/t1/state", headers=_headers("alice", "checkpointer:write"))
+@pytest.mark.parametrize(("method", "path", "body", "needed"), ROUTES)
+def test_token_without_the_permission_is_forbidden(method, path, body, needed):
+    # A scope narrows the default grant: every threads permission except the needed one.
+    scopes = ",".join(f"threads:{a}" for a in THREAD_ACTIONS if f"threads:{a}" != needed)
+    r = _call(_client(), method, path, body, _headers("alice", scopes))
     assert r.status_code == HTTP_FORBIDDEN
-    assert "checkpointer:read" in r.text
+    assert needed in r.text
 
 
-def test_delete_scope_required_for_delete():
-    client = _client()
-    # read+write but not delete -> deleting a thread is denied.
-    r = client.request(
-        "DELETE",
-        "/v1/threads/t1",
-        json={},
-        headers=_headers("alice", "checkpointer:read,checkpointer:write"),
-    )
+@pytest.mark.parametrize(("method", "path", "body", "needed"), ROUTES)
+def test_token_with_only_the_permission_is_not_forbidden(method, path, body, needed):
+    r = _call(_client(), method, path, body, _headers("alice", needed))
+    assert r.status_code != HTTP_FORBIDDEN
+
+
+def test_token_with_a_resource_wildcard_scope_is_allowed():
+    r = _call(_client(), "DELETE", "/v1/threads/t1", {}, _headers("alice", "threads:*"))
+    assert r.status_code == HTTP_OK
+
+
+def test_permissions_of_another_resource_do_not_help():
+    r = _call(_client(), "GET", "/v1/threads/t1/state", None, _headers("alice", "store:read"))
     assert r.status_code == HTTP_FORBIDDEN
-    assert "checkpointer:delete" in r.text
 
 
-def test_delete_allowed_with_delete_scope():
+def test_token_without_scopes_gets_the_default_permissions():
     client = _client()
-    r = client.request(
-        "DELETE", "/v1/threads/t1", json={}, headers=_headers("alice", "checkpointer:delete")
-    )
+    assert client.get("/v1/threads/t1/state", headers=_headers("alice")).status_code == HTTP_OK
+    r = _call(client, "DELETE", "/v1/threads/t1", {}, _headers("alice"))
     assert r.status_code == HTTP_OK
 
 
-def test_no_scopes_declared_is_permissive():
-    # Backward compatible: an identity that declares no scopes is not scope-restricted.
-    client = _client()
-    r = client.get("/v1/threads/t1/state", headers=_headers("alice", None))
-    assert r.status_code == HTTP_OK
+def test_missing_credentials_are_401_not_403():
+    assert _client().get("/v1/threads/t1/state").status_code == 401
 
 
-def test_rbac_backend_maps_roles_to_scopes_end_to_end():
-    """With the RBAC backend, roles decide scopes: a 'viewer' role grants
-    checkpointer:read (GET works) but not checkpointer:delete (DELETE -> 403)."""
-    import anyio
-    from tenxgraph.storage.checkpointer import InMemoryCheckpointer as _Cp
-    from tenxgraph.utils.thread_info import ThreadInfo
-
-    from tenxgraph_api.src.app.core.auth.authorization import RoleBasedAuthorizationBackend
-
-    checkpointer = _Cp()
-    authz = RoleBasedAuthorizationBackend(
-        {"viewer": ["checkpointer:read"], "admin": ["*"]},
-        checkpointer=checkpointer,
+def test_rbac_roles_decide_permissions_end_to_end():
+    """A ``viewer`` role holds threads:read (GET works) but not threads:delete (403);
+    an ``admin`` role holds everything."""
+    auth = HeaderAuth()
+    auth.rbac = RbacConfig(
+        roles={
+            "viewer": {"permissions": ["threads:read"], "reach": "own"},
+            "admin": {"permissions": ["*"], "reach": "own"},
+        }
     )
-    for thread_id, owner in (("t1", "alice"), ("t2", "bob")):
-        anyio.run(
-            checkpointer.aput_thread,
-            {"thread_id": thread_id, "user_id": owner},
-            ThreadInfo(thread_id=thread_id, user_id=owner),
-        )
-    app = build_app(routers=[checkpointer_router], authz=authz, checkpointer=checkpointer)
-    client = make_client(app)
+    client = _client(auth)
 
     def roled(user_id: str, role: str) -> dict[str, str]:
-        # HeaderAuth only sets user_id; supply the role via the scopes header is not
-        # possible, so drive roles through a small header the test auth understands.
         return {"X-Test-User": user_id, "X-Test-Role": role}
 
-    # We need the auth backend to surface the role. Extend via X-Test-Role below.
-    r_read = client.get("/v1/threads/t1/state", headers=roled("alice", "viewer"))
-    assert r_read.status_code == HTTP_OK
-    r_del = client.request("DELETE", "/v1/threads/t1", json={}, headers=roled("alice", "viewer"))
-    assert r_del.status_code == HTTP_FORBIDDEN
-    r_admin = client.request("DELETE", "/v1/threads/t2", json={}, headers=roled("bob", "admin"))
-    assert r_admin.status_code == HTTP_OK
-
-
-def test_authz_block_drives_core_isolation_via_api():
-    """End-to-end: the API stamps scope="owner"; the core checkpointer then isolates by
-    owner. Uses a backend that allows every action (authorize=True) but declares owner
-    isolation, so ONLY the stamped block -- not authorize() -- blocks the non-owner."""
-
-    import anyio
-    from tenxgraph.core.authz import build_authz
-    from tenxgraph.core.state import AgentState
-
-    from tenxgraph_api.src.app.core.auth.authorization import AuthorizationBackend
-
-    class _OwnerScopeBackend(AuthorizationBackend):
-        async def authorize(self, user, resource, action, resource_id=None, **ctx):
-            return True  # allow every action; isolation is enforced by the stamped block
-
-        def isolation_scope(self) -> str:
-            return "owner"
-
-    cp = InMemoryCheckpointer()
-    # Seed a state owned by alice (owner recorded because the config carries an owner policy).
-    anyio.run(
-        cp.aput_state,
-        {"thread_id": "t1", "user_id": "alice", "authz": build_authz("alice", scope="owner")},
-        AgentState(),
+    assert client.get("/v1/threads/t1/state", headers=roled("alice", "viewer")).status_code == (
+        HTTP_OK
     )
-
-    app = build_app(routers=[checkpointer_router], authz=_OwnerScopeBackend(), checkpointer=cp)
-    client = make_client(app)
-
-    # Owner reads their state; the API stamps scope=owner and the checkpointer returns it.
-    owner = client.get("/v1/threads/t1/state", headers=_headers("alice", "checkpointer:read"))
-    assert owner.status_code == HTTP_OK
-    assert owner.json()["data"]["state"] is not None
-
-    # Non-owner: same stamp, but the checkpointer isolates -> empty (not the other user's data).
-    other = client.get("/v1/threads/t1/state", headers=_headers("mallory", "checkpointer:read"))
-    assert other.status_code == HTTP_OK
-    assert other.json()["data"]["state"] is None
+    denied = client.request("DELETE", "/v1/threads/t1", json={}, headers=roled("alice", "viewer"))
+    assert denied.status_code == HTTP_FORBIDDEN
+    assert "threads:delete" in denied.text
+    allowed = client.request("DELETE", "/v1/threads/t1", json={}, headers=roled("alice", "admin"))
+    assert allowed.status_code == HTTP_OK
 
 
-# ---------------------------------------------------------------------------
-# Isolation default for a custom backend that implements only authorize()
-# ---------------------------------------------------------------------------
-
-
-def _two_user_app(authz):
-    import anyio
-    from tenxgraph.utils.thread_info import ThreadInfo
-
-    cp = InMemoryCheckpointer()
-    for thread_id, user_id in (("t-alice", "alice"), ("t-bob", "bob")):
-        anyio.run(
-            cp.aput_thread,
-            {"thread_id": thread_id, "user_id": user_id},
-            ThreadInfo(thread_id=thread_id, user_id=user_id),
-        )
-    return make_client(build_app(routers=[checkpointer_router], authz=authz, checkpointer=cp))
-
-
-def _listed_ids(client, user_id: str) -> set[str]:
-    resp = client.get("/v1/threads", headers=_headers(user_id, None))
-    assert resp.status_code == HTTP_OK
-    return {t["thread_id"] for t in resp.json()["data"]["threads"]}
-
-
-def test_custom_backend_with_only_authorize_isolates_users_by_default():
-    from tenxgraph_api.src.app.core.auth.authorization import AuthorizationBackend
-
-    class _OnlyAuthorize(AuthorizationBackend):
-        async def authorize(self, user, resource, action, resource_id=None, **ctx):
-            return True
-
-    assert _OnlyAuthorize().isolation_scope() == "owner"
-    client = _two_user_app(_OnlyAuthorize())
-    assert _listed_ids(client, "alice") == {"t-alice"}
-    assert _listed_ids(client, "bob") == {"t-bob"}
-
-
-def test_custom_backend_returning_none_shares_data_on_purpose():
-    from tenxgraph_api.src.app.core.auth.authorization import AuthorizationBackend
-
-    class _Shared(AuthorizationBackend):
-        async def authorize(self, user, resource, action, resource_id=None, **ctx):
-            return True
-
-        def isolation_scope(self) -> str:
-            return "none"
-
-    client = _two_user_app(_Shared())
-    assert _listed_ids(client, "alice") == {"t-alice", "t-bob"}
-
-
-def test_builtin_backends_keep_their_isolation_scope():
-    from tenxgraph_api.src.app.core.auth.authorization import (
-        DefaultAuthorizationBackend,
-        OwnershipAuthorizationBackend,
-        RoleBasedAuthorizationBackend,
+def test_user_without_a_known_role_has_no_permissions():
+    auth = HeaderAuth()
+    auth.rbac = RbacConfig(roles={"viewer": {"permissions": ["threads:read"], "reach": "own"}})
+    client = _client(auth)
+    r = client.get(
+        "/v1/threads/t1/state", headers={"X-Test-User": "alice", "X-Test-Role": "stranger"}
     )
+    assert r.status_code == HTTP_FORBIDDEN
 
-    assert DefaultAuthorizationBackend().isolation_scope() == "none"
-    assert OwnershipAuthorizationBackend().isolation_scope() == "owner"
-    assert RoleBasedAuthorizationBackend().isolation_scope() == "owner"
-    assert RoleBasedAuthorizationBackend(isolation="none").isolation_scope() == "none"
+
+def test_custom_authorize_can_refuse_a_permission():
+    class _NoDeletes(HeaderAuth):
+        async def authorize(self, identity, permission, resource=None):
+            return permission != "threads:delete" and await super().authorize(
+                identity, permission, resource
+            )
+
+    client = _client(_NoDeletes())
+    assert client.get("/v1/threads/t1/state", headers=_headers("alice")).status_code == HTTP_OK
+    r = _call(client, "DELETE", "/v1/threads/t1", {}, _headers("alice"))
+    assert r.status_code == HTTP_FORBIDDEN

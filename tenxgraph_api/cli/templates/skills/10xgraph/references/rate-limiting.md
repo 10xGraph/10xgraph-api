@@ -29,7 +29,7 @@ Each client IP may make `requests` calls every `window` seconds.
 ## Where the counters live
 
 The counters live in the API's cache store (`BaseCacheStore`), the same one that holds the run
-locks and caps, idempotency records, the ownership cache and token revocation. There is no
+locks and caps, idempotency records and token revocation. There is no
 separate rate-limit backend. `cache_store.type` picks the store once at boot:
 
 1. `"memory"`, or no `type`: `InMemoryCacheStore`, counters per process, fine for one worker.

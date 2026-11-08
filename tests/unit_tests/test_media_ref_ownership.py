@@ -10,6 +10,7 @@ client could send the internal URL form directly and have the graph read another
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import Message
 from tenxgraph.core.state.message_block import (
     DocumentBlock,
@@ -18,6 +19,7 @@ from tenxgraph.core.state.message_block import (
     TextBlock,
     ToolResultBlock,
 )
+from tenxgraph.utils.thread_info import ThreadInfo
 
 from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import (
     preprocess_multimodal_messages,
@@ -128,7 +130,7 @@ async def test_no_checks_without_an_authenticated_user():
 
 
 # ---------------------------------------------------------------------------
-# Messages written straight into a thread are resolved on the next run too.
+# State written straight into a thread is resolved on the next run too.
 # ---------------------------------------------------------------------------
 
 
@@ -142,23 +144,14 @@ def checkpointer_service(monkeypatch):
 
     service = CheckpointerService.__new__(CheckpointerService)
     service.checkpointer = MagicMock()
+    service.checkpointer.aget_thread = AsyncMock(return_value=ThreadInfo(thread_id="t1"))
     service.checkpointer.aget_state = AsyncMock(return_value=AgentState())
     service.checkpointer.aput_state = AsyncMock(side_effect=lambda cfg, state: state)
     service.checkpointer.aput_state_cache = AsyncMock()
-    service.checkpointer.aput_messages = AsyncMock()
     service.settings = MagicMock()
     media = _service({"victim-file": "victim"})
     monkeypatch.setattr(CheckpointerService, "_media_service", staticmethod(lambda: media))
     return service
-
-
-@pytest.mark.asyncio
-async def test_put_messages_rejects_another_users_file(checkpointer_service):
-    with pytest.raises(ValueError, match="not found"):
-        await checkpointer_service.put_messages(
-            {"thread_id": "t1"}, {"user_id": "attacker"}, [_image("graph://media/victim-file")]
-        )
-    checkpointer_service.checkpointer.aput_messages.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -173,6 +166,6 @@ async def test_put_state_rejects_another_users_file(checkpointer_service):
     ]
     with pytest.raises(ValueError, match="not found"):
         await checkpointer_service.put_state(
-            {"thread_id": "t1"}, {"user_id": "attacker"}, {"context": context}
+            {"thread_id": "t1"}, Identity(user_id="attacker"), {"context": context}
         )
     checkpointer_service.checkpointer.aput_state.assert_not_awaited()

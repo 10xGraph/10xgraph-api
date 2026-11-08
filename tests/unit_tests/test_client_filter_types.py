@@ -10,11 +10,11 @@ import pytest
 from tenxgraph.storage.columns import parse_columns
 from tenxgraph.storage.sql_filter import FilterSchema
 
-from tenxgraph_api.src.app.core.auth.client_filters import (
+from tenxgraph_api.src.app.core.validation.client_filters import (
     check_store_filters,
     check_thread_filters,
 )
-from tenxgraph_api.src.app.core.auth.request_config import ClientInputError
+from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
 
 
 COLUMNS = parse_columns(["org_id"], {"settings": "jsonb", "tags": "text[]", "plan": "text"})

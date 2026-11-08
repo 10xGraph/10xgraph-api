@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import WebSocketException
 from injectq import InjectQ
+from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.core import leases
 from tenxgraph_api.src.app.core.cache_store import (
@@ -298,7 +299,9 @@ async def test_run_slots_use_the_lease_manager(monkeypatch):
     store = RecordingStore()
     manager = LeaseManager(store)
     monkeypatch.setattr(run_limits, "lease_manager", lambda: manager)
-    await run_limits.acquire_run_slot({"user_id": "alice"}, RunsConfig(max_concurrent_per_user=1))
+    await run_limits.acquire_run_slot(
+        Identity(user_id="alice"), RunsConfig(max_concurrent_per_user=1)
+    )
     assert store.slots("concurrency:runs:user:alice") == 1
     await manager.aclose()
 
@@ -310,7 +313,7 @@ async def test_websocket_caps_use_the_lease_manager(monkeypatch):
 
     store = RecordingStore()
     manager = LeaseManager(store)
-    monkeypatch.setattr(realtime_guard.keying, "verified_user_id", lambda ws: "alice")
+    monkeypatch.setattr(realtime_guard.keying, "verified_caller_key", lambda ws: "alice")
     ws_config = WebSocketConfig(max_connections=10, max_connections_per_user=1)
     websocket = SimpleNamespace()
 
@@ -333,7 +336,7 @@ async def test_websocket_caps_hold_per_process_without_a_shared_store(monkeypatc
     from tenxgraph_api.src.app.routers.graph import realtime_guard
 
     manager = LeaseManager(InMemoryCacheStore())
-    monkeypatch.setattr(realtime_guard.keying, "verified_user_id", lambda ws: None)
+    monkeypatch.setattr(realtime_guard.keying, "verified_caller_key", lambda ws: None)
     ws_config = WebSocketConfig(max_connections=1, max_connections_per_user=1)
     async with realtime_guard._connection_slots(manager, SimpleNamespace(), ws_config):
         assert manager.held("ws:all") == 1
@@ -482,9 +485,9 @@ async def test_custom_cache_store_backs_locks_caps_and_idempotency(cache_module,
     assert isinstance(store, RecordingStore)
 
     guard = await acquire_run_guard(
-        user={"user_id": "alice"}, runs=RunsConfig(max_concurrent_per_user=2), thread_id="t1"
+        user=Identity(user_id="alice"), runs=RunsConfig(max_concurrent_per_user=2), thread_id="t1"
     )
-    run, _ = await idempotency.check({"user_id": "alice"}, "k1", "invoke", {})
+    run, _ = await idempotency.check(Identity(user_id="alice"), "k1", "invoke", {})
     await run.complete("{}")
     run.release()
     guard.release()
@@ -502,13 +505,12 @@ async def test_custom_cache_store_backs_locks_caps_and_idempotency(cache_module,
 
 
 @pytest.mark.asyncio
-async def test_custom_cache_store_backs_ownership_revocation_and_rate_limits(cache_module):
-    """The same custom store serves the ownership cache, token revocation and rate limits."""
-    from unittest.mock import AsyncMock, MagicMock
+async def test_custom_cache_store_backs_revocation_and_rate_limits(cache_module):
+    """The same custom store serves token revocation and rate limits."""
+    from unittest.mock import MagicMock
 
     from tenxgraph_api.src.app import loader
     from tenxgraph_api.src.app.core.auth import revocation
-    from tenxgraph_api.src.app.core.auth.authorization import AuthorizationBackend
     from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
     from tenxgraph_api.src.app.core.middleware.rate_limit import limiter
 
@@ -518,14 +520,6 @@ async def test_custom_cache_store_backs_ownership_revocation_and_rate_limits(cac
     )
     assert isinstance(store, RecordingStore)
 
-    checkpointer = MagicMock()
-    checkpointer.aget_thread_owner = AsyncMock(return_value="alice")
-    loader.load_and_bind_authorization(container, "ownership")
-    authz = container.get(AuthorizationBackend)
-    authz._checkpointer = checkpointer
-    assert await authz.authorize({"user_id": "alice"}, "graph", "invoke", resource_id="t1")
-    await authz.evict("t1", "alice")
-
     config = MagicMock(spec=GraphConfig)
     config.token_revocation = revocation.TokenRevocationConfig()
     loader._enable_token_revocation(container, config, True)
@@ -533,15 +527,14 @@ async def test_custom_cache_store_backs_ownership_revocation_and_rate_limits(cac
     await revocation.revoke_user(store, "mallory", before=100.0)
     bound = limiter.bound_cache_store(container)
     assert bound is store
-    assert await revocation.token_revoked({"user_id": "mallory", "iat": 50}, bound, settings)
+    assert await revocation.token_revoked(
+        Identity(user_id="mallory", claims={"iat": 50}), bound, settings
+    )
 
     assert (await limiter.check(bound, "ip:1.2.3.4", 5, 60)).allowed
 
     keys = {call[1] for call in store.calls if len(call) > 1}
     assert {
-        "owner:id:t1",
-        "owner:tomb:t1",
         "revoked:user:mallory",
         "ratelimit:ip:1.2.3.4",
     } <= keys
-    assert ("delete", "owner:id:t1") in store.calls

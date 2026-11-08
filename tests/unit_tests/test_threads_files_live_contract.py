@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
+from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import Message
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.storage.media.storage.local_store import LocalFileMediaStore
@@ -43,29 +44,29 @@ class TestHasMore:
     @pytest.mark.asyncio
     async def test_threads_full_page_with_more(self):
         svc = _checkpointer_service([_T(i) for i in range(5)])
-        res = await svc.list_threads({"user_id": "u"}, None, 0, 3)
+        res = await svc.list_threads(Identity(user_id="u"), None, 0, 3)
         assert len(res.threads) == 3
         assert (res.has_more, res.offset, res.limit) == (True, 0, 3)
 
     @pytest.mark.asyncio
     async def test_threads_exact_last_page(self):
         svc = _checkpointer_service([_T(i) for i in range(3)])
-        res = await svc.list_threads({"user_id": "u"}, None, 0, 3)
+        res = await svc.list_threads(Identity(user_id="u"), None, 0, 3)
         assert res.has_more is False
 
     @pytest.mark.asyncio
     async def test_threads_short_page(self):
         svc = _checkpointer_service([_T(i) for i in range(2)])
-        res = await svc.list_threads({"user_id": "u"}, None, 0, 3)
+        res = await svc.list_threads(Identity(user_id="u"), None, 0, 3)
         assert res.has_more is False
 
     @pytest.mark.asyncio
     async def test_messages_second_page(self):
         svc = _checkpointer_service([Message.text_message(str(i)) for i in range(7)])
-        res = await svc.get_messages({"thread_id": "t"}, {"user_id": "u"}, None, 3, 3)
+        res = await svc.get_messages({"thread_id": "t"}, Identity(user_id="u"), None, 3, 3)
         assert [m.text() for m in res.messages] == ["3", "4", "5"]
         assert (res.has_more, res.offset) == (True, 3)
-        res = await svc.get_messages({"thread_id": "t"}, {"user_id": "u"}, None, 6, 3)
+        res = await svc.get_messages({"thread_id": "t"}, Identity(user_id="u"), None, 6, 3)
         assert res.has_more is False
 
 

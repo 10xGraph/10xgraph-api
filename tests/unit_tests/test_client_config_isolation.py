@@ -1,7 +1,7 @@
 """Regression tests: client-supplied request config must not override server-owned keys.
 
 A request's ``config`` is an open dict so frontends can pass their own values to the graph.
-These tests pin the rule that keeps it safe: ``authz``, ``user``, ``user_id`` and ``_``-prefixed
+These tests pin the rule that keeps it safe: ``user``, ``user_id`` and ``_``-prefixed
 keys always come from the server, and the thread the permission check approved is the thread
 the service runs on.
 """
@@ -14,9 +14,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
+from tenxgraph.core.authz import Identity
+from tenxgraph.utils.thread_info import ThreadInfo
 
-from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
-from tenxgraph_api.src.app.core.auth.request_config import (
+from tenxgraph_api.src.app.core.auth.permissions import _body_thread_id
+from tenxgraph_api.src.app.core.validation.request_config import (
     client_config,
     normalize_thread_id,
 )
@@ -32,13 +34,12 @@ from tenxgraph_api.src.app.routers.store.services.store_service import StoreServ
 
 
 FORGED = {
-    "authz": {"user_id": "attacker", "scope": "none", "scopes": ["*"]},
     "user": {"user_id": "victim"},
     "user_id": "victim",
     "_skip_interrupt_at": "GUARD",
     "plan": "pro",  # an ordinary app value: must survive
 }
-TRUSTED_USER = {"user_id": "attacker", "authz": {"user_id": "attacker", "scope": "owner"}}
+TRUSTED_USER = Identity(user_id="attacker")
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +71,7 @@ def test_client_config_drops_core_security_keys(key, value):
     assert client_config({key: value, "plan": "pro"}) == {"plan": "pro"}
 
 
-@pytest.mark.parametrize("value", [None, "text", ["authz"], 5])
+@pytest.mark.parametrize("value", [None, "text", ["user"], 5])
 def test_client_config_non_dict_is_empty(value):
     assert client_config(value) == {}
 
@@ -115,9 +116,7 @@ def _request(body: object, content_type: str | None = "application/json") -> Req
 
 
 async def _body_resource_id(body: object, content_type: str | None = "application/json"):
-    return await RequirePermission("graph", "invoke")._extract_resource_id_from_body(
-        _request(body, content_type)
-    )
+    return await _body_thread_id(_request(body, content_type))
 
 
 @pytest.mark.asyncio
@@ -147,7 +146,7 @@ async def test_body_non_json_content_type_is_ignored():
 
 
 # ---------------------------------------------------------------------------
-# services never pass client authz/user downstream
+# services never pass client user downstream
 # ---------------------------------------------------------------------------
 
 
@@ -156,7 +155,6 @@ async def test_checkpointer_service_config_strips_forged_keys():
     service = CheckpointerService.__new__(CheckpointerService)
     service.checkpointer = MagicMock()
     cfg = service._config({**FORGED, "thread_id": "t1"}, TRUSTED_USER)
-    assert "authz" not in cfg
     assert "_skip_interrupt_at" not in cfg
     assert cfg["user"] is TRUSTED_USER
     assert cfg["user_id"] == "attacker"
@@ -167,7 +165,6 @@ async def test_checkpointer_service_config_strips_forged_keys():
 def test_store_service_config_strips_forged_keys():
     service = StoreService(store=AsyncMock())
     cfg = service._config(dict(FORGED), TRUSTED_USER)
-    assert "authz" not in cfg
     assert cfg["user"] is TRUSTED_USER
     assert cfg["user_id"] == "attacker"
     assert cfg["plan"] == "pro"
@@ -193,7 +190,6 @@ async def test_graph_prepare_input_strips_forged_keys(graph_service):
         config={**FORGED, "thread_id": " t1 "},
     )
     _, config, _ = await graph_service._prepare_input(gi)
-    assert "authz" not in config
     assert "user" not in config
     assert "_skip_interrupt_at" not in config
     assert config["thread_id"] == "t1"
@@ -215,7 +211,6 @@ async def test_graph_run_ignores_client_collection(graph_service):
 async def test_graph_stop_strips_forged_keys(graph_service):
     await graph_service.stop_graph("t1", TRUSTED_USER, {**FORGED, "thread_id": "victim"})
     sent = graph_service._graph.astop.call_args[0][0]
-    assert "authz" not in sent
     assert sent["thread_id"] == "t1"
     assert sent["user"] is TRUSTED_USER
     assert sent["plan"] == "pro"
@@ -231,7 +226,6 @@ async def test_checkpointer_routes_pin_path_thread_id(monkeypatch):
     from tenxgraph_api.src.app.routers.checkpointer import router as ck
     from tenxgraph_api.src.app.routers.checkpointer.schemas.checkpointer_schemas import (
         ConfigSchema,
-        PutMessagesSchema,
         StateSchema,
     )
 
@@ -245,17 +239,7 @@ async def test_checkpointer_routes_pin_path_thread_id(monkeypatch):
         thread_id="own",
         payload=StateSchema(state={}, config=forged),
         service=service,
-        user=TRUSTED_USER,
-    )
-    await ck.put_messages(
-        request=request,
-        thread_id="own",
-        payload=PutMessagesSchema(
-            messages=[{"role": "user", "content": [{"type": "text", "text": "x"}]}],
-            config=forged,
-        ),
-        service=service,
-        user=TRUSTED_USER,
+        identity=TRUSTED_USER,
     )
     await ck.delete_message(
         request=request,
@@ -263,25 +247,23 @@ async def test_checkpointer_routes_pin_path_thread_id(monkeypatch):
         message_id="m1",
         payload=ConfigSchema(config=forged),
         service=service,
-        user=TRUSTED_USER,
+        identity=TRUSTED_USER,
     )
     await ck.delete_thread(
         request=request,
         thread_id="own",
         payload=ConfigSchema(config=forged),
         service=service,
-        user=TRUSTED_USER,
+        identity=TRUSTED_USER,
     )
 
     for call in (
         service.put_state.call_args,
-        service.put_messages.call_args,
         service.delete_message.call_args,
         service.delete_thread.call_args,
     ):
         config = call[0][0]
         assert config["thread_id"] == "own"
-        assert "authz" not in config
         assert config["plan"] == "pro"
 
 
@@ -324,7 +306,7 @@ def _input(**kwargs):
 
 
 def test_reject_unlisted_keys():
-    from tenxgraph_api.src.app.core.auth.request_config import reject_unlisted_keys
+    from tenxgraph_api.src.app.core.validation.request_config import reject_unlisted_keys
 
     reject_unlisted_keys({"plan": "pro"}, None, "config")  # no allow-list: anything goes
     reject_unlisted_keys(None, frozenset(), "config")  # nothing sent
@@ -361,10 +343,10 @@ async def test_reserved_keys_are_stripped_not_counted(graph_service):
 
     graph_service.config.runs = RunsConfig(config_keys=frozenset())
     _, config, _ = await graph_service._prepare_input(
-        _input(config={"user_id": "forged", "authz": {}, "_node_name": "x", "thread_id": "t1"})
+        _input(config={"user_id": "forged", "_node_name": "x", "thread_id": "t1"})
     )
     # The forged id is gone; the server sets its own (anonymous when no user was passed).
-    assert config["user_id"] == "anonymous" and "authz" not in config
+    assert config["user_id"] == "anonymous"
 
 
 @pytest.mark.asyncio
@@ -421,6 +403,7 @@ async def test_put_state_honours_the_state_allow_list(monkeypatch):
 
     service = CheckpointerService.__new__(CheckpointerService)
     service.checkpointer = MagicMock()
+    service.checkpointer.aget_thread = AsyncMock(return_value=ThreadInfo(thread_id="t1"))
     service.checkpointer.aput_state = AsyncMock()
     with pytest.raises(HTTPException) as exc_info:
         await service.put_state({"thread_id": "t1"}, TRUSTED_USER, {"role": "admin"})
@@ -443,11 +426,11 @@ async def test_put_state_honours_the_state_allow_list(monkeypatch):
     ],
 )
 def test_client_error_detail(monkeypatch, mode, exc, expected):
-    from tenxgraph_api.src.app.core.auth.request_config import (
+    from tenxgraph_api.src.app.core.config import settings as settings_mod
+    from tenxgraph_api.src.app.core.validation.request_config import (
         ClientInputError,
         client_error_detail,
     )
-    from tenxgraph_api.src.app.core.config import settings as settings_mod
 
     monkeypatch.setattr(settings_mod, "get_settings", lambda: type("S", (), {"MODE": mode})())
     exc = exc or ClientInputError("config keys not allowed by this server: role")

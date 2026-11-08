@@ -5,10 +5,6 @@
 import pytest
 
 from tenxgraph_api.cli.config_editor import validate_config as validate
-from tenxgraph_api.src.app.core.auth.authorization import (
-    OwnershipAuthorizationBackend,
-    RoleBasedAuthorizationBackend,
-)
 from tenxgraph_api.src.app.core.config.graph_config import (
     DEFAULT_MAX_CONCURRENT_RUNS_PER_USER,
     GraphConfig,
@@ -128,7 +124,7 @@ def test_config_editor_knows_and_validates_runs():
     assert not [
         i
         for i in validate({**base, "runs": {"thread_ids": "server"}})
-        if i["path"].startswith("runs")
+        if i["path"].startswith("runs") and i["level"] == "error"
     ]
     issues = validate({**base, "runs": {"thread_ids": "nobody"}})
     assert [i["path"] for i in issues if i["level"] == "error"] == ["runs"]
@@ -139,87 +135,10 @@ def test_config_editor_knows_and_validates_runs():
 # ---------------------------------------------------------------------------
 
 
-class _Owners:
-    def __init__(self, owners):
-        self.owners = owners
-
-    async def aget_thread_owner(self, thread_id):
-        return self.owners.get(str(thread_id))
-
-
-ALICE = {"user_id": "alice"}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "backend_cls", [OwnershipAuthorizationBackend, RoleBasedAuthorizationBackend]
-)
-async def test_server_mode_refuses_client_named_new_threads(backend_cls):
-    backend = backend_cls(checkpointer=_Owners({"t1": "alice"}), server_thread_ids=True)
-    for resource, action in (
-        ("graph", "invoke"),
-        ("graph", "stream"),
-        ("checkpointer", "write"),
-    ):
-        assert await backend.authorize(ALICE, resource, action, resource_id="new-id") is False
-    # Existing, owned threads and requests that name no thread still work.
-    assert await backend.authorize(ALICE, "graph", "invoke", resource_id="t1") is True
-    assert await backend.authorize(ALICE, "graph", "invoke", resource_id=None) is True
-
-
 def test_client_is_an_explicit_opt_in():
     runs = RunsConfig.from_dict({"thread_ids": "client"})
     assert runs.thread_ids == "client"
     assert runs.server_thread_ids is False
-
-
-@pytest.mark.asyncio
-async def test_client_thread_ids_context_lets_ag_ui_and_live_name_a_new_thread():
-    backend = OwnershipAuthorizationBackend(
-        checkpointer=_Owners({"t1": "bob"}), server_thread_ids=True
-    )
-    kw = {"resource_id": "frontend-id", "client_thread_ids": True}
-    assert await backend.authorize(ALICE, "graph", "stream", **kw) is True
-    # An existing thread of someone else is still refused, and so is a non-create action.
-    assert (
-        await backend.authorize(ALICE, "graph", "stream", resource_id="t1", client_thread_ids=True)
-        is False
-    )
-    assert await backend.authorize(ALICE, "graph", "read", **kw) is False
-
-
-@pytest.mark.asyncio
-async def test_client_mode_lets_a_client_name_a_new_thread():
-    backend = OwnershipAuthorizationBackend(checkpointer=_Owners({}))
-    assert backend.server_thread_ids is False
-    assert await backend.authorize(ALICE, "graph", "invoke", resource_id="new-id") is True
-
-
-@pytest.mark.parametrize(
-    "authorization",
-    ["ownership", {"backend": "rbac", "roles": {}}, None],
-)
-def test_loader_passes_the_mode_to_ownership_backends(monkeypatch, authorization):
-    from tenxgraph_api.src.app import loader
-    from tenxgraph_api.src.app.core.config import settings as settings_mod
-
-    class _Prod:
-        MODE = "production"
-
-    monkeypatch.setattr(settings_mod, "get_settings", lambda: _Prod())
-    backend = loader._resolve_authorization_backend(authorization, None, server_thread_ids=True)
-    assert isinstance(backend, OwnershipAuthorizationBackend)
-    assert backend.server_thread_ids is True
-
-
-def test_loader_logs_when_the_mode_cannot_apply(caplog):
-    from injectq import InjectQ
-
-    from tenxgraph_api.src.app import loader
-
-    with caplog.at_level("DEBUG", logger="tenxgraph_api.loader"):
-        loader.load_and_bind_authorization(InjectQ(), "allow_all", None, server_thread_ids=True)
-    assert "does not check thread ownership" in caplog.text
 
 
 def test_config_editor_validates_max_parallel_tool_calls():

@@ -5,7 +5,6 @@ stay open long after its token expires. These tests cover the limits that apply 
 lifetime of the connection.
 """
 
-from typing import Any
 
 import pytest
 from fastapi import Depends, FastAPI, WebSocket
@@ -13,6 +12,7 @@ from fastapi.testclient import TestClient
 from injectq import InjectQ
 from injectq.integrations import setup_fastapi
 from starlette.websockets import WebSocketDisconnect
+from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.core.cache_store import BaseCacheStore, InMemoryCacheStore, SlotResult
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, WebSocketConfig
@@ -107,7 +107,7 @@ def caller(monkeypatch):
     """Set which verified user the guard sees (``None`` = anonymous / invalid token)."""
 
     def _set(user_id: str | None):
-        monkeypatch.setattr(keying, "verified_user_id", lambda connection: user_id)
+        monkeypatch.setattr(keying, "verified_caller_key", lambda connection: user_id)
 
     _set(None)
     return _set
@@ -215,22 +215,21 @@ class _Ws:
 
 def test_identity_check_passes_while_token_is_valid(caller):
     caller("alice")
-    assert ws_identity_still_valid(_Ws(), {"user_id": "alice"}) is True
+    assert ws_identity_still_valid(_Ws(), Identity(user_id="alice")) is True
 
 
 def test_identity_check_fails_once_token_stops_verifying(caller):
     caller(None)  # expired or revoked
-    assert ws_identity_still_valid(_Ws(), {"user_id": "alice"}) is False
+    assert ws_identity_still_valid(_Ws(), Identity(user_id="alice")) is False
 
 
 def test_identity_check_fails_if_token_now_belongs_to_someone_else(caller):
     caller("mallory")
-    assert ws_identity_still_valid(_Ws(), {"user_id": "alice"}) is False
+    assert ws_identity_still_valid(_Ws(), Identity(user_id="alice")) is False
 
 
 def test_identity_check_skipped_without_auth(caller):
-    user: dict[str, Any] = {}
-    assert ws_identity_still_valid(_Ws(), user) is True
+    assert ws_identity_still_valid(_Ws(), None) is True
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +250,7 @@ async def test_guard_and_runs_share_the_bound_cache_store(monkeypatch):
     store = InMemoryCacheStore()
     monkeypatch.setattr(realtime_guard, "bound_cache_store", lambda: store)
     monkeypatch.setattr(realtime_guard, "lease_manager", lambda: LeaseManager(store))
-    monkeypatch.setattr(keying, "verified_user_id", lambda connection: None)
+    monkeypatch.setattr(keying, "verified_caller_key", lambda connection: None)
     websocket = SimpleNamespace(state=SimpleNamespace())
     ws_config = WebSocketConfig(max_connections=None, max_connections_per_user=None)
     config = _Config(ws_config, rate_limit=_Global())

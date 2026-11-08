@@ -60,6 +60,7 @@ TypeScript client wrappers include:
 - `GET /v1/files/{file_id}/info`
 - `GET /v1/files/{file_id}/url`
 - `GET /v1/config/multimodal`
+- `GET /v1/me`: `user_id`, `tenant`, `roles`, `permissions`, `reach`; `{"auth": "off"}` when auth is off.
 
 ## Ping
 
@@ -73,8 +74,8 @@ Common status expectations:
 
 - 400/422 for invalid input.
 - 401 for unauthenticated requests.
-- 403 for authorization failures.
-- 404 for missing resources.
+- 403 for a missing permission.
+- 404 for missing resources and for resources outside the caller's reach (another user's thread, message, memory, file or run).
 - 500 for unexpected graph/server failures.
 
 ## Rules
