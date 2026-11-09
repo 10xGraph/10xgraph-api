@@ -3,12 +3,12 @@ import { Field, fieldGroups } from "./fields.jsx";
 import { SECTION_ICONS } from "./icons.js";
 import {
   PAGES, WIDGET_FIELD_IDS, isAgentReady, isObject, isOn, issuesFor, navItem, section, store,
-  valueOrDefault,
 } from "./store.js";
-import { Callout, Icon, IssueCallout, Segmented } from "./ui.jsx";
+import { Callout, Disclosure, Icon, IssueCallout, Segmented } from "./ui.jsx";
 import {
   AuthWidget, CacheStoreWidget, ChoiceWidget, RemoteToolsWidget,
 } from "./widgets.jsx";
+import { MetricsWidget, TracingWidget, metricsSummary, traceSummary } from "./telemetry.jsx";
 
 const Heading = ({ children, code }) => (
   <h1 id="page-title" tabindex={-1} class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-2xl font-semibold tracking-tight text-ink focus:outline-none">
@@ -68,22 +68,11 @@ function cacheSummary() {
   return { text: `${parts.join("; ")}.` };
 }
 
-function traceSummary() {
-  const o = store.config.observability;
-  if (o === undefined || o === null) return { text: offText("observability") };
-  const on = [];
-  if (valueOrDefault(["observability", "logfire", "enabled"])) on.push("Logfire");
-  if (valueOrDefault(["observability", "langsmith", "enabled"])) on.push("LangSmith");
-  if (valueOrDefault(["observability", "phoenix", "enabled"])) on.push("Phoenix");
-  const level = valueOrDefault(["observability", "level"]);
-  return { text: `Level ${level}${on.length ? `, sending to ${on.length > 1 ? `${on.slice(0, -1).join(", ")} and ${on[on.length - 1]}` : on[0]}` : ", no destination chosen yet"}.` };
-}
-
 function GetRunning() {
   const core = section("core");
   const ready = isAgentReady();
   const general = core ? issuesFor("core").filter((i) => !core.fields.some((f) => f.path.join(".") === i.path)) : [];
-  const rows = [["auth", authSummary()], ["cache_store", cacheSummary()], ["observability", traceSummary()]];
+  const rows = [["auth", authSummary()], ["cache_store", cacheSummary()], ["observability", traceSummary(offText)], ["metrics", metricsSummary(offText)]];
   const all = store.nav.flatMap((g) => g.items).filter((id) => id !== "get-running");
   return (
     <>
@@ -141,19 +130,18 @@ export function EnvList({ vars }) {
 function EnvDisclosure({ vars, open }) {
   if (!vars?.length) return null;
   return (
-    <details class="group mt-9 border-t border-line pt-1" open={open}>
-      <summary class="focus-ring flex min-h-11 cursor-pointer list-none items-center gap-2 font-medium text-muted [&::-webkit-details-marker]:hidden">
-        <Icon name="chevronRight" class="size-4 transition-transform group-open:rotate-90" />Set in .env
-      </summary>
+    <Disclosure title="Set in .env" open={open} class="mt-9 border-t border-line pt-1">
       <p class="mb-2 text-xs text-faint">Read only. The editor never reads .env, so only names are shown.</p>
       <EnvList vars={vars} />
-    </details>
+    </Disclosure>
   );
 }
 
 function SectionWidget({ sec }) {
   if (sec.widget === "auth") return <AuthWidget sec={sec} />;
   if (sec.widget === "remote_tools") return <RemoteToolsWidget />;
+  if (sec.widget === "observability") return <TracingWidget />;
+  if (sec.widget === "metrics") return <MetricsWidget />;
   if (sec.widget === "cache_store") return <CacheStoreWidget sec={sec} />;
   if (sec.widget === "id_generator" || sec.widget === "thread_name_generator") return <ChoiceWidget sec={sec} />;
   return null;
@@ -173,7 +161,7 @@ export function generalIssues(sec) {
 // Fields and widget of a section, no heading. Shared by the page and search results.
 export function SectionFields({ sec }) {
   const on = isOn(sec);
-  const widget = sec.widget && (on || !sec.optional);
+  const widget = sec.widget && (on || !sec.optional || sec.self_managed);
   return (
     <>
       {widget ? <div class="mt-6"><SectionWidget sec={sec} /></div> : null}
@@ -199,7 +187,7 @@ function SectionPage({ sec }) {
       <Heading code={sec.key}>{sec.title}</Heading>
       <Lead>{sec.description}</Lead>
       {general.length ? <div class="mt-4 space-y-2">{general.map((i, n) => <IssueCallout key={n} issue={i} />)}</div> : null}
-      {sec.optional ? (
+      {sec.optional && !sec.self_managed ? (
         <div class="mt-5 flex flex-wrap items-center gap-4">
           <Segmented
             label={`Settings for ${sec.title}`} value={on ? "c" : "d"}

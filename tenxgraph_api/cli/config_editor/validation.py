@@ -30,6 +30,7 @@ _IMPORT_PATH = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_][\w.]*$")
 _ROLE_IN_MESSAGE = re.compile(r"role '([^']+)'")
 _OBSERVABILITY_LEVELS = ("spans", "standard", "full")
 _USER_ID_MODES = ("raw", "hash", "mask")
+_TRACE_DESTINATIONS = ("logfire", "langsmith", "phoenix", "otlp")
 _MAX_PERCENT = 100
 # Settings that live inside cache_store; at the top level the server refuses them.
 _CACHE_STORE_SETTINGS = ("redis", "rate_limit", "token_revocation")
@@ -79,6 +80,7 @@ def validate_config(config: Any, base_dir: Path | None = None) -> list[Issue]:
     _check_ag_ui(config, out)
     _check_media(config, out)
     _check_observability(config, out)
+    _check_metrics(config, out)
     _check_wiring(config, out, base_dir)
     _check_remote_tools(config, out)
     _check_test(config, out)
@@ -301,8 +303,8 @@ def _check_observability(config: dict, out: _Collector) -> None:
             "observability.user_id_mode",
             f"user_id_mode must be one of {', '.join(_USER_ID_MODES)}.",
         )
-    any_enabled = False
-    for backend in ("logfire", "langsmith", "phoenix"):
+    enabled_blocks: dict[str, dict] = {}
+    for backend in _TRACE_DESTINATIONS:
         block = data.get(backend)
         if block is None:
             continue
@@ -312,7 +314,8 @@ def _check_observability(config: dict, out: _Collector) -> None:
         enabled = block.get("enabled", False)
         if not isinstance(enabled, bool):
             out.error(f"observability.{backend}.enabled", "enabled must be true or false.")
-        any_enabled = any_enabled or enabled is True
+        if enabled is True:
+            enabled_blocks[backend] = block
         console = block.get("console")
         if backend == "logfire" and console is not None and console is not False:
             out.error(
@@ -320,11 +323,71 @@ def _check_observability(config: dict, out: _Collector) -> None:
                 "console must be false or left out. Logfire takes False or a ConsoleOptions "
                 "object, which JSON cannot express.",
             )
-    if not any_enabled:
+    if "otlp" in enabled_blocks:
+        _check_otlp_tracing(config, enabled_blocks["otlp"], out)
+    if not enabled_blocks:
         out.warning(
             "observability",
-            "None of Logfire, LangSmith or Phoenix is enabled, so nothing is traced.",
+            "None of Logfire, LangSmith, Phoenix or OTLP is enabled, so nothing is traced.",
         )
+
+
+def _check_otlp_tracing(config: dict, otlp: dict, out: _Collector) -> None:
+    shared = otlp.get("use_metrics_endpoint")
+    if shared is not None and not isinstance(shared, bool):
+        out.error(
+            "observability.otlp.use_metrics_endpoint", "use_metrics_endpoint must be true or false."
+        )
+        return
+    endpoint = otlp.get("endpoint")
+    if shared:
+        metrics = config.get("metrics")
+        metrics = metrics if isinstance(metrics, dict) else {}
+        otlp_cfg = metrics.get("otlp")
+        url = otlp_cfg.get("endpoint") if isinstance(otlp_cfg, dict) else None
+        if not (metrics.get("enabled") is True and metrics.get("export") == "otlp" and url):
+            out.warning(
+                "observability.otlp.use_metrics_endpoint",
+                "Metrics are not set to OTLP push with an endpoint, so there is no endpoint to "
+                "share and the OTLP destination stays off.",
+            )
+            return
+        endpoint = url
+    elif not endpoint:
+        if not os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"):
+            out.error(
+                "observability.otlp.endpoint",
+                "OTLP needs an endpoint, or turn on Use the metrics endpoint.",
+            )
+        return
+    if isinstance(endpoint, str) and "/api/v1/otlp" in endpoint:
+        out.warning(
+            "observability.otlp.use_metrics_endpoint" if shared else "observability.otlp.endpoint",
+            "This is a Prometheus OTLP URL. Prometheus takes metrics only, so trace exports "
+            "will fail. Use a collector (OTel Collector, Grafana Alloy) that takes both.",
+        )
+
+
+def _check_metrics(config: dict, out: _Collector) -> None:
+    data = config.get("metrics")
+    if data is None:
+        return
+    if not isinstance(data, dict):
+        out.error("metrics", "metrics must be an object.")
+        return
+    from pydantic import ValidationError
+
+    from tenxgraph_api.src.app.core.config.metrics import MetricsConfig
+
+    try:
+        MetricsConfig.model_validate(data)
+    except ValidationError as exc:
+        for err in exc.errors():
+            message = err["msg"].removeprefix("Value error, ")
+            path = ".".join(["metrics", *(str(part) for part in err["loc"])])
+            # A rule on the whole model names its field in the message.
+            named = re.match(r"(metrics\.[\w.]+) ", message)
+            out.error(named.group(1) if named else path, message)
 
 
 def _check_wiring(config: dict, out: _Collector, base_dir: Path | None) -> None:

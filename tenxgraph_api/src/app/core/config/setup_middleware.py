@@ -1,4 +1,5 @@
 import uuid
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -19,6 +20,7 @@ from tenxgraph_api.src.app.core.middleware.request_limits import RequestSizeLimi
 from tenxgraph_api.src.app.core.middleware.security_headers import SecurityHeadersMiddleware
 
 from .graph_config import GraphConfig
+from .metrics import resolve_use_metrics_endpoint, setup_metrics
 from .sentry_config import init_sentry
 from .settings import get_settings, logger
 
@@ -29,11 +31,16 @@ class HealthCheckAwareTrustedHostMiddleware(TrustedHostMiddleware):
     Docker and Kubernetes probes call ``/ping`` and ``/health/ready`` on ``localhost`` or the
     pod IP, which are never in ``ALLOWED_HOST``, so the probe would fail and the container would
     be restarted. Both return only status words and read nothing from the request, so skipping
-    the Host check there is safe.
+    the Host check there is safe. ``open_paths`` adds more such paths (the Prometheus scrape
+    route, scraped by pod IP or service name).
     """
 
+    def __init__(self, app, *, open_paths: tuple[str, ...] = (), **kwargs: Any) -> None:
+        super().__init__(app, **kwargs)
+        self.open_paths = (*HEALTH_PROBE_PATHS, *open_paths)
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and _is_health_check(scope):
+        if scope["type"] == "http" and _is_health_check(scope, self.open_paths):
             await self.app(scope, receive, send)
             return
         await super().__call__(scope, receive, send)
@@ -58,10 +65,10 @@ def _upload_path_limits(max_request_size: int) -> dict[str, int]:
 HEALTH_PROBE_PATHS = ("/ping", "/health/ready")
 
 
-def _is_health_check(scope: Scope) -> bool:
+def _is_health_check(scope: Scope, paths: tuple[str, ...] = HEALTH_PROBE_PATHS) -> bool:
     path = scope.get("path", "")
     root_path = (scope.get("root_path") or "").rstrip("/")
-    return any(path in (probe, f"{root_path}{probe}") for probe in HEALTH_PROBE_PATHS)
+    return any(path in (probe, f"{root_path}{probe}") for probe in paths)
 
 
 # Paths that should be excluded from GZip compression (streaming endpoints)
@@ -296,7 +303,7 @@ def _attach_otel_publisher(
 
 
 def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | None) -> None:
-    """Wire Logfire/LangSmith/Phoenix from the ``observability`` block of ``10xgraph.json``.
+    """Wire Logfire/LangSmith/Phoenix/OTLP from the ``observability`` block of ``10xgraph.json``.
 
     Configures the tracer provider(s)/exporters and binds an ``OtelPublisher``
     into the DI container. This runs at app-construction time, before the graph
@@ -315,11 +322,13 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
     obs_cfg = graph_config.observability
     if not obs_cfg:
         return
+    obs_cfg = resolve_use_metrics_endpoint(obs_cfg, graph_config.metrics)
 
     logfire_on = bool((obs_cfg.get("logfire") or {}).get("enabled", False))
     langsmith_on = bool((obs_cfg.get("langsmith") or {}).get("enabled", False))
     phoenix_on = bool((obs_cfg.get("phoenix") or {}).get("enabled", False))
-    if not logfire_on and not langsmith_on and not phoenix_on:
+    otlp_on = bool((obs_cfg.get("otlp") or {}).get("enabled", False))
+    if not (logfire_on or langsmith_on or phoenix_on or otlp_on):
         return
 
     try:
@@ -363,15 +372,16 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
         _bind_publisher(container, CompositePublisher([existing, otel_publisher]))
 
     logger.info(
-        "Observability enabled (logfire=%s, langsmith=%s, phoenix=%s, level=%s)",
+        "Observability enabled (logfire=%s, langsmith=%s, phoenix=%s, otlp=%s, level=%s)",
         logfire_on,
         langsmith_on,
         phoenix_on,
+        otlp_on,
         level,
     )
 
 
-def setup_otel_provider(settings) -> bool:
+def setup_otel_provider(settings, *, metrics_owned: bool = False) -> bool:
     """Configure OpenTelemetry traces and metrics (API and worker share this).
 
     Metrics use a MeterProvider with the same resource and endpoint (OTLP gRPC, or the console
@@ -385,6 +395,9 @@ def setup_otel_provider(settings) -> bool:
     configured and the app is not in production, so traces are visible locally
     without any collector. In production with no endpoint nothing is set up and a warning
     is logged. Returns True when a provider was installed.
+
+    With ``metrics_owned`` the ``metrics`` block already installed the MeterProvider, so no
+    second one is created here.
     """
     try:
         from opentelemetry import trace
@@ -429,7 +442,10 @@ def setup_otel_provider(settings) -> bool:
         logger.info("OTEL: no endpoint configured, printing spans to console")
 
     trace.set_tracer_provider(provider)
-    _setup_otel_metrics(resource, endpoint)
+    if metrics_owned:
+        logger.info("OTEL: metrics come from the metrics block")
+    else:
+        _setup_otel_metrics(resource, endpoint)
     return True
 
 
@@ -462,20 +478,71 @@ def _setup_otel_metrics(resource, endpoint: str | None) -> None:
     logger.info("OTEL: metrics enabled")
 
 
-def _setup_otel(app: FastAPI, settings) -> None:
-    """Configure OpenTelemetry tracing and instrument the FastAPI app."""
-    if not setup_otel_provider(settings):
-        return
+def _instrument_fastapi(app: FastAPI, *, tracing: bool, meter_provider=None) -> bool:
+    """The one ``instrument_app`` call (it can run only once per app).
+
+    HTTP spans go to the global tracer provider only with the legacy ``OTEL_ENABLED`` path;
+    otherwise they go to a no-op one, so they never reach an AI tracing backend. HTTP metrics
+    go to ``meter_provider`` when given, else to the global one.
+    """
     try:
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+        from opentelemetry.trace import NoOpTracerProvider
     except ImportError:
         logger.warning(
-            "OTEL_ENABLED=true but opentelemetry packages are not installed. "
-            "Install with: pip install '10xgraph-api[otel]'"
+            "FastAPI instrumentation skipped: opentelemetry packages are not installed. "
+            "Install with: pip install '10xgraph-api[otel]' or '10xgraph-api[metrics]'"
         )
-        return
-    FastAPIInstrumentor.instrument_app(app)
+        return False
+    kwargs: dict[str, Any] = {}
+    if not tracing:
+        kwargs["tracer_provider"] = NoOpTracerProvider()
+    if meter_provider is not None:
+        kwargs["meter_provider"] = meter_provider
+    FastAPIInstrumentor.instrument_app(app, **kwargs)
+    return True
+
+
+def _setup_otel(app: FastAPI, settings, meter_provider=None) -> bool:
+    """Configure OpenTelemetry tracing and instrument the FastAPI app.
+
+    ``meter_provider`` is the one from the ``metrics`` block; it then owns the metrics.
+    Returns True when the app was instrumented.
+    """
+    if not setup_otel_provider(settings, metrics_owned=meter_provider is not None):
+        return False
+    if not _instrument_fastapi(app, tracing=True, meter_provider=meter_provider):
+        return False
     logger.info("OTEL: FastAPI instrumentation active (service=%s)", settings.OTEL_SERVICE_NAME)
+    return True
+
+
+def _add_metrics_route(app: FastAPI, path: str) -> None:
+    """Serve the Prometheus registry at ``path``. Public like /ping: scrapers send no tokens,
+    so keep it on the private network."""
+    from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
+
+    def scrape() -> Response:
+        return Response(generate_latest(REGISTRY), media_type=CONTENT_TYPE_LATEST)
+
+    app.add_api_route(path, scrape, methods=["GET"], include_in_schema=False)
+
+
+def _setup_metrics(app: FastAPI, graph_config: GraphConfig | None):
+    """Start the ``metrics`` block (when on) and return the MeterProvider, else None."""
+    metrics_cfg = graph_config.metrics if graph_config is not None else None
+    if metrics_cfg is None or not metrics_cfg.enabled:
+        return None
+    provider = setup_metrics(metrics_cfg, role="api")
+    if provider is None:
+        return None
+    app.state.meter_provider = provider
+    if metrics_cfg.scrape_path:
+        try:
+            _add_metrics_route(app, metrics_cfg.scrape_path)
+        except ImportError:
+            logger.warning("Metrics scrape route skipped: install '10xgraph-api[metrics]'")
+    return provider
 
 
 def setup_middleware(
@@ -503,10 +570,16 @@ def setup_middleware(
     if StaleStateError is not None:
         app.add_exception_handler(StaleStateError, _stale_state_handler)
 
+    meter_provider = _setup_metrics(app, graph_config)
+
+    instrumented = False
     if settings.OTEL_ENABLED:
-        _setup_otel(app, settings)
+        instrumented = _setup_otel(app, settings, meter_provider)
         if container is not None:
             _attach_otel_publisher(container, settings, graph_config)
+    # HTTP metrics once: here unless the legacy path instrumented (it can fail, e.g. no endpoint).
+    if meter_provider is not None and not instrumented:
+        _instrument_fastapi(app, tracing=False, meter_provider=meter_provider)
 
     # Declarative Logfire/LangSmith wiring from 10xgraph.json (before compile).
     _setup_observability(container, graph_config)
@@ -537,10 +610,16 @@ def setup_middleware(
         path_limits=_upload_path_limits(settings.MAX_REQUEST_SIZE),
     )
 
+    scrape_path = graph_config.metrics.scrape_path if graph_config is not None else None
     # Apply rate limiting only when configured in 10xgraph.json
     if graph_config is not None:
         rate_limit_config = graph_config.rate_limit
         if rate_limit_config is not None:
+            if scrape_path:  # scrapes come every few seconds from one address
+                rate_limit_config = replace(
+                    rate_limit_config,
+                    exclude_paths=(*rate_limit_config.exclude_paths, scrape_path),
+                )
             # The counters live in the cache store, bound in the container at startup.
             app.add_middleware(
                 RateLimitMiddleware,
@@ -560,6 +639,7 @@ def setup_middleware(
 
     app.add_middleware(
         HealthCheckAwareTrustedHostMiddleware,
+        open_paths=(scrape_path,) if scrape_path else (),
         allowed_hosts=[h.strip() for h in settings.ALLOWED_HOST.split(",") if h.strip()],
     )
 

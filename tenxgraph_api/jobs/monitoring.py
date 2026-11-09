@@ -1,8 +1,8 @@
 """``MonitoringMiddleware``: log every TaskIQ hook and send the same as core publisher events
 when a ``BasePublisher`` is bound in the container. It also records two metrics through core's
-metrics facade (exported when OTEL is enabled): ``tenxgraph.task.runs`` (attributes ``task``,
-``status`` = queued, success, failure, cancelled) and ``tenxgraph.task.duration_ms`` (attribute
-``task``). Never raises."""
+metrics facade (exported by the ``metrics`` block of 10xgraph.json, or the legacy OTEL path):
+``tenxgraph.task.runs`` (attributes ``task``, ``status`` = queued, success, failure, cancelled)
+and ``tenxgraph.task.duration`` (attribute ``task``). Never raises."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from tenxgraph_api.jobs.context import TaskCancelled
 logger = logging.getLogger("tenxgraph_api.jobs")
 MESSAGE_LIMIT = 500
 RUNS_METRIC = "tenxgraph.task.runs"
-DURATION_METRIC = "tenxgraph.task.duration_ms"
+DURATION_METRIC = "tenxgraph.task.duration"
 
 
 class MonitoringMiddleware(TaskiqMiddleware):

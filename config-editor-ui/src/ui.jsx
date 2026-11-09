@@ -53,12 +53,12 @@ export function Segmented({ id, label, options, value, onPick }) {
   );
 }
 
-export function Select({ id, options, value, invalid, onChange }) {
+export function Select({ id, options, value, invalid, onChange, plain }) {
   return (
     <div class="relative">
       <select
         id={id} value={value}
-        class={`input cursor-pointer appearance-none pr-9 font-mono ${invalid ? "input-invalid" : ""}`}
+        class={`input cursor-pointer appearance-none pr-9 ${plain ? "" : "font-mono"} ${invalid ? "input-invalid" : ""}`}
         onChange={(e) => onChange(e.currentTarget.value)}
       >
         {options.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
@@ -233,5 +233,17 @@ export function EmptyPanel({ icon, tint, title, text, children }) {
       <p class="mx-auto mt-1 max-w-xs text-sm leading-6 text-muted">{text}</p>
       {children}
     </div>
+  );
+}
+
+// Chevron disclosure, the same one the sections use for "Set in .env".
+export function Disclosure({ title, open, class: cls = "", children }) {
+  return (
+    <details class={`group ${cls}`} open={open}>
+      <summary class="focus-ring flex min-h-11 cursor-pointer list-none items-center gap-2 font-medium text-muted [&::-webkit-details-marker]:hidden">
+        <Icon name="chevronRight" class="size-4 transition-transform duration-150 group-open:rotate-90" />{title}
+      </summary>
+      {children}
+    </details>
   );
 }

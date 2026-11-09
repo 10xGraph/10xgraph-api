@@ -81,6 +81,14 @@ ACP support is in `tenxgraph/runtime/protocols/acp.py`. Treat it as a runtime pr
 - In Python: `setup_phoenix(graph, project=..., endpoint=..., api_key=...)` or `PhoenixPublisher(...)`, both from `tenxgraph.runtime.publisher`, used like `setup_langsmith` / `LangsmithPublisher`. Call before `graph.compile()`.
 - `PHOENIX_API_KEY` is env only and optional (a local Phoenix needs none). Never put it in the config file.
 
+## OTLP tracing and the metrics block
+
+- AI traces to any OTLP HTTP receiver (collector, Tempo, Jaeger, Grafana Cloud; not Prometheus): install `pip install '10xgraph[otlp]'`, config `"observability": {"otlp": {"enabled": true, "endpoint": "http://collector:4318"}}`. `/v1/traces` is appended. With a null endpoint, env `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is required (`OTEL_EXPORTER_OTLP_ENDPOINT` is not used). In Python: `setup_otlp(graph, endpoint=...)` before `graph.compile()`. Auth headers: env `OTEL_EXPORTER_OTLP_HEADERS` only.
+- `observability.otlp.use_metrics_endpoint: true` reuses `metrics.otlp.endpoint` (needs metrics on with `export: "otlp"`). The URL must take traces; a Prometheus `/api/v1/otlp` URL does not.
+- HTTP request spans never go to AI tracing; the server turns FastAPI's own telemetry off.
+- Metrics are separate from tracing: `"metrics": {"enabled": true, "export": "otlp" | "prometheus", "otlp": {"endpoint": ...}, "prometheus": {"path": "/metrics", "worker_port": 9464}, "latency_buckets_ms": [...]}`. Needs `pip install '10xgraph-api[metrics]'`. Prometheus scrape covers one process (API route, worker port); with several gunicorn or TaskIQ processes use OTLP push. The scrape route has no auth, keep it on a private network.
+- Core metrics include `tenxgraph.llm.duration` (provider, model, status) and `tenxgraph.llm.tokens` (provider, model, type); the task metrics are `tenxgraph.task.runs` and `tenxgraph.task.duration`.
+
 ## Rules
 
 - Prefer publisher events for observability instead of ad hoc print/log statements in reusable runtime paths.

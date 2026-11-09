@@ -131,6 +131,15 @@ otel = [
     "opentelemetry-instrumentation-fastapi>=0.40b0",
     "opentelemetry-exporter-otlp>=1.20.0",
 ]
+# Metrics export (OTLP push or Prometheus scrape); floors are the tested versions.
+metrics = [
+    "opentelemetry-api>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
+    "opentelemetry-instrumentation-fastapi>=0.66b2",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.2",
+    "opentelemetry-exporter-prometheus>=0.66b2",
+    "prometheus-client>=0.26.0",
+]
 ag-ui = [
     "ag-ui-protocol>=1.0,<2",
 ]

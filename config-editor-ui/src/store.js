@@ -7,7 +7,7 @@
 // are pages of their own rather than schema sections.
 export const NAV = [
   { label: null, items: ["get-running"] },
-  { label: "Before production", items: ["auth", "cache_store", "observability"] },
+  { label: "Before production", items: ["auth", "cache_store", "observability", "metrics"] },
   { label: "Runs and streaming", items: ["runs", "websocket", "ag_ui", "remote_tools", "media"] },
   { label: "Project wiring", items: ["checkpointer", "id_generator", "thread_name_generator", "store", "injectq"] },
   { label: "Developer tools", items: ["test", "evaluation"] },
@@ -155,6 +155,7 @@ export const fieldChanged = (f) => {
 export const sectionChanged = (sec) => {
   if (sec.id === "core") return false;
   if (sec.id === "auth") return store.config.auth != null;
+  if (sec.id === "metrics") return store.config.metrics?.enabled === true;
   return sec.optional ? isOn(sec) : sec.fields.some(fieldChanged);
 };
 // Highest-severity issue of a section, or null.

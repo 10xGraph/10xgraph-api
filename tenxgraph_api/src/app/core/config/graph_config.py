@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError,
 if TYPE_CHECKING:
     from tenxgraph_api.jobs.config import WorkerConfig
     from tenxgraph_api.src.app.core.auth.auth_config import AuthConfig
+    from tenxgraph_api.src.app.core.config.metrics import MetricsConfig
 
 
 logger = logging.getLogger("tenxgraph_api")
@@ -975,6 +976,13 @@ class GraphConfig:
         """
         data = self.data.get("ag_ui", None)
         return AgUiConfig.from_dict({} if data is None else data)
+
+    @property
+    def metrics(self) -> "MetricsConfig":
+        """The ``metrics`` block (OTLP push or Prometheus scrape); off when absent."""
+        from tenxgraph_api.src.app.core.config.metrics import MetricsConfig
+
+        return MetricsConfig.model_validate(self.data.get("metrics") or {})
 
     @property
     def media(self) -> MediaConfig:

@@ -12,10 +12,12 @@ Section shape::
         "description": "...",
         "key": "observability",  # top-level key, or None for root-level fields
         "optional": True,  # renders an on/off toggle for the whole key
+        "self_managed": False,  # True: no toggle, the widget adds and removes the key itself
         "off_summary": "...",  # what happens while the key is absent
         "default": {...},  # value written when the toggle is switched on
         "widget": None,  # custom renderer: "auth", "remote_tools",
-        # "cache_store", "id_generator", "thread_name_generator"
+        # "cache_store", "id_generator", "thread_name_generator",
+        # "observability", "metrics"
         "choices": [["value", "Label", "One line of help"]],  # widget sections with a dropdown
         "fields": [...],  # generic fields, paths are relative to the root
         "notes": ["..."],  # extra hints (secrets that belong in .env, ...)
@@ -87,6 +89,7 @@ KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
         "ag_ui",
         "media",
         "observability",
+        "metrics",
         "injectq",
         "store",
         "store_allow_tenant_mismatch",
@@ -642,21 +645,22 @@ _SECTIONS: list[dict[str, Any]] = [
     },
     {
         "id": "observability",
-        "title": "Observability",
-        "description": "Trace graph runs to Logfire, LangSmith and/or Phoenix.",
+        "title": "AI tracing",
+        "description": (
+            "Traces of graph runs, LLM calls and tools, sent to the services you pick. "
+            "Never metrics: see Metrics for request rate and latency."
+        ),
         "key": "observability",
         "optional": True,
         "off_summary": "Graph runs are not traced.",
-        "default": {
-            "level": "standard",
-            "logfire": {"enabled": False},
-            "langsmith": {"enabled": False},
-            "phoenix": {"enabled": False},
-        },
+        "self_managed": True,
+        "default": {"level": "standard", "user_id_mode": "raw"},
+        "widget": "observability",
         "fields": [
             {
                 "path": ["observability", "level"],
                 "group": "Tracing",
+                "managed": True,
                 "default": "standard",
                 "label": "Level",
                 "type": "select",
@@ -666,6 +670,7 @@ _SECTIONS: list[dict[str, Any]] = [
             {
                 "path": ["observability", "user_id_mode"],
                 "group": "Tracing",
+                "managed": True,
                 "default": "raw",
                 "label": "User id in traces",
                 "type": "select",
@@ -676,31 +681,25 @@ _SECTIONS: list[dict[str, Any]] = [
                 ),
             },
             {
-                "path": ["observability", "logfire", "enabled"],
-                "group": "Logfire",
-                "default": False,
-                "label": "Logfire",
-                "type": "bool",
-            },
-            {
                 "path": ["observability", "logfire", "service_name"],
                 "group": "Logfire",
-                "label": "Logfire service name",
+                "managed": True,
+                "label": "Service name",
                 "type": "text",
                 "placeholder": "my-agent",
-                "show_if": {"path": ["observability", "logfire", "enabled"], "equals": True},
             },
             {
                 "path": ["observability", "logfire", "send_to_logfire"],
                 "group": "Logfire",
+                "managed": True,
                 "default": True,
                 "label": "Send to Logfire",
                 "type": "bool",
-                "show_if": {"path": ["observability", "logfire", "enabled"], "equals": True},
             },
             {
                 "path": ["observability", "logfire", "console"],
                 "group": "Logfire",
+                "managed": True,
                 "label": "Print spans to console",
                 "type": "bool",
                 "unset_label": "Default: Logfire's own console behavior",
@@ -709,57 +708,63 @@ _SECTIONS: list[dict[str, Any]] = [
                     "Only Default or Off work from this file. Logfire takes False or a "
                     "ConsoleOptions object, which JSON cannot express, so true is rejected."
                 ),
-                "show_if": {"path": ["observability", "logfire", "enabled"], "equals": True},
-            },
-            {
-                "path": ["observability", "langsmith", "enabled"],
-                "group": "LangSmith",
-                "default": False,
-                "label": "LangSmith",
-                "type": "bool",
             },
             {
                 "path": ["observability", "langsmith", "project"],
                 "group": "LangSmith",
-                "label": "LangSmith project",
+                "managed": True,
+                "label": "Project",
                 "type": "text",
                 "placeholder": "my-agent",
-                "show_if": {"path": ["observability", "langsmith", "enabled"], "equals": True},
             },
             {
                 "path": ["observability", "langsmith", "endpoint"],
                 "group": "LangSmith",
-                "label": "LangSmith endpoint",
+                "managed": True,
+                "label": "Endpoint",
                 "type": "text",
                 "placeholder": "https://api.smith.langchain.com/otel",
-                "show_if": {"path": ["observability", "langsmith", "enabled"], "equals": True},
-            },
-            {
-                "path": ["observability", "phoenix", "enabled"],
-                "group": "Phoenix",
-                "default": False,
-                "label": "Phoenix",
-                "type": "bool",
             },
             {
                 "path": ["observability", "phoenix", "project"],
                 "group": "Phoenix",
-                "label": "Phoenix project",
+                "managed": True,
+                "label": "Project",
                 "type": "text",
                 "placeholder": "my-agent",
-                "show_if": {"path": ["observability", "phoenix", "enabled"], "equals": True},
             },
             {
                 "path": ["observability", "phoenix", "endpoint"],
                 "group": "Phoenix",
-                "label": "Phoenix endpoint",
+                "managed": True,
+                "label": "Endpoint",
                 "type": "text",
                 "placeholder": "http://localhost:6006",
                 "help": "Base collector URL. /v1/traces is appended.",
-                "show_if": {"path": ["observability", "phoenix", "enabled"], "equals": True},
+            },
+            {
+                "path": ["observability", "otlp", "use_metrics_endpoint"],
+                "group": "OTLP",
+                "managed": True,
+                "default": False,
+                "label": "Use the metrics endpoint",
+                "type": "bool",
+                "help": "Send traces to the same endpoint as the metrics.",
+            },
+            {
+                "path": ["observability", "otlp", "endpoint"],
+                "group": "OTLP",
+                "managed": True,
+                "label": "Endpoint",
+                "type": "text",
+                "placeholder": "http://collector:4318",
+                "help": (
+                    "Base URL of an OTLP HTTP receiver. /v1/traces is appended. Auth headers "
+                    "come from OTEL_EXPORTER_OTLP_HEADERS."
+                ),
             },
         ],
-        "notes": ["Tokens stay in .env: LOGFIRE_TOKEN, LANGSMITH_API_KEY and PHOENIX_API_KEY."],
+        "notes": [],
         "env": [
             {
                 "name": "LOGFIRE_TOKEN",
@@ -774,12 +779,20 @@ _SECTIONS: list[dict[str, Any]] = [
                 "purpose": "Phoenix API key. Optional; a local Phoenix needs none.",
             },
             {
+                "name": "OTEL_EXPORTER_OTLP_HEADERS",
+                "purpose": "Auth headers for the OTLP destination, as key=value pairs.",
+            },
+            {
+                "name": "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+                "purpose": "OTLP traces endpoint used when the OTLP endpoint field is empty.",
+            },
+            {
                 "name": "TENXGRAPH_TRACE_USER_ID_KEY",
                 "purpose": "Secret that keys the hash of user ids in traces when the mode is hash.",
             },
             {
                 "name": "OTEL_ENABLED",
-                "purpose": "Export OpenTelemetry traces from the API server. Defaults to false.",
+                "purpose": "Export OpenTelemetry traces from the API server (off unless set to true).",
             },
             {
                 "name": "OTEL_LEVEL",
@@ -787,11 +800,92 @@ _SECTIONS: list[dict[str, Any]] = [
             },
             {
                 "name": "OTEL_SERVICE_NAME",
-                "purpose": "Service name on OpenTelemetry traces. Defaults to 10xgraph-api.",
+                "purpose": "Service name on OpenTelemetry traces (10xgraph-api when unset).",
             },
             {
                 "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
                 "purpose": "OTLP endpoint that receives the traces.",
+            },
+        ],
+    },
+    {
+        "id": "metrics",
+        "title": "Metrics",
+        "description": (
+            "Request rate, latency percentiles, errors and task throughput for Prometheus and "
+            "Grafana, from the API server and the worker. Never AI traces."
+        ),
+        "key": "metrics",
+        "optional": True,
+        "off_summary": "No metrics are exported.",
+        "default": {"enabled": True, "export": "otlp", "otlp": {"endpoint": None}},
+        "self_managed": True,
+        "widget": "metrics",
+        "fields": [
+            {
+                "path": ["metrics", "export"],
+                "managed": True,
+                "label": "Export metrics",
+                "type": "select",
+                "options": [
+                    ["otlp", "OTLP push (recommended for production)"],
+                    ["prometheus", "Prometheus scrape (single process)"],
+                ],
+            },
+            {
+                "path": ["metrics", "otlp", "endpoint"],
+                "managed": True,
+                "label": "OTLP endpoint",
+                "type": "text",
+                "placeholder": "http://collector:4318",
+                "help": (
+                    "Base URL of an OTLP HTTP receiver. /v1/metrics is appended. For Prometheus "
+                    "use http://prometheus:9090/api/v1/otlp, started with "
+                    "--web.enable-otlp-receiver. Auth headers come from "
+                    "OTEL_EXPORTER_OTLP_HEADERS."
+                ),
+            },
+            {
+                "path": ["metrics", "prometheus", "path"],
+                "managed": True,
+                "default": "/metrics",
+                "label": "Scrape path",
+                "type": "text",
+                "placeholder": "/metrics",
+                "help": "Route on the API server that Prometheus scrapes.",
+            },
+            {
+                "path": ["metrics", "prometheus", "worker_port"],
+                "managed": True,
+                "default": 9464,
+                "label": "Worker port",
+                "type": "number",
+                "min": 1,
+                "step": 1,
+                "help": "Port where each worker serves its own metrics.",
+            },
+            {
+                "path": ["metrics", "latency_buckets_ms"],
+                "managed": True,
+                "default": [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000],
+                "label": "Latency buckets (ms)",
+                "type": "list",
+                "placeholder": "250",
+                "help": "Upper bounds of the latency histogram buckets, ascending.",
+            },
+        ],
+        "env": [
+            {
+                "name": "OTEL_EXPORTER_OTLP_HEADERS",
+                "purpose": "Auth headers for OTLP push and OTLP tracing, as key=value pairs.",
+            },
+            {
+                "name": "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+                "purpose": "OTLP metrics endpoint used when the endpoint field is empty.",
+            },
+            {
+                "name": "OTEL_SERVICE_NAME",
+                "purpose": "Service name on metrics (10xgraph-api when unset).",
             },
         ],
     },

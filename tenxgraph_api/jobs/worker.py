@@ -50,9 +50,11 @@ async def worker_startup(state: TaskiqState) -> None:
 
     The ``taskiq worker`` CLI has imported the task modules before this event.
     """
+    from tenxgraph_api.src.app.core.config.metrics import setup_metrics
     from tenxgraph_api.src.app.core.config.settings import get_settings
     from tenxgraph_api.src.app.core.config.setup_middleware import (
         _attach_otel_publisher,
+        _setup_observability,
         setup_otel_provider,
     )
     from tenxgraph_api.src.app.loader import attach_all_modules, load_container
@@ -63,9 +65,15 @@ async def worker_startup(state: TaskiqState) -> None:
     container = load_container(graph_config.injectq_path) or InjectQ.get_instance()
     container.bind_instance(GraphConfig, graph_config)
     settings = get_settings()
-    if settings.OTEL_ENABLED:  # same traces as the API; before the graph freezes BasePublisher
-        setup_otel_provider(settings)
+    metrics_cfg = graph_config.metrics
+    state.meter_provider = (
+        setup_metrics(metrics_cfg, role="worker") if metrics_cfg.enabled else None
+    )
+    # Same traces as the API; before the graph freezes BasePublisher.
+    if settings.OTEL_ENABLED:
+        setup_otel_provider(settings, metrics_owned=state.meter_provider is not None)
         _attach_otel_publisher(container, settings, graph_config)
+    _setup_observability(container, graph_config)
     state.container = container
     state.graph = await attach_all_modules(graph_config, container)
     if settings.STARTUP_CHECKS:
@@ -75,8 +83,10 @@ async def worker_startup(state: TaskiqState) -> None:
 
 
 async def worker_shutdown(state: TaskiqState) -> None:
-    """Close the graph (and with it the checkpointer and store), then the cache store."""
+    """Close the graph (and with it the checkpointer and store), then the cache store, then
+    send the last metrics and AI spans."""
     from tenxgraph_api.src.app.core.cache_store import BaseCacheStore
+    from tenxgraph_api.src.app.core.config.metrics import flush_telemetry
     from tenxgraph_api.src.app.core.config.settings import get_settings
 
     container = getattr(state, "container", None) or InjectQ.get_instance()
@@ -97,6 +107,8 @@ async def worker_shutdown(state: TaskiqState) -> None:
             await cache_store.aclose()
     except Exception as exc:
         logger.warning("Cache store close failed: %s", exc)
+    # Last: taskiq bounds this hook (--shutdown-timeout), so a slow collector cuts only this.
+    await flush_telemetry(getattr(state, "meter_provider", None))
 
 
 if worker_config is not None:

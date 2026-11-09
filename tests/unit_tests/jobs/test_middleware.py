@@ -351,7 +351,7 @@ async def test_monitoring_records_run_counters_and_duration(monitored, meter):
         ("stopped", "queued"),
         ("stopped", "cancelled"),
     }
-    durations = [c for c in meter.calls if c[1] == "tenxgraph.task.duration_ms"]
+    durations = [c for c in meter.calls if c[1] == "tenxgraph.task.duration"]
     assert len(durations) == 3
     assert all(c[0] == "histogram" and c[2] >= 0 and set(c[3]) == {"task"} for c in durations)
 

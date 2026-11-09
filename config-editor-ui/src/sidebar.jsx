@@ -9,7 +9,7 @@ function Markers({ id }) {
   if (!changed && !issue) return null;
   return (
     <span class="flex shrink-0 gap-1">
-      {changed ? <span class="size-2 rounded-full bg-brand" title="Changed from default" /> : null}
+      {changed ? <span class="size-2 rounded-full bg-brand" title={section(id).self_managed ? "Configured" : "Changed from default"} /> : null}
       {issue ? (
         <span
           class={`size-2 rounded-full ${issue.level === "error" ? "bg-danger" : "bg-warn"}`}

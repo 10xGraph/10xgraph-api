@@ -883,3 +883,130 @@ def test_worker_unsupported_type_is_refused(worker: dict, path: str, message: st
     issues = validate_config({"agent": "a:b", "worker": worker})
     matching = [i for i in issues if i["path"] == path]
     assert [i["message"] for i in matching] == [message]
+
+
+# ---------------------------------------------------------------------------
+# AI tracing destinations and metrics
+# ---------------------------------------------------------------------------
+
+_FULL_TELEMETRY = {
+    "agent": "graph.react:app",
+    "observability": {
+        "level": "full",
+        "logfire": {"enabled": True, "service_name": "svc", "send_to_logfire": False},
+        "langsmith": {"enabled": True, "project": "p", "endpoint": "https://smith.example/otel"},
+        "phoenix": {"enabled": True, "project": "p", "endpoint": "http://localhost:6006"},
+        "otlp": {"enabled": True, "use_metrics_endpoint": True},
+    },
+    "metrics": {
+        "enabled": True,
+        "export": "otlp",
+        "otlp": {"endpoint": "http://collector:4318"},
+        "latency_buckets_ms": [100, 500, 1000],
+    },
+}
+
+
+def _section(section_id: str) -> dict:
+    return next(s for s in build_schema()["sections"] if s["id"] == section_id)
+
+
+def test_tracing_and_metrics_sections() -> None:
+    tracing, metrics = _section("observability"), _section("metrics")
+    assert tracing["widget"] == "observability" and metrics["widget"] == "metrics"
+    assert tracing["title"] == "AI tracing" and tracing["key"] == "observability"
+    assert tracing["self_managed"] is True and metrics["self_managed"] is True
+    assert tracing["notes"] == [] and tracing["default"]["user_id_mode"] == "raw"
+    assert all(
+        s.get("self_managed", False) is False
+        for s in build_schema()["sections"]
+        if s["id"] not in ("observability", "metrics")
+    )
+    assert metrics["key"] == "metrics" and metrics["optional"] is True
+    assert "metrics" in KNOWN_TOP_LEVEL_KEYS
+    assert section_for_key("metrics") == "metrics"
+    paths = {".".join(f["path"]) for f in tracing["fields"]}
+    assert {"observability.otlp.endpoint", "observability.otlp.use_metrics_endpoint"} <= paths
+    assert all(f["managed"] for f in tracing["fields"] + metrics["fields"])
+    assert {".".join(f["path"]) for f in metrics["fields"]} == {
+        "metrics.export",
+        "metrics.otlp.endpoint",
+        "metrics.prometheus.path",
+        "metrics.prometheus.worker_port",
+        "metrics.latency_buckets_ms",
+    }
+    names = {e["name"] for e in metrics["env"]}
+    assert names == {
+        "OTEL_EXPORTER_OTLP_HEADERS",
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+        "OTEL_SERVICE_NAME",
+    }
+    from tenxgraph_api.src.app.core.config.metrics import DEFAULT_BUCKETS_MS
+
+    buckets = next(f for f in metrics["fields"] if f["path"][-1] == "latency_buckets_ms")
+    assert buckets["default"] == DEFAULT_BUCKETS_MS
+    assert metrics["default"] == {"enabled": True, "export": "otlp", "otlp": {"endpoint": None}}
+
+
+def test_full_telemetry_config_round_trips(tmp_path: Path) -> None:
+    store = ConfigFileStore(tmp_path / "10xgraph.json")
+    store.save(_FULL_TELEMETRY, None)
+    assert json.loads((tmp_path / "10xgraph.json").read_text()) == _FULL_TELEMETRY
+    issues = validate_config(_FULL_TELEMETRY)
+    assert [i for i in issues if i["section"] in ("observability", "metrics")] == []
+
+
+def test_metrics_validation() -> None:
+    def check(metrics: object) -> list[dict]:
+        issues = validate_config({"agent": "a:b", "metrics": metrics})
+        return [i for i in issues if i["section"] == "metrics"]
+
+    assert [i["path"] for i in check({"enabled": True})] == ["metrics.export"]
+    assert [i["path"] for i in check({"enabled": True, "export": "otlp"})] == [
+        "metrics.otlp.endpoint"
+    ]
+    assert check({"enabled": True, "export": "prometheus"}) == []
+    assert check({"enabled": False}) == []
+    assert check({"latency_buckets_ms": [5, 1]})[0]["path"] == "metrics.latency_buckets_ms"
+    assert check({"prometheus": {"worker_port": 0}})[0]["path"] == "metrics.prometheus.worker_port"
+    assert check("on")[0]["path"] == "metrics"
+
+
+def test_otlp_tracing_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
+
+    def check(otlp: dict, metrics: dict | None = None) -> list[dict]:
+        config: dict = {"agent": "a:b", "observability": {"otlp": {"enabled": True, **otlp}}}
+        if metrics is not None:
+            config["metrics"] = metrics
+        return [i for i in validate_config(config) if i["path"].startswith("observability")]
+
+    missing = check({})
+    assert [(i["level"], i["path"]) for i in missing] == [("error", "observability.otlp.endpoint")]
+    assert check({"endpoint": "http://collector:4318"}) == []
+
+    shared = "observability.otlp.use_metrics_endpoint"
+    unset = check({"use_metrics_endpoint": True})
+    assert [(i["level"], i["path"]) for i in unset] == [("warning", shared)]
+    prom_metrics = {"enabled": True, "export": "prometheus"}
+    assert [i["level"] for i in check({"use_metrics_endpoint": True}, prom_metrics)] == ["warning"]
+    good = {"enabled": True, "export": "otlp", "otlp": {"endpoint": "http://collector:4318"}}
+    assert check({"use_metrics_endpoint": True}, good) == []
+
+    prom = {"enabled": True, "export": "otlp", "otlp": {"endpoint": "http://p:9090/api/v1/otlp"}}
+    assert [i["path"] for i in check({"use_metrics_endpoint": True}, prom)] == [shared]
+    own = check({"endpoint": "http://p:9090/api/v1/otlp"})
+    assert [(i["level"], i["path"]) for i in own] == [("warning", "observability.otlp.endpoint")]
+
+    bad = check({"use_metrics_endpoint": "yes"})
+    assert _levels(bad, shared) == ["error"]
+
+
+def test_nothing_traced_warning_counts_otlp() -> None:
+    none = validate_config({"agent": "a:b", "observability": {"otlp": {"enabled": False}}})
+    warn = next(i for i in none if i["path"] == "observability")
+    assert "OTLP" in warn["message"]
+    on = validate_config(
+        {"agent": "a:b", "observability": {"otlp": {"enabled": True, "endpoint": "http://c:4318"}}}
+    )
+    assert _levels(on, "observability") == []
