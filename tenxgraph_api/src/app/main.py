@@ -99,7 +99,11 @@ async def _prepare_checkpointer() -> None:
     missing permission shows in the boot log instead of on the first request. Best effort:
     the checkpointer also creates its schema on its first query, so a failure here only logs.
     """
-    checkpointer = container.try_get("checkpointer") or container.try_get("BaseCheckpointer")
+    from tenxgraph_api.src.app.routers.ping.readiness import readiness_targets
+
+    # The graph binds its checkpointer under the BaseCheckpointer class (never a string
+    # key); the same lookup the startup check and /health/ready use.
+    checkpointer = readiness_targets(container)[0]
     asetup = getattr(checkpointer, "asetup", None)
     if not callable(asetup):
         return
