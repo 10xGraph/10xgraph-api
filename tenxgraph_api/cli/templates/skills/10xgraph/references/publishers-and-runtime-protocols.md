@@ -28,6 +28,13 @@ Publishers receive structured events from graph/tool execution. Use them for tra
 to stdout by default; pass `ConsolePublisher({"use_logger": True})` to route events through the
 `tenxgraph.publisher` logger instead of stdout.
 
+Publisher kinds:
+
+- `BasePublisher.kind` is `"events"` by default (type `PublisherKind = Literal["events", "observability"]`). `OtelPublisher` sets `"observability"`, so `LogfirePublisher`, `LangsmithPublisher` and `PhoenixPublisher` have it too. A custom tracing backend sets `kind = "observability"`.
+- `publish_event(event, only="events")` sends to event publishers only; `only="observability"` to tracing publishers only; `None` (default) to all. It works inside a `CompositePublisher`, also nested.
+- Event publishers (Kafka, Redis, RabbitMQ, console, custom) are bound in code; there is no `10xgraph.json` key. Tracing publishers come from the `observability` block. `metrics` never goes through publishers.
+- Routing: graph, node, LLM and tool events (AI errors included) go to event publishers and tracing, plus logs and LLM metrics. Task lifecycle events (queued, started, finished, saved, cancelled) go to event publishers only (`only="events"`), plus task metrics and logs. A task failure is not published: ERROR log and `tenxgraph.task.runs{status="failure"}`. API HTTP errors are not published: HTTP metrics and logs.
+
 Realtime adds an `Event.REALTIME` event source and a `ContentType.TRANSCRIPT` content type (see
 `realtime.md`).
 

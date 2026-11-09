@@ -171,6 +171,22 @@ class FakePublisher(BasePublisher):
     def sync_close(self): ...
 
 
+@pytest.fixture(autouse=True)
+def only_calls(monkeypatch):
+    """Record the ``only`` argument of each publish_event call. The installed core may predate
+    ``only``, so the stand-in drops it before calling the real function."""
+    from tenxgraph.runtime.publisher import publish
+
+    real, seen = publish.publish_event, []
+
+    def fake(event, publisher, task_manager, only=None):
+        seen.append(only)
+        real(event, publisher=publisher, task_manager=task_manager)
+
+    monkeypatch.setattr(publish, "publish_event", fake)
+    return seen
+
+
 @pytest_asyncio.fixture
 async def monitored():
     env = Env(InMemoryCacheStore(), MonitoringMiddleware(), TaskMiddleware())
@@ -181,7 +197,7 @@ async def monitored():
     await env.broker.shutdown()
 
 
-async def test_monitoring_logs_and_publishes(monitored, caplog):
+async def test_monitoring_logs_and_publishes(monitored, caplog, only_calls):
     env, manager = monitored
     publisher = FakePublisher()
     env.container.bind_instance(BasePublisher, publisher)
@@ -210,7 +226,6 @@ async def test_monitoring_logs_and_publishes(monitored, caplog):
         ok_events = list(publisher.events)
         caplog.clear()
         failed = await run(boom)
-        failed_events = list(publisher.events)
         failed_records = list(caplog.records)
         caplog.clear()
         cancelled = await run(stopped)
@@ -225,16 +240,9 @@ async def test_monitoring_logs_and_publishes(monitored, caplog):
     ]
     assert ok_events[2].data["duration"] >= 0
     assert "return_value" not in ok_events[3].data
-    assert failed == [
-        ("queued", "update"),
-        ("started", "start"),
-        ("failed", "error"),
-        ("saved", "result"),
-    ]
-    error = failed_events[2]
-    assert error.is_error and error.data["error"] == "ValueError"
-    assert error.data["message"].startswith("bad x") and len(error.data["message"]) == 500
-    assert error.data["attempt"] == 1 and "duration" in error.data
+    assert only_calls and set(only_calls) == {"events"}
+    # A failure is logged and counted but not published (no "failed" event).
+    assert failed == [("queued", "update"), ("started", "start"), ("saved", "result")]
     logged = [
         r for r in failed_records if r.levelno == logging.ERROR and r.name == "tenxgraph_api.jobs"
     ]
@@ -255,7 +263,7 @@ async def test_monitoring_logs_and_publishes(monitored, caplog):
     assert any("cancelled" in r.getMessage() for r in cancelled_records)
 
 
-async def test_monitoring_counts_retries():
+async def test_monitoring_counts_retries(caplog):
     env = Env(
         InMemoryCacheStore(), SimpleRetryMiddleware(default_retry_count=3), MonitoringMiddleware()
     )
@@ -269,11 +277,17 @@ async def test_monitoring_counts_retries():
     async def flaky() -> str:
         raise RuntimeError("again")
 
+    caplog.set_level(logging.ERROR, logger="tenxgraph_api.jobs")
     handle = await kiq_with_id(flaky)
     await handle.wait_result(timeout=5)
     await asyncio.sleep(0.3)  # retries are re-sent in the background
     await manager.wait_for_all(timeout=5)
-    attempts = [e.data["attempt"] for e in publisher.events if e.metadata["phase"] == "failed"]
+    assert not [e for e in publisher.events if e.is_error]
+    attempts = [
+        int(r.getMessage().split("failed on attempt ")[1].split()[0])
+        for r in caplog.records
+        if "failed on attempt" in r.getMessage()
+    ]
     assert attempts == [1, 2, 3]
     await env.broker.shutdown()
 

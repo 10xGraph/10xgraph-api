@@ -648,7 +648,8 @@ _SECTIONS: list[dict[str, Any]] = [
         "title": "AI tracing",
         "description": (
             "Traces of graph runs, LLM calls and tools, sent to the services you pick. "
-            "Never metrics: see Metrics for request rate and latency."
+            "These are observability publishers: event publishers (Kafka, Redis, RabbitMQ) "
+            "are set in code. Never metrics: see Metrics for request rate and latency."
         ),
         "key": "observability",
         "optional": True,

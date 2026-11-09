@@ -210,6 +210,17 @@ function DestinationCard({ dest }) {
   );
 }
 
+// Shown with and without a destination, so the difference is visible while picking one.
+function KindNote() {
+  return (
+    <p class={note}>
+      These are observability publishers. They get graph, node, LLM and tool spans, AI errors included.
+      Event publishers (Kafka, Redis, RabbitMQ) are set in code and also get task events.
+      API and worker errors go to Metrics and logs.
+    </p>
+  );
+}
+
 export function TracingWidget() {
   const [adding, setAdding] = useState(false);
   const chosen = DESTINATIONS.filter((d) => isPicked(d.key));
@@ -226,6 +237,7 @@ export function TracingWidget() {
             onChange={(v) => { if (v) addDestination(v); }}
           />
           <p class={note}>Graph runs are not traced.</p>
+          <KindNote />
         </div>
       ) : (
         <>
@@ -247,6 +259,7 @@ export function TracingWidget() {
               </button>
             )
           ) : null}
+          <div class="max-w-[520px]"><KindNote /></div>
           <h2 class="eyebrow mt-8">Trace settings</h2>
           <div class="grid gap-x-6 sm:grid-cols-2">
             <SelectField
