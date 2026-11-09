@@ -453,7 +453,7 @@ def test_setup_middleware_all():
         assert len(rate_limit) == 1
         assert rate_limit[0].kwargs == {"config": rate_limit_config, "container": container}
         assert not hasattr(app.state, "rate_limit_backend")
-        mock_setup_otel.assert_called_once_with(app, settings, None)
+        mock_setup_otel.assert_called_once_with(app, settings, None, None)
         mock_attach.assert_called_once_with(container, settings, graph_config)
 
 

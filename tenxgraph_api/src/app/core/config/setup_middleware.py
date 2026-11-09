@@ -1,3 +1,5 @@
+import os
+import re
 import uuid
 from dataclasses import replace
 from datetime import datetime
@@ -478,12 +480,26 @@ def _setup_otel_metrics(resource, endpoint: str | None) -> None:
     logger.info("OTEL: metrics enabled")
 
 
-def _instrument_fastapi(app: FastAPI, *, tracing: bool, meter_provider=None) -> bool:
+def _excluded_urls(app: FastAPI, scrape_path: str) -> str:
+    """Comma-separated URL regexes the instrumentation skips: the scrape route (so scraping does
+    not show up in the HTTP metrics) plus whatever the standard env variables already exclude.
+    Passing ``excluded_urls`` replaces those variables, hence they are merged here."""
+    own = rf"^\w+://[^/]*{re.escape(app.root_path)}{re.escape(scrape_path)}(\?|$)"
+    env = os.environ.get("OTEL_PYTHON_FASTAPI_EXCLUDED_URLS") or os.environ.get(
+        "OTEL_PYTHON_EXCLUDED_URLS", ""
+    )
+    return f"{env},{own}" if env else own
+
+
+def _instrument_fastapi(
+    app: FastAPI, *, tracing: bool, meter_provider=None, scrape_path: str | None = None
+) -> bool:
     """The one ``instrument_app`` call (it can run only once per app).
 
     HTTP spans go to the global tracer provider only with the legacy ``OTEL_ENABLED`` path;
     otherwise they go to a no-op one, so they never reach an AI tracing backend. HTTP metrics
-    go to ``meter_provider`` when given, else to the global one.
+    go to ``meter_provider`` when given, else to the global one. ``scrape_path`` is left out of
+    both.
     """
     try:
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
@@ -495,6 +511,8 @@ def _instrument_fastapi(app: FastAPI, *, tracing: bool, meter_provider=None) -> 
         )
         return False
     kwargs: dict[str, Any] = {}
+    if scrape_path:
+        kwargs["excluded_urls"] = _excluded_urls(app, scrape_path)
     if not tracing:
         kwargs["tracer_provider"] = NoOpTracerProvider()
     if meter_provider is not None:
@@ -503,7 +521,7 @@ def _instrument_fastapi(app: FastAPI, *, tracing: bool, meter_provider=None) -> 
     return True
 
 
-def _setup_otel(app: FastAPI, settings, meter_provider=None) -> bool:
+def _setup_otel(app: FastAPI, settings, meter_provider=None, scrape_path=None) -> bool:
     """Configure OpenTelemetry tracing and instrument the FastAPI app.
 
     ``meter_provider`` is the one from the ``metrics`` block; it then owns the metrics.
@@ -511,7 +529,9 @@ def _setup_otel(app: FastAPI, settings, meter_provider=None) -> bool:
     """
     if not setup_otel_provider(settings, metrics_owned=meter_provider is not None):
         return False
-    if not _instrument_fastapi(app, tracing=True, meter_provider=meter_provider):
+    if not _instrument_fastapi(
+        app, tracing=True, meter_provider=meter_provider, scrape_path=scrape_path
+    ):
         return False
     logger.info("OTEL: FastAPI instrumentation active (service=%s)", settings.OTEL_SERVICE_NAME)
     return True
@@ -526,6 +546,7 @@ def _add_metrics_route(app: FastAPI, path: str) -> None:
         return Response(generate_latest(REGISTRY), media_type=CONTENT_TYPE_LATEST)
 
     app.add_api_route(path, scrape, methods=["GET"], include_in_schema=False)
+    app.state.scrape_route = app.routes[-1]
 
 
 def _setup_metrics(app: FastAPI, graph_config: GraphConfig | None):
@@ -571,15 +592,18 @@ def setup_middleware(
         app.add_exception_handler(StaleStateError, _stale_state_handler)
 
     meter_provider = _setup_metrics(app, graph_config)
+    scrape_path = graph_config.metrics.scrape_path if graph_config is not None else None
 
     instrumented = False
     if settings.OTEL_ENABLED:
-        instrumented = _setup_otel(app, settings, meter_provider)
+        instrumented = _setup_otel(app, settings, meter_provider, scrape_path)
         if container is not None:
             _attach_otel_publisher(container, settings, graph_config)
     # HTTP metrics once: here unless the legacy path instrumented (it can fail, e.g. no endpoint).
     if meter_provider is not None and not instrumented:
-        _instrument_fastapi(app, tracing=False, meter_provider=meter_provider)
+        _instrument_fastapi(
+            app, tracing=False, meter_provider=meter_provider, scrape_path=scrape_path
+        )
 
     # Declarative Logfire/LangSmith wiring from 10xgraph.json (before compile).
     _setup_observability(container, graph_config)
@@ -610,7 +634,6 @@ def setup_middleware(
         path_limits=_upload_path_limits(settings.MAX_REQUEST_SIZE),
     )
 
-    scrape_path = graph_config.metrics.scrape_path if graph_config is not None else None
     # Apply rate limiting only when configured in 10xgraph.json
     if graph_config is not None:
         rate_limit_config = graph_config.rate_limit

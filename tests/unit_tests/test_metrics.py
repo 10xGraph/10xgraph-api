@@ -597,3 +597,177 @@ def test_setup_observability_runs_for_otlp_alone():
     ):
         sm._setup_observability(container, _graph_config(MetricsConfig(), observability=obs))
     core_setup.assert_called_once()
+
+
+# ── deferred review fixes ────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def semconv_env(monkeypatch):
+    monkeypatch.delenv("OTEL_SEMCONV_STABILITY_OPT_IN", raising=False)
+    return monkeypatch
+
+
+@pytest.mark.parametrize(
+    ("preset", "expected"),
+    [
+        (None, "http"),
+        ("database", "database,http"),
+        (" database , gen_ai ", "database,gen_ai,http"),
+        ("http", "http"),
+        ("database,http/dup", "database,http/dup"),
+    ],
+)
+def test_semconv_opt_in_is_merged_not_replaced(semconv_env, preset, expected):
+    if preset is not None:
+        semconv_env.setenv("OTEL_SEMCONV_STABILITY_OPT_IN", preset)
+    metrics_module._use_stable_http_names()
+    assert os.environ["OTEL_SEMCONV_STABILITY_OPT_IN"] == expected
+
+
+def _fake_semconv(initialized, *, http_mode="default"):
+    fake = MagicMock()
+    fake._StabilityMode.DEFAULT = "default"
+    stability = fake._OpenTelemetrySemanticConventionStability
+    stability._initialized = initialized
+    stability._get_opentelemetry_stability_opt_in_mode.return_value = http_mode
+    return {"opentelemetry.instrumentation._semconv": fake}
+
+
+def test_semconv_already_read_warns_about_old_names(semconv_env, caplog):
+    with (
+        patch.dict("sys.modules", _fake_semconv(True)),
+        caplog.at_level(logging.WARNING, logger="10xgraph-api"),
+    ):
+        metrics_module._use_stable_http_names()
+    assert any("old names" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_semconv_already_read_with_http_mode_does_not_warn(semconv_env, caplog):
+    with (
+        patch.dict("sys.modules", _fake_semconv(True, http_mode="http")),
+        caplog.at_level(logging.WARNING, logger="10xgraph-api"),
+    ):
+        metrics_module._use_stable_http_names()
+    assert not any("old names" in r.message for r in caplog.records)
+
+
+def test_semconv_not_yet_read_does_not_warn(semconv_env, caplog):
+    with (
+        patch.dict("sys.modules", _fake_semconv(False)),
+        caplog.at_level(logging.WARNING, logger="10xgraph-api"),
+    ):
+        metrics_module._use_stable_http_names()
+    assert not any("old names" in r.message for r in caplog.records)
+
+
+def test_scrape_path_must_not_be_root_or_relative():
+    with pytest.raises(ValidationError):
+        MetricsConfig(prometheus={"path": "/"})
+    with pytest.raises(ValidationError):
+        MetricsConfig(prometheus={"path": "metrics"})
+
+
+def _app_with_scrape(path, *real_paths):
+    app = FastAPI()
+    for real in real_paths:
+        app.add_api_route(real, lambda: None, methods=["GET"])
+    app.add_api_route(path, lambda: None, methods=["GET"])
+    app.state.scrape_route = app.routes[-1]
+    return app
+
+
+def test_scrape_route_clash_with_real_route_fails_naming_it():
+    app = _app_with_scrape("/ping", "/ping")
+    with pytest.raises(ValueError, match="'/ping'"):
+        metrics_module.check_scrape_route(app, app.state.scrape_route)
+
+
+def test_scrape_route_clash_with_parameterised_route_fails():
+    app = _app_with_scrape("/v1/threads/metrics", "/v1/threads/{thread_id}")
+    with pytest.raises(ValueError, match=r"/v1/threads/\{thread_id\}"):
+        metrics_module.check_scrape_route(app, app.state.scrape_route)
+
+
+def test_scrape_route_without_clash_or_without_route_passes():
+    app = _app_with_scrape("/metrics", "/ping", "/v1/graph")
+    metrics_module.check_scrape_route(app, app.state.scrape_route)
+    metrics_module.check_scrape_route(app, None)
+
+
+def test_prometheus_notice_is_a_warning_with_several_workers(monkeypatch, caplog):
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+    cfg = MetricsConfig(enabled=True, export="prometheus")
+    with caplog.at_level(logging.INFO, logger="10xgraph-api"):
+        metrics_module._announce_scrape(cfg, "api")
+    record = next(r for r in caplog.records if "this process only" in r.message)
+    assert record.levelno == logging.WARNING
+
+
+def test_prometheus_notice_is_info_with_one_worker(monkeypatch, caplog):
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    cfg = MetricsConfig(enabled=True, export="prometheus")
+    with caplog.at_level(logging.INFO, logger="10xgraph-api"):
+        metrics_module._announce_scrape(cfg, "api")
+    record = next(r for r in caplog.records if "this process only" in r.message)
+    assert record.levelno == logging.INFO
+
+
+def test_scrape_path_is_excluded_from_http_metrics_and_env_exclusions_kept(monkeypatch):
+    import re
+
+    monkeypatch.setenv("OTEL_PYTHON_FASTAPI_EXCLUDED_URLS", "healthz")
+    modules = _otel_modules()
+    app = FastAPI()
+    with patch.dict("sys.modules", modules):
+        sm._instrument_fastapi(
+            app, tracing=False, meter_provider=MagicMock(), scrape_path="/metrics"
+        )
+    instrument = modules["opentelemetry.instrumentation.fastapi"].FastAPIInstrumentor.instrument_app
+    excluded = instrument.call_args.kwargs["excluded_urls"]
+    env_part, own = excluded.split(",", 1)
+    assert env_part == "healthz"
+    assert re.search(own, "http://host:8000/metrics")
+    assert re.search(own, "http://host/metrics?x=1")
+    assert not re.search(own, "http://host/v1/metrics")
+    assert not re.search(own, "http://host/metrics/extra")
+
+
+def test_rebuild_shuts_down_the_previous_provider(monkeypatch):
+    monkeypatch.setattr(metrics_module, "_providers", [])
+    modules = _otel_modules()
+    first, second = MagicMock(), MagicMock()
+    modules["opentelemetry.sdk.metrics"].MeterProvider.side_effect = [first, second]
+    with patch.dict("sys.modules", modules), patch("tenxgraph.utils.metrics.setup_otel_metrics"):
+        setup_metrics(_cfg(), role="api")
+        first.shutdown.assert_not_called()
+        setup_metrics(_cfg(), role="api")
+    first.shutdown.assert_called_once_with()
+    second.shutdown.assert_not_called()
+
+
+def test_use_metrics_endpoint_reads_exporter_env_when_endpoint_unset(monkeypatch):
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "http://m:4318/v1/metrics")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://shared:4318")
+    cfg = MetricsConfig(enabled=True, export="otlp")  # valid only because the env is set
+    assert resolve_use_metrics_endpoint(OBS, cfg)["otlp"]["endpoint"] == "http://m:4318"
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+    assert resolve_use_metrics_endpoint(OBS, cfg)["otlp"]["endpoint"] == "http://shared:4318"
+
+
+def test_use_metrics_endpoint_env_prometheus_url_still_warns(monkeypatch):
+    monkeypatch.setenv(
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "http://p:9090/api/v1/otlp/v1/metrics"
+    )
+    cfg = MetricsConfig(enabled=True, export="otlp")
+    with patch.object(sm.logger, "warning") as warning:
+        resolved = resolve_use_metrics_endpoint(OBS, cfg)
+    assert resolved["otlp"]["endpoint"] == "http://p:9090/api/v1/otlp"
+    assert "Prometheus accepts metrics only" in warning.call_args.args[0]
+
+
+def test_use_metrics_endpoint_without_any_endpoint_still_disables(monkeypatch):
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    cfg = MetricsConfig.model_construct(enabled=True, export="otlp", otlp=MetricsConfig().otlp)
+    assert resolve_use_metrics_endpoint(OBS, cfg)["otlp"]["enabled"] is False

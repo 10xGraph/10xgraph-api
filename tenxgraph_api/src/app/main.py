@@ -22,7 +22,11 @@ from tenxgraph_api.src.app.core.auth.route_guard import (
     assert_all_routes_protected,
 )
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, default_config_path
-from tenxgraph_api.src.app.core.config.metrics import flush_telemetry, native_telemetry_off
+from tenxgraph_api.src.app.core.config.metrics import (
+    check_scrape_route,
+    flush_telemetry,
+    native_telemetry_off,
+)
 from tenxgraph_api.src.app.loader import attach_all_modules, load_container
 from tenxgraph_api.src.app.routers import init_routes
 
@@ -300,6 +304,9 @@ init_routes(
     websocket=graph_config.websocket.enabled,
     tasks=graph_config.worker is not None,
 )
+
+# The scrape path is open to the auth guard and rate limit: no real route may share it.
+check_scrape_route(app, getattr(app.state, "scrape_route", None))
 
 # Secure by construction: refuse to boot if any non-public route forgot its
 # RequirePermission guard (a forgotten guard would otherwise ship an open endpoint).

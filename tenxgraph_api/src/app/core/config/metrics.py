@@ -6,18 +6,21 @@ Metrics (request rate, latency, task throughput, LLM latency) are separate from 
 
 import asyncio
 import inspect
+import logging
 import os
 import socket
 import time
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .settings import get_settings, logger
 
 
 DEFAULT_BUCKETS_MS = [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000]
 METRICS_ENDPOINT_ENV = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
+OTLP_ENDPOINT_ENV = "OTEL_EXPORTER_OTLP_ENDPOINT"
+SEMCONV_ENV = "OTEL_SEMCONV_STABILITY_OPT_IN"
 INSTALL_HINT = "pip install '10xgraph-api[metrics]'"
 # Bound for the final metrics push and AI span flush at shutdown (each, run at the same time).
 TELEMETRY_FLUSH_SECONDS = 5.0
@@ -38,6 +41,13 @@ class MetricsPrometheusConfig(_Section):
 
     path: str = Field(default="/metrics", pattern=r"^/")
     worker_port: int = Field(default=9464, ge=1, le=65535)
+
+    @field_validator("path")
+    @classmethod
+    def _not_root(cls, path: str) -> str:
+        if path == "/":
+            raise ValueError('metrics.prometheus.path must not be "/"')
+        return path
 
 
 class MetricsConfig(_Section):
@@ -69,11 +79,13 @@ class MetricsConfig(_Section):
             if self.export is None:
                 raise ValueError('metrics.export is required when enabled: "otlp" or "prometheus"')
             if self.export == "otlp" and not (
-                self.otlp.endpoint or os.environ.get(METRICS_ENDPOINT_ENV)
+                self.otlp.endpoint
+                or os.environ.get(METRICS_ENDPOINT_ENV)
+                or os.environ.get(OTLP_ENDPOINT_ENV)
             ):
                 raise ValueError(
                     "metrics.otlp.endpoint is required for export=otlp "
-                    f"(or set {METRICS_ENDPOINT_ENV})"
+                    f"(or set {METRICS_ENDPOINT_ENV} or {OTLP_ENDPOINT_ENV})"
                 )
         return self
 
@@ -96,9 +108,14 @@ def resolve_use_metrics_endpoint(obs_cfg: dict, metrics_cfg: MetricsConfig) -> d
     if not otlp.get("enabled") or not otlp.get("use_metrics_endpoint"):
         return obs_cfg
     otlp = dict(otlp)
-    endpoint = (
-        metrics_cfg.otlp.endpoint if metrics_cfg.enabled and metrics_cfg.export == "otlp" else None
-    )
+    endpoint = None
+    if metrics_cfg.enabled and metrics_cfg.export == "otlp":
+        # The exporter reads the same env vars when metrics.otlp.endpoint is not set.
+        endpoint = (
+            metrics_cfg.otlp.endpoint
+            or os.environ.get(METRICS_ENDPOINT_ENV)
+            or os.environ.get(OTLP_ENDPOINT_ENV)
+        )
     if endpoint:
         # Core appends /v1/traces to the base URL.
         base = endpoint.rstrip("/")
@@ -113,10 +130,60 @@ def resolve_use_metrics_endpoint(obs_cfg: dict, metrics_cfg: MetricsConfig) -> d
     else:
         logger.warning(
             "observability.otlp.use_metrics_endpoint needs metrics enabled with export=otlp and "
-            "metrics.otlp.endpoint set; the otlp trace destination is off."
+            "an OTLP endpoint (metrics.otlp.endpoint or %s); the otlp trace destination is off.",
+            METRICS_ENDPOINT_ENV,
         )
         otlp["enabled"] = False
     return {**obs_cfg, "otlp": otlp}
+
+
+# The provider of the last setup_metrics call; a rebuild in one process shuts it down first.
+_providers: list = []
+
+
+def _use_stable_http_names() -> None:
+    """Make sure ``OTEL_SEMCONV_STABILITY_OPT_IN`` has ``http`` (or ``http/dup``), keeping other
+    values, so HTTP metrics are ``http.server.request.duration`` (seconds). Must run before the
+    first instrumentation: OpenTelemetry reads the variable once and caches it."""
+    values = [v.strip() for v in os.environ.get(SEMCONV_ENV, "").split(",") if v.strip()]
+    if "http" not in values and "http/dup" not in values:
+        os.environ[SEMCONV_ENV] = ",".join([*values, "http"])
+    try:
+        from opentelemetry.instrumentation._semconv import (
+            _OpenTelemetrySemanticConventionStability as stability,
+        )
+        from opentelemetry.instrumentation._semconv import (
+            _OpenTelemetryStabilitySignalType,
+            _StabilityMode,
+        )
+
+        # The mode is cached on first use; a read before our merge may have missed "http".
+        cached = (
+            stability._initialized
+            and stability._get_opentelemetry_stability_opt_in_mode(
+                _OpenTelemetryStabilitySignalType.HTTP
+            )
+            == _StabilityMode.DEFAULT
+        )
+    except Exception:  # a best-effort diagnostic: never block the setup
+        return
+    if cached:
+        logger.warning(
+            "OpenTelemetry read %s before the metrics block set it: HTTP metrics will use the "
+            "old names (http.server.duration, in ms). Set %s=http in the environment.",
+            SEMCONV_ENV,
+            SEMCONV_ENV,
+        )
+
+
+def _shutdown_previous_provider() -> None:
+    """Shut down the provider of an earlier setup in this process (app built twice in tests or
+    when embedding); this also unregisters its Prometheus collector, so families are not doubled."""
+    while _providers:
+        try:
+            _providers.pop().shutdown()
+        except Exception as exc:
+            logger.warning("Previous MeterProvider shutdown failed: %r", exc)
 
 
 def setup_metrics(metrics_cfg: MetricsConfig, *, role: Literal["api", "worker"]):
@@ -125,8 +192,8 @@ def setup_metrics(metrics_cfg: MetricsConfig, *, role: Literal["api", "worker"])
     Returns the provider, or None when the OpenTelemetry packages are missing or the setup
     fails (never raises).
     """
-    # Before any instrumentation: the stable HTTP names (http.server.request.duration, in s).
-    os.environ.setdefault("OTEL_SEMCONV_STABILITY_OPT_IN", "http")
+    _use_stable_http_names()
+    _shutdown_previous_provider()
     try:
         from opentelemetry import metrics
         from tenxgraph.utils.metrics import setup_otel_metrics
@@ -139,6 +206,7 @@ def setup_metrics(metrics_cfg: MetricsConfig, *, role: Literal["api", "worker"])
         logger.warning("Metrics are not exported: setup failed: %s", exc)
         return None
 
+    _providers.append(provider)
     metrics.set_meter_provider(provider)
     if metrics.get_meter_provider() is not provider:
         # Set earlier by opentelemetry-instrument, logfire.configure() or an imported module.
@@ -193,10 +261,15 @@ def _build_provider(metrics_cfg: MetricsConfig):
 
 def _announce_scrape(metrics_cfg: MetricsConfig, role: str) -> None:
     if role == "api":
-        logger.info(
+        from tenxgraph_api.src.app.loader import _web_concurrency
+
+        workers = _web_concurrency()
+        logger.log(
+            logging.WARNING if workers > 1 else logging.INFO,
             "Prometheus scrape at %s covers this process only; with several gunicorn "
-            "workers use OTLP push instead.",
+            "workers (WEB_CONCURRENCY=%d) use OTLP push instead.",
             metrics_cfg.prometheus.path,
+            workers,
         )
         return
     port = metrics_cfg.prometheus.worker_port
@@ -259,6 +332,21 @@ async def _bounded(what: str, call) -> None:
             what,
             TELEMETRY_FLUSH_SECONDS,
         )
+
+
+def check_scrape_route(app, scrape_route) -> None:
+    """Refuse to start when another route answers on the scrape path. The scrape path is open
+    to the auth guard and the rate limit, so a real route there would lose both. Call after all
+    routers are included. ``scrape_route`` is the route the metrics block added (or None)."""
+    if scrape_route is None:
+        return
+    for route in app.routes:
+        regex = getattr(route, "path_regex", None)
+        if route is not scrape_route and regex is not None and regex.match(scrape_route.path):
+            raise ValueError(
+                f"metrics.prometheus.path {scrape_route.path!r} clashes with the route "
+                f"{route.path!r}; choose another path such as /_metrics."
+            )
 
 
 def native_telemetry_off() -> dict:
