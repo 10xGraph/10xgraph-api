@@ -80,6 +80,19 @@ def ask_questions(  # noqa: PLR0911
     if auth is None:
         return None
 
+    worker = prompts.select(
+        "Background tasks?",
+        [
+            Choice("none", "None", "No worker"),
+            Choice("redis", "Redis", "Redis Streams broker, results in Redis"),
+            Choice("rabbitmq", "RabbitMQ", "AMQP broker, results in Redis"),
+            Choice("kafka", "Kafka", "At-most-once delivery, results in Redis"),
+        ],
+        default="none",
+    )
+    if worker is None:
+        return None
+
     extras = prompts.checkbox("Which extras?", _EXTRAS)
     if extras is None:
         return None
@@ -88,5 +101,6 @@ def ask_questions(  # noqa: PLR0911
         **answers,
         "storage": storage,
         "auth": "none" if auth == "open" else auth,
+        "worker": worker,
         **{choice.value: choice.value in extras for choice in _EXTRAS},
     }

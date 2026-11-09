@@ -11,6 +11,7 @@ from tenxgraph_api.cli.commands.init_context import (
     DEFAULT_PROVIDER,
     PROVIDERS,
     STORAGE_PRESETS,
+    WORKERS,
     build_config,
     build_context,
     check_agent_name,
@@ -34,6 +35,7 @@ _TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 _SKIP_DIRS = {"__pycache__", ".ruff_cache"}
 _AUTH_DIR = "auth"
 _OPTIONAL_DIRS = ("evals", "tests")
+_WORKER_DIR = "worker"
 _CONFIG_HINT = "10xgraph config for more settings."
 
 
@@ -79,6 +81,7 @@ class InitCommand(BaseCommand):
         tests: bool | None = None,
         ag_ui: bool | None = None,
         otel: bool | None = None,
+        worker: str | None = None,
         yes: bool = False,
         non_interactive: bool = False,
         dry_run: bool = False,
@@ -107,6 +110,7 @@ class InitCommand(BaseCommand):
                     tests=tests,
                     ag_ui=ag_ui,
                     otel=otel,
+                    worker=worker,
                 )
             else:
                 context = self._prompt_user()
@@ -235,9 +239,17 @@ class InitCommand(BaseCommand):
             ]
             before_production: list[str] = []
         else:
-            if storage.startswith("postgres"):
-                key_step += " (and DATABASE_URL, REDIS_URL)"
+            worker = context.get("worker", "none")
+            env_keys = ["DATABASE_URL"] if storage.startswith("postgres") else []
+            if storage.startswith("postgres") or worker != "none":
+                env_keys.append("REDIS_URL")
+            if worker in ("rabbitmq", "kafka"):
+                env_keys.append("BROKER_URL")
+            if env_keys:
+                key_step += f" (and {', '.join(env_keys)})"
             steps = [f"cd {base_path}", "pip install -e .", f"{key_step}.", "10xgraph dev"]
+            if worker != "none":
+                steps += ["10xgraph worker", "10xgraph scheduler (run exactly one)"]
             secret = " and a strong JWT_SECRET_KEY" if context["auth"] == "jwt" else ""
             before_production = [
                 "10xgraph config to review auth, rate limit, CORS origins and the other "
@@ -297,6 +309,10 @@ class InitCommand(BaseCommand):
             if auth != "none":
                 revocation = "On" if context.get("token_revocation") else "Off"
                 rows.append(("Token revocation", revocation))
+            worker = context.get("worker", "none")
+            rows.append(
+                ("Background tasks", WORKERS[worker]["label"] if worker != "none" else "None")
+            )
             rows.append(("Evaluations", "On" if context.get("evals") else "Off"))
             rows.append(("Tests", "On" if context.get("tests") else "Off"))
             for key, label in (("ag_ui", "AG-UI"), ("otel", "OpenTelemetry")):
@@ -323,6 +339,8 @@ class InitCommand(BaseCommand):
         top = src.relative_to(template_dir).parts[0]
         if top == _AUTH_DIR:
             return context["auth"] != "custom"
+        if top == _WORKER_DIR:
+            return context.get("worker", "none") == "none"
         if top in _OPTIONAL_DIRS:
             return not context.get(top)
         return False

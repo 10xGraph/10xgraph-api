@@ -172,7 +172,7 @@ def test_interactive_quick_asks_three_questions(monkeypatch) -> None:
     assert "cache_store" not in build_config(context, False)
 
 
-def test_interactive_full_asks_three_more_questions(monkeypatch) -> None:
+def test_interactive_full_asks_four_more_questions(monkeypatch) -> None:
     context, scripted, _ = _run_prompts(monkeypatch, _FULL)
     assert scripted.asked == [
         "Which setup?",
@@ -180,6 +180,7 @@ def test_interactive_full_asks_three_more_questions(monkeypatch) -> None:
         "Which AI provider?",
         "Where should state be stored?",
         "How should the API be secured?",
+        "Background tasks?",
         "Which extras?",
     ]
     assert context is not None

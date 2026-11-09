@@ -45,6 +45,22 @@ STORAGE_PRESETS: dict[str, dict[str, str]] = {
     "postgres-memory": {"label": "Postgres + Redis + pgvector memory", "cache_store": "redis"},
 }
 AUTH_MODES = ("none", "jwt", "custom")
+# Background worker choices: label, broker type in 10xgraph.json, broker URL, API extra.
+WORKERS: dict[str, dict[str, str]] = {
+    "redis": {"label": "Redis", "type": "redis_stream", "url": "${REDIS_URL}", "extra": "jobs"},
+    "rabbitmq": {
+        "label": "RabbitMQ",
+        "type": "rabbitmq",
+        "url": "${BROKER_URL}",
+        "extra": "jobs-rabbitmq",
+    },
+    "kafka": {
+        "label": "Kafka",
+        "type": "kafka",
+        "url": "${BROKER_URL}",
+        "extra": "jobs-kafka",
+    },
+}
 
 _MODE_ALIASES = {"quick-start": "quick", "production": "full"}
 _MARKER = re.compile(
@@ -107,6 +123,7 @@ def build_context(  # noqa: PLR0913
     tests: bool | None = None,
     ag_ui: bool | None = None,
     otel: bool | None = None,
+    worker: str | None = None,
 ) -> dict[str, Any]:
     """Resolve a complete, reproducible scaffold recipe without prompting."""
     resolved_mode = _resolve_mode(mode, template)
@@ -138,6 +155,7 @@ def build_context(  # noqa: PLR0913
             "--tests": tests,
             "--ag-ui": ag_ui,
             "--otel": otel,
+            "--worker": worker not in (None, "none"),
         }
         used = [flag for flag, value in full_only.items() if value not in (None, False)]
         if used:
@@ -154,17 +172,25 @@ def build_context(  # noqa: PLR0913
             "tests": False,
             "ag_ui": False,
             "otel": False,
+            "worker": "none",
         }
 
     resolved_storage = _choice(storage, "memory", STORAGE_PRESETS, "storage", "storage")
     resolved_auth = _choice(auth, "jwt", AUTH_MODES, "auth", "auth mode")
+    resolved_worker = _choice(worker, "none", ("none", *WORKERS), "worker", "worker")
     resolved_cache = _choice(
         cache_store,
-        STORAGE_PRESETS[resolved_storage]["cache_store"],
+        "redis" if resolved_worker != "none" else STORAGE_PRESETS[resolved_storage]["cache_store"],
         CACHE_STORES,
         "cache_store",
         "cache store",
     )
+    if resolved_worker != "none" and resolved_cache == "memory":
+        raise ValidationError(
+            "A background worker needs --cache-store redis: task status and cancel live in "
+            "the cache store, and a memory store is private to each process.",
+            field="cache_store",
+        )
     auth_on = resolved_auth != "none"
     return {
         **base,
@@ -184,6 +210,7 @@ def build_context(  # noqa: PLR0913
         "tests": tests is not False,
         "ag_ui": bool(ag_ui),
         "otel": bool(otel),
+        "worker": resolved_worker,
     }
 
 
@@ -240,6 +267,13 @@ def build_config(context: dict, is_prod: bool) -> dict:
         cache_store["token_revocation"] = True
     config["cache_store"] = cache_store
 
+    worker = WORKERS.get(context.get("worker", "none"))
+    if worker:
+        config["worker"] = {
+            "broker": {"type": worker["type"], "url": worker["url"]},
+            "tasks": ["worker.tasks"],
+        }
+
     if context.get("tests"):
         config["test"] = {"path": "tests", "coverage": True, "coverage_threshold": 70}
     if context.get("evals"):
@@ -261,6 +295,7 @@ def template_flags(context: dict[str, Any]) -> dict[str, bool]:
     provider = context.get("provider", DEFAULT_PROVIDER)
     postgres = storage.startswith("postgres")
     store = storage == "postgres-memory"
+    worker = context.get("worker", "none")
     return {
         "jwt": context.get("auth") == "jwt",
         "custom_auth": context.get("auth") == "custom",
@@ -275,6 +310,8 @@ def template_flags(context: dict[str, Any]) -> dict[str, bool]:
         "otel": bool(context.get("otel")),
         "websocket": bool(context.get("websocket")),
         "ag_ui": bool(context.get("ag_ui")),
+        "worker": worker != "none",
+        "broker_url": worker in ("rabbitmq", "kafka"),
     }
 
 
@@ -341,7 +378,15 @@ def template_vars(context: dict[str, Any]) -> dict[str, Any]:
         )
         if wanted
     ]
+    if flags["worker"]:
+        api_extras.append(WORKERS[context["worker"]]["extra"])
+    broker_example = (
+        "amqp://guest:guest@localhost:5672/"
+        if context.get("worker") == "rabbitmq"
+        else "localhost:9092"
+    )
     return {
+        "broker_url_example": broker_example,
         "llm_provider": context.get("provider", DEFAULT_PROVIDER),
         "llm_model": provider["model"],
         "llm_sim_model": provider["sim_model"],

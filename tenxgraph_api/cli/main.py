@@ -601,6 +601,11 @@ def init(  # noqa: PLR0913
         "--otel/--no-otel",
         help="Full mode: add OpenTelemetry (default off).",
     ),
+    worker: str | None = typer.Option(
+        None,
+        "--worker",
+        help="Full mode background worker: none (default), redis, rabbitmq, or kafka.",
+    ),
     yes: bool = typer.Option(
         False,
         "--yes",
@@ -656,6 +661,7 @@ def init(  # noqa: PLR0913
             tests=tests,
             ag_ui=ag_ui,
             otel=otel,
+            worker=worker,
             yes=yes,
             non_interactive=non_interactive,
             dry_run=dry_run,
