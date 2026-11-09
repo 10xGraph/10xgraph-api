@@ -74,8 +74,9 @@ function traceSummary() {
   const on = [];
   if (valueOrDefault(["observability", "logfire", "enabled"])) on.push("Logfire");
   if (valueOrDefault(["observability", "langsmith", "enabled"])) on.push("LangSmith");
+  if (valueOrDefault(["observability", "phoenix", "enabled"])) on.push("Phoenix");
   const level = valueOrDefault(["observability", "level"]);
-  return { text: `Level ${level}${on.length ? `, sending to ${on.join(" and ")}` : ", no destination chosen yet"}.` };
+  return { text: `Level ${level}${on.length ? `, sending to ${on.length > 1 ? `${on.slice(0, -1).join(", ")} and ${on[on.length - 1]}` : on[0]}` : ", no destination chosen yet"}.` };
 }
 
 function GetRunning() {

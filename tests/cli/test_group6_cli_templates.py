@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from tenxgraph_api.cli.commands.init import InitCommand
+from tenxgraph_api.cli.commands.init_context import build_config
 from tenxgraph_api.cli.core.output import OutputFormatter
 from tenxgraph_api.cli.templates.defaults import generate_k8s_manifest_content
 
@@ -29,29 +30,29 @@ def _context(auth: str, cache_store: str = "redis", **flags) -> dict:
 
 def test_production_rate_limit_is_per_user_when_auth_is_on() -> None:
     for auth in ("jwt", "custom"):
-        config = _cmd()._build_config(_context(auth), True)
+        config = build_config(_context(auth), True)
         assert config["cache_store"]["rate_limit"]["by"] == "user"
-    config = _cmd()._build_config(_context("none"), True)
+    config = build_config(_context("none"), True)
     assert config["cache_store"]["rate_limit"]["by"] == "ip"
 
 
 def test_production_cache_store_follows_the_answers() -> None:
-    config = _cmd()._build_config(_context("jwt"), True)
+    config = build_config(_context("jwt"), True)
     assert config["cache_store"]["type"] == "redis"
     assert "url" not in config["cache_store"]
     assert config["cache_store"]["token_revocation"] is True
 
-    memory = _cmd()._build_config(_context("jwt", "memory"), True)["cache_store"]
+    memory = build_config(_context("jwt", "memory"), True)["cache_store"]
     assert memory["type"] == "memory"
     assert "url" not in memory
     assert memory["rate_limit"]["enabled"] is True
     assert memory["token_revocation"] is True
 
-    assert "token_revocation" not in _cmd()._build_config(_context("none"), True)["cache_store"]
-    off = _cmd()._build_config(_context("jwt", rate_limit=False, token_revocation=False), True)
+    assert "token_revocation" not in build_config(_context("none"), True)["cache_store"]
+    off = build_config(_context("jwt", rate_limit=False, token_revocation=False), True)
     assert off["cache_store"] == {"type": "redis"}
     for store in ("redis", "memory"):
-        config = _cmd()._build_config(_context("jwt", store), True)
+        config = build_config(_context("jwt", store), True)
         assert not {"redis", "rate_limit", "token_revocation"} & set(config)
 
 
@@ -90,7 +91,7 @@ def test_static_templates_load_through_graph_config(monkeypatch) -> None:
 
 
 def test_generated_exclude_paths_use_the_real_redoc_path() -> None:
-    config = _cmd()._build_config(_context("jwt"), True)
+    config = build_config(_context("jwt"), True)
     assert "/redocs" in config["cache_store"]["rate_limit"]["exclude_paths"]
 
 

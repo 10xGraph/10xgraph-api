@@ -441,6 +441,18 @@ def test_observability_checks() -> None:
     assert _levels(issues, "observability") == ["warning"]
 
 
+def test_observability_phoenix_block() -> None:
+    ok = validate_config(
+        {"agent": "graph.react:app", "observability": {"phoenix": {"enabled": True}}}
+    )
+    assert _levels(ok, "observability") == []
+    bad = validate_config(
+        {"agent": "graph.react:app", "observability": {"phoenix": {"enabled": "yes"}}}
+    )
+    assert _levels(bad, "observability.phoenix.enabled") == ["error"]
+    assert "observability.phoenix.project" in _fields()
+
+
 def test_observability_user_id_mode() -> None:
     for mode in ("raw", "hash", "mask"):
         ok = validate_config({"agent": "graph.react:app", "observability": {"user_id_mode": mode}})

@@ -643,7 +643,7 @@ _SECTIONS: list[dict[str, Any]] = [
     {
         "id": "observability",
         "title": "Observability",
-        "description": "Trace graph runs to Logfire and/or LangSmith.",
+        "description": "Trace graph runs to Logfire, LangSmith and/or Phoenix.",
         "key": "observability",
         "optional": True,
         "off_summary": "Graph runs are not traced.",
@@ -651,6 +651,7 @@ _SECTIONS: list[dict[str, Any]] = [
             "level": "standard",
             "logfire": {"enabled": False},
             "langsmith": {"enabled": False},
+            "phoenix": {"enabled": False},
         },
         "fields": [
             {
@@ -733,8 +734,32 @@ _SECTIONS: list[dict[str, Any]] = [
                 "placeholder": "https://api.smith.langchain.com/otel",
                 "show_if": {"path": ["observability", "langsmith", "enabled"], "equals": True},
             },
+            {
+                "path": ["observability", "phoenix", "enabled"],
+                "group": "Phoenix",
+                "default": False,
+                "label": "Phoenix",
+                "type": "bool",
+            },
+            {
+                "path": ["observability", "phoenix", "project"],
+                "group": "Phoenix",
+                "label": "Phoenix project",
+                "type": "text",
+                "placeholder": "my-agent",
+                "show_if": {"path": ["observability", "phoenix", "enabled"], "equals": True},
+            },
+            {
+                "path": ["observability", "phoenix", "endpoint"],
+                "group": "Phoenix",
+                "label": "Phoenix endpoint",
+                "type": "text",
+                "placeholder": "http://localhost:6006",
+                "help": "Base collector URL. /v1/traces is appended.",
+                "show_if": {"path": ["observability", "phoenix", "enabled"], "equals": True},
+            },
         ],
-        "notes": ["Tokens stay in .env: LOGFIRE_TOKEN and LANGSMITH_API_KEY."],
+        "notes": ["Tokens stay in .env: LOGFIRE_TOKEN, LANGSMITH_API_KEY and PHOENIX_API_KEY."],
         "env": [
             {
                 "name": "LOGFIRE_TOKEN",
@@ -743,6 +768,10 @@ _SECTIONS: list[dict[str, Any]] = [
             {
                 "name": "LANGSMITH_API_KEY",
                 "purpose": "LangSmith API key. Required when LangSmith is enabled.",
+            },
+            {
+                "name": "PHOENIX_API_KEY",
+                "purpose": "Phoenix API key. Optional; a local Phoenix needs none.",
             },
             {
                 "name": "TENXGRAPH_TRACE_USER_ID_KEY",

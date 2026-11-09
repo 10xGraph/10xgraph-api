@@ -527,7 +527,11 @@ def test_setup_observability_noop_when_no_backend_enabled():
     from tenxgraph_api.src.app.core.config.setup_middleware import _setup_observability
 
     container = MagicMock()
-    cfg = {"logfire": {"enabled": False}, "langsmith": {"enabled": False}}
+    cfg = {
+        "logfire": {"enabled": False},
+        "langsmith": {"enabled": False},
+        "phoenix": {"enabled": False},
+    }
     _setup_observability(container, _graph_config(cfg))
     container.bind_instance.assert_not_called()
 
@@ -564,6 +568,22 @@ def test_setup_observability_adds_to_existing_composite():
 
     assert len(existing.publishers) == 1
     container.bind_instance.assert_not_called()
+
+
+def test_setup_observability_binds_for_phoenix_only():
+    from tenxgraph_api.src.app.core.config.setup_middleware import _setup_observability
+
+    modules, setup_obs, _base, _comp = _obs_modules()
+    cfg = {"phoenix": {"enabled": True, "project": "p", "endpoint": None}}
+    container = MagicMock()
+    container.try_get.return_value = None
+
+    with patch.dict(sys.modules, modules):
+        _setup_observability(container, _graph_config(cfg))
+
+    setup_obs.assert_called_once()
+    assert setup_obs.call_args[0][1] == cfg
+    container.bind_instance.assert_called_once()
 
 
 def test_setup_observability_wraps_single_existing():

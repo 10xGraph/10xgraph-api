@@ -302,7 +302,7 @@ def _check_observability(config: dict, out: _Collector) -> None:
             f"user_id_mode must be one of {', '.join(_USER_ID_MODES)}.",
         )
     any_enabled = False
-    for backend in ("logfire", "langsmith"):
+    for backend in ("logfire", "langsmith", "phoenix"):
         block = data.get(backend)
         if block is None:
             continue
@@ -322,7 +322,8 @@ def _check_observability(config: dict, out: _Collector) -> None:
             )
     if not any_enabled:
         out.warning(
-            "observability", "Neither Logfire nor LangSmith is enabled, so nothing is traced."
+            "observability",
+            "None of Logfire, LangSmith or Phoenix is enabled, so nothing is traced.",
         )
 
 

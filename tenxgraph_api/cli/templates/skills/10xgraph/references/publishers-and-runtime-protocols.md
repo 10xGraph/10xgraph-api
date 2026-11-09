@@ -71,8 +71,15 @@ ACP support is in `tenxgraph/runtime/protocols/acp.py`. Treat it as a runtime pr
 
 - Events and spans keep content on purpose. Redis, RabbitMQ and Kafka publishers send full events (message text, tool I/O); send them only to trusted systems. OTEL records prompts and tool I/O only at `ObservabilityLevel.FULL`.
 - TLS is the developer's choice, never forced. Recommend it in production whenever possible, and always on networks the developer does not control; a broker reachable only inside a secured private network (private subnet or VPC, or an encrypting service mesh) can run without it. Redis: `rediss://` URL. RabbitMQ: `amqps://` URL. Kafka: opt-in config keys `security_protocol`, `ssl_context`, `ssl_cafile`, `ssl_certfile`, `ssl_keyfile`, `sasl_mechanism`, `sasl_plain_username`, `sasl_plain_password` (passed to aiokafka only when set; `ssl_context` wins over the file keys).
-- `user_id_mode` (`"raw"` default, `"hash"`, `"mask"`) controls `user_id` on OTEL spans, and so on Logfire and LangSmith. It does not apply to Redis, RabbitMQ, Kafka or Console events. `hash` is the first 16 hex chars of SHA-256, or HMAC-SHA256 when env `TENXGRAPH_TRACE_USER_ID_KEY` is set (set it; plain SHA-256 of short ids can be guessed). Options: `OtelPublisher(level=..., user_id_mode=...)`, `setup_tracing`, `setup_logfire`, `setup_langsmith`, `setup_observability(graph, {"user_id_mode": ...})`. Invalid value raises `ValueError`.
+- `user_id_mode` (`"raw"` default, `"hash"`, `"mask"`) controls `user_id` on OTEL spans, and so on Logfire, LangSmith and Phoenix. It does not apply to Redis, RabbitMQ, Kafka or Console events. `hash` is the first 16 hex chars of SHA-256, or HMAC-SHA256 when env `TENXGRAPH_TRACE_USER_ID_KEY` is set (set it; plain SHA-256 of short ids can be guessed). Options: `OtelPublisher(level=..., user_id_mode=...)`, `setup_tracing`, `setup_logfire`, `setup_langsmith`, `setup_observability(graph, {"user_id_mode": ...})`. Invalid value raises `ValueError`.
 - Server: `10xgraph.json` `"observability": {"user_id_mode": "hash"}`; also in the `10xgraph config` editor.
+
+## Phoenix (Arize)
+
+- Install `pip install '10xgraph[phoenix]'` (also in `10xgraph[observability]`). Enable in `10xgraph.json`: `"observability": {"phoenix": {"enabled": true, "project": "my-agent", "endpoint": null}}`.
+- `project` falls back to env `PHOENIX_PROJECT` / `PHOENIX_PROJECT_NAME`; `endpoint` is the base collector URL (env `PHOENIX_COLLECTOR_ENDPOINT`, then `http://localhost:6006`), `/v1/traces` is appended.
+- In Python: `setup_phoenix(graph, project=..., endpoint=..., api_key=...)` or `PhoenixPublisher(...)`, both from `tenxgraph.runtime.publisher`, used like `setup_langsmith` / `LangsmithPublisher`. Call before `graph.compile()`.
+- `PHOENIX_API_KEY` is env only and optional (a local Phoenix needs none). Never put it in the config file.
 
 ## Rules
 

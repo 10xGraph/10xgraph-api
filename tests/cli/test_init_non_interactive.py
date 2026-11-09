@@ -77,6 +77,7 @@ def test_production_dependencies_follow_the_answers(tmp_path: Path) -> None:
         agent_name="Secure Agent",
         template="production",
         auth="jwt",
+        storage="postgres",
         provider="openai",
         non_interactive=True,
     )
@@ -109,6 +110,7 @@ def test_production_without_jwt_installs_redis_but_not_jwt(tmp_path: Path) -> No
         agent_name="Open Agent",
         template="production",
         auth="custom",
+        storage="postgres",
         cache_store="memory",
         provider="anthropic",
         non_interactive=True,
@@ -143,7 +145,7 @@ def test_websocket_off_by_default_and_not_installed(tmp_path: Path) -> None:
         path=str(target), template="production", provider="openai", non_interactive=True
     )
     assert result == 0
-    assert _dependencies(target) == ["10xgraph[openai,pg_checkpoint]", "10xgraph-api[jwt,redis]"]
+    assert _dependencies(target) == ["10xgraph[openai]", "10xgraph-api[jwt]"]
     config = json.loads((target / "10xgraph.json").read_text())
     assert config["websocket"] == {"enabled": False}
 
@@ -162,10 +164,7 @@ def test_websocket_on_adds_the_extra_and_enables_the_routes(tmp_path: Path) -> N
         non_interactive=True,
     )
     assert result == 0
-    assert _dependencies(target) == [
-        "10xgraph[anthropic,pg_checkpoint]",
-        "10xgraph-api[jwt,redis,websocket]",
-    ]
+    assert _dependencies(target) == ["10xgraph[anthropic]", "10xgraph-api[jwt,websocket]"]
     config = json.loads((target / "10xgraph.json").read_text())
     assert config["websocket"] == {"enabled": True}
 
@@ -273,8 +272,10 @@ def _written(tmp_path: Path, **kwargs) -> dict:
 
 
 def test_cache_store_choices(tmp_path: Path) -> None:
-    assert _written(tmp_path)["cache_store"]["type"] == "redis"
-    assert _written(tmp_path / "m", cache_store="memory")["cache_store"]["type"] == "memory"
+    assert _written(tmp_path)["cache_store"]["type"] == "memory"
+    assert _written(tmp_path / "p", storage="postgres")["cache_store"]["type"] == "redis"
+    override = _written(tmp_path / "m", storage="postgres", cache_store="memory")
+    assert override["cache_store"]["type"] == "memory"
     assert "url" not in _written(tmp_path / "r", cache_store="redis")["cache_store"]
 
 
@@ -287,12 +288,12 @@ def test_invalid_cache_store_lists_the_choices(tmp_path: Path) -> None:
         non_interactive=True,
     )
     assert result != 0
-    assert "memory or redis" in stream.getvalue()
+    assert "memory, redis" in stream.getvalue()
 
 
 def test_rate_limit_off_and_token_revocation_off(tmp_path: Path) -> None:
     store = _written(tmp_path / "a", rate_limit=False, token_revocation=False)["cache_store"]
-    assert store == {"type": "redis"}
+    assert store == {"type": "memory"}
     store = _written(tmp_path / "b", token_revocation=False)["cache_store"]
     assert "token_revocation" not in store and store["rate_limit"]["enabled"] is True
 
@@ -302,22 +303,27 @@ def test_token_revocation_is_ignored_without_auth(tmp_path: Path) -> None:
     assert "token_revocation" not in store
 
 
-def test_quick_start_ignores_cache_flags(tmp_path: Path) -> None:
-    import json
-
-    target = tmp_path / "q"
-    result = InitCommand(OutputFormatter(stream=io.StringIO())).execute(
-        path=str(target), cache_store="redis", rate_limit=True, non_interactive=True
+def test_quick_start_rejects_full_only_flags(tmp_path: Path) -> None:
+    stream = io.StringIO()
+    result = InitCommand(OutputFormatter(stream=stream)).execute(
+        path=str(tmp_path / "q"), cache_store="redis", rate_limit=True, non_interactive=True
     )
-    assert result == 0
-    assert "cache_store" not in json.loads((target / "10xgraph.json").read_text())
+    assert result != 0
+    assert "--mode full" in stream.getvalue()
 
 
-def test_next_steps_point_to_config_for_every_template(tmp_path: Path) -> None:
-    for template in ("quick-start", "production"):
+def test_next_steps_point_to_config_for_every_mode(tmp_path: Path) -> None:
+    texts = {}
+    for mode in ("quick", "full"):
         stream = io.StringIO()
         InitCommand(OutputFormatter(stream=stream)).execute(
-            path=str(tmp_path / template), template=template, non_interactive=True
+            path=str(tmp_path / mode), mode=mode, non_interactive=True
         )
-        text = " ".join(stream.getvalue().split())
-        assert "Run 10xgraph config for full control" in text
+        texts[mode] = " ".join(stream.getvalue().split())
+    assert "10xgraph config for more settings" in texts["quick"]
+    assert "Before production" not in texts["quick"]
+    assert "10xgraph config to review auth" in texts["full"]
+    assert "Before production" in texts["full"]
+    assert "10xgraph build" in texts["full"]
+    assert "JWT_SECRET_KEY" in texts["full"]
+    assert "10xgraph skills" in texts["full"]

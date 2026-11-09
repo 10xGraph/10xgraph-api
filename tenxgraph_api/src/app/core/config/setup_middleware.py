@@ -296,7 +296,7 @@ def _attach_otel_publisher(
 
 
 def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | None) -> None:
-    """Wire Logfire/LangSmith from the ``observability`` block of ``10xgraph.json``.
+    """Wire Logfire/LangSmith/Phoenix from the ``observability`` block of ``10xgraph.json``.
 
     Configures the tracer provider(s)/exporters and binds an ``OtelPublisher``
     into the DI container. This runs at app-construction time, before the graph
@@ -306,7 +306,7 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
     preserves a publisher already present in the container instead of clobbering
     it with ``None``.
 
-    Secrets stay in the environment (``LOGFIRE_TOKEN``, ``LANGSMITH_API_KEY``);
+    Secrets stay in the environment (``LOGFIRE_TOKEN``, ``LANGSMITH_API_KEY``, ``PHOENIX_API_KEY``);
     only non-secret settings live in ``10xgraph.json``.
     """
     if container is None or graph_config is None:
@@ -318,7 +318,8 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
 
     logfire_on = bool((obs_cfg.get("logfire") or {}).get("enabled", False))
     langsmith_on = bool((obs_cfg.get("langsmith") or {}).get("enabled", False))
-    if not logfire_on and not langsmith_on:
+    phoenix_on = bool((obs_cfg.get("phoenix") or {}).get("enabled", False))
+    if not logfire_on and not langsmith_on and not phoenix_on:
         return
 
     try:
@@ -362,9 +363,10 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
         _bind_publisher(container, CompositePublisher([existing, otel_publisher]))
 
     logger.info(
-        "Observability enabled (logfire=%s, langsmith=%s, level=%s)",
+        "Observability enabled (logfire=%s, langsmith=%s, phoenix=%s, level=%s)",
         logfire_on,
         langsmith_on,
+        phoenix_on,
         level,
     )
 

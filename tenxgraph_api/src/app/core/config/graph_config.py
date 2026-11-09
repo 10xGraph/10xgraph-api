@@ -903,17 +903,18 @@ class GraphConfig:
 
     @property
     def observability(self) -> dict | None:
-        """The declarative ``observability`` block (Logfire / LangSmith).
+        """The declarative ``observability`` block (Logfire / LangSmith / Phoenix).
 
         Shape mirrors ``tenxgraph.runtime.publisher.setup_observability``::
 
             {
               "level": "standard",
               "logfire":   {"enabled": true, "service_name": "my-agent", ...},
-              "langsmith": {"enabled": true, "project": "my-agent", "endpoint": null}
+              "langsmith": {"enabled": true, "project": "my-agent", "endpoint": null},
+              "phoenix":   {"enabled": true, "project": "my-agent", "endpoint": null}
             }
 
-        Secrets (``LOGFIRE_TOKEN``, ``LANGSMITH_API_KEY``) stay in the
+        Secrets (``LOGFIRE_TOKEN``, ``LANGSMITH_API_KEY``, ``PHOENIX_API_KEY``) stay in the
         environment and are never read from here.
         """
         return self.data.get("observability", None)
