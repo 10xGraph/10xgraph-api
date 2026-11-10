@@ -8,6 +8,7 @@ import { Callout, Disclosure, Icon, IssueCallout, Segmented } from "./ui.jsx";
 import {
   AuthWidget, CacheStoreWidget, ChoiceWidget, RemoteToolsWidget,
 } from "./widgets.jsx";
+import { AuditWidget, auditSummary } from "./audit.jsx";
 import { MetricsWidget, TracingWidget, metricsSummary, traceSummary } from "./telemetry.jsx";
 
 const Heading = ({ children, code }) => (
@@ -72,7 +73,7 @@ function GetRunning() {
   const core = section("core");
   const ready = isAgentReady();
   const general = core ? issuesFor("core").filter((i) => !core.fields.some((f) => f.path.join(".") === i.path)) : [];
-  const rows = [["auth", authSummary()], ["cache_store", cacheSummary()], ["observability", traceSummary(offText)], ["metrics", metricsSummary(offText)]];
+  const rows = [["auth", authSummary()], ["cache_store", cacheSummary()], ["observability", traceSummary(offText)], ["metrics", metricsSummary(offText)], ["audit", auditSummary(offText)]];
   const all = store.nav.flatMap((g) => g.items).filter((id) => id !== "get-running");
   return (
     <>
@@ -142,6 +143,7 @@ function SectionWidget({ sec }) {
   if (sec.widget === "remote_tools") return <RemoteToolsWidget />;
   if (sec.widget === "observability") return <TracingWidget />;
   if (sec.widget === "metrics") return <MetricsWidget />;
+  if (sec.widget === "audit") return <AuditWidget />;
   if (sec.widget === "cache_store") return <CacheStoreWidget sec={sec} />;
   if (sec.widget === "id_generator" || sec.widget === "thread_name_generator") return <ChoiceWidget sec={sec} />;
   return null;

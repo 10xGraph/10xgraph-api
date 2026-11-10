@@ -17,6 +17,7 @@ from tenxgraph_api.src.app.core import (
     init_logger,
     setup_middleware,
 )
+from tenxgraph_api.src.app.core.audit import configure_audit
 from tenxgraph_api.src.app.core.auth.route_guard import (
     DEFAULT_PUBLIC_PATHS,
     assert_all_routes_protected,
@@ -192,6 +193,11 @@ async def lifespan(app: FastAPI):
         container=container,
     )
 
+    # Audit sinks, once, now that the auth class is bound (or not).
+    from tenxgraph_api import BaseAuth
+
+    configure_audit(graph_config.audit, auth_enabled=container.try_get(BaseAuth) is not None)
+
     await _prepare_checkpointer()
 
     # Fail fast, in development and production, while a configured backend is unreachable.
@@ -291,7 +297,7 @@ setup_middleware(app, graph_config=graph_config, container=container)
 # attach_injector(app, injector=injector)
 setup_fastapi(container=container, app=app)
 
-init_logger(settings.LOG_LEVEL)
+init_logger(settings.LOG_LEVEL, settings.LOG_FORMAT)
 
 # init error handler
 init_errors_handler(app)
@@ -299,6 +305,7 @@ init_errors_handler(app)
 # A malformed "media" section should stop the boot, not surface on the first delete.
 graph_config.media  # noqa: B018
 graph_config.metrics  # noqa: B018
+graph_config.audit  # noqa: B018
 
 # init routes
 # The AG-UI endpoint is opt-in through 10xgraph.json; the WebSocket routes can be turned off there.

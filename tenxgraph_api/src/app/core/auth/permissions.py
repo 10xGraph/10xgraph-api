@@ -14,7 +14,7 @@ refreshed tokens) must keep the default ``False``.
 
 import copy
 import email.message
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 
 from fastapi import HTTPException, Response, WebSocket, WebSocketException
 from fastapi.security import HTTPAuthorizationCredentials
@@ -23,6 +23,7 @@ from starlette.requests import HTTPConnection, Request
 from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.core import logger
+from tenxgraph_api.src.app.core.audit import audit_enabled, audit_event
 from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
 from tenxgraph_api.src.app.core.auth.permissions_registry import ALL_PERMISSIONS
 from tenxgraph_api.src.app.core.auth.rbac import InvalidClaimsError, resolve
@@ -36,6 +37,7 @@ from tenxgraph_api.src.app.core.auth.revocation import (
     token_revoked,
 )
 from tenxgraph_api.src.app.core.exceptions.general_exception import GeneralException
+from tenxgraph_api.src.app.core.request_context import get_request_context, set_request_user
 from tenxgraph_api.src.app.core.utils.container import current_container
 from tenxgraph_api.src.app.core.validation.request_config import (
     ClientInputError,
@@ -179,27 +181,53 @@ def _recall_claims(connection: HTTPConnection, auth: BaseAuth, token: str) -> di
     return copy.deepcopy(claims)
 
 
-def _authenticate(
+async def _auth_failed(reason: str, user_id: str | None = None) -> None:
+    """The ``auth`` audit event for a refused credential (no token or claim content)."""
+    await audit_event("auth", "failed", reason=reason, user_id=user_id)
+
+
+def _failure_reason(
+    credential: HTTPAuthorizationCredentials | None, exc: Exception | None = None
+) -> str:
+    """Short audit code for a failed ``authenticate``: missing, expired or invalid token."""
+    if getattr(exc, "status_code", 401) >= 500:  # noqa: PLR2004
+        return "auth_error"  # the auth backend broke (JWT settings missing), not the caller
+    if credential is None:
+        return "missing_token"
+    if getattr(exc, "error_code", None) == "EXPIRED_TOKEN":
+        return "expired"
+    return "invalid_token"
+
+
+async def _authenticate(
     auth: BaseAuth, connection: HTTPConnection, response: Response | None
 ) -> dict[str, Any]:
-    """The verified claims of this request, or a 401 (1008 on a WebSocket)."""
+    """The verified claims of this request, or a 401 (1008 on a WebSocket).
+
+    Claims the rate limiter already verified are reused (``_recall_claims``): the limiter
+    emits nothing, so each request gets at most one ``auth`` event, from here or ``_identity``.
+    """
     credential = _extract_credential(connection)
     try:
         claims = _recall_claims(connection, auth, credential.credentials) if credential else None
         if claims is None:
             claims = auth.authenticate(connection, response, credential)
     except HTTPException as exc:
+        await _auth_failed(_failure_reason(credential, exc))
         _reject(connection, exc.status_code, str(exc.detail))
     except GeneralException as exc:
+        await _auth_failed(_failure_reason(credential, exc))
         # JwtAuth raises UserAccountError (401). HTTP routes render it through its exception
         # handler; a WebSocket has no handler, so close it cleanly.
         if isinstance(connection, WebSocket):
             _reject(connection, exc.status_code, exc.message)
         raise
     if not claims:
+        await _auth_failed(_failure_reason(credential))
         _reject(connection, 401, "Authentication required")
     if not isinstance(claims, dict):
         logger.error("%s.authenticate returned %s, not a dict", type(auth).__name__, type(claims))
+        await _auth_failed("claims_rejected")
         _reject(connection, 401, "Authentication failed")
     return claims
 
@@ -207,24 +235,38 @@ def _authenticate(
 async def _identity(
     connection: HTTPConnection, response: Response | None, auth: BaseAuth
 ) -> Identity:
-    """Authenticate, resolve roles and permissions, refuse reserved ids and revoked tokens."""
-    claims = _authenticate(auth, connection, response)
+    """Authenticate, resolve roles and permissions, refuse reserved ids and revoked tokens.
+
+    Each refusal emits one ``auth`` audit event; the WARNING lines are written only while audit
+    is off, so the record is not doubled.
+    """
+    claims = await _authenticate(auth, connection, response)
     try:
         identity = resolve(claims, auth.rbac)
     except InvalidClaimsError as exc:
-        logger.warning("Rejected token claims: %s", exc)
+        if not audit_enabled():
+            logger.warning("Rejected token claims: %s", exc)
+        user_id = claims.get("user_id")
+        await _auth_failed("claims_rejected", user_id if isinstance(user_id, str) else None)
         _reject(connection, 401, "Invalid token, please login again")
     if identity_is_reserved(identity):
         # Any auth class, any transport, cached or fresh: nobody acts as the shared owner.
-        log_reserved_rejection()
+        # The event leaves the reserved id out, like the log line.
+        if not audit_enabled():
+            log_reserved_rejection()
+        await _auth_failed("reserved_id")
         _reject(connection, 401, RESERVED_USER_ID_MESSAGE)
     try:
         revoked = await token_revoked(identity)
     except TokenRevocationUnavailableError:
+        await _auth_failed("revocation_unavailable", identity.user_id)
         _reject(connection, 503, "Token revocation check unavailable")
     if revoked:
-        logger.warning("Rejected revoked credential for user %s", identity.user_id)
+        if not audit_enabled():
+            logger.warning("Rejected revoked credential for user %s", identity.user_id)
+        await _auth_failed("revoked", identity.user_id)
         _reject(connection, 401, "Token has been revoked, please login again")
+    set_request_user(identity.user_id)
     return identity
 
 
@@ -244,12 +286,16 @@ class RequireIdentity:
         auth: BaseAuth | None = InjectAPI(BaseAuth),
     ) -> Identity | None:
         if auth is None:
+            if self.permission is not None:
+                # Auth off: everyone is allowed; the event records the call (user_id null).
+                await _audit_access(None, self.permission, _path_resource(connection), "allowed")
             return None
         identity = await _identity(connection, response, auth)
         if self.permission is not None:
             resource_id = await _resource_id(connection)
+            resource = _resource_label(connection, resource_id)
             try:
-                await _authorize(auth, identity, self.permission, resource_id)
+                await _authorize(auth, identity, self.permission, resource_id, resource)
             except HTTPException as exc:
                 _reject(connection, exc.status_code, str(exc.detail))
         return identity
@@ -271,12 +317,40 @@ class RequirePermission(RequireIdentity):
         self.permission = permission
 
 
-async def _authorize(
-    auth: BaseAuth, identity: Identity, permission: str, resource: str | None
+async def _audit_access(
+    identity: Identity | None,
+    permission: str,
+    resource: str | None,
+    result: Literal["allowed", "denied"],
 ) -> None:
-    """``auth.authorize`` or an ``HTTPException`` (403; one ``authorize`` raised passes through)."""
-    if not await auth.authorize(identity, permission, resource):
-        logger.warning("User %s lacks permission %s", identity.user_id, permission)
+    """The ``access`` audit event; also remembers the permission for a later ``not_found``."""
+    ctx = get_request_context()
+    if ctx is not None:
+        ctx.action = permission
+        ctx.resource = resource
+    await audit_event("access", result, action=permission, resource=resource, identity=identity)
+
+
+async def _authorize(
+    auth: BaseAuth,
+    identity: Identity,
+    permission: str,
+    resource_id: str | None,
+    resource: str | None,
+) -> None:
+    """``auth.authorize`` or an ``HTTPException`` (403; one ``authorize`` raised passes through).
+
+    ``resource_id`` goes to ``authorize``; ``resource`` (``"thread/<id>"``) to the audit event.
+    """
+    try:
+        allowed = await auth.authorize(identity, permission, resource_id)
+    except HTTPException:
+        await _audit_access(identity, permission, resource, "denied")
+        raise
+    await _audit_access(identity, permission, resource, "allowed" if allowed else "denied")
+    if not allowed:
+        if not audit_enabled():
+            logger.warning("User %s lacks permission %s", identity.user_id, permission)
         raise HTTPException(status_code=403, detail=f"Missing required permission: {permission}")
 
 
@@ -296,7 +370,33 @@ async def authorize_resource(
         return
     auth = current_container().try_get(BaseAuth)
     if auth is not None:
-        await _authorize(auth, identity, permission, resource)
+        label = f"thread/{resource}" if resource is not None else None
+        await _authorize(auth, identity, permission, resource, label)
+
+
+# Path parameters that name the target, in priority order, with the audit resource kind.
+_RESOURCE_KINDS = {
+    "thread_id": "thread",
+    "memory_id": "memory",
+    "namespace": "namespace",
+    "file_id": "file",
+}
+
+
+def _resource_label(connection: HTTPConnection, resource_id: str | None) -> str | None:
+    """``"<kind>/<id>"`` for the audit event; a body id is always a thread."""
+    if resource_id is None:
+        return None
+    params = connection.path_params
+    kind = next((k for name, k in _RESOURCE_KINDS.items() if name in params), "thread")
+    return f"{kind}/{resource_id}"
+
+
+def _path_resource(connection: HTTPConnection) -> str | None:
+    """The audit resource from the path alone (auth off: the body is not read)."""
+    params = connection.path_params
+    resource_id = next((str(params[n]) for n in _RESOURCE_KINDS if n in params), None)
+    return _resource_label(connection, resource_id)
 
 
 async def _resource_id(connection: HTTPConnection) -> str | None:
@@ -310,10 +410,7 @@ async def _resource_id(connection: HTTPConnection) -> str | None:
     for name in ("thread_id", "message_id", "memory_id"):
         if name in params:
             problem = resource_id_error(params[name], name) or problem
-    resource_id = next(
-        (str(params[n]) for n in ("thread_id", "memory_id", "namespace", "file_id") if n in params),
-        None,
-    )
+    resource_id = next((str(params[n]) for n in _RESOURCE_KINDS if n in params), None)
     if resource_id is None:
         resource_id = await _body_thread_id(connection)
         problem = problem or resource_id_error(resource_id, "thread_id")

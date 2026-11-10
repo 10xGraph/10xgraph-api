@@ -7,6 +7,7 @@
 [![PyPI](https://img.shields.io/pypi/v/10xgraph-api?color=blue)](https://pypi.org/project/10xgraph-api/)
 [![Python](https://img.shields.io/pypi/pyversions/10xgraph-api)](https://pypi.org/project/10xgraph-api/)
 [![License](https://img.shields.io/github/license/10xGraph/10xgraph-api)](https://github.com/10xGraph/10xgraph-api/blob/main/LICENSE)
+[![Verified on FreeAPI](https://findfreeapi.com/api/badge/10xgraph-api)](https://findfreeapi.com/en/service/10xgraph-api)
 
 `10xgraph-api` generates the production server around a [10xGraph](https://github.com/10xGraph/10xGraph) agent. Point `10xgraph.json` at your compiled graph and it serves REST, NDJSON streaming, WebSocket and realtime-audio endpoints with JWT or custom auth, scoped authorization on every endpoint, owner-only threads and rate limiting, then writes your Docker Compose and Kubernetes files. MIT licensed and self-hosted.
 

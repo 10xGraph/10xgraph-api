@@ -15,6 +15,8 @@ from tenxgraph.core.exceptions import ThreadNotFoundError
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.utils.thread_info import ThreadInfo
 
+from tenxgraph_api.src.app.core.audit import audit_not_found
+
 
 async def require_thread(
     checkpointer: BaseCheckpointer,
@@ -47,7 +49,9 @@ async def require_thread(
         return thread
     if run and not server_thread_ids and not await _taken(checkpointer, thread_id):
         return None
-    raise ThreadNotFoundError(thread_id)
+    error = ThreadNotFoundError(thread_id)
+    await audit_not_found(error, identity)  # one event, on every transport
+    raise error
 
 
 async def _taken(checkpointer: BaseCheckpointer, thread_id: Any) -> bool:

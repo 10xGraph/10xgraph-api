@@ -267,6 +267,9 @@ def build_config(context: dict, is_prod: bool) -> dict:
         cache_store["token_revocation"] = True
     config["cache_store"] = cache_store
 
+    # Who accessed or changed which data, as JSON lines on stdout for the log pipeline.
+    config["audit"] = {"enabled": True, "sinks": ["log"], "include_reads": True}
+
     worker = WORKERS.get(context.get("worker", "none"))
     if worker:
         config["worker"] = {

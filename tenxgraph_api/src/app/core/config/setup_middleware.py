@@ -12,16 +12,18 @@ from fastapi.responses import JSONResponse
 from injectq import InjectQ
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.cors import CORSMiddleware
-from starlette.requests import Request
+from starlette.requests import HTTPConnection, Request
 from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from tenxgraph_api.src.app.core.exceptions.server_errors import UnhandledErrorMiddleware
 from tenxgraph_api.src.app.core.middleware.rate_limit import RateLimitMiddleware
+from tenxgraph_api.src.app.core.middleware.rate_limit.keying import _client_ip
 from tenxgraph_api.src.app.core.middleware.request_limits import RequestSizeLimitMiddleware
 from tenxgraph_api.src.app.core.middleware.security_headers import SecurityHeadersMiddleware
+from tenxgraph_api.src.app.core.request_context import RequestContext, request_context_var
 
-from .graph_config import GraphConfig
+from .graph_config import GraphConfig, RateLimitConfig
 from .metrics import resolve_use_metrics_endpoint, setup_metrics
 from .sentry_config import init_sentry
 from .settings import get_settings, logger
@@ -197,10 +199,20 @@ class RequestIDMiddleware:
     per-request task and never buffers a streaming body (``BaseHTTPMiddleware`` does both).
     """
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, rate_limit_config: RateLimitConfig | None = None) -> None:
         self.app = app
+        self.rate_limit_config = rate_limit_config
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "websocket":
+            # Same request context as HTTP, but no headers: the handshake send path is untouched.
+            scope.setdefault("state", {})["request_id"] = request_id = str(uuid.uuid4())
+            token = self._bind_context(scope, request_id, "ws")
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                request_context_var.reset(token)
+            return
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -219,8 +231,23 @@ class RequestIDMiddleware:
                 headers["X-Timestamp"] = timestamp
             await send(message)
 
-        await self.app(scope, receive, send_with_id)
+        token = self._bind_context(scope, request_id, "http")
+        try:
+            await self.app(scope, receive, send_with_id)
+        finally:
+            request_context_var.reset(token)
         logger.debug(f"Response: Request ID: {request_id}, Timestamp: {timestamp}")
+
+    def _bind_context(self, scope: Scope, request_id: str, transport: str) -> Any:
+        """Set the request context; client_ip is the address the rate limiter keys on."""
+        config = self.rate_limit_config
+        if config is not None:
+            client_ip = _client_ip(HTTPConnection(scope), config)
+        else:
+            client_ip = scope["client"][0] if scope.get("client") else None
+        return request_context_var.set(
+            RequestContext(request_id=request_id, transport=transport, client_ip=client_ip)
+        )
 
 
 def _user_id_mode(graph_config: GraphConfig | None) -> str:
@@ -681,7 +708,10 @@ def setup_middleware(
             csp_policy=settings.CSP_POLICY,
         )
 
-    app.add_middleware(RequestIDMiddleware)
+    app.add_middleware(
+        RequestIDMiddleware,
+        rate_limit_config=graph_config.rate_limit if graph_config is not None else None,
+    )
 
     app.add_middleware(
         AllowlistCORSMiddleware,

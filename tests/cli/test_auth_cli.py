@@ -1,6 +1,5 @@
 """``10xgraph audit`` and ``10xgraph build`` on the shared auth rules."""
 
-
 from __future__ import annotations
 
 import io
@@ -56,3 +55,24 @@ def test_build_warns_that_the_image_would_not_boot(tmp_path, monkeypatch) -> Non
     assert code == 0
     assert "authorization-removed" in text
     assert "would not boot" in text
+
+
+def test_audit_command_warns_when_production_has_no_audit_log(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MODE", "production")
+    _write(tmp_path, monkeypatch, GOOD)
+    result = AuditCommand._audit_log_check()
+    assert result.status == "warn"
+    assert "audit log off in production" in result.detail
+    _write(tmp_path, monkeypatch, {**GOOD, "audit": {"enabled": False}})
+    assert AuditCommand._audit_log_check().status == "warn"
+
+
+def test_audit_command_passes_with_the_audit_log_on_or_outside_production(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("MODE", "production")
+    _write(tmp_path, monkeypatch, {**GOOD, "audit": {"enabled": True}})
+    assert AuditCommand._audit_log_check().status == "pass"
+    monkeypatch.setenv("MODE", "development")
+    _write(tmp_path, monkeypatch, GOOD)
+    assert AuditCommand._audit_log_check().status == "pass"

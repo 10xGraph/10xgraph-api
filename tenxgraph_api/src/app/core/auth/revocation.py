@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 
 from tenxgraph.core.authz import Identity
 
+from tenxgraph_api.src.app.core.audit import audit_event
 from tenxgraph_api.src.app.core.config.graph_config import (
     DEFAULT_USER_REVOCATION_TTL,
     TokenRevocationConfig,
@@ -118,6 +119,7 @@ async def revoke_token(cache: BaseCacheStore, jti: str, expires_at: float | None
     if expires_at is not None:
         ttl = max(1, int(float(expires_at) - await cache.now()))
     await cache.set(jti_key(jti), b"1", ttl)
+    await audit_event("change", "success", action="tokens:revoke", resource=f"token/{jti}")
 
 
 async def revoke_user(
@@ -137,6 +139,7 @@ async def revoke_user(
     # cutoff itself through.
     text = Decimal(cutoff).quantize(_MICROSECOND, rounding=ROUND_CEILING)
     await cache.set(user_key(user_id), f"{text:f}".encode(), ttl, mode="if_greater")
+    await audit_event("change", "success", action="users:revoke", resource=f"user/{user_id}")
 
 
 async def _none() -> None:

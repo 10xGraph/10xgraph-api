@@ -920,7 +920,7 @@ def test_tracing_and_metrics_sections() -> None:
     assert all(
         s.get("self_managed", False) is False
         for s in build_schema()["sections"]
-        if s["id"] not in ("observability", "metrics")
+        if s["id"] not in ("observability", "metrics", "audit")
     )
     assert metrics["key"] == "metrics" and metrics["optional"] is True
     assert "metrics" in KNOWN_TOP_LEVEL_KEYS
@@ -1010,3 +1010,45 @@ def test_nothing_traced_warning_counts_otlp() -> None:
         {"agent": "a:b", "observability": {"otlp": {"enabled": True, "endpoint": "http://c:4318"}}}
     )
     assert _levels(on, "observability") == []
+
+
+# ---------------------------------------------------------------------------
+# audit log section
+# ---------------------------------------------------------------------------
+
+
+def test_audit_section_is_next_to_metrics_and_lists_log_format() -> None:
+    sections = {s["id"]: s for s in build_schema()["sections"]}
+    audit = sections["audit"]
+    assert audit["key"] == "audit" and audit["self_managed"] and audit["widget"] == "audit"
+    assert audit["off_summary"] == "No audit events are recorded."
+    assert [e["name"] for e in audit["env"]] == ["LOG_FORMAT"]
+    assert "audit" in KNOWN_TOP_LEVEL_KEYS and section_for_key("audit") == "audit"
+    assert "default" not in json.dumps([f["label"] for f in audit["fields"]]).lower()
+
+
+def test_audit_key_round_trips_through_the_store(tmp_path: Path) -> None:
+    store = ConfigFileStore(tmp_path / "10xgraph.json")
+    audit = {
+        "enabled": True,
+        "sinks": ["log", "publisher", "my_pkg.sink:Sink"],
+        "include_reads": False,
+    }
+    store.save({"agent": "graph.react:app", "audit": audit}, None)
+    loaded = store.load().config
+    assert loaded["audit"] == audit
+    assert _levels(validate_config(loaded), "audit") == []
+    assert _levels(validate_config(loaded), "audit.sinks") == []
+
+
+def test_audit_unknown_key_and_bad_values_are_errors() -> None:
+    base = {"agent": "graph.react:app"}
+    issues = validate_config({**base, "audit": {"enabled": True, "level": "full"}})
+    assert _levels(issues, "audit.level") == ["error"]
+    issues = validate_config({**base, "audit": {"enabled": "yes", "include_reads": 1}})
+    assert _levels(issues, "audit.enabled") == ["error"]
+    assert _levels(issues, "audit.include_reads") == ["error"]
+    for sinks in (["syslog"], [], "log", ["log", 3]):
+        issues = validate_config({**base, "audit": {"enabled": True, "sinks": sinks}})
+        assert _levels(issues, "audit.sinks") == ["error"], sinks
+    assert _levels(validate_config({**base, "audit": []}), "audit") == ["error"]

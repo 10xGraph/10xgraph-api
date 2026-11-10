@@ -32,6 +32,7 @@ _OBSERVABILITY_LEVELS = ("spans", "standard", "full")
 _USER_ID_MODES = ("raw", "hash", "mask")
 _TRACE_DESTINATIONS = ("logfire", "langsmith", "phoenix", "otlp")
 _MAX_PERCENT = 100
+_AUDIT_KEYS = ("enabled", "sinks", "include_reads")
 # Settings that live inside cache_store; at the top level the server refuses them.
 _CACHE_STORE_SETTINGS = ("redis", "rate_limit", "token_revocation")
 
@@ -81,6 +82,7 @@ def validate_config(config: Any, base_dir: Path | None = None) -> list[Issue]:
     _check_media(config, out)
     _check_observability(config, out)
     _check_metrics(config, out)
+    _check_audit(config, out)
     _check_wiring(config, out, base_dir)
     _check_remote_tools(config, out)
     _check_test(config, out)
@@ -388,6 +390,37 @@ def _check_metrics(config: dict, out: _Collector) -> None:
             # A rule on the whole model names its field in the message.
             named = re.match(r"(metrics\.[\w.]+) ", message)
             out.error(named.group(1) if named else path, message)
+
+
+def _check_audit(config: dict, out: _Collector) -> None:
+    data = config.get("audit")
+    if data is None:
+        return
+    if not isinstance(data, dict):
+        out.error("audit", "audit must be an object.")
+        return
+    for key in data:
+        if key not in _AUDIT_KEYS:
+            out.error(
+                f"audit.{key}", f"audit.{key} is not a setting. Use {', '.join(_AUDIT_KEYS)}."
+            )
+    for key in ("enabled", "include_reads"):
+        if key in data and not isinstance(data[key], bool):
+            out.error(f"audit.{key}", f"audit.{key} must be true or false.")
+    sinks = data.get("sinks")
+    if sinks is None:
+        return
+    if not isinstance(sinks, list) or not sinks:
+        out.error("audit.sinks", "audit.sinks must be a non-empty list.")
+        return
+    for sink in sinks:
+        if sink not in ("log", "publisher") and not (
+            isinstance(sink, str) and _IMPORT_PATH.match(sink)
+        ):
+            out.error(
+                "audit.sinks",
+                f'Unknown sink {sink!r}. Use "log", "publisher" or "module:Class".',
+            )
 
 
 def _check_wiring(config: dict, out: _Collector, base_dir: Path | None) -> None:

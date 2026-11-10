@@ -7,6 +7,7 @@ from injectq.integrations import InjectAPI
 from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import Message
 
+from tenxgraph_api.src.app.core.audit import audit_event
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.validation.client_filters import parse_filters_param
@@ -126,6 +127,13 @@ async def put_state(
         identity,
         payload.state,
     )
+    await audit_event(
+        "change",
+        "success",
+        action="threads:write",
+        resource=f"thread/{thread_id}",
+        identity=identity,
+    )
 
     return success_response(
         res,
@@ -163,6 +171,13 @@ async def clear_state(
     res = await service.clear_state(
         config,
         identity,
+    )
+    await audit_event(
+        "change",
+        "success",
+        action="threads:delete",
+        resource=f"thread/{thread_id}",
+        identity=identity,
     )
 
     return success_response(
@@ -259,6 +274,13 @@ async def put_message_feedback(
         message_id,
         payload.feedback,
     )
+    await audit_event(
+        "change",
+        "success",
+        action="threads:write",
+        resource=f"message/{message_id}",
+        identity=identity,
+    )
 
     return success_response(
         parse_message_output(get_settings(), result),
@@ -354,6 +376,13 @@ async def delete_message(
         config,
         identity,
         message_id,
+    )
+    await audit_event(
+        "change",
+        "success",
+        action="threads:delete",
+        resource=f"message/{message_id}",
+        identity=identity,
     )
 
     return success_response(
@@ -492,6 +521,13 @@ async def delete_thread(
         config,
         identity,
         thread_id,
+    )
+    await audit_event(
+        "change",
+        "success",
+        action="threads:delete",
+        resource=f"thread/{thread_id}",
+        identity=identity,
     )
 
     return success_response(

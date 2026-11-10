@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import socket
 import sys
 from collections.abc import Callable
@@ -57,7 +58,7 @@ class Diagnostic:
 class AuditCommand(BaseCommand):
     """Audit the local CLI, core package, project config, and default port.
 
-    Runs eight checks in a fixed order and reports them twice: live, through the
+    Runs nine checks in a fixed order and reports them twice: live, through the
     step timeline, and again as a summary table once every check has finished.
 
     ============  ==========================================================
@@ -78,6 +79,8 @@ class AuditCommand(BaseCommand):
     security      The settings in ``10xgraph.json`` that matter before production
                   (auth, authorization, rate limiting, token revocation), as
                   warnings only: they are the developer's choices, never failures.
+    audit log     Warns when MODE=production and ``audit.enabled`` is not true
+                  in ``10xgraph.json``.
     port          The default API port is free to bind.
     ============  ==========================================================
     """
@@ -108,6 +111,7 @@ class AuditCommand(BaseCommand):
             ("config", "Project configuration", lambda: self._config_check(config)),
             ("auth", "Auth configuration", lambda: self._auth_check(config)),
             ("security", "Security posture", lambda: self._security_check(config)),
+            ("audit_log", "Audit log", lambda: self._audit_log_check(config)),
             ("port", f"Port {DEFAULT_PORT}", lambda: self._port_check(DEFAULT_PORT)),
         )
 
@@ -252,6 +256,21 @@ class AuditCommand(BaseCommand):
         return Diagnostic(
             "Security", "warn", "; ".join(f"{i['path']}: {i['message']}" for i in issues)
         )
+
+    @staticmethod
+    def _audit_log_check(config: str = DEFAULT_CONFIG_FILE) -> Diagnostic:
+        """Warn when production runs without the audit log (reads the JSON and MODE only)."""
+        if os.environ.get("MODE", "").lower() != "production":
+            return Diagnostic("Audit log", "pass", "not checked outside MODE=production")
+        config_path = resolve_default_config(config).resolve()
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return Diagnostic("Audit log", "pass", "no readable config to check")
+        section = data.get("audit") if isinstance(data, dict) else None
+        if isinstance(section, dict) and section.get("enabled") is True:
+            return Diagnostic("Audit log", "pass", "on")
+        return Diagnostic("Audit log", "warn", "audit log off in production")
 
     @staticmethod
     def _port_check(port: int) -> Diagnostic:

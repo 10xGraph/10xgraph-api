@@ -6,6 +6,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from injectq.integrations import InjectAPI
 from tenxgraph.core.authz import Identity
 
+from tenxgraph_api.src.app.core.audit import audit_event
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
 from tenxgraph_api.src.app.utils.response_helper import success_response
 from tenxgraph_api.src.app.utils.swagger_helper import generate_swagger_responses
@@ -46,6 +47,13 @@ async def create_memory(
     """Store a memory item using the configured store."""
 
     result = await service.store_memory(payload, identity)
+    await audit_event(
+        "change",
+        "success",
+        action="memory:write",
+        resource=f"memory/{result.memory_id}",
+        identity=identity,
+    )
     return success_response(result, request, message="Memory stored successfully")
 
 
@@ -128,6 +136,13 @@ async def update_memory(
         raise HTTPException(status_code=422, detail="memory_id is required and cannot be empty")
 
     result = await service.update_memory(memory_id, payload, identity)
+    await audit_event(
+        "change",
+        "success",
+        action="memory:write",
+        resource=f"memory/{memory_id}",
+        identity=identity,
+    )
     return success_response(result, request, message="Memory updated successfully")
 
 
@@ -157,6 +172,13 @@ async def delete_memory(
     result = await service.delete_memory(
         memory_id, config_payload, identity, options=options_payload
     )
+    await audit_event(
+        "change",
+        "success",
+        action="memory:delete",
+        resource=f"memory/{memory_id}",
+        identity=identity,
+    )
     return success_response(result, request, message="Memory deleted successfully")
 
 
@@ -176,6 +198,9 @@ async def forget_memory(
     """Forget memories based on filters."""
 
     result = await service.forget_memory(payload, identity)
+    await audit_event(
+        "change", "success", action="memory:delete", resource="memory", identity=identity
+    )
     return success_response(result, request, message="Memories removed successfully")
 
 

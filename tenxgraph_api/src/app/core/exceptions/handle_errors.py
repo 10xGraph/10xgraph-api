@@ -20,6 +20,7 @@ from tenxgraph.core.exceptions import (
 from tenxgraph.utils.validators import ValidationError
 
 from tenxgraph_api.src.app.core import logger
+from tenxgraph_api.src.app.core.audit import audit_http_not_found, audit_not_found
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.exceptions.server_errors import (
     RETRY_AFTER_SECONDS,
@@ -142,6 +143,8 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request: Request, exc: HTTPException):
         _log_handled(request, exc, exc.status_code, "HTTPException", "HTTP exception")
+        if exc.status_code == 404:  # noqa: PLR2004
+            await audit_http_not_found()
 
         # Get request ID for tracking
         request_id = getattr(request.state, "request_id", "unknown")
@@ -399,6 +402,7 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
         # A subclass of StorageError: Starlette picks the handler of the closest class, so this
         # one wins over the generic 500. No details: the context holds the thread id.
         _log_handled(request, exc, 404, THREAD_NOT_FOUND_CODE, "ThreadNotFoundError")
+        await audit_not_found(exc)  # skipped when the thread lookup already recorded it
         return error_response(
             request,
             error_code=THREAD_NOT_FOUND_CODE,

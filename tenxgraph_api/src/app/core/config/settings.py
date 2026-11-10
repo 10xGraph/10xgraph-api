@@ -90,6 +90,8 @@ class Settings(BaseSettings):
     # DEBUG = 10
     # NOTSET = 0
     LOG_LEVEL: str = "INFO"
+    # "text" (one readable line) or "json" (one JSON object per line, for log pipelines).
+    LOG_FORMAT: str = "text"
     # When true, MODE=production refuses to start on the settings it otherwise only warns
     # about: wildcard ALLOWED_HOST, wildcard ORIGINS, and enabled API docs. Unset means on in
     # production and off in development; STRICT_PRODUCTION_CHECKS=false opts out.
@@ -240,6 +242,15 @@ class Settings(BaseSettings):
     OTEL_SERVICE_NAME: str = "10xgraph-api"
     OTEL_EXPORTER_OTLP_ENDPOINT: str | None = None
     OTEL_LEVEL: str = "standard"  # spans | standard | full
+
+    @field_validator("LOG_FORMAT", mode="before")
+    @classmethod
+    def check_log_format(cls, v: str | None) -> str:
+        """LOG_FORMAT is ``text`` or ``json``; reject anything else."""
+        value = str(v or "text").strip().lower()
+        if value not in ("text", "json"):
+            raise ValueError(f"LOG_FORMAT must be 'text' or 'json', got {v!r}")
+        return value
 
     @field_validator("MODE", mode="before")
     @classmethod

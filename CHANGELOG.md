@@ -29,6 +29,32 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added: audit log
+
+- **`audit` key in `10xgraph.json`** (`enabled`, `sinks`, `include_reads`; off by default, unknown
+  keys refuse to boot). Records who accessed or changed what, when, and whether it was allowed, as
+  metadata only: ids and results, never prompts, answers, message text or file contents. Event
+  types: `access` (`allowed`, `denied`, `not_found`), `auth` (`failed` with a reason) and `change`
+  (`success`, with a `count` where known). `include_reads: false` drops allowed access events;
+  denials, auth failures and changes are always kept.
+- **Sinks.** `"log"` writes one JSON line per event on stdout (logger `tenxgraph_api.audit`),
+  whatever `LOG_FORMAT`. `"publisher"` also sends each event through the app's events publisher
+  (Kafka, Redis, RabbitMQ, custom); it is best effort and events still queued at SIGTERM may be
+  lost, so the log sink is the record. Observability publishers (OTEL, Logfire, Phoenix) are
+  skipped, and a `"publisher"` entry with no events publisher logs a warning at boot and is
+  skipped. `"module:Class"` loads your own sink once at boot (a `BaseAuditSink` subclass, an
+  instance or a zero-argument factory); anything else refuses to boot.
+- **`BaseAuditSink` and `AuditEvent`** are exported from `tenxgraph_api`. A sink that raises is
+  logged at ERROR and the request continues; with metrics on it also counts into
+  `tenxgraph_audit_sink_errors_total` (label `sink`, the sink class name).
+- **`LOG_FORMAT=json`** writes every log line as one JSON object, with request id, transport and
+  user id when known; secrets are still masked.
+- **`10xgraph config`** has an Audit log section.
+- **`10xgraph init` production template** turns the audit log on, and **`10xgraph build`** sets
+  `LOG_FORMAT=json` in the Dockerfile, Kubernetes manifest and Docker Compose file.
+- **`10xgraph audit`** has an Audit log check that warns when `MODE=production` and
+  `audit.enabled` is not true.
+
 ### Breaking changes: auth, RBAC and reach
 
 Needs the `10xgraph` release with `Identity` and `Reach` (`tenxgraph.core.authz`). The unreleased

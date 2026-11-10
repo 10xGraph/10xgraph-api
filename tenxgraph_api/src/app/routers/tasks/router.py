@@ -20,6 +20,7 @@ from tenxgraph_api.jobs.arguments import ReservedArgumentError, check_arguments
 from tenxgraph_api.jobs.context import cancel
 from tenxgraph_api.jobs.scheduler import sources
 from tenxgraph_api.jobs.worker import broker
+from tenxgraph_api.src.app.core.audit import audit_event
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
 from tenxgraph_api.src.app.core.cache_store import BaseCacheStore
 from tenxgraph_api.src.app.core.config.settings import get_settings
@@ -157,6 +158,13 @@ async def start_task(
         except Exception:
             await store.delete(_schedule_key(record.schedule_id))
             raise
+        await audit_event(
+            "change",
+            "success",
+            action="tasks:trigger",
+            resource=f"schedule/{record.schedule_id}",
+            identity=identity,
+        )
         return success_response({"schedule_id": record.schedule_id}, request, status_code=202)
 
     task_id = broker.id_generator()
@@ -175,6 +183,13 @@ async def start_task(
     except Exception:
         await state.update_status(store, task_id, task.task_name, "failure", config)
         raise
+    await audit_event(
+        "change",
+        "success",
+        action="tasks:trigger",
+        resource=f"task/{task_id}",
+        identity=identity,
+    )
     return success_response({"task_id": task_id}, request, status_code=202)
 
 
@@ -227,6 +242,13 @@ async def change_schedule(
     record.schedule = body.schedule
     await _save_schedule(store, record)
     await _add_schedule(task, record)
+    await audit_event(
+        "change",
+        "success",
+        action="tasks:trigger",
+        resource=f"schedule/{schedule_id}",
+        identity=identity,
+    )
     return success_response(record.model_dump(mode="json", exclude={"config"}), request)
 
 
@@ -243,10 +265,24 @@ async def cancel_task(
     if schedule is not None and _visible(schedule, identity, widen=True):
         await _source().delete_schedule(task_id)
         await store.delete(_schedule_key(task_id))
+        await audit_event(
+            "change",
+            "success",
+            action="tasks:cancel",
+            resource=f"schedule/{task_id}",
+            identity=identity,
+        )
         return success_response({"schedule_id": task_id, "deleted": True}, request)
     record = await state.read_status(store, task_id)
     if schedule is not None or record is None or not _visible(record, identity, widen=True):
         raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
     await cancel(task_id)
     record = await state.read_status(store, task_id) or record
+    await audit_event(
+        "change",
+        "success",
+        action="tasks:cancel",
+        resource=f"task/{task_id}",
+        identity=identity,
+    )
     return success_response({"task_id": task_id, "status": record.status}, request)

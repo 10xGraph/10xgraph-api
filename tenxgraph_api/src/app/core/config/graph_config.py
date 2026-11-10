@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError,
 
 if TYPE_CHECKING:
     from tenxgraph_api.jobs.config import WorkerConfig
+    from tenxgraph_api.src.app.core.audit.config import AuditConfig
     from tenxgraph_api.src.app.core.auth.auth_config import AuthConfig
     from tenxgraph_api.src.app.core.config.metrics import MetricsConfig
 
@@ -983,6 +984,14 @@ class GraphConfig:
         from tenxgraph_api.src.app.core.config.metrics import MetricsConfig
 
         return MetricsConfig.model_validate(self.data.get("metrics") or {})
+
+    @property
+    def audit(self) -> "AuditConfig":
+        """The ``audit`` block (access, auth and change events); off when absent. Unknown keys
+        are a validation error, so a typo refuses to boot."""
+        from tenxgraph_api.src.app.core.audit.config import AuditConfig
+
+        return AuditConfig.model_validate(self.data.get("audit") or {})
 
     @property
     def media(self) -> MediaConfig:

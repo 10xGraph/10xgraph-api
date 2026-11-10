@@ -280,3 +280,20 @@ def test_production_graph_builds_a_pg_checkpointer_without_services(tmp_path: Pa
     )
     assert done.returncode == 0, done.stderr
     assert done.stdout.strip().endswith("PgCheckpointer")
+
+
+def test_production_template_writes_the_audit_log(tmp_path: Path) -> None:
+    import json
+
+    target = tmp_path / "audited"
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+    assert command.execute(path=str(target), agent_name="Audited", mode="full", yes=True) == 0
+    config = json.loads((target / "10xgraph.json").read_text())
+    assert config["audit"] == {"enabled": True, "sinks": ["log"], "include_reads": True}
+
+
+def test_summary_shows_the_audit_log(monkeypatch) -> None:
+    context, _, _ = _run_prompts(monkeypatch, _FULL)
+    stream = io.StringIO()
+    InitCommand(output=OutputFormatter(stream=stream))._print_summary(context)
+    assert "Audit log" in stream.getvalue()

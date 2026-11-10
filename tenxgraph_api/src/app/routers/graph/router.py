@@ -17,6 +17,7 @@ from tenxgraph.core.realtime.base import ErrorEvent
 from tenxgraph.core.realtime.queue import LiveInputQueue
 from tenxgraph.core.state import StreamChunk, StreamEvent
 
+from tenxgraph_api.src.app.core.audit import audit_event
 from tenxgraph_api.src.app.core.auth.permissions import (
     RequirePermission,
     authorize_resource,
@@ -658,6 +659,13 @@ async def stop_graph(
 
     await require_thread(service.checkpointer, identity, stop_request.thread_id)
     result = await service.stop_graph(stop_request.thread_id, identity, stop_request.config)
+    await audit_event(
+        "change",
+        "success",
+        action="graph:stop",
+        resource=f"thread/{stop_request.thread_id}",
+        identity=identity,
+    )
 
     if not _is_production():
         logger.info("Graph stop completed for thread %s", log_safe(stop_request.thread_id))
@@ -720,6 +728,13 @@ async def fix_graph(
             identity,
             fix_request.config,
         )
+    await audit_event(
+        "change",
+        "success",
+        action="graph:fix",
+        resource=f"thread/{fix_request.thread_id}",
+        identity=identity,
+    )
 
     if not _is_production():
         logger.info("Graph fix completed for thread %s", log_safe(fix_request.thread_id))
@@ -738,14 +753,32 @@ async def fix_graph(
 async def _ws_token_revoked(identity: Identity | None) -> bool:
     """Whether the socket's token was revoked since the handshake (an outage counts as yes).
 
-    Never revoked when auth is off (``identity`` is ``None``).
+    Never revoked when auth is off (``identity`` is ``None``). A refusal is an ``auth`` audit
+    event.
     """
     if identity is None:
         return False
     try:
-        return await token_revoked(identity)
+        revoked = await token_revoked(identity)
+        reason = "revoked"
     except TokenRevocationUnavailableError:
+        revoked, reason = True, "revocation_unavailable"
+    if revoked:
+        await audit_event("auth", "failed", reason=reason, user_id=identity.user_id)
+    return revoked
+
+
+async def _ws_credential_error(websocket: WebSocket, identity: Identity | None) -> bool:
+    """Whether the socket's credential no longer holds (expired, revoked or backend down).
+
+    Checked before each ``/v1/graph/ws`` run and on a timer during a ``/v1/graph/live``
+    session: the token is re-verified (catches expiry) and the revocation backend is asked.
+    """
+    if not ws_identity_still_valid(websocket, identity):
+        user_id = identity.user_id if identity is not None else None
+        await audit_event("auth", "failed", reason="invalid_token", user_id=user_id)
         return True
+    return await _ws_token_revoked(identity)
 
 
 async def _ws_run_gate(websocket: WebSocket, identity: Identity | None) -> str:
@@ -754,7 +787,7 @@ async def _ws_run_gate(websocket: WebSocket, identity: Identity | None) -> str:
     The handshake guard runs once, so a socket that stays open must be re-checked before each
     run: the token may have expired or been revoked, and every run counts against the limit.
     """
-    if not ws_identity_still_valid(websocket, identity) or await _ws_token_revoked(identity):
+    if await _ws_credential_error(websocket, identity):
         logger.info("WebSocket credential no longer valid; closing")
         await websocket.send_text(
             StreamChunk(
@@ -1153,16 +1186,6 @@ class _ByteBoundedLiveInputQueue(LiveInputQueue):
             yield item
 
 
-async def _live_credential_error(websocket: WebSocket, identity: Identity | None) -> bool:
-    """Whether a live session's credential no longer holds (expired, revoked or backend down).
-
-    Same two checks as ``_ws_run_gate`` uses before each ``/v1/graph/ws`` run: the token is
-    re-verified (catches expiry) and the revocation backend is asked (an outage counts as
-    revoked, so it fails closed).
-    """
-    return not ws_identity_still_valid(websocket, identity) or await _ws_token_revoked(identity)
-
-
 async def _close_live(websocket: WebSocket, code: str, message: str) -> None:
     """End a live session before it starts: a fatal error event, then close 1008."""
     with contextlib.suppress(Exception):
@@ -1326,7 +1349,7 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
 
     # The handshake guard ran before the init frame; re-check before the session (the run)
     # starts, then on a timer for as long as it lasts.
-    if await _live_credential_error(websocket, identity):
+    if await _ws_credential_error(websocket, identity):
         await close_session_expired()
         return
 
@@ -1446,7 +1469,7 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
         """End the session once its token expires or is revoked."""
         while True:
             await asyncio.sleep(REALTIME_RECHECK_INTERVAL)
-            if await _live_credential_error(websocket, identity):
+            if await _ws_credential_error(websocket, identity):
                 await close_session_expired()
                 return
 
