@@ -17,14 +17,14 @@ from injectq.integrations.taskiq import setup_taskiq
 from taskiq import InMemoryBroker
 from taskiq.cli.utils import import_tasks
 
-from tenxgraph_api.cli.commands.worker import _is_glob
+from tenxgraph_api.jobs.config import is_glob
 
 
 def _import_task_modules(config_path: str, tasks: list[str]) -> None:
     """``worker.tasks`` the way ``10xgraph worker`` passes them: module names, and file globs
     relative to the project folder (the config file's folder)."""
-    modules = [t for t in tasks if not _is_glob(t)]
-    patterns = [t for t in tasks if _is_glob(t)]
+    modules = [t for t in tasks if not is_glob(t)]
+    patterns = [t for t in tasks if is_glob(t)]
     project = Path(config_path).resolve().parent
     with contextlib.chdir(project):  # TaskIQ globs from the cwd and imports with it on sys.path
         import_tasks(modules, patterns, bool(patterns))

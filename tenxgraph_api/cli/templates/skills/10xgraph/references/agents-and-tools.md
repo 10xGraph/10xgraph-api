@@ -281,9 +281,36 @@ pip install "10xgraph[mcp]"
 tool_node = ToolNode(
     [local_fn],
     client=mcp_client,               # fastmcp Client
-    pass_user_info_to_mcp=True,      # forward config["user"] to MCP context
+    pass_user_info_to_mcp=True,      # send the signed-in user as request metadata
 )
 ```
+
+Server side, read the user from request metadata, never from a tool argument:
+
+```python
+from fastmcp import Context, FastMCP
+
+mcp = FastMCP("support")
+
+@mcp.tool
+async def my_tickets(ctx: Context) -> list[dict]:
+    """List the signed-in user's open tickets."""
+    meta = ctx.request_context.meta
+    if meta is not None and not isinstance(meta, dict):  # fastmcp 3.x: pydantic model
+        meta = meta.model_dump()
+    user = (meta or {}).get("user") or {}
+    return await tickets_api.list_open(user_id=user["user_id"])
+```
+
+The server never takes `user_id` as a tool argument. Tool arguments are visible to and set by the model, so the model could forge them. Request metadata is set by 10xGraph, outside the model.
+
+What `meta["user"]` holds:
+
+- Behind the API, `config["user"]` is an `Identity`, sent as `Identity.model_dump(mode="json")`: `{"user_id": "alice", "kind": "user", "tenant": {"org_id": "acme"}, "roles": ["member"], "permissions": [...] or null, "reach": "own", "claims": {...}}`.
+- With the SDK directly, a plain dict `config["user"]` is sent as is.
+- With no user, it is `{"user_id": config["user_id"]}`.
+
+The MCP server must authenticate the caller before it trusts this metadata. Send a service token from the client with `auth=`, for example `StreamableHttpTransport(url, auth="<token>")` (a string becomes a bearer token; an `httpx.Auth` object also works), and check it on the server.
 
 ---
 

@@ -349,7 +349,7 @@ def generate_dockerfile_content(
         [
             "# Production process manager: gunicorn supervising uvicorn workers. These are",
             "# not dependencies of 10xgraph-api, so the image installs them here.",
-            'RUN pip install "gunicorn>=23,<27" "uvicorn-worker>=0.4,<1"',
+            'RUN pip install "gunicorn>=25.1,<27" "uvicorn-worker>=0.4,<1"',
             "",
             "# Strip CLI-only assets the server never loads: project scaffolds, the bundled",
             "# agent skill, and the local config editor (HTML/JS). Only the server code and",
@@ -422,11 +422,14 @@ def generate_dockerfile_content(
                 "# graceful timeout is 30s, so on every rolling deploy SIGTERM would",
                 "# hard-kill runs that were still mid-flight, truncating them. Give",
                 "# in-flight runs time to finish draining instead.",
+                "# --no-control-socket (gunicorn 25.1+): the control server would write",
+                "# /app/.gunicorn, and the root filesystem is read-only.",
                 (
                     f'CMD ["gunicorn", "-k", "{GUNICORN_WORKER_CLASS}", '
                     f'"-b", "0.0.0.0:{port}", '
                     f'"--graceful-timeout", "{GRACEFUL_TIMEOUT_SECONDS}", '
                     f'"--timeout", "{WORKER_TIMEOUT_SECONDS}", '
+                    '"--no-control-socket", '
                     '"tenxgraph_api.src.app.main:app"]'
                 ),
                 "",
@@ -624,6 +627,7 @@ def generate_docker_compose_content(service_name: str, port: int) -> str:
                 f"'-b', '0.0.0.0:{port}', "
                 f"'--graceful-timeout', '{GRACEFUL_TIMEOUT_SECONDS}', "
                 f"'--timeout', '{WORKER_TIMEOUT_SECONDS}', "
+                "'--no-control-socket', "
                 "'tenxgraph_api.src.app.main:app' ]"
             ),
             # Give in-flight agent runs time to drain on `docker compose down`

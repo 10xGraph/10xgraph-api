@@ -51,7 +51,7 @@ ReactAgent(
     model: str,
     state: StateT | None = None,
     context_manager: BaseContextManager | None = None,
-    publisher: BasePublisher | None = None,
+    publisher: BasePublisher | list[BasePublisher] | None = None,
     id_generator: BaseIDGenerator = DefaultIDGenerator(),
     container: InjectQ | None = None,
     *,
@@ -76,20 +76,69 @@ ReactAgent(
 )
 ```
 
-`ReactAgent.compile()` accepts: `checkpointer`, `store`, `interrupt_before`, `interrupt_after`, `callback_manager`, `media_store`, `shutdown_timeout`.
+`ReactAgent.compile()` accepts: `checkpointer`, `store`, `interrupt_before`, `interrupt_after`, `callback_manager`, `media_store`, `shutdown_timeout`, `media_policy`.
 
 ### ReactAgent with MCP
 
 ```python
 from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
 
 agent = ReactAgent(
     model="gpt-4o",
-    tools=[],
-    client=Client("path/to/mcp/server"),
+    client=Client(StreamableHttpTransport(MCP_URL, auth=MCP_TOKEN)),
     pass_user_info_to_mcp=True,
 )
 ```
+
+Server side, read the user from request metadata, never from a tool argument:
+
+```python
+from fastmcp import Context, FastMCP
+
+mcp = FastMCP("support")
+
+@mcp.tool
+async def my_tickets(ctx: Context) -> list[dict]:
+    """List the signed-in user's open tickets."""
+    meta = ctx.request_context.meta
+    if meta is not None and not isinstance(meta, dict):  # fastmcp 3.x: pydantic model
+        meta = meta.model_dump()
+    user = (meta or {}).get("user") or {}
+    return await tickets_api.list_open(user_id=user["user_id"])
+```
+
+The server never takes `user_id` as a tool argument. Tool arguments are visible to and set by the model, so the model could forge them. Request metadata is set by 10xGraph, outside the model.
+
+What `meta["user"]` holds:
+
+- Behind the API, `config["user"]` is an `Identity`, sent as `Identity.model_dump(mode="json")`: `{"user_id": "alice", "kind": "user", "tenant": {"org_id": "acme"}, "roles": ["member"], "permissions": [...] or null, "reach": "own", "claims": {...}}`.
+- With the SDK directly, a plain dict `config["user"]` is sent as is.
+- With no user, it is `{"user_id": config["user_id"]}`.
+
+The MCP server must authenticate the caller before it trusts this metadata. Send a service token from the client with `auth=`, for example `StreamableHttpTransport(url, auth="<token>")` (a string becomes a bearer token; an `httpx.Auth` object also works), and check it on the server.
+
+### Support agent over MCP
+
+One agent, business logic in the MCP server. No routers, handoffs or guard nodes.
+
+```python
+from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
+from tenxgraph.prebuilt.agent import ReactAgent
+from tenxgraph.runtime.publisher import ConsolePublisher
+
+app = ReactAgent(
+    model="gpt-4o",
+    client=Client(StreamableHttpTransport(MCP_URL, auth=MCP_TOKEN)),
+    pass_user_info_to_mcp=True,
+    system_prompt=[{"role": "system", "content": "You are a support agent. Use the tools."}],
+    publisher=ConsolePublisher(),
+    trim_context=True,
+).compile(checkpointer=checkpointer)
+```
+
+The server tool is `my_tickets` above. All argument names match `ReactAgent.__init__` and `compile()`.
 
 ---
 

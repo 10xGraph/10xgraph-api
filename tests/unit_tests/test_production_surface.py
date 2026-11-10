@@ -163,7 +163,7 @@ def test_dockerignore_excludes_dev_only_folders():
 
 def test_dockerfile_installs_only_what_the_dependency_file_lists():
     # Besides the dependency file, the only install is the process manager the CMD runs.
-    process_manager = 'RUN pip install "gunicorn>=23,<27" "uvicorn-worker>=0.4,<1"'
+    process_manager = 'RUN pip install "gunicorn>=25.1,<27" "uvicorn-worker>=0.4,<1"'
     for kwargs in ({"has_requirements": True}, {"has_requirements": False, "has_pyproject": True}):
         lines = _dockerfile(**kwargs).splitlines()
         assert process_manager in lines
@@ -295,3 +295,13 @@ def test_build_adds_secret_patterns_to_an_existing_dockerignore(tmp_path, monkey
     lines = (tmp_path / ".dockerignore").read_text(encoding="utf-8").splitlines()
     assert lines[:2] == [".git/", ".env"]
     assert {"*.pem", "credentials*.json"} <= set(lines)
+
+
+def test_generated_gunicorn_commands_disable_the_control_socket():
+    # gunicorn 25.1+ writes /app/.gunicorn at boot; the root filesystem is read-only.
+    from tenxgraph_api.cli.templates.defaults import generate_docker_compose_content
+
+    dockerfile = _dockerfile(has_requirements=False, has_pyproject=True)
+    compose = generate_docker_compose_content("svc", 8000)
+    assert '"--no-control-socket"' in dockerfile
+    assert "'--no-control-socket'" in compose

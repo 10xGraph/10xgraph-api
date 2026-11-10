@@ -5,8 +5,8 @@ description: >-
   (10xgraph). Use when code imports from tenxgraph or the legacy agentflow name (e.g. `from tenxgraph import`,
   `StateGraph`, `Agent`, `ToolNode`, `AgentState`); when the user references `10xgraph.json`
   or CLI commands (`10xgraph init`, `10xgraph dev`, `10xgraph build`,
-  `10xgraph skills`); or when the user is building graph-based multi-agent workflows, tools,
-  memory, checkpointing, or streaming with this framework. Skip generic Python or multi-agent
+  `10xgraph skills`); or when the user is building AI agents, tools, memory, checkpointing,
+  streaming, or graph workflows on this infrastructure. Skip generic Python or agent
   questions that do not reference 10xGraph, and other frameworks (LangGraph, CrewAI, AutoGen)
   unless comparing.
 license: MIT
@@ -14,9 +14,19 @@ license: MIT
 
 # 10xGraph Project Skill
 
-Use this skill when working in a 10xGraph project. 10xGraph is a multi-agent framework that wraps official OpenAI and Google SDK capabilities behind a unified graph, agent, tool, state, storage, API, CLI, and TypeScript client interface.
+Use this skill when working in a 10xGraph project. 10xGraph is open-source, self-hosted infrastructure for production AI agents and AI apps. You write the agents, tools and tasks; 10xGraph runs them behind an API server with auth, durable state, a CLI, and a TypeScript client. Multi-agent handoff is one feature, not the category.
 
 Treat https://10xgraph.com/ as the first source of truth for public package names, install commands, and user-facing behavior. Use implementation source after the docs establish the intended API.
+
+## Default shape
+
+Keep apps small. Follow these rules unless the user asks otherwise.
+
+- Start from a prebuilt agent: `ReactAgent` for a tool-calling agent. Hand-write a `StateGraph` only when no prebuilt agent fits, and say why.
+- Build one agent unless the user asks for more. Do not add routers, handoffs, guard nodes or approval nodes the user did not ask for.
+- Business data and rules belong in tools and the systems they call (APIs, MCP servers, databases), not in graph nodes or state.
+- MCP: pass the signed-in user with `pass_user_info_to_mcp=True`. The MCP server reads it from `ctx.request_context.meta["user"]`. Never add `user`, `user_id`, `org_id` or tenant arguments to MCP tools. See `references/prebuilt-agents-and-tools.md`.
+- Do not work around 10xGraph bugs in app code (subclassing `ToolNode`, overriding private methods). Report them instead.
 
 ## Workflow
 
@@ -71,8 +81,8 @@ Treat https://10xgraph.com/ as the first source of truth for public package name
    - Testing helpers overview: `references/testing-and-evaluation.md`
 
 3. Prefer existing 10xGraph abstractions over new custom wiring:
-   - Build workflows with `StateGraph`, `Agent`, `ToolNode`, `AgentState`, and `Message`.
-   - Use prebuilt agents (`ReactAgent`, `PlanActReflectAgent`, `StructuredOutputAgent`, `SupervisorTeamAgent`, `SwarmAgent`, `RAGAgent`) for common patterns before hand-writing graph loops.
+   - Use prebuilt agents (`ReactAgent` by default; also `PlanActReflectAgent`, `StructuredOutputAgent`, `SupervisorTeamAgent`, `SwarmAgent`, `RAGAgent`) before hand-writing graph loops.
+   - For custom flows only, build workflows with `StateGraph`, `Agent`, `ToolNode`, `AgentState`, and `Message`.
    - Persist conversation state with checkpointers; use stores only for cross-thread memory.
    - Put business services in `InjectQ` instead of global variables.
    - Keep API/CLI graph modules storage-agnostic and wire dependencies through `10xgraph.json`.

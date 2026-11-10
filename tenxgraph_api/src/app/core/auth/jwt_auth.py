@@ -173,7 +173,7 @@ class JwtAuth(BaseAuth):
                 the RBAC step that narrows permissions with it.
         """
         if credential is None:
-            raise _unauthorized("Invalid token, please login again", "REVOKED_TOKEN")
+            raise _unauthorized("Invalid token, please login again", "INVALID_TOKEN")
 
         settings = get_settings()
         keys = verification_keys(settings)

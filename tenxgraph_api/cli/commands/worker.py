@@ -14,15 +14,11 @@ from tenxgraph_api.cli.commands import BaseCommand
 from tenxgraph_api.cli.constants import DEFAULT_CONFIG_FILE
 from tenxgraph_api.cli.core.config import resolve_default_config
 from tenxgraph_api.cli.exceptions import ConfigurationError, ValidationError
+from tenxgraph_api.jobs.config import is_glob
 
 
 MIN_FLAG_LEN = 3  # "--" plus at least one letter
-GLOB_MARKS = ("*", "?", "[", "/")
 PROCESS_POOL_FLAGS = ("--use-process-pool", "--max-process-pool-processes")
-
-
-def _is_glob(entry: str) -> bool:
-    return entry.endswith(".py") or any(mark in entry for mark in GLOB_MARKS)
 
 
 def _is_flag(arg: str, flag: str) -> bool:
@@ -47,8 +43,8 @@ class _TaskiqCommand(BaseCommand):
 
     def build_argv(self, tasks: list[str], extra: list[str]) -> list[str]:
         """``<target>`` + module names + one ``--tasks-pattern`` per glob + the passed args."""
-        modules = [t for t in tasks if not _is_glob(t)]
-        patterns = [t for t in tasks if _is_glob(t)]
+        modules = [t for t in tasks if not is_glob(t)]
+        patterns = [t for t in tasks if is_glob(t)]
         argv = [self.target, *modules]
         if patterns:
             argv.append("--fs-discover")

@@ -29,6 +29,35 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changes
+
+- **`10xgraph skills` adds always-on project instructions.** Skills load only on demand, so coding
+  agents often never loaded the 10xGraph skill. The Claude target now also writes a 10xGraph
+  section into the project-root `CLAUDE.md`, and the Codex target into `AGENTS.md`. The section
+  tells the agent, and every subagent it starts, to load the skill first, and sets the default
+  shape (prebuilt `ReactAgent`, one agent, business rules in tools, MCP identity through request
+  metadata). It sits between `<!-- 10xgraph:start -->` and `<!-- 10xgraph:end -->`: a missing
+  file is created, an existing section is replaced, otherwise the section is appended. Text
+  outside the markers is never changed, an existing `CLAUDE.md` or `AGENTS.md` does not need
+  `--force`, symlinked files are refused, and the file is written atomically.
+- **Bundled skill: smaller apps by default.** The skill and the Copilot instructions describe
+  10xGraph as infrastructure for production AI agents (multi-agent is one feature), list prebuilt
+  agents before hand-written `StateGraph` loops, add a "Default shape" section, and show how an
+  MCP server reads the signed-in user from `ctx.request_context.meta["user"]` (the `Identity` as
+  JSON) and why it must authenticate the caller. New example: a support agent over MCP with
+  `ReactAgent`. Refresh a project's copy with `10xgraph skills --agent claude --force` (or
+  `--all --force`).
+
+### Fixes
+
+- **Boot in `10xgraph build` images with a `worker` key.** The tasks router no longer imports the
+  CLI (`typer`, `rich`), which the slim image removes. The server and jobs import without them.
+- **No control-socket error on a read-only root.** The generated gunicorn commands pass
+  `--no-control-socket`, and the Dockerfile installs `gunicorn>=25.1,<27` (the flag is new in 25.1).
+- **An input validator rejection is a 422, not a 500.** `/v1/graph/invoke` answers 422
+  `VALIDATION_ERROR`; stream and WebSocket send an error chunk with that code. Logged at WARNING.
+- **A missing bearer token answers `INVALID_TOKEN`**, not `REVOKED_TOKEN`.
+
 ## [1.0.0rc5] - 2026-11-10
 
 The fifth release candidate of `10xgraph-api` 1.0. It requires `10xgraph` 1.0.0rc5. 10xGraph is

@@ -17,6 +17,7 @@ from tenxgraph.core.graph import CompiledGraph
 from tenxgraph.core.state import AgentState, Message, StreamChunk, StreamEvent
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.utils import ResponseGranularity
+from tenxgraph.utils.validators import ValidationError as InputValidationError
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RunsConfig
@@ -138,8 +139,8 @@ def _reraise_framework_errors(exc: Exception) -> None:
     ``tenxgraph.core.exceptions`` package triggers a circular import through the core
     media modules during test collection.
     """
-    if isinstance(exc, HTTPException):
-        raise exc
+    if isinstance(exc, HTTPException | InputValidationError):
+        raise exc  # InputValidationError: an input validator refused the request (422)
     from tenxgraph.core.exceptions import (
         GraphError,
         GraphRecursionError,
@@ -224,6 +225,14 @@ def _stream_error_data(exc: Exception) -> dict[str, Any]:
             "code": SERVICE_UNAVAILABLE_CODE,
             "retry_after_seconds": RETRY_AFTER_SECONDS,
         }
+    if isinstance(exc, InputValidationError):
+        # The same code and text as the HTTP 422 handler: generic in production.
+        from tenxgraph_api.src.app.core.config.settings import get_settings
+        from tenxgraph_api.src.app.core.exceptions.handle_errors import _sanitize_error_message
+
+        is_production = get_settings().MODE == "production"
+        reason = _sanitize_error_message(str(exc), "VALIDATION_ERROR", is_production)
+        return {"reason": reason, "code": "VALIDATION_ERROR"}
     return {"reason": _stream_error_reason(exc)}
 
 
@@ -1270,7 +1279,10 @@ class GraphService:
             # would cause: RuntimeError("Caught handled exception, but response
             # already started.")  Instead, we yield a structured error chunk so
             # the client can detect and display the failure.
-            logger.error(f"Graph streaming failed: {e}")
+            if isinstance(e, InputValidationError):
+                logger.warning("Graph stream rejected by an input validator: %s", log_safe(e))
+            else:
+                logger.error(f"Graph streaming failed: {e}")
             try:
                 if self.telemetry and thread_id and run_id:
                     self.telemetry.finish_run(
