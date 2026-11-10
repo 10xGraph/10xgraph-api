@@ -67,7 +67,7 @@ Agent(
     system_prompt=[{"role": "system", "content": "Help {user_name}."}],  # state interpolation
     tool_node=tool_node,                        # ToolNode instance or graph node name string
     tools_tags={"search"},                      # expose only matching-tagged tools
-    extra_messages=[...],                       # injected after system_prompt every call
+    extra_messages=[...],                       # sent after history every call; {field} filled from state. Put mid-conversation values (date, status) here as role="user" in a <conversation_context> block, not in system_prompt (prompt caching)
     trim_context=True,                          # trim old messages to fit token limits
     reasoning_config={"effort": "medium"},      # on by default; None to disable
     retry_config=True,                          # default 3 retries with backoff
