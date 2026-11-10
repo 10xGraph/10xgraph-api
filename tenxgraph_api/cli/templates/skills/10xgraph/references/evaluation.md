@@ -320,7 +320,7 @@ JUnit XML — for CI test summary tabs (GitHub Actions, Jenkins).
 
 ## 10xgraph eval CLI
 
-Auto-discovers `*_eval.py` / `eval_*.py` in `evals/` (or configured directory). Each file must expose `get_eval_set()`, optionally `get_eval_config()` or `EVAL_CONFIG`, or a full `run()` function. The CLI writes a JSON report only (no HTML, no browser); open it in the playground with Evals > Open report file.
+Auto-discovers `*_eval.py` / `eval_*.py` in `evals/` (or configured directory). Each file must expose `get_scenarios()` / `SCENARIOS`, `get_eval_set()` (optionally with `get_eval_config()` or `EVAL_CONFIG`), or pytest-style functions annotated `-> EvalSet`. The CLI writes a JSON report only (no HTML, no browser); open it in the playground with Evals > Open report file.
 
 ```bash
 10xgraph eval                          # scan evals/, write JSON + HTML reports to eval_reports/, open the HTML (--no-open to skip)
@@ -333,9 +333,12 @@ Auto-discovers `*_eval.py` / `eval_*.py` in `evals/` (or configured directory). 
 
 Eval file entry points (in order of priority):
 
-1. `run()` — sync or async function returning `EvalReport`; full control
-2. `get_eval_set()` + optional `get_eval_config()` or `EVAL_CONFIG` — CLI loads agent from `10xgraph.json` and runs with default or provided config
-3. Files without any entry point are skipped with a warning
+1. `get_scenarios()` or a `SCENARIOS` list: user-simulation scenarios (`ConversationScenario`)
+2. `get_eval_set()` plus optional `get_eval_config()` or `EVAL_CONFIG`: the CLI loads the agent from `10xgraph.json` and runs with the given or default config
+3. pytest-style functions annotated `-> EvalSet` (a function annotated `-> EvalConfig` supplies the config)
+4. Files without any entry point are skipped with a warning
+
+The first match wins; a file is not scanned for later entry points.
 
 `10xgraph.json` configuration:
 
@@ -351,6 +354,29 @@ Eval file entry points (in order of priority):
 ```
 
 Exit code: 0 only when pass rate is 100% (or meets threshold with no errors). Always 1 when any case fails.
+
+---
+
+## Run as a signed-in user
+
+Tools that read `config["user"]` need a user in the run config. Simulated scenarios take it in `config`; builder cases take it in `session_input`. `10xgraph eval` honors both.
+
+```python
+from tenxgraph.qa.evaluation import ConversationScenario, EvalSetBuilder, SessionInput
+
+user = {"user_id": "u1", "org_id": "acme", "roles": ["agent"]}
+
+# Simulation: merged into the simulator's run config (an explicit config= passed to UserSimulator.run wins)
+ConversationScenario(scenario_id="refund", goals=["Refund is issued"], config={"user": user})
+
+# Builder cases: add_case, add_multi_turn and add_tool_test accept session_input
+EvalSetBuilder(name="orders").add_case(
+    "Show my orders", "Here are your orders",
+    session_input=SessionInput(user_id="u1", config={"user": user}),
+)
+```
+
+`SessionInput` fields: `app_name`, `user_id` (default `"test_user"`), `state`, `config`. The evaluator sets `user_id` from `session_input.user_id` and builds the run config from `session_input.config`.
 
 ---
 

@@ -238,6 +238,38 @@ async def test_run_flat_pool_simulation(cmd):
 
 
 @pytest.mark.asyncio
+async def test_run_flat_pool_simulation_scenario_config_reaches_graph(cmd):
+    from tenxgraph.core.state import Message
+    from tenxgraph.qa.evaluation.simulators.user_simulator import (
+        ConversationScenario,
+        UserSimulator,
+    )
+
+    seen = []
+
+    class FakeGraph:
+        async def ainvoke(self, input_data, config=None):
+            seen.append(config)
+            return {"messages": [Message.text_message("ok", role="assistant")]}
+
+    user = {"user_id": "u1", "org_id": "acme", "roles": ["agent"]}
+    scenario = ConversationScenario(
+        scenario_id="sc_cfg", starting_prompt="hi", goals=[], max_turns=1, config={"user": user}
+    )
+    ps = _PendingSimulation(
+        scenario=scenario,
+        graph=FakeGraph(),
+        simulator=UserSimulator(),
+        file_name="test_sim.py",
+        eval_set_id="es_sim",
+        eval_set_name="Sim Set",
+    )
+
+    await cmd._run_flat_pool([ps], max_concurrency=4, parallel=False)
+    assert seen[0]["user"] == user
+
+
+@pytest.mark.asyncio
 async def test_run_flat_pool_simulation_error(cmd):
     simulator = MagicMock()
     mock_criterion = MagicMock()
