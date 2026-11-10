@@ -54,7 +54,7 @@ def _make_service(stream_chunks_per_call: list[list[str]]) -> MagicMock:
         for chunk in chunks:
             yield chunk
 
-    def _side_effect(graph_input, user):
+    def _side_effect(graph_input, user, credential=None):
         calls.append(graph_input)
         idx = len(calls) - 1
         chunks = stream_chunks_per_call[idx] if idx < len(stream_chunks_per_call) else []
