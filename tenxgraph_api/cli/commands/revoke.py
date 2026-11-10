@@ -21,6 +21,19 @@ from tenxgraph_api.cli.exceptions import ValidationError
 class RevokeCommand(BaseCommand):
     """Revoke one token (``--jti``) or all of a user's older tokens (``--user``)."""
 
+    def _configure_audit(self, graph_config: Any) -> None:
+        """Set up the audit sinks; on failure warn and use the log sink, never block."""
+        from tenxgraph_api.src.app.core.audit import AuditConfig, configure_audit
+
+        try:
+            configure_audit(graph_config.audit, auth_enabled=True)
+        except Exception as e:
+            self.output.warning(
+                f"Audit sinks could not be set up ({type(e).__name__}: {e}); "
+                "the revocation is audited to the log only."
+            )
+            configure_audit(AuditConfig(enabled=True, sinks=["log"]), auth_enabled=True)
+
     def _cache_store(self, redis_url: str | None, config: str) -> tuple[Any, float | None]:
         """The cache store to write to and the default ``user_ttl`` from the project config."""
         from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore, RedisCacheStore
@@ -32,6 +45,12 @@ class RevokeCommand(BaseCommand):
 
         path = resolve_default_config(config)
         graph_config = GraphConfig(str(path)) if path.exists() else None
+        if graph_config is not None:
+            # Custom cache stores and audit sinks import from the project, like on the server.
+            root = str(path.resolve().parent)
+            if root not in sys.path:
+                sys.path.insert(0, root)
+            self._configure_audit(graph_config)
         user_ttl: float | None = DEFAULT_USER_REVOCATION_TTL
         if graph_config is not None:
             settings = graph_config.token_revocation  # raises for an invalid value
@@ -40,11 +59,6 @@ class RevokeCommand(BaseCommand):
         if redis_url:
             return RedisCacheStore.from_url(redis_url), user_ttl
 
-        if graph_config is not None:
-            # A custom cache_store.path imports from the project, like the server does.
-            root = str(path.resolve().parent)
-            if root not in sys.path:
-                sys.path.insert(0, root)
         # GraphConfig has loaded the project's env file, so cache_store.url expands after it.
         store, source = build_cache_store(graph_config)
         if isinstance(store, InMemoryCacheStore):

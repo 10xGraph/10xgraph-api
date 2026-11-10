@@ -95,6 +95,13 @@ class MetricsConfig(_Section):
         return self.prometheus.path if self.enabled and self.export == "prometheus" else None
 
 
+def count_audit_sink_error(sink: str) -> None:
+    """Count one failed audit sink call. A no-op until ``setup_metrics`` has run."""
+    from tenxgraph.utils.metrics import counter
+
+    counter("tenxgraph_audit_sink_errors_total").inc(attributes={"sink": sink})
+
+
 def _otlp_metrics_url(endpoint: str) -> str:
     base = endpoint.rstrip("/")
     return base if base.endswith("/v1/metrics") else base + "/v1/metrics"

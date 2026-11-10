@@ -220,3 +220,19 @@ def test_revoke_command_rejects_a_top_level_token_revocation(monkeypatch, tmp_pa
     cmd = RevokeCommand(output=OutputFormatter(stream=io.StringIO(), quiet=True))
     with pytest.raises(ValueError, match="`token_revocation` goes inside `cache_store`"):
         cmd._cache_store("redis://x", "10xgraph.json")
+
+
+def test_production_env_sets_json_logs_in_every_target() -> None:
+    from tenxgraph_api.cli.templates.defaults import (
+        generate_docker_compose_content,
+        generate_dockerfile_content,
+    )
+
+    assert "- LOG_FORMAT=json" in generate_docker_compose_content("svc", 8000)
+    assert "ENV LOG_FORMAT=json" in generate_dockerfile_content(
+        "3.12", 8000, "requirements.txt", True
+    )
+    yaml = __import__("pytest").importorskip("yaml")
+    deployment, _ = yaml.safe_load_all(generate_k8s_manifest_content("svc", 8000))
+    env = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+    assert {"name": "LOG_FORMAT", "value": "json"} in env

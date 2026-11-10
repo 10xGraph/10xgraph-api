@@ -1,9 +1,12 @@
+import json
 import logging
 import sys
+from datetime import UTC, datetime
 
 from fastapi.logger import logger as fastapi_logger
 
 from tenxgraph_api.src.app.core.config.settings import LOGGER_NAME
+from tenxgraph_api.src.app.core.request_context import get_request_context
 from tenxgraph_api.src.app.core.utils.log_sanitizer import SanitizingFormatter, redact_text
 
 
@@ -25,7 +28,39 @@ class AccessLogTokenFilter(logging.Filter):
         return True
 
 
-def init_logger(level: int | str = logging.INFO) -> None:
+class RequestContextFilter(logging.Filter):
+    """Copy the current request context (request id, transport, user) onto the record."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        ctx = get_request_context()
+        record.request_id = ctx.request_id if ctx else None
+        record.transport = ctx.transport if ctx else None
+        record.user_id = ctx.user_id if ctx else None
+        return True
+
+
+class JsonFormatter(logging.Formatter):
+    """One JSON object per record. Wrapped by ``SanitizingFormatter``, so secrets are masked."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        entry: dict[str, object] = {
+            "ts": datetime.fromtimestamp(record.created, UTC).isoformat(timespec="milliseconds")[
+                :-6
+            ]
+            + "Z",
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        for key in ("request_id", "transport", "user_id"):
+            if getattr(record, key, None):
+                entry[key] = getattr(record, key)
+        if record.exc_info:
+            entry["exc_info"] = self.formatException(record.exc_info)
+        return json.dumps(entry, default=str)
+
+
+def init_logger(level: int | str = logging.INFO, log_format: str = "text") -> None:
     """
     Initializes and configures logging for the application.
 
@@ -56,10 +91,15 @@ def init_logger(level: int | str = logging.INFO) -> None:
     # Create console handler and set level to DEBUG
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(level)
+    console_handler.addFilter(RequestContextFilter())
 
     # Create formatter
-    base_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s"
+    base_formatter: logging.Formatter = (
+        JsonFormatter()
+        if log_format == "json"
+        else logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s"
+        )
     )
     # Wrap with sanitizing formatter to prevent sensitive data in logs
     formatter = SanitizingFormatter(base_formatter)

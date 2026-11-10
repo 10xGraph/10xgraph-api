@@ -12,6 +12,7 @@ from injectq.integrations import InjectAPI
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from tenxgraph.core.authz import Identity
 
+from tenxgraph_api.src.app.core.audit import audit_event
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
 from tenxgraph_api.src.app.core.config.media_settings import get_media_settings
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
@@ -230,6 +231,13 @@ async def upload_file(
     except ValueError as exc:
         raise HTTPException(status_code=413, detail=client_error_detail(exc))
 
+    await audit_event(
+        "change",
+        "success",
+        action="files:upload",
+        resource=f"file/{result.get('file_id')}",
+        identity=identity,
+    )
     return success_response(FileUploadResponse(**result), request)
 
 
@@ -383,6 +391,9 @@ async def delete_file(
     if not deleted:
         raise HTTPException(status_code=404, detail="File not found")
 
+    await audit_event(
+        "change", "success", action="files:delete", resource=f"file/{file_id}", identity=identity
+    )
     return success_response(FileDeleteResponse(file_id=file_id, deleted=True), request)
 
 

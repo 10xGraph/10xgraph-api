@@ -40,7 +40,7 @@ class TestCreateMemoryLogic:
         from tenxgraph_api.src.app.routers.store.schemas.store_schemas import StoreMemorySchema
 
         mock_success_response.return_value = {"data": {}}
-        mock_service.store_memory.return_value = {"id": "mem-1"}
+        mock_service.store_memory.return_value = MagicMock(memory_id="mem-1")
         payload = StoreMemorySchema(content="Test memory", metadata=None)
 
         result = await create_memory(

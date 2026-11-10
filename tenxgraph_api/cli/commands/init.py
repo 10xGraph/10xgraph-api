@@ -291,6 +291,7 @@ class InitCommand(BaseCommand):
 
             store = context.get("cache_store") or "memory"
             rows.append(("Cache store", "Redis" if store == "redis" else "Memory"))
+            rows.append(("Audit log", "On"))
             rows.append(("ID generator", str(context.get("id_generator", "uuid"))))
             if context.get("rate_limit"):
                 rl_by = {"global": "Global", "user": "Per user"}.get(

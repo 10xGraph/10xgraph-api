@@ -17,7 +17,7 @@ Section shape::
         "default": {...},  # value written when the toggle is switched on
         "widget": None,  # custom renderer: "auth", "remote_tools",
         # "cache_store", "id_generator", "thread_name_generator",
-        # "observability", "metrics"
+        # "observability", "metrics", "audit"
         "choices": [["value", "Label", "One line of help"]],  # widget sections with a dropdown
         "fields": [...],  # generic fields, paths are relative to the root
         "notes": ["..."],  # extra hints (secrets that belong in .env, ...)
@@ -90,6 +90,7 @@ KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
         "media",
         "observability",
         "metrics",
+        "audit",
         "injectq",
         "store",
         "store_allow_tenant_mismatch",
@@ -887,6 +888,49 @@ _SECTIONS: list[dict[str, Any]] = [
             {
                 "name": "OTEL_SERVICE_NAME",
                 "purpose": "Service name on metrics (10xgraph-api when unset).",
+            },
+        ],
+    },
+    {
+        "id": "audit",
+        "title": "Audit log",
+        "description": (
+            "Who accessed or changed which data, when, and whether it was allowed. Ids and "
+            "results only, never prompts, answers or file contents."
+        ),
+        "key": "audit",
+        "optional": True,
+        "off_summary": "No audit events are recorded.",
+        "default": {"enabled": True, "sinks": ["log"], "include_reads": True},
+        "self_managed": True,
+        "widget": "audit",
+        "fields": [
+            {
+                "path": ["audit", "enabled"],
+                "managed": True,
+                "label": "Record an audit log",
+                "type": "bool",
+            },
+            {
+                "path": ["audit", "sinks"],
+                "managed": True,
+                "label": "Sinks",
+                "type": "list",
+                "placeholder": "my_pkg.audit:MySink",
+                "help": 'Where events go: "log", "publisher", or a "module:Class" sink.',
+            },
+            {
+                "path": ["audit", "include_reads"],
+                "managed": True,
+                "label": "Include allowed reads",
+                "type": "bool",
+                "help": "Off keeps denials, auth failures and changes only.",
+            },
+        ],
+        "env": [
+            {
+                "name": "LOG_FORMAT",
+                "purpose": ("json writes every log line as one JSON object; use in production."),
             },
         ],
     },

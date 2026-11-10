@@ -41,7 +41,7 @@ export const ICONS = {
 export const SECTION_ICONS = {
   "get-running": "flag", environment: "terminal",
   core: "flag", auth: "lock", cache_store: "gauge",
-  observability: "activity", metrics: "gauge", runs: "play", websocket: "bolt", ag_ui: "external", remote_tools: "wrench",
+  observability: "activity", metrics: "gauge", audit: "file", runs: "play", websocket: "bolt", ag_ui: "external", remote_tools: "wrench",
   media: "file", checkpointer: "layers", id_generator: "key", thread_name_generator: "file", store: "box",
   injectq: "arrows", test: "flask", evaluation: "target",
 };
