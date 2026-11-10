@@ -1,14 +1,28 @@
 """Init command implementation."""
 
 import json
-import re
 from collections.abc import Callable
 from pathlib import Path
 from string import Template
 from typing import Any
 
 from tenxgraph_api.cli.commands import BaseCommand
-from tenxgraph_api.cli.core.prompts import Choice
+from tenxgraph_api.cli.commands.init_context import (
+    DEFAULT_PROVIDER,
+    PROVIDERS,
+    STORAGE_PRESETS,
+    WORKERS,
+    build_config,
+    build_context,
+    check_agent_name,
+    slugify,
+    strip_blocks,
+    template_flags,
+)
+from tenxgraph_api.cli.commands.init_context import (
+    template_vars as _template_vars,
+)
+from tenxgraph_api.cli.commands.init_prompts import ask_questions
 from tenxgraph_api.cli.exceptions import FileOperationError, ValidationError
 from tenxgraph_api.cli.templates.defaults import (
     GITIGNORE_SECRET_PATTERNS,
@@ -19,41 +33,10 @@ from tenxgraph_api.cli.templates.defaults import (
 
 _TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 _SKIP_DIRS = {"__pycache__", ".ruff_cache"}
-
-# Directories inside prod/ that are only included based on user choices
 _AUTH_DIR = "auth"
-
-# AI provider choices: the core extra that installs the SDK, the model the scaffold
-# starts with, the model the eval user simulator uses, and the API key variable.
-_PROVIDERS: dict[str, dict[str, str]] = {
-    "google": {
-        "label": "Google Gemini",
-        "extra": "google-genai",
-        "model": "gemini-2.5-flash",
-        "sim_model": "gemini/gemini-2.5-flash",
-        "api_key_env": "GOOGLE_API_KEY",
-    },
-    "openai": {
-        "label": "OpenAI",
-        "extra": "openai",
-        "model": "gpt-4o-mini",
-        "sim_model": "openai/gpt-4o-mini",
-        "api_key_env": "OPENAI_API_KEY",
-    },
-    "anthropic": {
-        "label": "Anthropic Claude",
-        "extra": "anthropic",
-        "model": "claude-sonnet-5-5",
-        "sim_model": "anthropic/claude-sonnet-5-5",
-        "api_key_env": "ANTHROPIC_API_KEY",
-    },
-}
-_DEFAULT_PROVIDER = "google"
-_CACHE_STORES = ("memory", "redis")
-_CONFIG_HINT = (
-    "Run 10xgraph config for full control: WebSocket, AG-UI, ID generator, thread naming "
-    "and every other server setting."
-)
+_OPTIONAL_DIRS = ("evals", "tests")
+_WORKER_DIR = "worker"
+_CONFIG_HINT = "10xgraph config for more settings."
 
 
 def _escape_agent_name(name: str, filename: str) -> str:
@@ -68,77 +51,13 @@ def _escape_agent_name(name: str, filename: str) -> str:
 
 def _agent_name_problem(value: str) -> bool | str:
     """Prompt validator: True when the name is usable, else the message to show."""
-    if not value.strip() or not _slugify(value):
+    if not value.strip() or not slugify(value):
         return "Use at least one letter or number"
     try:
-        _check_agent_name(value)
+        check_agent_name(value)
     except ValidationError as exc:
         return exc.message
     return True
-
-
-def _check_agent_name(name: str) -> None:
-    """Refuse a name with control characters (a newline would add lines to pyproject.toml)."""
-    if any(ord(ch) < 32 or ord(ch) == 127 for ch in name):  # noqa: PLR2004
-        raise ValidationError("Agent name cannot contain control characters.", field="name")
-
-
-def _slugify(name: str) -> str:
-    """Convert 'WeatherBot' → 'weather-bot'."""
-    s = re.sub(r"([A-Z])", r"-\1", name).lstrip("-").lower()
-    s = re.sub(r"[^a-z0-9]+", "-", s)
-    return s.strip("-")
-
-
-def _strip_env_blocks(content: str, *, keep_redis: bool, keep_jwt: bool) -> str:
-    """Remove conditional marker blocks that are not needed."""
-    if not keep_redis:
-        content = re.sub(r"##\[IF_REDIS\]##.*?##\[/IF_REDIS\]##\n?", "", content, flags=re.DOTALL)
-    else:
-        content = re.sub(r"##\[IF_REDIS\]##\n?", "", content)
-        content = re.sub(r"##\[/IF_REDIS\]##\n?", "", content)
-
-    if not keep_jwt:
-        content = re.sub(r"##\[IF_JWT\]##.*?##\[/IF_JWT\]##\n?", "", content, flags=re.DOTALL)
-    else:
-        content = re.sub(r"##\[IF_JWT\]##\n?", "", content)
-        content = re.sub(r"##\[/IF_JWT\]##\n?", "", content)
-
-    return content
-
-
-def _template_vars(context: dict[str, Any]) -> dict[str, Any]:
-    """Derive the template variables that depend on the user's answers.
-
-    The production pyproject.toml lists only what the answers need: the provider SDK
-    and the Postgres + Redis checkpointer (``pg_checkpoint``) through the core extras,
-    PyJWT for JWT auth, redis (always, the checkpointer and the API's cache store use it),
-    and websockets for WebSocket streaming / realtime. The generated Dockerfile
-    installs exactly this list. Quick-start has no Postgres or Redis, so its core
-    requirement is the provider extra alone.
-    """
-    provider = _PROVIDERS[context.get("provider", _DEFAULT_PROVIDER)]
-    is_prod = context.get("setup_type") == "production"
-    core_extras = [provider["extra"]]
-    if is_prod:
-        core_extras.append("pg_checkpoint")
-    api_extras = []
-    if context.get("auth") == "jwt":
-        api_extras.append("jwt")
-    if is_prod or context.get("cache_store") == "redis":
-        api_extras.append("redis")
-    if context.get("websocket"):
-        api_extras.append("websocket")
-    return {
-        "llm_provider": context.get("provider", _DEFAULT_PROVIDER),
-        "llm_model": provider["model"],
-        "llm_sim_model": provider["sim_model"],
-        "llm_api_key_env": provider["api_key_env"],
-        "core_requirement": f"10xgraph[{','.join(core_extras)}]",
-        "api_requirement": (
-            f"10xgraph-api[{','.join(api_extras)}]" if api_extras else "10xgraph-api"
-        ),
-    }
 
 
 class InitCommand(BaseCommand):
@@ -150,12 +69,19 @@ class InitCommand(BaseCommand):
         force: bool = False,
         agent_name: str | None = None,
         template: str | None = None,
+        mode: str | None = None,
         auth: str | None = None,
+        storage: str | None = None,
         cache_store: str | None = None,
         rate_limit: bool | None = None,
         token_revocation: bool | None = None,
         provider: str | None = None,
         websocket: bool = False,
+        evals: bool | None = None,
+        tests: bool | None = None,
+        ag_ui: bool | None = None,
+        otel: bool | None = None,
+        worker: str | None = None,
         yes: bool = False,
         non_interactive: bool = False,
         dry_run: bool = False,
@@ -172,12 +98,19 @@ class InitCommand(BaseCommand):
                     path=path,
                     agent_name=agent_name,
                     template=template,
+                    mode=mode,
                     auth=auth,
+                    storage=storage,
                     cache_store=cache_store,
                     rate_limit=rate_limit,
                     token_revocation=token_revocation,
                     provider=provider,
                     websocket=websocket,
+                    evals=evals,
+                    tests=tests,
+                    ag_ui=ag_ui,
+                    otel=otel,
+                    worker=worker,
                 )
             else:
                 context = self._prompt_user()
@@ -239,7 +172,7 @@ class InitCommand(BaseCommand):
                     # Regenerate 10xgraph.json from the built config. Force is safe only
                     # to override the copy this run just made; honor --force for a file
                     # that was already there.
-                    config = self._build_config(context, is_prod)
+                    config = build_config(context, is_prod)
                     self._write_file(
                         config_path,
                         json.dumps(config, indent=2) + "\n",
@@ -247,48 +180,7 @@ class InitCommand(BaseCommand):
                     )
                     step.detail(str(config_path))
 
-            agent_name = context["agent_name"]
-            provider_info = _PROVIDERS[context.get("provider", _DEFAULT_PROVIDER)]
-            # Production lists these in pyproject.toml; quick-start has no pyproject, so it
-            # needs the install step.
-            install_step = (
-                []
-                if is_prod
-                else [f'pip install "{_template_vars(context)["core_requirement"]}"']
-                + (['pip install "10xgraph-api[websocket]"'] if context.get("websocket") else [])
-            )
-            prod_steps = (
-                [
-                    "Set DATABASE_URL (Postgres) and REDIS_URL (Redis) in .env.",
-                    "graph/agent.py keeps a commented InMemoryCheckpointer for local testing "
-                    "without Postgres and Redis.",
-                    "10xgraph config to review auth, rate limiting and the other settings.",
-                    "10xgraph build to generate the Dockerfile for deployment.",
-                ]
-                if is_prod
-                else ["10xgraph config to review the settings in your browser."]
-            )
-            details: dict[str, Any] = {
-                "Location": base_path.resolve(),
-                "Template": "production" if is_prod else "quick-start",
-                "Auth": context["auth"],
-                "AI provider": provider_info["label"],
-            }
-            if context.get("websocket"):
-                details["WebSocket"] = "on"
-            self.output.completion_screen(
-                "Project ready",
-                f'"{agent_name}" was created successfully',
-                details=details,
-                next_steps=[
-                    f"cd {base_path}",
-                    *install_step,
-                    f"Copy .env.example to .env and set {provider_info['api_key_env']}.",
-                    *prod_steps,
-                    _CONFIG_HINT,
-                    "10xgraph dev",
-                ],
-            )
+            self._print_completion(context, base_path, is_prod)
 
             return 0
 
@@ -297,96 +189,9 @@ class InitCommand(BaseCommand):
         except Exception as e:
             return self.handle_error(FileOperationError(f"Failed to initialize project: {e}"))
 
-    def _non_interactive_context(
-        self,
-        *,
-        path: str,
-        agent_name: str | None,
-        template: str | None,
-        auth: str | None,
-        cache_store: str | None = None,
-        rate_limit: bool | None = None,
-        token_revocation: bool | None = None,
-        provider: str | None = None,
-        websocket: bool = False,
-    ) -> dict[str, Any]:
+    def _non_interactive_context(self, **options: Any) -> dict[str, Any]:
         """Resolve a complete, reproducible scaffold recipe without prompting."""
-        resolved_template = (template or "quick-start").strip().lower().replace("_", "-")
-        if resolved_template not in {"quick-start", "production"}:
-            raise ValidationError(
-                f"Invalid template '{resolved_template}'. Choose quick-start or production.",
-                field="template",
-            )
-
-        inferred_name = Path(path).resolve().name if path not in {"", "."} else "MyAgent"
-        resolved_name = (agent_name or inferred_name).strip()
-        _check_agent_name(resolved_name)
-        slug = _slugify(resolved_name)
-        if not resolved_name or not slug:
-            raise ValidationError(
-                "Agent name must contain at least one letter or number.",
-                field="name",
-            )
-
-        is_prod_template = resolved_template == "production"
-        resolved_auth = (auth or ("jwt" if is_prod_template else "none")).strip().lower()
-        if resolved_auth not in {"none", "jwt", "custom"}:
-            raise ValidationError(
-                f"Invalid auth mode '{resolved_auth}'. Choose none, jwt, or custom.",
-                field="auth",
-            )
-
-        resolved_cache_store = (cache_store or "redis").strip().lower()
-        if is_prod_template and resolved_cache_store not in _CACHE_STORES:
-            raise ValidationError(
-                f"Invalid cache store '{resolved_cache_store}'. "
-                f"Choose {' or '.join(_CACHE_STORES)}.",
-                field="cache_store",
-            )
-
-        resolved_provider = (provider or _DEFAULT_PROVIDER).strip().lower()
-        if resolved_provider not in _PROVIDERS:
-            raise ValidationError(
-                f"Invalid AI provider '{resolved_provider}'. Choose {', '.join(_PROVIDERS)}.",
-                field="provider",
-            )
-
-        if resolved_template == "quick-start" and auth is not None and resolved_auth != "none":
-            raise ValidationError("--auth requires --template production.", field="template")
-
-        if not is_prod_template:
-            # The cache store, rate limit and token revocation flags are production settings.
-            return {
-                "agent_name": resolved_name,
-                "agent_name_slug": slug,
-                "setup_type": "quick_start",
-                "provider": resolved_provider,
-                "websocket": websocket,
-                "auth": "none",
-                "cache_store": None,
-                "rate_limit": False,
-                "token_revocation": False,
-            }
-
-        auth_on = resolved_auth in {"jwt", "custom"}
-        return {
-            "agent_name": resolved_name,
-            "agent_name_slug": slug,
-            "setup_type": "production",
-            "provider": resolved_provider,
-            "websocket": websocket,
-            "auth": resolved_auth,
-            "cache_store": resolved_cache_store,
-            "rate_limit": rate_limit is not False,
-            # Ignored with auth off: there is no token to revoke.
-            "token_revocation": auth_on and token_revocation is not False,
-            "id_generator": "uuid",
-            "rl_requests": 100,
-            "rl_window": 60,
-            # With auth on, one budget per user; "ip" would share one budget behind a proxy.
-            "rl_by": "user" if auth_on else "ip",
-            "rl_trusted_proxy": False,
-        }
+        return build_context(**options)
 
     # ------------------------------------------------------------------
     # Prompts
@@ -395,80 +200,93 @@ class InitCommand(BaseCommand):
     def _prompt_user(self) -> dict | None:
         prompts = self.output.prompts()
         prompts.require_interactive(
-            field="template",
+            field="mode",
             alternatives=(
                 "Re-run with --yes to accept the defaults, or --non-interactive "
-                "with --name/--template for a reproducible recipe."
+                "with --name/--mode for a reproducible recipe."
             ),
         )
-
-        agent_name = prompts.text(
-            "What is your agent name?",
-            default="MyAgent",
-            validate=_agent_name_problem,
-        )
-        if agent_name is None:
+        answers = ask_questions(prompts, _agent_name_problem, DEFAULT_PROVIDER)
+        if answers is None:
             return None
+        return self._non_interactive_context(path=".", **answers)
 
-        template = prompts.select(
-            "Which project template?",
-            [
-                Choice(
-                    "quick_start",
-                    "Quick Start",
-                    "Minimal graph, no auth — fastest path to a running agent",
-                ),
-                Choice(
-                    "production",
-                    "Production",
-                    "JWT auth, Postgres + Redis, rate limiting, evals, and tests scaffolded in",
-                ),
-            ],
-            default="quick_start",
+    def _print_completion(self, context: dict, base_path: Path, is_prod: bool) -> None:
+        provider_info = PROVIDERS[context.get("provider", DEFAULT_PROVIDER)]
+        storage = context.get("storage") or "memory"
+        key_step = f"Copy .env.example to .env and set {provider_info['api_key_env']}"
+        details: dict[str, Any] = {
+            "Location": base_path.resolve(),
+            "Setup": "Full" if is_prod else "Quick",
+            "Auth": context["auth"],
+            "AI provider": provider_info["label"],
+        }
+        if is_prod:
+            details["Storage"] = STORAGE_PRESETS[storage]["label"]
+        if context.get("websocket"):
+            details["WebSocket"] = "on"
+
+        if not is_prod:
+            install = [f'pip install "{_template_vars(context)["core_requirement"]}"']
+            if context.get("websocket"):
+                install.append('pip install "10xgraph-api[websocket]"')
+            steps = [
+                f"cd {base_path}",
+                *install,
+                f"{key_step}.",
+                "10xgraph dev",
+                _CONFIG_HINT,
+            ]
+            before_production: list[str] = []
+        else:
+            worker = context.get("worker", "none")
+            env_keys = ["DATABASE_URL"] if storage.startswith("postgres") else []
+            if storage.startswith("postgres") or worker != "none":
+                env_keys.append("REDIS_URL")
+            if worker in ("rabbitmq", "kafka"):
+                env_keys.append("BROKER_URL")
+            if env_keys:
+                key_step += f" (and {', '.join(env_keys)})"
+            steps = [f"cd {base_path}", "pip install -e .", f"{key_step}.", "10xgraph dev"]
+            if worker != "none":
+                steps += ["10xgraph worker", "10xgraph scheduler (run exactly one)"]
+            secret = " and a strong JWT_SECRET_KEY" if context["auth"] == "jwt" else ""
+            before_production = [
+                "10xgraph config to review auth, rate limit, CORS origins and the other "
+                "settings and make the project production ready.",
+                f"Set MODE=production, ORIGINS{secret} in the deploy environment.",
+                "10xgraph build to generate the Dockerfile (--docker-compose / --k8s optional).",
+            ]
+
+        self.output.completion_screen(
+            "Project ready",
+            f'"{context["agent_name"]}" was created successfully',
+            details=details,
+            next_steps=steps,
         )
-        if template is None:
-            return None
-
-        provider = prompts.select(
-            "Which AI provider?",
-            [
-                Choice("google", "Google Gemini", "Installs google-genai · GOOGLE_API_KEY"),
-                Choice("openai", "OpenAI", "Installs openai · OPENAI_API_KEY"),
-                Choice("anthropic", "Anthropic Claude", "Installs anthropic · ANTHROPIC_API_KEY"),
-            ],
-            default=_DEFAULT_PROVIDER,
+        if before_production:
+            self.output.print_list(before_production, title="Before production", bullet="→")
+        self.output.info(
+            "10xgraph skills installs the 10xGraph skill for your AI coding assistant.",
+            emoji=False,
         )
-        if provider is None:
-            return None
-
-        # Nothing else is asked: Production writes the recommended setup, and
-        # `10xgraph config` (or the flags) changes any part of it.
-        return self._non_interactive_context(
-            path=".",
-            agent_name=agent_name,
-            template="production" if template == "production" else "quick-start",
-            auth=None,
-            provider=provider,
-        )
-
-    # ------------------------------------------------------------------
-    # Output helpers
-    # ------------------------------------------------------------------
 
     def _print_summary(self, context: dict) -> None:
         is_prod = context["setup_type"] == "production"
-        setup_label = "Production" if is_prod else "Quick Start"
+        setup_label = "Full" if is_prod else "Quick"
 
         rows: list[tuple[str, str]] = [
             ("Agent name", context["agent_name"]),
             ("Package name", context["agent_name_slug"]),
             ("Setup", setup_label),
-            ("AI provider", _PROVIDERS[context.get("provider", _DEFAULT_PROVIDER)]["label"]),
+            ("AI provider", PROVIDERS[context.get("provider", DEFAULT_PROVIDER)]["label"]),
         ]
         if context.get("websocket"):
             rows.append(("WebSocket", "On"))
         if is_prod:
             auth = context["auth"]
+            storage = context.get("storage") or "memory"
+            rows.append(("Storage", STORAGE_PRESETS[storage]["label"]))
             rows.append(("Auth", "None" if auth == "none" else auth.upper()))
 
             store = context.get("cache_store") or "memory"
@@ -491,68 +309,21 @@ class InitCommand(BaseCommand):
             if auth != "none":
                 revocation = "On" if context.get("token_revocation") else "Off"
                 rows.append(("Token revocation", revocation))
+            worker = context.get("worker", "none")
+            rows.append(
+                ("Background tasks", WORKERS[worker]["label"] if worker != "none" else "None")
+            )
+            rows.append(("Evaluations", "On" if context.get("evals") else "Off"))
+            rows.append(("Tests", "On" if context.get("tests") else "Off"))
+            for key, label in (("ag_ui", "AG-UI"), ("otel", "OpenTelemetry")):
+                if context.get(key):
+                    rows.append((label, "On"))
 
         self.output.print_table(
             ["Setting", "Value"],
             [[label, value] for label, value in rows],
             title="Project summary",
         )
-
-    # ------------------------------------------------------------------
-    # Config generation
-    # ------------------------------------------------------------------
-
-    def _build_config(self, context: dict, is_prod: bool) -> dict:
-        config: dict = {
-            "agent": "graph.agent:app",
-            "env": ".env",
-            "auth": None,
-            "thread_name_generator": None,
-            # AG-UI endpoint for clients such as CopilotKit. Off until turned on here.
-            "ag_ui": {"enabled": False},
-            # WebSocket streaming (/v1/graph/ws) and realtime audio (/v1/graph/live).
-            # Off: neither route is mounted and no WebSocket library is needed.
-            "websocket": {"enabled": bool(context.get("websocket"))},
-        }
-
-        if not is_prod:
-            return config
-
-        auth = context["auth"]
-        if auth == "jwt":
-            config["auth"] = {"method": "jwt"}
-        elif auth == "custom":
-            config["auth"] = {"method": "custom", "path": "auth.agent_auth:AgentAuth"}
-
-        # Frontend tools are declared here (name and schema fixed by the server) instead of
-        # being accepted from each request. Add them under "remote_tools".
-        config["ag_ui"] = {"enabled": False, "allow_client_tools": False}
-        config["remote_tools"] = []
-
-        config["thread_name_generator"] = "graph.thread_name_generator:MyNameGenerator"
-        config["injectq"] = "graph.agent:container"
-        config["id_generator"] = context.get("id_generator", "uuid")
-
-        # The API's cache store: rate limit counters, run locks and caps, idempotency,
-        # ownership cache and token revocation. Redis is shared by every worker (empty url:
-        # the URL comes from REDIS_URL in .env); memory is per process.
-        cache_store: dict[str, Any] = {"type": context.get("cache_store") or "memory"}
-        if context.get("rate_limit"):
-            cache_store["rate_limit"] = {
-                "enabled": True,
-                "requests": context.get("rl_requests", 100),
-                "window": context.get("rl_window", 60),
-                "by": context.get("rl_by", "user" if auth in ("jwt", "custom") else "ip"),
-                "trusted_proxy_headers": context.get("rl_trusted_proxy", False),
-                "fail_open": False,
-                "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"],
-            }
-        if auth in ("jwt", "custom") and context.get("token_revocation"):
-            # A leaked or logged-out token is rejected before it expires. See `10xgraph revoke`.
-            cache_store["token_revocation"] = True
-        config["cache_store"] = cache_store
-
-        return config
 
     # ------------------------------------------------------------------
     # File helpers
@@ -564,20 +335,25 @@ class InitCommand(BaseCommand):
             return True
         if not is_prod:
             return False
-        # auth/ is only included for custom auth; skip for none and jwt
-        rel_parts = src.relative_to(template_dir).parts
-        return rel_parts[0] == _AUTH_DIR and context["auth"] != "custom"
+        # auth/ is only included for custom auth; evals/ and tests/ only when asked for
+        top = src.relative_to(template_dir).parts[0]
+        if top == _AUTH_DIR:
+            return context["auth"] != "custom"
+        if top == _WORKER_DIR:
+            return context.get("worker", "none") == "none"
+        if top in _OPTIONAL_DIRS:
+            return not context.get(top)
+        return False
 
     def _render(self, src: Path, context: dict, is_prod: bool) -> str:
         content = src.read_text(encoding="utf-8")
 
-        # Strip conditional blocks in .env.example before substitution
-        if src.name == ".env.example" and is_prod:
-            content = _strip_env_blocks(
-                content,
-                keep_redis=True,
-                keep_jwt=context["auth"] == "jwt",
-            )
+        # Resolve ##[IF_NAME]## blocks in every production template file
+        if is_prod:
+            try:
+                content = strip_blocks(content, template_flags(context))
+            except FileOperationError as exc:
+                raise FileOperationError(f"{src.name}: {exc.message}", file_path=str(src)) from exc
 
         try:
             values = {**context, **_template_vars(context)}

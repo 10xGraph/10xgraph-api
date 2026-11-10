@@ -28,6 +28,13 @@ Publishers receive structured events from graph/tool execution. Use them for tra
 to stdout by default; pass `ConsolePublisher({"use_logger": True})` to route events through the
 `tenxgraph.publisher` logger instead of stdout.
 
+Publisher kinds:
+
+- `BasePublisher.kind` is `"events"` by default (type `PublisherKind = Literal["events", "observability"]`). `OtelPublisher` sets `"observability"`, so `LogfirePublisher`, `LangsmithPublisher` and `PhoenixPublisher` have it too. A custom tracing backend sets `kind = "observability"`.
+- `publish_event(event, only="events")` sends to event publishers only; `only="observability"` to tracing publishers only; `None` (default) to all. It works inside a `CompositePublisher`, also nested.
+- Event publishers (Kafka, Redis, RabbitMQ, console, custom) are bound in code; there is no `10xgraph.json` key. Tracing publishers come from the `observability` block. `metrics` never goes through publishers.
+- Routing: graph, node, LLM and tool events (AI errors included) go to event publishers and tracing, plus logs and LLM metrics. Task lifecycle events (queued, started, finished, saved, cancelled) go to event publishers only (`only="events"`), plus task metrics and logs. A task failure is not published: ERROR log and `tenxgraph.task.runs{status="failure"}`. API HTTP errors are not published: HTTP metrics and logs.
+
 Realtime adds an `Event.REALTIME` event source and a `ContentType.TRANSCRIPT` content type (see
 `realtime.md`).
 
@@ -71,8 +78,23 @@ ACP support is in `tenxgraph/runtime/protocols/acp.py`. Treat it as a runtime pr
 
 - Events and spans keep content on purpose. Redis, RabbitMQ and Kafka publishers send full events (message text, tool I/O); send them only to trusted systems. OTEL records prompts and tool I/O only at `ObservabilityLevel.FULL`.
 - TLS is the developer's choice, never forced. Recommend it in production whenever possible, and always on networks the developer does not control; a broker reachable only inside a secured private network (private subnet or VPC, or an encrypting service mesh) can run without it. Redis: `rediss://` URL. RabbitMQ: `amqps://` URL. Kafka: opt-in config keys `security_protocol`, `ssl_context`, `ssl_cafile`, `ssl_certfile`, `ssl_keyfile`, `sasl_mechanism`, `sasl_plain_username`, `sasl_plain_password` (passed to aiokafka only when set; `ssl_context` wins over the file keys).
-- `user_id_mode` (`"raw"` default, `"hash"`, `"mask"`) controls `user_id` on OTEL spans, and so on Logfire and LangSmith. It does not apply to Redis, RabbitMQ, Kafka or Console events. `hash` is the first 16 hex chars of SHA-256, or HMAC-SHA256 when env `TENXGRAPH_TRACE_USER_ID_KEY` is set (set it; plain SHA-256 of short ids can be guessed). Options: `OtelPublisher(level=..., user_id_mode=...)`, `setup_tracing`, `setup_logfire`, `setup_langsmith`, `setup_observability(graph, {"user_id_mode": ...})`. Invalid value raises `ValueError`.
+- `user_id_mode` (`"raw"` default, `"hash"`, `"mask"`) controls `user_id` on OTEL spans, and so on Logfire, LangSmith and Phoenix. It does not apply to Redis, RabbitMQ, Kafka or Console events. `hash` is the first 16 hex chars of SHA-256, or HMAC-SHA256 when env `TENXGRAPH_TRACE_USER_ID_KEY` is set (set it; plain SHA-256 of short ids can be guessed). Options: `OtelPublisher(level=..., user_id_mode=...)`, `setup_tracing`, `setup_logfire`, `setup_langsmith`, `setup_observability(graph, {"user_id_mode": ...})`. Invalid value raises `ValueError`.
 - Server: `10xgraph.json` `"observability": {"user_id_mode": "hash"}`; also in the `10xgraph config` editor.
+
+## Phoenix (Arize)
+
+- Install `pip install '10xgraph[phoenix]'` (also in `10xgraph[observability]`). Enable in `10xgraph.json`: `"observability": {"phoenix": {"enabled": true, "project": "my-agent", "endpoint": null}}`.
+- `project` falls back to env `PHOENIX_PROJECT` / `PHOENIX_PROJECT_NAME`; `endpoint` is the base collector URL (env `PHOENIX_COLLECTOR_ENDPOINT`, then `http://localhost:6006`), `/v1/traces` is appended.
+- In Python: `setup_phoenix(graph, project=..., endpoint=..., api_key=...)` or `PhoenixPublisher(...)`, both from `tenxgraph.runtime.publisher`, used like `setup_langsmith` / `LangsmithPublisher`. Call before `graph.compile()`.
+- `PHOENIX_API_KEY` is env only and optional (a local Phoenix needs none). Never put it in the config file.
+
+## OTLP tracing and the metrics block
+
+- AI traces to any OTLP HTTP receiver (collector, Tempo, Jaeger, Grafana Cloud; not Prometheus): install `pip install '10xgraph[otlp]'`, config `"observability": {"otlp": {"enabled": true, "endpoint": "http://collector:4318"}}`. `/v1/traces` is appended. With a null endpoint, env `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is required (`OTEL_EXPORTER_OTLP_ENDPOINT` is not used). In Python: `setup_otlp(graph, endpoint=...)` before `graph.compile()`. Auth headers: env `OTEL_EXPORTER_OTLP_HEADERS` only.
+- `observability.otlp.use_metrics_endpoint: true` reuses `metrics.otlp.endpoint` (needs metrics on with `export: "otlp"`). The URL must take traces; a Prometheus `/api/v1/otlp` URL does not.
+- HTTP request spans never go to AI tracing; the server turns FastAPI's own telemetry off.
+- Metrics are separate from tracing: `"metrics": {"enabled": true, "export": "otlp" | "prometheus", "otlp": {"endpoint": ...}, "prometheus": {"path": "/metrics", "worker_port": 9464}, "latency_buckets_ms": [...]}`. Needs `pip install '10xgraph-api[metrics]'`. Prometheus scrape covers one process (API route, worker port); with several gunicorn or TaskIQ processes use OTLP push. The scrape route has no auth, keep it on a private network.
+- Core metrics include `tenxgraph.llm.duration` (provider, model, status) and `tenxgraph.llm.tokens` (provider, model, type); the task metrics are `tenxgraph.task.runs` and `tenxgraph.task.duration`.
 
 ## Rules
 

@@ -262,10 +262,15 @@ async def test_message_media_still_in_state_through_another_message_is_kept(monk
 
 @pytest.mark.asyncio
 async def test_boot_runs_the_checkpointer_setup(monkeypatch):
-    checkpointer = MagicMock()
+    # A real container, bound the way StateGraph.compile() binds it (the class, not a string
+    # key): a mocked "checkpointer" key hid that boot never found the graph's checkpointer.
+    from injectq import InjectQ
+    from tenxgraph.storage.checkpointer import BaseCheckpointer, InMemoryCheckpointer
+
+    checkpointer = InMemoryCheckpointer()
     checkpointer.asetup = AsyncMock(return_value=True)
-    container = MagicMock()
-    container.try_get.side_effect = lambda name: checkpointer if name == "checkpointer" else None
+    container = InjectQ()
+    container.bind_instance(BaseCheckpointer, checkpointer, allow_concrete=True)
     monkeypatch.setattr(app_main, "container", container)
     await app_main._prepare_checkpointer()
     checkpointer.asetup.assert_awaited_once()
@@ -273,12 +278,16 @@ async def test_boot_runs_the_checkpointer_setup(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_boot_survives_a_failing_setup(monkeypatch):
-    checkpointer = MagicMock()
+    from injectq import InjectQ
+    from tenxgraph.storage.checkpointer import BaseCheckpointer, InMemoryCheckpointer
+
+    checkpointer = InMemoryCheckpointer()
     checkpointer.asetup = AsyncMock(side_effect=ConnectionError("postgres down"))
-    container = MagicMock()
-    container.try_get.return_value = checkpointer
+    container = InjectQ()
+    container.bind_instance(BaseCheckpointer, checkpointer, allow_concrete=True)
     monkeypatch.setattr(app_main, "container", container)
     await app_main._prepare_checkpointer()  # logs, does not raise
+    checkpointer.asetup.assert_awaited_once()
 
 
 @pytest.mark.asyncio

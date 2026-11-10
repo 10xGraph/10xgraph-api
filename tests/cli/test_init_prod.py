@@ -6,6 +6,7 @@ import io
 from pathlib import Path
 
 from tenxgraph_api.cli.commands.init import InitCommand
+from tenxgraph_api.cli.commands.init_context import build_config
 from tenxgraph_api.cli.core.output import OutputFormatter
 from tenxgraph_api.src.app.core.auth.auth_config import check_auth_config
 
@@ -80,42 +81,44 @@ def test_init_prod_skips_binary_template_artifacts() -> None:
     )
 
 
-def test_production_template_defaults_to_recommended_setup(tmp_path: Path) -> None:
-    """With no answers, production scaffolds JWT, ownership, Postgres + Redis and rate limits."""
+def test_full_mode_defaults_to_memory_storage_and_jwt(tmp_path: Path) -> None:
+    """With no answers, Full scaffolds JWT, rate limits and in-memory storage."""
     import json
     import tomllib
 
-    target = tmp_path / "default-prod"
+    target = tmp_path / "default-full"
     command = InitCommand(OutputFormatter(stream=io.StringIO()))
-    result = command.execute(
-        path=str(target), agent_name="Default Prod", template="production", non_interactive=True
-    )
+    result = command.execute(path=str(target), agent_name="Default Full", mode="full", yes=True)
     assert result == 0
 
     config = json.loads((target / "10xgraph.json").read_text())
     assert config["auth"] == {"method": "jwt"}
     assert "authorization" not in config
+    assert "store" not in config
     assert config["ag_ui"] == {"enabled": False, "allow_client_tools": False}
     assert config["remote_tools"] == []
     assert check_auth_config(config, production=True) == []
-    assert config["cache_store"]["type"] == "redis"
-    assert "url" not in config["cache_store"]
+    assert config["cache_store"]["type"] == "memory"
     assert config["cache_store"]["rate_limit"]["enabled"] is True
     assert config["cache_store"]["token_revocation"] is True
+    assert "InMemoryCheckpointer()" in (target / "graph" / "agent.py").read_text()
+    assert (target / "evals").is_dir() and (target / "tests").is_dir()
 
-    agent_py = (target / "graph" / "agent.py").read_text()
-    assert "PgCheckpointer(" in agent_py
-    memory_lines = [line for line in agent_py.splitlines() if "InMemoryCheckpointer" in line]
-    assert memory_lines
-    assert all(line.lstrip().startswith("#") for line in memory_lines)
+    dependencies = tomllib.loads((target / "pyproject.toml").read_text())["project"]["dependencies"]
+    assert dependencies == ["10xgraph[google-genai]", "10xgraph-api[jwt]"]
 
+
+def test_full_postgres_scaffolds_pg_checkpointer_and_env(tmp_path: Path) -> None:
+    target = tmp_path / "pg"
+    command = InitCommand(OutputFormatter(stream=io.StringIO()))
+    result = command.execute(
+        path=str(target), agent_name="Pg", mode="full", storage="postgres", non_interactive=True
+    )
+    assert result == 0
+    assert "PgCheckpointer(" in (target / "graph" / "agent.py").read_text()
     env_example = (target / ".env.example").read_text()
     assert "DATABASE_URL=" in env_example
     assert "REDIS_URL=" in env_example
-
-    dependencies = tomllib.loads((target / "pyproject.toml").read_text())["project"]["dependencies"]
-    assert any("pg_checkpoint" in dep for dep in dependencies)
-    assert any(dep.startswith("10xgraph-api[") and "redis" in dep for dep in dependencies)
 
 
 class _Scripted:
@@ -142,9 +145,10 @@ class _Scripted:
         return self._answer(message, default)
 
     def select(self, message, _choices, default=None, **_kwargs):
-        if message == "Which project template?":
-            return "production"
         return self._answer(message, default)
+
+    def checkbox(self, message, choices, **_kwargs):
+        return self._answer(message, [c.value for c in choices if c.checked])
 
 
 def _run_prompts(monkeypatch, answers=None):
@@ -155,45 +159,47 @@ def _run_prompts(monkeypatch, answers=None):
     return InitCommand(output=formatter)._prompt_user(), scripted, output.getvalue()
 
 
-def test_interactive_production_asks_only_the_basics(monkeypatch) -> None:
-    """Name, template and provider are the only questions; Production gets the full setup."""
-    context, scripted, text = _run_prompts(monkeypatch)
+_FULL = {"Which setup?": "full"}
 
+
+def test_interactive_quick_asks_three_questions(monkeypatch) -> None:
+    context, scripted, _ = _run_prompts(monkeypatch)
+    assert scripted.asked == ["Which setup?", "What is your agent name?", "Which AI provider?"]
+    assert context is not None and context["setup_type"] == "quick_start"
+    assert context["storage"] is None and context["cache_store"] is None
+    assert context["rate_limit"] is False and context["auth"] == "none"
+    assert build_config(context, False).keys() >= {"agent"}
+    assert "cache_store" not in build_config(context, False)
+
+
+def test_interactive_full_asks_four_more_questions(monkeypatch) -> None:
+    context, scripted, _ = _run_prompts(monkeypatch, _FULL)
     assert scripted.asked == [
+        "Which setup?",
         "What is your agent name?",
         "Which AI provider?",
+        "Where should state be stored?",
+        "How should the API be secured?",
+        "Background tasks?",
+        "Which extras?",
     ]
     assert context is not None
     assert context["setup_type"] == "production"
+    assert context["storage"] == "memory"
     assert context["auth"] == "jwt"
-    assert context["cache_store"] == "redis"
+    assert context["cache_store"] == "memory"
     assert context["rate_limit"] is True
     assert context["token_revocation"] is True
     assert context["id_generator"] == "uuid"
-    assert context["websocket"] is False
-    assert "cannot reach" not in text
+    assert (context["evals"], context["tests"]) == (True, True)
+    assert (context["websocket"], context["ag_ui"], context["otel"]) == (False, False, False)
 
 
-def test_interactive_quick_start_has_no_cache_store(monkeypatch) -> None:
-    class _Quick(_Scripted):
-        def select(self, message, _choices, default=None, **_kwargs):
-            return "quick_start" if message == "Which project template?" else default
-
-    output = io.StringIO()
-    formatter = OutputFormatter(stream=output)
-    monkeypatch.setattr(formatter, "prompts", lambda: _Quick())
-    context = InitCommand(output=formatter)._prompt_user()
-    assert context is not None and context["setup_type"] == "quick_start"
-    assert context["cache_store"] is None and context["rate_limit"] is False
-    assert InitCommand(output=formatter)._build_config(context, False).keys() >= {"agent"}
-    assert "cache_store" not in InitCommand(output=formatter)._build_config(context, False)
-
-
-def test_interactive_production_writes_the_recommended_config(monkeypatch, tmp_path) -> None:
+def test_interactive_full_writes_the_recommended_config(monkeypatch) -> None:
     import json
 
-    context, _, _ = _run_prompts(monkeypatch)
-    config = InitCommand(output=SilentOutput())._build_config(context, True)
+    context, _, _ = _run_prompts(monkeypatch, _FULL)
+    config = build_config(context, True)
     assert config["auth"] == {"method": "jwt"}
     assert "authorization" not in config
     assert config["ag_ui"] == {"enabled": False, "allow_client_tools": False}
@@ -201,7 +207,7 @@ def test_interactive_production_writes_the_recommended_config(monkeypatch, tmp_p
     assert check_auth_config(config, production=True) == []
     assert config["id_generator"] == "uuid"
     assert config["cache_store"] == {
-        "type": "redis",
+        "type": "memory",
         "rate_limit": {
             "enabled": True,
             "requests": 100,
@@ -215,23 +221,25 @@ def test_interactive_production_writes_the_recommended_config(monkeypatch, tmp_p
     }
     template = Path(__file__).parents[2] / "tenxgraph_api/cli/templates/prod/10xgraph.json"
     static = json.loads(template.read_text(encoding="utf-8"))
-    for key in (
-        "auth",
-        "ag_ui",
-        "remote_tools",
-        "id_generator",
-        "cache_store",
-        "thread_name_generator",
-    ):
+    for key in ("auth", "ag_ui", "remote_tools", "id_generator", "thread_name_generator"):
         assert static[key] == config[key], key
 
 
-def test_summary_shows_the_production_choices(monkeypatch) -> None:
-    context, _, _ = _run_prompts(monkeypatch)
+def test_summary_shows_the_full_choices(monkeypatch) -> None:
+    context, _, _ = _run_prompts(monkeypatch, _FULL)
     stream = io.StringIO()
     InitCommand(output=OutputFormatter(stream=stream))._print_summary(context)
     text = stream.getvalue()
-    for label in ("Auth", "Cache store", "Rate limit", "Token revocation", "ID generator"):
+    for label in (
+        "Storage",
+        "Auth",
+        "Cache store",
+        "Rate limit",
+        "Token revocation",
+        "ID generator",
+        "Evaluations",
+        "Tests",
+    ):
         assert label in text
 
 
@@ -249,7 +257,11 @@ def test_production_graph_builds_a_pg_checkpointer_without_services(tmp_path: Pa
     command = InitCommand(OutputFormatter(stream=io.StringIO()))
     assert (
         command.execute(
-            path=str(target), agent_name="Pg Agent", template="production", non_interactive=True
+            path=str(target),
+            agent_name="Pg Agent",
+            mode="full",
+            storage="postgres",
+            non_interactive=True,
         )
         == 0
     )

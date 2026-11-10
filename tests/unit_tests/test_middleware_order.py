@@ -12,6 +12,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from tenxgraph_api.src.app.core.config import setup_middleware as sm
 from tenxgraph_api.src.app.core.config.graph_config import RateLimitConfig
+from tenxgraph_api.src.app.core.config.metrics import MetricsConfig
 from tenxgraph_api.src.app.core.config.settings import Settings
 
 
@@ -28,6 +29,7 @@ def _app(allowed_host: str = "testserver", max_size: int = 10 * 1024 * 1024) -> 
     graph_config = SimpleNamespace(
         rate_limit=RateLimitConfig.from_dict({"requests": 1, "window": 60}),
         observability=None,
+        metrics=MetricsConfig(),
     )
     app = FastAPI()
 

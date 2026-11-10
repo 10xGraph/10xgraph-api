@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 15s
+
+# Used by the OTLP receiver (--web.enable-otlp-receiver). Keeps service.name as the
+# `job` label and adds one series per process through service.instance.id.
+otlp:
+  promote_resource_attributes:
+    - service.instance.id
+
+# Option B scrape mode: use these when 10xgraph.json has "metrics": {"export": "prometheus"}.
+# With OTLP push (option A) leave them alone: the targets just show as down.
+scrape_configs:
+  - job_name: tenxgraph-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+  - job_name: tenxgraph-worker
+    static_configs:
+      - targets: ["host.docker.internal:9464"]

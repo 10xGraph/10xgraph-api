@@ -17,8 +17,16 @@ from tenxgraph_api.src.app.core import (
     init_logger,
     setup_middleware,
 )
-from tenxgraph_api.src.app.core.auth.route_guard import assert_all_routes_protected
+from tenxgraph_api.src.app.core.auth.route_guard import (
+    DEFAULT_PUBLIC_PATHS,
+    assert_all_routes_protected,
+)
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, default_config_path
+from tenxgraph_api.src.app.core.config.metrics import (
+    check_scrape_route,
+    flush_telemetry,
+    native_telemetry_off,
+)
 from tenxgraph_api.src.app.loader import attach_all_modules, load_container
 from tenxgraph_api.src.app.routers import init_routes
 
@@ -91,7 +99,11 @@ async def _prepare_checkpointer() -> None:
     missing permission shows in the boot log instead of on the first request. Best effort:
     the checkpointer also creates its schema on its first query, so a failure here only logs.
     """
-    checkpointer = container.try_get("checkpointer") or container.try_get("BaseCheckpointer")
+    from tenxgraph_api.src.app.routers.ping.readiness import readiness_targets
+
+    # The graph binds its checkpointer under the BaseCheckpointer class (never a string
+    # key); the same lookup the startup check and /health/ready use.
+    checkpointer = readiness_targets(container)[0]
     asetup = getattr(checkpointer, "asetup", None)
     if not callable(asetup):
         return
@@ -256,6 +268,9 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.debug("Auth close failed: %s", exc)
 
+    # Last, so a slow collector delays nothing else: the final metrics push and AI spans.
+    await flush_telemetry(getattr(app.state, "meter_provider", None))
+
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -268,6 +283,7 @@ app = FastAPI(
     openapi_url="/openapi.json" if settings.DOCS_PATH or settings.REDOCS_PATH else None,
     lifespan=lifespan,
     root_path=settings.ROOT_PATH,
+    **native_telemetry_off(),
 )
 
 setup_middleware(app, graph_config=graph_config, container=container)
@@ -282,6 +298,7 @@ init_errors_handler(app)
 
 # A malformed "media" section should stop the boot, not surface on the first delete.
 graph_config.media  # noqa: B018
+graph_config.metrics  # noqa: B018
 
 # init routes
 # The AG-UI endpoint is opt-in through 10xgraph.json; the WebSocket routes can be turned off there.
@@ -292,9 +309,16 @@ init_routes(
     tasks=graph_config.worker is not None,
 )
 
+# The scrape path is open to the auth guard and rate limit: no real route may share it.
+check_scrape_route(app, getattr(app.state, "scrape_route", None))
+
 # Secure by construction: refuse to boot if any non-public route forgot its
 # RequirePermission guard (a forgotten guard would otherwise ship an open endpoint).
-assert_all_routes_protected(app)
+# The Prometheus scrape route is public too (scrapers send no tokens).
+_scrape_path = graph_config.metrics.scrape_path
+assert_all_routes_protected(
+    app, DEFAULT_PUBLIC_PATHS | {_scrape_path} if _scrape_path else DEFAULT_PUBLIC_PATHS
+)
 
 # instrumentator = Instrumentator().instrument(app)  # Instrument first
 # instrumentator.expose(app)  # Then expose

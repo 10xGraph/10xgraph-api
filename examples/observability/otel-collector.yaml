@@ -1,0 +1,29 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  # Metrics go to Prometheus' OTLP receiver (the exporter appends /v1/metrics).
+  otlphttp/prometheus:
+    endpoint: http://prometheus:9090/api/v1/otlp
+  # Traces are only printed to the collector log. Add a Tempo or Jaeger exporter here to keep them.
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/prometheus]
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]

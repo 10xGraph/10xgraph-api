@@ -1,8 +1,11 @@
-"""``MonitoringMiddleware``: log every TaskIQ hook and send the same as core publisher events
-when a ``BasePublisher`` is bound in the container. It also records two metrics through core's
-metrics facade (exported when OTEL is enabled): ``tenxgraph.task.runs`` (attributes ``task``,
-``status`` = queued, success, failure, cancelled) and ``tenxgraph.task.duration_ms`` (attribute
-``task``). Never raises."""
+"""``MonitoringMiddleware``: log every TaskIQ hook and send the lifecycle steps as core publisher
+events when a ``BasePublisher`` is bound in the container. Events go to event publishers only
+(``only="events"``), never to AI tracing publishers, which would take a task for a graph run.
+A task failure is not published as an event: it is logged at ERROR and counted. It also
+records two metrics through core's metrics facade (exported by the ``metrics`` block of
+10xgraph.json, or the legacy OTEL path):
+``tenxgraph.task.runs`` (attributes ``task``, ``status`` = queued, success, failure, cancelled)
+and ``tenxgraph.task.duration`` (attribute ``task``). Never raises."""
 
 from __future__ import annotations
 
@@ -17,22 +20,21 @@ from tenxgraph_api.jobs.context import TaskCancelled
 
 
 logger = logging.getLogger("tenxgraph_api.jobs")
-MESSAGE_LIMIT = 500
 RUNS_METRIC = "tenxgraph.task.runs"
-DURATION_METRIC = "tenxgraph.task.duration_ms"
+DURATION_METRIC = "tenxgraph.task.duration"
 
 
 class MonitoringMiddleware(TaskiqMiddleware):
-    """Task lifecycle logs and events. Core has no task event kind yet, so events use
-    ``Event.GRAPH_EXECUTION`` with ``metadata["source"] == "task"`` and the hook name in
-    ``metadata["phase"]``.
+    """Task lifecycle logs and events (event publishers only). Core has no task event kind yet,
+    so events use ``Event.GRAPH_EXECUTION`` with ``metadata["source"] == "task"`` and the hook
+    name in ``metadata["phase"]``.
 
     | hook | event type | phase |
     |---|---|---|
     | pre_send | none | |
     | post_send | UPDATE | queued |
     | pre_execute | START | started |
-    | on_error | ERROR (INTERRUPTED for ``TaskCancelled``) | failed (cancelled) |
+    | on_error | none for a failure (log, metric); INTERRUPTED for ``TaskCancelled`` | cancelled |
     | post_execute | END (success only) | finished |
     | post_save | RESULT | saved |
     """
@@ -84,13 +86,6 @@ class MonitoringMiddleware(TaskiqMiddleware):
             exc_info=exception,
         )
         self._count(message, "failure")
-        data = {
-            "error": type(exception).__name__,
-            "message": str(exception)[:MESSAGE_LIMIT],
-            "duration": took,
-            "attempt": attempt,
-        }
-        self._publish(message, "error", "failed", data, is_error=True)
 
     def post_execute(self, message: TaskiqMessage, result: TaskiqResult[Any]) -> None:
         self._duration(message, result.execution_time)
@@ -137,7 +132,6 @@ class MonitoringMiddleware(TaskiqMiddleware):
         event_type: str,
         phase: str,
         data: dict[str, Any] | None = None,
-        is_error: bool = False,
     ) -> None:
         try:
             from tenxgraph.runtime.publisher.base_publisher import BasePublisher
@@ -156,10 +150,9 @@ class MonitoringMiddleware(TaskiqMiddleware):
                 node_name=message.task_name,
                 run_id=message.task_id,
                 user_id=state.parse_config(message.labels).get("user_id"),
-                is_error=is_error,
                 data=data or {},
                 metadata={"source": "task", "task_name": message.task_name, "phase": phase},
             )
-            publish_event(event, publisher=publisher, task_manager=manager)
+            publish_event(event, publisher=publisher, task_manager=manager, only="events")
         except Exception:
             logger.debug("Task event not published", exc_info=True)

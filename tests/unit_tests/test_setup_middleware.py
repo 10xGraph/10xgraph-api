@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from tenxgraph_api.src.app.core.config import setup_middleware as setup_middleware_module
+from tenxgraph_api.src.app.core.config.metrics import MetricsConfig
 from tenxgraph_api.src.app.core.config.setup_middleware import (
     SelectiveGZipMiddleware,
     setup_middleware,
@@ -431,6 +432,7 @@ def test_setup_middleware_all():
     rate_limit_config.exclude_paths = None
     rate_limit_config.trusted_proxy_headers = True
     graph_config.rate_limit = rate_limit_config
+    graph_config.metrics = MetricsConfig()
 
     container = MagicMock()
 
@@ -451,7 +453,7 @@ def test_setup_middleware_all():
         assert len(rate_limit) == 1
         assert rate_limit[0].kwargs == {"config": rate_limit_config, "container": container}
         assert not hasattr(app.state, "rate_limit_backend")
-        mock_setup_otel.assert_called_once_with(app, settings)
+        mock_setup_otel.assert_called_once_with(app, settings, None, None)
         mock_attach.assert_called_once_with(container, settings, graph_config)
 
 
@@ -527,7 +529,11 @@ def test_setup_observability_noop_when_no_backend_enabled():
     from tenxgraph_api.src.app.core.config.setup_middleware import _setup_observability
 
     container = MagicMock()
-    cfg = {"logfire": {"enabled": False}, "langsmith": {"enabled": False}}
+    cfg = {
+        "logfire": {"enabled": False},
+        "langsmith": {"enabled": False},
+        "phoenix": {"enabled": False},
+    }
     _setup_observability(container, _graph_config(cfg))
     container.bind_instance.assert_not_called()
 
@@ -564,6 +570,22 @@ def test_setup_observability_adds_to_existing_composite():
 
     assert len(existing.publishers) == 1
     container.bind_instance.assert_not_called()
+
+
+def test_setup_observability_binds_for_phoenix_only():
+    from tenxgraph_api.src.app.core.config.setup_middleware import _setup_observability
+
+    modules, setup_obs, _base, _comp = _obs_modules()
+    cfg = {"phoenix": {"enabled": True, "project": "p", "endpoint": None}}
+    container = MagicMock()
+    container.try_get.return_value = None
+
+    with patch.dict(sys.modules, modules):
+        _setup_observability(container, _graph_config(cfg))
+
+    setup_obs.assert_called_once()
+    assert setup_obs.call_args[0][1] == cfg
+    container.bind_instance.assert_called_once()
 
 
 def test_setup_observability_wraps_single_existing():
