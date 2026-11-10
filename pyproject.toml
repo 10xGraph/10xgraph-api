@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "10xgraph-api"
-version = "1.0.0rc4"
-description = "Production server for 10xGraph agents (formerly 10xscale-agentflow-cli). Serves a compiled graph over REST, SSE, WebSocket, realtime audio and AG-UI with JWT or custom auth, scoped authorization on every endpoint, owner-only threads and rate limiting, and generates Docker Compose and Kubernetes files. Includes the 10xgraph CLI. MIT licensed, self-hosted."
+version = "1.0.0rc5"
+description = "API server and CLI of 10xGraph (formerly 10xscale-agentflow-cli), open-source self-hosted infrastructure for AI applications: REST, streaming and WebSocket from your graph, JWT or custom auth, roles with own/tenant/all reach, tenant isolation, rate limits, background jobs, metrics, audit log, and Docker and Kubernetes files. MIT."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
@@ -60,7 +60,7 @@ classifiers = [
 dependencies = [
     # This release needs core 1.0 (import `tenxgraph`). The explicit rc in the
     # specifier lets pip and uv pick the core pre-release until 1.0.0 is out.
-    "10xgraph>=1.0.0rc4,<2.0",
+    "10xgraph>=1.0.0rc5,<2.0",
     # Pre-1.0 and major-version-risky deps are capped; floors are the versions
     # the suite is verified against.
     "fastapi>=0.116,<1.0",
@@ -120,7 +120,7 @@ media = [
 # Pillow for image resize / EXIF / format conversion in core's media processor.
 # Without it, uploaded images pass through unchanged.
 images = [
-    "10xgraph[images]>=1.0.0rc4,<2.0",
+    "10xgraph[images]>=1.0.0rc5,<2.0",
 ]
 gcloud = [
     "google-cloud-logging",
@@ -400,7 +400,7 @@ ENVIRONMENT = "pytest"
 
 [dependency-groups]
 dev = [
-    "10xgraph>=1.0.0rc4",
+    "10xgraph>=1.0.0rc5",
     "snowflakekit",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
@@ -427,10 +427,3 @@ dev = [
     "gunicorn>=23,<27",
     "uvicorn-worker>=0.4,<1",
 ]
-
-# TEMPORARY: develop and test against unreleased core (PgVectorStore, tenant columns,
-# sql_filter, Isolation, aget_thread_scope). uv sources are not written into the built
-# wheel, so published packages still depend on 10xgraph from PyPI.
-# Remove this block at the 1.0.0rc5 release and pin "10xgraph>=1.0.0rc5,<2.0" instead.
-[tool.uv.sources]
-10xgraph = { git = "https://github.com/10xGraph/10xGraph", branch = "main" }

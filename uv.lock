@@ -10,13 +10,17 @@ resolution-markers = [
 
 [[package]]
 name = "10xgraph"
-version = "1.0.0rc4"
-source = { git = "https://github.com/10xGraph/10xGraph?branch=main#0b65e3bd4a695f6a10960c82e19570220feb5c18" }
+version = "1.0.0rc5"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "injectq" },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/83/d9/9f4e58365d028945bb13e7a6d1cd728907f4846f3b16aedc4044b5cd65f1/10xgraph-1.0.0rc5.tar.gz", hash = "sha256:8b263bd270588b78892b739ff25e4e57e42a0d803f91bafa14bee1fb0bf5c16c", size = 755513, upload-time = "2026-11-10T13:59:27.576Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a1/96/848b85a8bff7168a31185b80872f1b0528dc0cd82eca801ba85fb4ed3ef4/10xgraph-1.0.0rc5-py3-none-any.whl", hash = "sha256:21f327935d49bd0c06d959f67af3fe466627e52df2998810dc08e9dbd42ba42c", size = 814796, upload-time = "2026-11-10T13:59:23.766Z" },
 ]
 
 [package.optional-dependencies]
@@ -26,7 +30,7 @@ images = [
 
 [[package]]
 name = "10xgraph-api"
-version = "1.0.0rc4"
+version = "1.0.0rc5"
 source = { editable = "." }
 dependencies = [
     { name = "10xgraph" },
@@ -132,8 +136,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "10xgraph", git = "https://github.com/10xGraph/10xGraph?branch=main" },
-    { name = "10xgraph", extras = ["images"], marker = "extra == 'images'", git = "https://github.com/10xGraph/10xGraph?branch=main" },
+    { name = "10xgraph", specifier = ">=1.0.0rc5,<2.0" },
+    { name = "10xgraph", extras = ["images"], marker = "extra == 'images'", specifier = ">=1.0.0rc5,<2.0" },
     { name = "ag-ui-protocol", marker = "extra == 'ag-ui'", specifier = ">=1.0,<2" },
     { name = "fastapi", specifier = ">=0.116,<1.0" },
     { name = "firebase-admin", marker = "extra == 'firebase'", specifier = ">=6.5.0" },
@@ -177,7 +181,7 @@ provides-extras = ["sentry", "firebase", "snowflakekit", "redis", "jobs", "jobs-
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "10xgraph", git = "https://github.com/10xGraph/10xGraph?branch=main" },
+    { name = "10xgraph", specifier = ">=1.0.0rc5" },
     { name = "ag-ui-protocol", specifier = ">=1.0,<2" },
     { name = "gunicorn", specifier = ">=23,<27" },
     { name = "httpx", specifier = "==0.27.0" },
