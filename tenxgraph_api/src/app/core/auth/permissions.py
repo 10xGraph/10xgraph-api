@@ -20,7 +20,7 @@ from fastapi import HTTPException, Response, WebSocket, WebSocketException
 from fastapi.security import HTTPAuthorizationCredentials
 from injectq.integrations import InjectAPI
 from starlette.requests import HTTPConnection, Request
-from tenxgraph.core.authz import Identity
+from tenxgraph.core.authz import Identity, UserCredential
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.audit import audit_enabled, audit_event
@@ -145,6 +145,8 @@ def _reject(connection: HTTPConnection, status_code: int, detail: str) -> NoRetu
 
 
 _STATE_KEY = "tenxgraph_verified_claims"
+# The run credential from ``BaseAuth.downstream_credential``; read with ``run_credential``.
+_CREDENTIAL_STATE_KEY = "tenxgraph_run_credential"
 
 
 def _reusable(auth: BaseAuth) -> bool:
@@ -201,8 +203,8 @@ def _failure_reason(
 
 async def _authenticate(
     auth: BaseAuth, connection: HTTPConnection, response: Response | None
-) -> dict[str, Any]:
-    """The verified claims of this request, or a 401 (1008 on a WebSocket).
+) -> tuple[dict[str, Any], HTTPAuthorizationCredentials | None]:
+    """The verified claims of this request and its bearer credential, or a 401 (1008 on a WS).
 
     Claims the rate limiter already verified are reused (``_recall_claims``): the limiter
     emits nothing, so each request gets at most one ``auth`` event, from here or ``_identity``.
@@ -229,7 +231,7 @@ async def _authenticate(
         logger.error("%s.authenticate returned %s, not a dict", type(auth).__name__, type(claims))
         await _auth_failed("claims_rejected")
         _reject(connection, 401, "Authentication failed")
-    return claims
+    return claims, credential
 
 
 async def _identity(
@@ -240,7 +242,7 @@ async def _identity(
     Each refusal emits one ``auth`` audit event; the WARNING lines are written only while audit
     is off, so the record is not doubled.
     """
-    claims = await _authenticate(auth, connection, response)
+    claims, credential = await _authenticate(auth, connection, response)
     try:
         identity = resolve(claims, auth.rbac)
     except InvalidClaimsError as exc:
@@ -266,8 +268,34 @@ async def _identity(
             logger.warning("Rejected revoked credential for user %s", identity.user_id)
         await _auth_failed("revoked", identity.user_id)
         _reject(connection, 401, "Token has been revoked, please login again")
+    _keep_run_credential(connection, auth.downstream_credential(connection, credential, claims))
     set_request_user(identity.user_id)
     return identity
+
+
+def _keep_run_credential(connection: HTTPConnection, credential: Any) -> None:
+    """Keep the run credential on the connection, apart from the identity and claims."""
+    if credential is not None and not isinstance(credential, UserCredential):
+        # A plain string would be logged and published like any other config value.
+        raise TypeError(
+            f"downstream_credential must return a UserCredential or None, "
+            f"got {type(credential).__name__}"
+        )
+    scope = getattr(connection, "scope", None)
+    if isinstance(scope, dict):
+        scope.setdefault("state", {})[_CREDENTIAL_STATE_KEY] = credential
+
+
+def run_credential(connection: HTTPConnection | None) -> UserCredential | None:
+    """The caller's credential for the run config (``config["credential"]``), or None.
+
+    Set by ``RequireIdentity`` / ``RequirePermission``; None with auth off or before them.
+    """
+    scope = getattr(connection, "scope", None)
+    credential = (
+        scope.get("state", {}).get(_CREDENTIAL_STATE_KEY) if isinstance(scope, dict) else None
+    )
+    return credential if isinstance(credential, UserCredential) else None
 
 
 class RequireIdentity:

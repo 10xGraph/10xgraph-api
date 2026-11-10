@@ -64,6 +64,8 @@ RESERVED_CONFIG_KEYS: frozenset[str] = frozenset(
     {
         "user",
         "user_id",
+        # The caller's run credential, set only from BaseAuth.downstream_credential
+        "credential",
         "remote_tools",
         # Set by the AG-UI endpoint from the AG-UI request; never from a plain graph request
         "ag_ui",

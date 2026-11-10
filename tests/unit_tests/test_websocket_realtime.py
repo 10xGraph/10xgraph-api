@@ -61,7 +61,7 @@ def _make_service(events: list):
     service.new_thread_id = AsyncMock(return_value="srv-1")
     captured = {}
 
-    async def _gen(input_queue, init, user):
+    async def _gen(input_queue, init, user, credential=None):
         captured["queue"] = input_queue
         captured["init"] = init
         captured["user"] = user
@@ -166,7 +166,7 @@ class TestRealtimeWebSocket:
         service.runs_policy.return_value = RunsConfig()
         service.new_thread_id = AsyncMock(return_value="srv-1")
 
-        async def _boom(input_queue, init, user):
+        async def _boom(input_queue, init, user, credential=None):
             raise RuntimeError("graph has no LiveAgent")
             yield  # make it an async generator
 
@@ -231,7 +231,7 @@ class TestRealtimeWebSocket:
             _json_event("turn_complete"),
         ]
 
-        async def _slow_gen(input_queue, init, user):
+        async def _slow_gen(input_queue, init, user, credential=None):
             # Still producing after the client closed input (model finishing its turn).
             for e in events:
                 await asyncio.sleep(0.01)
@@ -260,7 +260,7 @@ class TestRealtimeWebSocket:
     async def test_invalid_modalities_sends_error_event_not_opaque_close(self):
         """A bad session config surfaces as a normalized fatal error frame, not a bare 1011."""
 
-        async def _boom(input_queue, init, user):
+        async def _boom(input_queue, init, user, credential=None):
             raise ValueError("response_modalities must contain exactly one modality")
             yield  # make it an async generator
 
@@ -546,7 +546,7 @@ class TestRealtimeCredentialRecheck:
     def _slow_service():
         service = _make_service([])
 
-        async def _gen(input_queue, init, user):
+        async def _gen(input_queue, init, user, credential=None):
             await asyncio.sleep(30)  # a session that would run on
             yield
 

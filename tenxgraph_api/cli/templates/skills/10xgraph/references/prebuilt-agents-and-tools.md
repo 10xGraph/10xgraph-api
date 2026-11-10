@@ -60,6 +60,7 @@ ReactAgent(
     tools: Iterable[Callable] | None = None,
     client: Any = None,                    # FastMCP client for MCP tools
     pass_user_info_to_mcp: bool = False,
+    mcp_auth: Any = None,                  # async (MCPAuthContext) -> dict of headers per MCP call
     extra_messages: list[Message] | None = None,
     trim_context: bool = False,
     tools_tags: set[str] | None = None,
@@ -139,6 +140,8 @@ app = ReactAgent(
 ```
 
 The server tool is `my_tickets` above. All argument names match `ReactAgent.__init__` and `compile()`.
+
+To authenticate each MCP call as the signed-in user, add `mcp_auth=my_mcp_auth` (an async function returning headers, see "Authenticate MCP calls as the user" in agents-and-tools.md). `PlanActReflectAgent`, `StructuredOutputAgent` and `AudioAgent` take it too. Needs fastmcp >= 4.1.7 and an HTTP transport.
 
 ---
 

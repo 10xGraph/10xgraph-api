@@ -7,7 +7,7 @@ from typing import Any
 
 from ag_ui.core import RunAgentInput
 from ag_ui.encoder import EventEncoder
-from tenxgraph.core.authz import Identity
+from tenxgraph.core.authz import Identity, UserCredential
 from tenxgraph.utils import ResponseGranularity
 
 from tenxgraph_api.src.app.core import logger
@@ -32,11 +32,13 @@ async def stream_ag_ui(
     user: Identity | None,
     encoder: EventEncoder,
     allow_client_tools: bool = True,
+    credential: UserCredential | None = None,
 ) -> AsyncIterator[str]:
     """Stream one AG-UI run as encoded events.
 
     With ``allow_client_tools`` the tools the client sends are offered to the model for this run
     (see ``ag_ui.allow_client_tools``); without it only ``remote_tools`` from 10xgraph.json are.
+    ``credential`` goes into the run config for the graph's tools.
 
     The thread's checkpoint is the record of the conversation: only client messages it has not
     seen are sent to the graph. A run with nothing new (a client syncing state) still gets a
@@ -49,7 +51,7 @@ async def stream_ag_ui(
 
     try:
         async for event in _run_events(
-            service, run_input, user, mapper, initial_state, allow_client_tools
+            service, run_input, user, mapper, initial_state, allow_client_tools, credential
         ):
             yield encoder.encode(event)
     except ValueError as exc:
@@ -73,6 +75,7 @@ async def _run_events(
     mapper: AgUiEventMapper,
     initial_state: dict[str, Any] | None,
     allow_client_tools: bool,
+    credential: UserCredential | None,
 ) -> AsyncIterator[Any]:
     """The events between ``RUN_STARTED`` and the terminal event of one run."""
     checkpoint_state = await _checkpoint_state(service, run_input.thread_id, user)
@@ -100,7 +103,7 @@ async def _run_events(
     graph_input, server_config = _graph_request(
         run_input, messages, initial_state, resume, allow_client_tools
     )
-    async for chunk in service.stream_chunks(graph_input, user, server_config):
+    async for chunk in service.stream_chunks(graph_input, user, server_config, credential):
         for event in mapper.map(chunk):
             yield event
 

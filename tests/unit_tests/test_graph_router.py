@@ -63,7 +63,7 @@ async def test_invoke_graph_endpoint(mock_request, mock_service, mock_user):
             identity=mock_user,
         )
         assert res == {"status": "success"}
-        mock_service.invoke_graph.assert_called_once_with(graph_input, mock_user)
+        mock_service.invoke_graph.assert_called_once_with(graph_input, mock_user, credential=None)
         mock_success.assert_called_once()
 
 
@@ -86,7 +86,7 @@ async def test_stream_graph_endpoint(mock_service, mock_user):
             identity=mock_user,
         )
         assert res == "streaming_response_obj"
-        mock_service.stream_graph.assert_called_once_with(graph_input, mock_user)
+        mock_service.stream_graph.assert_called_once_with(graph_input, mock_user, credential=None)
         mock_streaming_response.assert_called_once()
 
 

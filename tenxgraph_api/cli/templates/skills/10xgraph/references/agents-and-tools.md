@@ -312,6 +312,28 @@ What `meta["user"]` holds:
 
 The MCP server must authenticate the caller before it trusts this metadata. Send a service token from the client with `auth=`, for example `StreamableHttpTransport(url, auth="<token>")` (a string becomes a bearer token; an `httpx.Auth` object also works), and check it on the server.
 
+### Authenticate MCP calls as the user
+
+`pass_user_info_to_mcp` sends who the user is, not a credential. To send per-user auth, give `ToolNode` (or any prebuilt agent) an async `mcp_auth`. It runs before every MCP list and call and returns headers for that one request. Needs fastmcp >= 4.1.7 and an HTTP transport (streamable HTTP or SSE).
+
+```python
+from tenxgraph.core.graph.tool_node import MCPAuthContext, forward_credential
+
+async def mcp_auth(ctx: MCPAuthContext) -> dict[str, str]:
+    # ctx: identity, credential (UserCredential or None), tool_name, server, thread_id, run_id
+    token = await exchange_token(ctx.credential.token.get_secret_value())  # your RFC 8693 call
+    return {"Authorization": f"Bearer {token}"}
+
+ToolNode(tools=[], client=mcp_client, mcp_auth=mcp_auth)
+# forward_credential sends the user's own token; only for a server that accepts that same token.
+```
+
+- Headers win over transport `auth=` on the same name. mTLS stays on the transport (`verify=`).
+- The tool list is cached per node and shared by all users, so it must not differ per user.
+- A local tool parameter named `credential` receives the `UserCredential` (always that type, hidden from the model). In nodes use `get_credential(config)` from `tenxgraph.core.authz`.
+- Never forward the user's token to a server it was not issued for. Use token exchange, an M2M token or a short-lived token you sign.
+- Docs: https://10xgraph.com/docs/guides/call-services-as-the-user
+
 ---
 
 ## The `@tool` decorator

@@ -21,6 +21,7 @@ from tenxgraph_api.src.app.core.audit import audit_event
 from tenxgraph_api.src.app.core.auth.permissions import (
     RequirePermission,
     authorize_resource,
+    run_credential,
     ws_bearer_subprotocol,
 )
 from tenxgraph_api.src.app.core.auth.revocation import (
@@ -434,6 +435,7 @@ async def invoke_graph(
         result: GraphInvokeOutputSchema = await service.invoke_graph(
             graph_input,
             identity,
+            credential=run_credential(request),
         )
         if idem:
             await idem.complete(result.model_dump_json())
@@ -500,7 +502,7 @@ async def stream_graph(
         if idem:
             idem.release()
         raise
-    lines = service.stream_graph(graph_input, identity)
+    lines = service.stream_graph(graph_input, identity, credential=run_credential(request))
     if idem:
         lines = idempotency.stream_with_record(lines, idem)
     result = release_when_done(lines, guard)
@@ -886,7 +888,7 @@ async def _ws_run(
     write. The run generator is closed before this returns, so the caller can release the
     thread lock knowing the run is over.
     """
-    stream = service.stream_graph(graph_input, user=identity)
+    stream = service.stream_graph(graph_input, user=identity, credential=run_credential(websocket))
 
     async def pump() -> None:
         async with contextlib.aclosing(stream):
@@ -1448,7 +1450,8 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
     async def downstream() -> None:
         """Stream normalized events back: audio as binary, everything else as JSON."""
         try:
-            async for event in service.realtime_graph(queue, init, identity):
+            credential = run_credential(websocket)
+            async for event in service.realtime_graph(queue, init, identity, credential=credential):
                 if getattr(event, "type", None) == "audio_delta":
                     await _ws_send_bytes(websocket, event.data)
                 else:

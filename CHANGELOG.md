@@ -31,6 +31,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changes
 
+- **Tools can call services as the signed-in user.** After a request authenticates, the API
+  puts the caller's credential into the run config as `config["credential"]` (a core
+  `UserCredential`: redacted repr, refuses JSON and pickling) for invoke and stream (resume
+  included), `/v1/graph/ws`, `/v1/graph/live` and AG-UI. A tool reads it through a parameter
+  named `credential`, and `ToolNode(mcp_auth=...)` sees it. New hook
+  `BaseAuth.downstream_credential(connection, credential, claims)`: the default returns the
+  bearer token the request carried (header, or on a WebSocket the `10xgraph-bearer` subprotocol
+  or `?token=`); override it when `authenticate` verifies a cookie or an API key, or return
+  None for no credential. `authenticate()` is unchanged. `credential` is a reserved config key
+  (a client value is dropped, and `runs.config_keys` cannot admit it). It is never put in the
+  identity, claims, audit events, logs, thread naming, stop or fix, and never in background
+  tasks (`/v1/tasks` payloads, task status and results carry user data only). Needs the core
+  release that ships `UserCredential`.
+
 - **`10xgraph skills` adds always-on project instructions.** Skills load only on demand, so coding
   agents often never loaded the 10xGraph skill. The Claude target now also writes a 10xGraph
   section into the project-root `CLAUDE.md`, and the Codex target into `AGENTS.md`. The section
