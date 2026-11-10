@@ -125,12 +125,12 @@ class ApiKeyAuth(BaseAuth):
             raise HTTPException(status_code=401, detail="no key")
         return {"user_id": "keyuser"}
 
-    def downstream_credential(self, connection, credential, claims):
+    async def downstream_credential(self, connection, credential, claims):
         return UserCredential(connection.headers["X-Api-Key"], scheme="ApiKey")
 
 
 class NoCredentialAuth(BearerAuth):
-    def downstream_credential(self, connection, credential, claims):
+    async def downstream_credential(self, connection, credential, claims):
         return None
 
 
@@ -245,20 +245,15 @@ def test_stream_gives_the_tool_the_bearer_token_and_no_chunk_carries_it(make):
     assert SECRET not in resp.text
 
 
-@pytest.mark.parametrize("transport", ["header", "subprotocol", "query"])
+@pytest.mark.parametrize("transport", ["header", "subprotocol"])
 def test_websocket_gives_the_tool_the_token_from_every_transport(make, transport):
     h = make()
     if transport == "header":
         chunks = h.ws_run(ALICE)
     elif transport == "subprotocol":
         chunks = h.ws_run(subprotocols=[WS_BEARER_SUBPROTOCOL, TOKEN])
-    else:
-        with h.client.websocket_connect(f"/v1/graph/ws?token={TOKEN}") as ws:
-            ws.send_json({"messages": [_user()]})
-            chunks = [ws.receive_json()]
-            while (chunks[-1].get("data") or {}).get("status") != "done":
-                assert chunks[-1]["event"] != "error", chunks[-1]
-                chunks.append(ws.receive_json())
+    else:  # pragma: no cover
+        raise AssertionError(transport)
     assert chunks[-1]["data"]["status"] == "done", chunks
     assert TOOL_SAW == [TOKEN, "Bearer"]
     assert SECRET not in json.dumps(chunks)
@@ -322,7 +317,7 @@ def test_custom_auth_returning_none_gives_no_credential(make):
 
 def test_downstream_credential_must_return_a_user_credential(make):
     class RawString(BearerAuth):
-        def downstream_credential(self, connection, credential, claims):
+        async def downstream_credential(self, connection, credential, claims):
             return credential.credentials
 
     h = make(auth=RawString())

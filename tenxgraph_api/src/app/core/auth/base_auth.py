@@ -42,7 +42,7 @@ class BaseAuth(ABC):
         """
         return identity.can(permission)
 
-    def downstream_credential(
+    async def downstream_credential(
         self,
         connection: HTTPConnection,
         credential: HTTPAuthorizationCredentials | None,
@@ -51,11 +51,11 @@ class BaseAuth(ABC):
         """The credential a run may use to call other services as this caller, or None.
 
         Called once ``authenticate`` succeeded, with the bearer credential the request
-        carried (header, or on a WebSocket the ``10xgraph-bearer`` subprotocol or ``?token=``)
-        and the verified claims. The result goes into the run config under ``"credential"``,
-        where tools read it (a parameter named ``credential``, or ``get_credential(config)``)
-        and ``ToolNode(mcp_auth=...)`` sees it. It never reaches claims, events, logs,
-        checkpoints or background tasks.
+        carried (header, or on a WebSocket the ``10xgraph-bearer`` subprotocol) and the
+        verified claims. Async, so an override can call an identity provider. The result goes
+        into the run config under ``"credential"``, where tools read it (a parameter named
+        ``credential``, or ``get_credential(config)``) and ``ToolNode(mcp_auth=...)`` sees it.
+        It never reaches claims, events, logs, checkpoints or background tasks.
 
         The default returns the bearer token as is. Override it when ``authenticate`` does
         not verify that token (a cookie or an API key): return the credential it did verify,

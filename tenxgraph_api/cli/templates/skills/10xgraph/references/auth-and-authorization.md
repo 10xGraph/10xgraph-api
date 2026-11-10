@@ -113,7 +113,7 @@ The API sets `config["credential"]` (a `UserCredential` with the verified bearer
 
 ```python
 class MyAuth(BaseAuth):
-    def downstream_credential(self, connection, credential, claims):
+    async def downstream_credential(self, connection, credential, claims):
         # default: the verified bearer token. Override for cookies or API keys.
         return UserCredential(connection.cookies["session"], scheme="Session")  # or None
 ```

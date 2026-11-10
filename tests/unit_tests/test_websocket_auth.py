@@ -8,7 +8,8 @@ FastAPI cannot inject it on a WebSocket connection -- the previous failure mode 
 which endpoint-level unit tests (that pass ``user=...`` directly) could never surface.
 """
 
-from fastapi import Depends, FastAPI, WebSocket
+import pytest
+from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.testclient import TestClient
 from injectq import InjectQ
 from injectq.integrations import setup_fastapi
@@ -59,11 +60,13 @@ def _build_client(auth_configured: bool) -> TestClient:
 
 
 class TestWebSocketAuthResolves:
-    def test_token_query_param_authenticates_on_websocket(self):
-        """The ?token= fallback must resolve the dependency on a WS route (was a TypeError)."""
+    def test_token_query_param_is_not_read(self):
+        """A ?token= in the URL would end up in access logs and trace spans: never accepted."""
         client = _build_client(auth_configured=True)
-        with client.websocket_connect("/ws?token=alice") as conn:
-            assert conn.receive_json()["user_id"] == "alice"
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect("/ws?token=alice") as conn:
+                conn.receive_json()
+        assert exc.value.code == 1008
 
     def test_authorization_header_authenticates_on_websocket(self):
         client = _build_client(auth_configured=True)
@@ -92,15 +95,13 @@ class TestExtractCredential:
         assert cred.credentials == "xyz"
         assert cred.scheme == "Bearer"
 
-    def test_query_token_fallback_when_no_header(self):
+    def test_query_token_is_never_read(self):
         conn = type(
             "_C",
             (),
             {"headers": {}, "query_params": {"token": "qtok"}, "scope": {"type": "websocket"}},
         )()
-        cred = _extract_credential(conn)
-        assert cred is not None
-        assert cred.credentials == "qtok"
+        assert _extract_credential(conn) is None
 
     def test_header_takes_priority_over_query(self):
         conn = type(

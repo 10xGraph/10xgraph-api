@@ -29,6 +29,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- **WebSocket routes no longer accept `?token=`.** `/v1/graph/ws` and `/v1/graph/live` take the
+  bearer from the `Authorization` header or the `10xgraph-bearer` subprotocol only. A token in
+  the URL ended up in access logs, proxy logs and HTTP trace spans. `10xgraph-client` already
+  uses the subprotocol; other clients that put the token in the URL must switch.
+- **`BaseAuth.downstream_credential` is async**, so an override can call an identity provider.
+
 ### Changes
 
 - **Tools can call services as the signed-in user.** After a request authenticates, the API

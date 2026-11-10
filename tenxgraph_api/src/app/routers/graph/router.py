@@ -946,9 +946,9 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
 
     Authentication
     --------------
-    Bearer token via the ``Authorization`` header, the ``10xgraph-bearer``
-    Sec-WebSocket-Protocol (browser-safe), or the ``?token=`` query fallback —
-    identical to the HTTP stream route. Handshakes are subject to the global rate
+    Bearer token via the ``Authorization`` header or the ``10xgraph-bearer``
+    Sec-WebSocket-Protocol (browser-safe). A ``?token=`` in the URL is not accepted.
+    Handshakes are subject to the global rate
     limit and the ``websocket.max_connections`` cap.
 
     Every run on the socket counts against the same rate limit (an error chunk with
@@ -1260,9 +1260,9 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
                    JSON text frame = every other event (transcripts, turn_complete,
                                      interrupted, tool_call, session/go_away, error)
 
-    Auth: ``RequirePermission("graph","stream")`` — bearer via the ``Authorization`` header,
-    the ``10xgraph-bearer`` Sec-WebSocket-Protocol (browser-safe), or the ``?token=`` query
-    fallback. Handshakes are subject to the global rate limit and the
+    Auth: ``RequirePermission("graph","stream")``: bearer via the ``Authorization`` header or
+    the ``10xgraph-bearer`` Sec-WebSocket-Protocol (browser-safe); ``?token=`` is not accepted.
+    Handshakes are subject to the global rate limit and the
     ``websocket.max_connections`` cap (rejected with close code 1013). A non-live
     (turn-based) graph is rejected up front with close code 1008 — use ``/v1/graph/ws``.
     """
