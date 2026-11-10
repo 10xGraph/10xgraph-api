@@ -793,7 +793,7 @@ _SECTIONS: list[dict[str, Any]] = [
             },
             {
                 "name": "OTEL_ENABLED",
-                "purpose": "Export OpenTelemetry traces from the API server (off unless set to true).",
+                "purpose": "Export OpenTelemetry traces from the API server (off unless set true)",
             },
             {
                 "name": "OTEL_LEVEL",
