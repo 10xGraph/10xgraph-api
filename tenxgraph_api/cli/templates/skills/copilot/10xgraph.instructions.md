@@ -44,7 +44,7 @@ Compile graphs once at startup. Keep graph code storage-agnostic; wire dependenc
   - `AudioAgent` — realtime full-duplex voice agent (Gemini Live); needs the `[realtime]` extra and is driven by `arealtime()`, not `invoke`/`stream`
 - For custom flows only, build workflows with `StateGraph`, `Agent`, `ToolNode`, `AgentState`, and `Message`.
 - Keep apps small: one agent unless asked for more, no unrequested routers, handoffs, guard or approval nodes. Business data and rules live in tools and the systems they call, not in graph nodes or state.
-- MCP: pass the signed-in user with `pass_user_info_to_mcp=True`; the server reads `ctx.request_context.meta["user"]`. Never add `user`, `user_id`, `org_id` or tenant arguments to MCP tools.
+- MCP: for a server that enforces per-user or per-tenant access, use `mcp_auth=` with a short-lived signed token the server verifies; `pass_user_info_to_mcp=True` sends unsigned metadata (`ctx.request_context.meta["user"]`) the server cannot verify, so use it only for a trusted internal server. Never add `user`, `user_id`, `org_id` or tenant arguments to MCP tools.
 - Do not work around 10xGraph bugs in app code (subclassing `ToolNode`, overriding private methods). Report them instead.
 - Persist conversation state with **checkpointers**. Use **stores** only for cross-thread memory.
 - Inject business services through **`InjectQ`**, not module-level globals.

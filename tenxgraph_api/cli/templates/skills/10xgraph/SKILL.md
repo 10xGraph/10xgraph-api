@@ -25,7 +25,7 @@ Keep apps small. Follow these rules unless the user asks otherwise.
 - Start from a prebuilt agent: `ReactAgent` for a tool-calling agent. Hand-write a `StateGraph` only when no prebuilt agent fits, and say why.
 - Build one agent unless the user asks for more. Do not add routers, handoffs, guard nodes or approval nodes the user did not ask for.
 - Business data and rules belong in tools and the systems they call (APIs, MCP servers, databases), not in graph nodes or state.
-- MCP: pass the signed-in user with `pass_user_info_to_mcp=True`. The MCP server reads it from `ctx.request_context.meta["user"]`. Never add `user`, `user_id`, `org_id` or tenant arguments to MCP tools. See `references/prebuilt-agents-and-tools.md`.
+- MCP: for a server that enforces per-user or per-tenant access, use `mcp_auth=` with a short-lived signed token the server verifies (it names the user, and the agent as actor). `pass_user_info_to_mcp=True` sends unsigned metadata (`ctx.request_context.meta["user"]`) that the server cannot verify; use it only for a trusted internal server. Never add `user`, `user_id`, `org_id` or tenant arguments to MCP tools. See `references/prebuilt-agents-and-tools.md`.
 - Do not work around 10xGraph bugs in app code (subclassing `ToolNode`, overriding private methods). Report them instead.
 
 ## Workflow

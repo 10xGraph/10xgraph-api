@@ -10,8 +10,9 @@ reference file it points to. Tell every subagent you start to do the same.
   approval nodes the user did not ask for.
 - Business data and rules belong in tools and the systems they call (APIs, MCP servers,
   databases), not in graph nodes or state.
-- MCP: pass the signed-in user with `pass_user_info_to_mcp=True`. The MCP server reads it from
-  `ctx.request_context.meta["user"]`. Never add `user`, `user_id`, `org_id` or tenant
-  arguments to MCP tools.
+- MCP: for a server that enforces per-user or per-tenant access, use `mcp_auth=` with a
+  short-lived signed token the server verifies. `pass_user_info_to_mcp=True` sends unsigned
+  metadata (`ctx.request_context.meta["user"]`) the server cannot verify; use it only for a
+  trusted internal server. Never add `user`, `user_id`, `org_id` or tenant arguments to MCP tools.
 - Do not work around 10xGraph bugs in app code (subclassing ToolNode, overriding private
   methods). Report them instead.

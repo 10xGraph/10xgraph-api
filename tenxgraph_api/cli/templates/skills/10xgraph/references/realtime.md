@@ -39,7 +39,7 @@ app = AudioAgent(
 
 - Constructor (positional): `model`, then optional `state`, `context_manager`, `publisher`,
   `id_generator`, `container`; keyword-only: `realtime_config`, `system_prompt`, `tools`, `client`,
-  `pass_user_info_to_mcp`, `skills`, `memory`, `realtime_client_factory`, `live_node_name="LIVE"`.
+  `pass_user_info_to_mcp` (unsigned metadata, trusted internal servers only), `mcp_auth` (async per-call MCP headers, for per-user access control), `skills`, `memory`, `realtime_client_factory`, `live_node_name="LIVE"`.
 - `compile()` takes `checkpointer`, `store`, `callback_manager`, `shutdown_timeout` (default 30.0).
   It does **not** take `media_store` or `interrupt_before` / `interrupt_after` — those belong to the
   turn-based super-step executor, which realtime bypasses.

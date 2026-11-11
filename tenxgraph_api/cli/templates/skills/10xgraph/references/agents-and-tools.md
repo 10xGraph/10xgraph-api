@@ -302,11 +302,13 @@ pip install "10xgraph[mcp]"
 tool_node = ToolNode(
     [local_fn],
     client=mcp_client,               # fastmcp Client
-    pass_user_info_to_mcp=True,      # send the signed-in user as request metadata
+    pass_user_info_to_mcp=True,      # unsigned metadata: trusted internal servers only
 )
 ```
 
-Server side, read the user from request metadata, never from a tool argument:
+`pass_user_info_to_mcp=True` is unsigned: the server cannot verify it, so anything that can reach the MCP endpoint can claim any user. Use it for a trusted internal server (a network boundary you control) or informational identity. When the server enforces per-user or per-tenant access, use `mcp_auth` (next section). Either way the user is never a tool argument.
+
+Server side, read the metadata, never a tool argument:
 
 ```python
 from fastmcp import Context, FastMCP
@@ -331,11 +333,11 @@ What `meta["user"]` holds:
 - With the SDK directly, a plain dict `config["user"]` is sent as is.
 - With no user, it is `{"user_id": config["user_id"]}`.
 
-The MCP server must authenticate the caller before it trusts this metadata. Send a service token from the client with `auth=`, for example `StreamableHttpTransport(url, auth="<token>")` (a string becomes a bearer token; an `httpx.Auth` object also works), and check it on the server.
+The MCP server must authenticate the calling app before it trusts this metadata, and even then the user in it is an assertion, not a proof. Send a service token from the client with `auth=`, for example `StreamableHttpTransport(url, auth="<token>")` (a string becomes a bearer token; an `httpx.Auth` object also works), and check it on the server.
 
 ### Authenticate MCP calls as the user
 
-`pass_user_info_to_mcp` sends who the user is, not a credential. To send per-user auth, give `ToolNode` (or any prebuilt agent) an async `mcp_auth`. It runs before every MCP list and call and returns headers for that one request. Needs fastmcp >= 4.1.7 and an HTTP transport (streamable HTTP or SSE).
+`pass_user_info_to_mcp` sends who the user is, unsigned, not a credential. This is the recommended way when the MCP server enforces per-user or per-tenant access: send per-user auth, give `ToolNode` (or any prebuilt agent) an async `mcp_auth`. It runs before every MCP list and call and returns headers for that one request. Needs fastmcp >= 4.1.7 and an HTTP transport (streamable HTTP or SSE).
 
 ```python
 from tenxgraph.core.graph.tool_node import MCPAuthContext, forward_credential
@@ -352,6 +354,7 @@ ToolNode(tools=[], client=mcp_client, mcp_auth=mcp_auth)
 - Headers win over transport `auth=` on the same name. mTLS stays on the transport (`verify=`).
 - The tool list is cached per node and shared by all users, so it must not differ per user.
 - A local tool parameter named `credential` receives the `UserCredential` (always that type, hidden from the model). In nodes use `get_credential(config)` from `tenxgraph.core.authz`.
+- A short-lived signed token (for example 60 seconds, `aud` the MCP server, `sub` the user, `act` the agent) lets the server verify who the user is and which agent acted. The server takes the user from the token, not from request metadata.
 - Never forward the user's token to a server it was not issued for. Use token exchange, an M2M token or a short-lived token you sign.
 - Docs: https://10xgraph.com/docs/guides/call-services-as-the-user
 
@@ -365,19 +368,18 @@ Attaches metadata to any function. Does not change injection behavior — enrich
 from tenxgraph.utils import tool
 
 @tool(
-    name="web_search",
     description="Search the web for up-to-date information.",
     tags=["search", "web"],
     provider="custom",
     capabilities=["network_access"],
     metadata={"rate_limit": 100},
 )
-async def search_web(query: str, max_results: int = 5) -> list[str]:
+async def web_search(query: str, max_results: int = 5) -> list[str]:
     """Search the web."""
     ...
 ```
 
-Without arguments: function name and docstring are used as defaults.
+The tool name the model sees is always the function name; to change it, rename the function. Without arguments, the docstring is the description.
 
 `record_tool_result=False` keeps a read-only tool (search, weather, lookups) out of the checkpointer's tool execution ledger. The default is `True`, so a finished call is not run again after a crash or resume. With `False`, the tool can run twice in those cases. The checkpointer's own `record_tool_result=False` wins over the tool's.
 
