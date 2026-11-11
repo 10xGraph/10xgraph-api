@@ -23,6 +23,7 @@ agentflow = tenxgraph_api.cli.main:legacy_main   # deprecated alias, removed in 
 
 - Scaffolds `10xgraph.json`, `graph/agent.py` and `.env.example`, and suggests `10xgraph skills` as a next step.
 - Asks three questions: agent name, template (quick-start or production) and AI provider (Google, OpenAI, Anthropic). Nothing else is asked.
+- Before writing, it checks which files already exist. At a terminal it asks before overwriting them; without one it stops before writing anything and names them, so pass `--force`.
 - Quick-start writes a minimal `10xgraph.json` (no `cache_store`: in-memory, no rate limit, no token revocation).
 - Production writes the recommended setup without asking: `"auth": {"method": "jwt"}` (default roles: all permissions except `admin:*`, reach `own`; add `auth.roles` to narrow), `"id_generator": "uuid"`, and `"cache_store": {"type": "redis", "rate_limit": {...100 requests / 60 s by user, "fail_open": false...}, "token_revocation": true}` (no `url`, so it reads `REDIS_URL`). WebSocket and AG-UI stay off.
 - The summary table shows what was written; the next steps point to `10xgraph config` for WebSocket, AG-UI, ID generator, thread naming and every other setting.

@@ -36,6 +36,7 @@ _SKIP_DIRS = {"__pycache__", ".ruff_cache"}
 _AUTH_DIR = "auth"
 _OPTIONAL_DIRS = ("evals", "tests")
 _WORKER_DIR = "worker"
+_MAX_NAMES = 5
 _CONFIG_HINT = "10xgraph config for more settings."
 
 
@@ -130,18 +131,22 @@ class InitCommand(BaseCommand):
             is_prod = context["setup_type"] == "production"
             template_dir = _TEMPLATES_DIR / ("prod" if is_prod else "dev")
 
+            planned = self._planned_files(template_dir, context, is_prod)
+            existing = [name for name in planned if (base_path / name).exists()]
+
             if dry_run:
-                planned = [
-                    str(src.relative_to(template_dir))
-                    for src in sorted(template_dir.rglob("*"))
-                    if src.is_file() and not self._should_skip(src, template_dir, context, is_prod)
-                ]
-                if "10xgraph.json" not in planned:
-                    planned.append("10xgraph.json")
-                planned.append(".gitignore")
-                self.output.print_list(planned, title="Files that would be created", bullet="→")
+                shown = [f"{name} (exists)" if name in existing else name for name in planned]
+                shown.append(".gitignore")
+                self.output.print_list(shown, title="Files that would be created", bullet="→")
                 self.output.info("Dry run complete; no files were written.", emoji=False)
                 return 0
+
+            if existing and not force:
+                interactive = not (yes or non_interactive) and self.output.prompts().interactive
+                if not self._agree_to_overwrite(existing, interactive):
+                    self.output.info("Cancelled. No files were written.", emoji=False)
+                    return 0
+                force = True
 
             timeline = self.output.timeline(
                 f'Scaffolding "{context["agent_name"]}"',
@@ -329,6 +334,32 @@ class InitCommand(BaseCommand):
     # ------------------------------------------------------------------
     # File helpers
     # ------------------------------------------------------------------
+
+    def _planned_files(self, template_dir: Path, context: dict, is_prod: bool) -> list[str]:
+        """Files init writes, relative to the project folder (.gitignore is merged, not listed)."""
+        planned = [
+            src.relative_to(template_dir).as_posix()
+            for src in sorted(template_dir.rglob("*"))
+            if src.is_file() and not self._should_skip(src, template_dir, context, is_prod)
+        ]
+        if "10xgraph.json" not in planned:
+            planned.append("10xgraph.json")
+        return planned
+
+    def _agree_to_overwrite(self, existing: list[str], interactive: bool) -> bool:
+        """Ask before replacing existing files; without a terminal, stop before any write."""
+        names = ", ".join(existing[:_MAX_NAMES])
+        if len(existing) > _MAX_NAMES:
+            names += f" (and {len(existing) - _MAX_NAMES} more)"
+        if not interactive:
+            raise FileOperationError(
+                f"These files already exist: {names}. Use --force to overwrite them."
+            )
+        return bool(
+            self.output.prompts().confirm(
+                f"These files already exist: {names}. Overwrite them?", default=False
+            )
+        )
 
     def _should_skip(self, src: Path, template_dir: Path, context: dict, is_prod: bool) -> bool:
         """Return True if this template file should not be copied."""

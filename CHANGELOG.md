@@ -45,6 +45,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `strategy: Recreate`). At a terminal `build` asks where you deploy, whether to run the worker and
   the scheduler, and whether to overwrite; new flags `--worker/--no-worker` and
   `--scheduler/--no-scheduler` answer them. It warns when the `jobs` extra for the broker is missing.
+- **`10xgraph init` checks for existing files before writing.** It used to fail on the first existing file and leave a partial scaffold. Now it asks once before overwriting (default No; No writes nothing), or without a terminal stops before any write and lists the files. `--force` skips the question; `--dry-run` marks existing files.
 - **Tools can call services as the signed-in user.** After a request authenticates, the API
   puts the caller's credential into the run config as `config["credential"]` (a core
   `UserCredential`: redacted repr, refuses JSON and pickling) for invoke and stream (resume
