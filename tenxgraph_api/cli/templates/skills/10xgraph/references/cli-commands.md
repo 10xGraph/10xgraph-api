@@ -39,7 +39,9 @@ agentflow = tenxgraph_api.cli.main:legacy_main   # deprecated alias, removed in 
 `10xgraph build`
 
 - Generates Docker deployment files.
-- Options include `--output/-o`, `--force/-f`, `--python-version`, `--port/-p`, `--docker-compose/--no-docker-compose`, `--service-name`, `--verbose/-v`, and `--quiet/-q`.
+- Asks up to four questions at a terminal (deploy target, worker, scheduler, overwrite), skipping any a flag answers.
+- With a non-`memory` `worker` key in `10xgraph.json`, adds `worker` and `scheduler` services to `docker-compose.yml` or Deployments to `k8s.yaml`. The scheduler is included only with `--scheduler`. `--worker` without such a key is an error. Run exactly one scheduler.
+- Options include `--output/-o`, `--force/-f`, `--python-version`, `--port/-p`, `--docker-compose/--no-docker-compose`, `--k8s/--no-k8s`, `--worker/--no-worker`, `--scheduler/--no-scheduler`, `--service-name`, `--verbose/-v`, and `--quiet/-q`.
 
 `10xgraph skills`
 

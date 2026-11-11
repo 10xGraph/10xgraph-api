@@ -44,7 +44,7 @@ Production should set `MODE=production`, configure CORS origins, and use real au
 
 - `10xgraph dev`: serve graph over HTTP and open the playground (`--no-open` to serve only).
 - `10xgraph init`: scaffold config and graph.
-- `10xgraph build --docker-compose`: generate Docker deployment files.
+- `10xgraph build --docker-compose`: generate Docker deployment files. Add `--worker` (and `--scheduler`) to also run the background-job processes; needs a non-`memory` `worker` key in `10xgraph.json`.
 
 ## Source Map
 

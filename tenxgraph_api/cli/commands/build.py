@@ -6,7 +6,11 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError as PydanticValidationError
+
+from tenxgraph_api.cli.capabilities import truthy_env
 from tenxgraph_api.cli.commands import BaseCommand
+from tenxgraph_api.cli.commands.build_prompts import ask_questions
 from tenxgraph_api.cli.config_editor.validation import production_readiness_warnings
 from tenxgraph_api.cli.constants import (
     DEFAULT_CONFIG_FILE,
@@ -26,11 +30,33 @@ from tenxgraph_api.cli.templates.defaults import (
     generate_k8s_manifest_content,
     merge_ignore_patterns,
 )
+from tenxgraph_api.jobs.config import WorkerConfig
 from tenxgraph_api.src.app.core.auth.auth_config import check_auth_config
+
+
+# The pip extra of 10xgraph-api that installs each broker's TaskIQ packages.
+BROKER_EXTRAS = {"redis_stream": "jobs", "rabbitmq": "jobs-rabbitmq", "kafka": "jobs-kafka"}
 
 
 class BuildCommand(BaseCommand):
     """Command to generate Dockerfile and docker-compose.yml for the application."""
+
+    def _read_worker_config(self) -> WorkerConfig | None:
+        """The ``worker`` key of the project config, or None when there is none to read."""
+        config_path = resolve_default_config(DEFAULT_CONFIG_FILE)
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        raw = config.get("worker") if isinstance(config, dict) else None
+        if raw is None:
+            return None
+        try:
+            return WorkerConfig.model_validate(raw)
+        except PydanticValidationError as exc:
+            raise ValidationError(
+                f'Invalid "worker" key in {config_path.name}: {exc}', field="worker"
+            ) from exc
 
     def _warn_not_production_ready(self) -> None:
         """Warn about settings in the project config that are risky in production."""
@@ -50,15 +76,19 @@ class BuildCommand(BaseCommand):
             suffix = " (the image would not boot)" if auth_issue.level == "error" else ""
             self.output.warning(f"{auth_issue}{suffix}")
 
-    def execute(  # noqa: PLR0912, PLR0915
+    def execute(  # noqa: PLR0912, PLR0913, PLR0915
         self,
         output_file: str = "Dockerfile",
         force: bool = False,
         python_version: str = DEFAULT_PYTHON_VERSION,
         port: int = DEFAULT_PORT,
-        docker_compose: bool = False,
-        k8s: bool = False,
+        docker_compose: bool | None = None,
+        k8s: bool | None = None,
         service_name: str = DEFAULT_SERVICE_NAME,
+        worker: bool | None = None,
+        scheduler: bool | None = None,
+        yes: bool = False,
+        non_interactive: bool = False,
         **kwargs: Any,
     ) -> int:
         """Execute the build command.
@@ -68,9 +98,13 @@ class BuildCommand(BaseCommand):
             force: Overwrite existing files
             python_version: Python version to use
             port: Port to expose
-            docker_compose: Generate docker-compose.yml
-            k8s: Generate a Kubernetes manifest (Deployment + Service)
+            docker_compose: Generate docker-compose.yml (None: not passed, ask at a terminal)
+            k8s: Generate a Kubernetes manifest (None: not passed, ask at a terminal)
             service_name: Service name for docker-compose
+            worker: Add a worker service (None: ask, else on when the config has a worker)
+            scheduler: Add a scheduler service (None: ask, else off)
+            yes: Do not ask questions
+            non_interactive: Do not ask questions
             **kwargs: Additional arguments
 
         Returns:
@@ -90,18 +124,70 @@ class BuildCommand(BaseCommand):
                 color="yellow",
             )
 
+            worker_config = self._read_worker_config()
+            can_run_worker = worker_config is not None and worker_config.broker.type != "memory"
+            if (worker or scheduler) and not can_run_worker:
+                raise ValidationError(
+                    "--worker and --scheduler need a worker key in the config with a broker "
+                    "other than memory: the memory broker runs tasks inside the API process, "
+                    "so there is no worker to run.",
+                    field="worker",
+                )
+
+            target = None
+            if docker_compose is not None or k8s is not None:
+                target = "compose" if docker_compose else "k8s" if k8s else "dockerfile"
+            overwrite = force
+            prompts = self.output.prompts()
+            if not (yes or non_interactive or truthy_env("CI")) and prompts.interactive:
+                answers = ask_questions(
+                    prompts,
+                    target=target,
+                    worker=worker,
+                    scheduler=scheduler,
+                    can_run_worker=can_run_worker,
+                    output_file=output_file,
+                    force=force,
+                )
+                if answers is None or not answers.overwrite:
+                    self.output.info("Cancelled. No files were written.", emoji=False)
+                    return 0
+                target, worker, scheduler, overwrite = answers
+            else:
+                target = target or "dockerfile"
+                if worker is None:
+                    worker = can_run_worker and target != "dockerfile"
+                scheduler = bool(scheduler)
+            if (worker or scheduler) and target == "dockerfile":
+                raise ValidationError(
+                    "The worker and scheduler services need --docker-compose or --k8s.",
+                    field="worker",
+                )
+            if scheduler and not worker:
+                raise ValidationError("--scheduler needs the worker service.", field="scheduler")
+            if worker_config is not None and not can_run_worker and target != "dockerfile":
+                self.output.info(
+                    "worker.broker is memory: tasks run inside the API process, so no worker "
+                    "service is generated.",
+                    emoji=False,
+                )
+            tasks = worker_config.tasks if worker_config else []
+
             steps: list[tuple[str, str]] = [
                 ("validate", "Validating build options"),
                 ("sources", "Discovering project sources"),
                 ("dockerfile", "Generating Dockerfile"),
                 ("dockerignore", "Generating .dockerignore"),
             ]
-            if docker_compose:
+            if target == "compose":
                 steps.append(("compose", "Generating docker-compose.yml"))
-            if k8s:
+            if target == "k8s":
                 steps.append(("k8s", "Generating k8s.yaml"))
 
             generated = ["Dockerfile", ".dockerignore"]
+            services = [service_name, *(["worker"] if worker else [])]
+            if scheduler:
+                services.append("scheduler")
             timeline = self.output.timeline("Assembling deployment assets", steps=tuple(steps))
             with timeline:
                 with timeline.step("validate") as step:
@@ -109,12 +195,13 @@ class BuildCommand(BaseCommand):
                     validated_python_version = Validator.validate_python_version(python_version)
                     validated_service_name = Validator.validate_service_name(service_name)
                     output_path = Validator.validate_path(output_file)
-                    if output_path.exists() and not force:
-                        raise FileOperationError(
-                            f"Dockerfile already exists at {output_path}. "
-                            "Use --force to overwrite.",
-                            file_path=str(output_path),
-                        )
+                    targets = {"compose": Path("docker-compose.yml"), "k8s": Path("k8s.yaml")}
+                    for path in (output_path, targets.get(target)):
+                        if path is not None and path.exists() and not overwrite:
+                            raise FileOperationError(
+                                f"{path.name} already exists at {path}. Use --force to overwrite.",
+                                file_path=str(path),
+                            )
                     step.detail(
                         f"python {validated_python_version} · port {validated_port} · "
                         f"service {validated_service_name}"
@@ -141,6 +228,14 @@ class BuildCommand(BaseCommand):
                             "only the dependencies you list, so add it or the container "
                             "cannot start the server."
                         )
+                    if worker and worker_config is not None:
+                        extra = BROKER_EXTRAS[worker_config.broker.type]
+                        if dep_source is None or not self._lists_extra(dep_source, extra):
+                            self.output.warning(
+                                f"{dep_source.name if dep_source else 'The image'} does not list "
+                                f"{CLI_PACKAGE}[{extra}], so the worker cannot start. Add it to "
+                                "your dependencies."
+                            )
 
                     self._warn_not_production_ready()
 
@@ -150,10 +245,10 @@ class BuildCommand(BaseCommand):
                         port=validated_port,
                         requirements_file=requirements_file,
                         has_requirements=bool(requirements_files),
-                        omit_cmd=docker_compose,
+                        omit_cmd=target == "compose",
                         has_pyproject=has_pyproject,
                     )
-                    self._write_dockerfile(output_path, dockerfile_content)
+                    self._write(output_path, dockerfile_content)
                     step.detail(str(output_path))
 
                 dockerignore_path = output_path.parent / ".dockerignore"
@@ -174,22 +269,32 @@ class BuildCommand(BaseCommand):
                         )
                         step.detail(str(dockerignore_path))
 
-                if docker_compose:
+                if target == "compose":
                     with timeline.step("compose") as step:
-                        self._write_docker_compose(
-                            force=force,
-                            service_name=validated_service_name,
-                            port=validated_port,
+                        self._write(
+                            targets["compose"],
+                            generate_docker_compose_content(
+                                validated_service_name,
+                                validated_port,
+                                worker=bool(worker),
+                                scheduler=scheduler,
+                                tasks=tasks,
+                            ),
                         )
                         generated.append("docker-compose.yml")
                         step.detail("docker-compose.yml")
 
-                if k8s:
+                if target == "k8s":
                     with timeline.step("k8s") as step:
-                        self._write_k8s_manifest(
-                            force=force,
-                            service_name=validated_service_name,
-                            port=validated_port,
+                        self._write(
+                            targets["k8s"],
+                            generate_k8s_manifest_content(
+                                validated_service_name,
+                                validated_port,
+                                worker=bool(worker),
+                                scheduler=scheduler,
+                                tasks=tasks,
+                            ),
                         )
                         generated.append("k8s.yaml")
                         step.detail("k8s.yaml")
@@ -200,11 +305,12 @@ class BuildCommand(BaseCommand):
                 details={
                     "Files": ", ".join(generated),
                     "Service": validated_service_name,
+                    "Services": ", ".join(services),
                     "Port": validated_port,
                 },
                 next_steps=(
                     ["docker compose up --build"]
-                    if docker_compose
+                    if target == "compose"
                     else [f"docker build -t {validated_service_name} ."]
                 ),
             )
@@ -252,131 +358,48 @@ class BuildCommand(BaseCommand):
         return requirements_files, requirements_file
 
     @staticmethod
+    def _dependencies(dep_source: Path) -> list[str] | None:
+        """The dependency lines of a requirements file or pyproject.toml; None if unreadable."""
+        try:
+            if dep_source.suffix == ".toml":
+                with dep_source.open("rb") as f:
+                    return tomllib.load(f).get("project", {}).get("dependencies", [])
+            return dep_source.read_text(encoding="utf-8").splitlines()
+        except (OSError, tomllib.TOMLDecodeError):
+            return None
+
+    @staticmethod
     def _lists_server_package(dep_source: Path) -> bool:
         """Return whether a requirements file or pyproject.toml lists the API server package."""
-        if dep_source.suffix == ".toml":
-            try:
-                with dep_source.open("rb") as f:
-                    deps = tomllib.load(f).get("project", {}).get("dependencies", [])
-            except (OSError, tomllib.TOMLDecodeError):
-                return True  # Can't tell; don't warn on a file we couldn't read
-        else:
-            try:
-                deps = dep_source.read_text(encoding="utf-8").splitlines()
-            except OSError:
-                return True
+        deps = BuildCommand._dependencies(dep_source)
+        if deps is None:
+            return True  # Can't tell; don't warn on a file we couldn't read
         names = (re.split(r"[\s\[<>=!~;@]", dep.strip(), maxsplit=1)[0] for dep in deps)
         return any(name.lower().replace("_", "-") == CLI_PACKAGE for name in names)
 
-    def _write_dockerfile(self, output_path: Path, content: str) -> None:
-        """Write Dockerfile content to file.
+    @staticmethod
+    def _lists_extra(dep_source: Path, extra: str) -> bool:
+        """Return whether the file asks for ``10xgraph-api[<extra>]``; True if unreadable."""
+        deps = BuildCommand._dependencies(dep_source)
+        if deps is None:
+            return True
+        for dep in deps:
+            match = re.match(r"\s*([A-Za-z0-9._-]+)\s*\[([^\]]*)\]", dep)
+            if not match or match.group(1).lower().replace("_", "-") != CLI_PACKAGE:
+                continue
+            if extra in (e.strip().lower().replace("_", "-") for e in match.group(2).split(",")):
+                return True
+        return False
 
-        Args:
-            output_path: Path to write to
-            content: Dockerfile content
+    def _write(self, path: Path, content: str) -> None:
+        """Write one generated file.
 
         Raises:
             FileOperationError: If writing fails
         """
         try:
-            output_path.write_text(content, encoding="utf-8")
+            path.write_text(content, encoding="utf-8")
         except OSError as e:
             raise FileOperationError(
-                f"Failed to write Dockerfile: {e}", file_path=str(output_path)
+                f"Failed to write {path.name}: {e}", file_path=str(path)
             ) from e
-
-    def _write_k8s_manifest(self, force: bool, service_name: str, port: int) -> None:
-        """Write k8s.yaml (Deployment + Service).
-
-        No manifest was generated before, so users hand-rolled one -- usually with
-        the default 30s termination grace period, which SIGKILLs an agent run
-        mid-LLM-call on every rolling deploy. The generated one sets a grace period
-        that matches how long a run can actually take, plus a preStop hook.
-
-        Raises:
-            FileOperationError: If writing fails
-        """
-        manifest_path = Path("k8s.yaml")
-
-        if manifest_path.exists() and not force:
-            raise FileOperationError(
-                f"k8s.yaml already exists at {manifest_path}. Use --force to overwrite.",
-                file_path=str(manifest_path),
-            )
-
-        content = generate_k8s_manifest_content(service_name, port)
-
-        try:
-            manifest_path.write_text(content, encoding="utf-8")
-        except OSError as e:
-            raise FileOperationError(
-                f"Failed to write k8s.yaml: {e}", file_path=str(manifest_path)
-            ) from e
-
-    def _write_docker_compose(self, force: bool, service_name: str, port: int) -> None:
-        """Write docker-compose.yml file.
-
-        Args:
-            force: Overwrite existing file
-            service_name: Service name to use
-            port: Port to expose
-
-        Raises:
-            FileOperationError: If writing fails
-        """
-        compose_path = Path("docker-compose.yml")
-
-        if compose_path.exists() and not force:
-            raise FileOperationError(
-                f"docker-compose.yml already exists at {compose_path}. Use --force to overwrite.",
-                file_path=str(compose_path),
-            )
-
-        compose_content = generate_docker_compose_content(service_name, port)
-
-        try:
-            compose_path.write_text(compose_content, encoding="utf-8")
-        except OSError as e:
-            raise FileOperationError(
-                f"Failed to write docker-compose.yml: {e}", file_path=str(compose_path)
-            ) from e
-
-    def _show_next_steps(self, docker_compose: bool) -> None:
-        """Show next steps to the user.
-
-        Args:
-            docker_compose: Whether docker-compose was generated
-        """
-        if docker_compose:
-            steps = [
-                "Review the generated Dockerfile and docker-compose.yml",
-                "Build and run with: docker compose up --build",
-                "Or build separately: docker build -t 10xgraph-api .",
-                "Access your API at: http://localhost:8000",
-            ]
-        else:
-            steps = [
-                "Review the generated Dockerfile",
-                "Build the image: docker build -t 10xgraph-api .",
-                "Run the container: docker run -p 8000:8000 10xgraph-api",
-                "Access your API at: http://localhost:8000",
-            ]
-
-        self.output.print_list(
-            [f"{index}. {step}" for index, step in enumerate(steps, 1)],
-            title="Next steps",
-            bullet="→",
-        )
-
-        production_tips = [
-            "Using a multi-stage build to reduce image size",
-            "Setting up proper environment variables",
-            "Configuring health checks and resource limits",
-            "Using a reverse proxy like nginx",
-        ]
-
-        self.output.print_list(
-            production_tips,
-            title="Production considerations",
-            bullet="•",
-        )

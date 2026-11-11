@@ -39,6 +39,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changes
 
+- **`10xgraph build` generates the background-job processes.** With a non-`memory` `worker` key in
+  `10xgraph.json`, `docker-compose.yml` gets `worker` and `scheduler` services and `k8s.yaml` gets
+  `<service>-worker` and `<service>-scheduler` Deployments (the scheduler has one replica and
+  `strategy: Recreate`). At a terminal `build` asks where you deploy, whether to run the worker and
+  the scheduler, and whether to overwrite; new flags `--worker/--no-worker` and
+  `--scheduler/--no-scheduler` answer them. It warns when the `jobs` extra for the broker is missing.
 - **Tools can call services as the signed-in user.** After a request authenticates, the API
   puts the caller's credential into the run config as `config["credential"]` (a core
   `UserCredential`: redacted repr, refuses JSON and pickling) for invoke and stream (resume
