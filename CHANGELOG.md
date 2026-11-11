@@ -29,8 +29,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0rc6] - 2026-11-11
+
+The sixth release candidate of `10xgraph-api` 1.0. It requires `10xgraph` 1.0.0rc6. Tools and MCP
+servers can call services as the signed-in user, and `10xgraph build` generates the background job
+worker and scheduler.
+
 ### Breaking
 
+- **Tracing defaults to `full`.** `OTEL_LEVEL`, `observability.level` in `10xgraph.json` and the
+  fallback for an invalid value are now `full` (was `standard`), so message content and graph state
+  reach the trace backend by default, also in production (the production warning for `full` is
+  gone). Set `OTEL_LEVEL=standard` or `"level": "standard"` (or `spans`) to keep content out. When
+  the graph already has its own observability publisher (Phoenix, LangSmith, Logfire, OTel), the
+  `observability` block is not applied, its level included, and a warning says so.
 - **WebSocket routes no longer accept `?token=`.** `/v1/graph/ws` and `/v1/graph/live` take the
   bearer from the `Authorization` header or the `10xgraph-bearer` subprotocol only. A token in
   the URL ended up in access logs, proxy logs and HTTP trace spans. `10xgraph-client` already
@@ -52,13 +64,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   included), `/v1/graph/ws`, `/v1/graph/live` and AG-UI. A tool reads it through a parameter
   named `credential`, and `ToolNode(mcp_auth=...)` sees it. New hook
   `BaseAuth.downstream_credential(connection, credential, claims)`: the default returns the
-  bearer token the request carried (header, or on a WebSocket the `10xgraph-bearer` subprotocol
-  or `?token=`); override it when `authenticate` verifies a cookie or an API key, or return
+  bearer token the request carried (header, or on a WebSocket the `10xgraph-bearer` subprotocol); override it when `authenticate` verifies a cookie or an API key, or return
   None for no credential. `authenticate()` is unchanged. `credential` is a reserved config key
   (a client value is dropped, and `runs.config_keys` cannot admit it). It is never put in the
   identity, claims, audit events, logs, thread naming, stop or fix, and never in background
-  tasks (`/v1/tasks` payloads, task status and results carry user data only). Needs the core
-  release that ships `UserCredential`.
+  tasks (`/v1/tasks` payloads, task status and results carry user data only). Needs `10xgraph`
+  1.0.0rc6 or later.
 
 - **`10xgraph skills` adds always-on project instructions.** Skills load only on demand, so coding
   agents often never loaded the 10xGraph skill. The Claude target now also writes a 10xGraph
@@ -76,6 +87,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   JSON) and why it must authenticate the caller. New example: a support agent over MCP with
   `ReactAgent`. Refresh a project's copy with `10xgraph skills --agent claude --force` (or
   `--all --force`).
+- **Bundled skill: tool names and the tool results ledger.** The skill and docs now say a tool's name is
+  its function name (`@tool` no longer takes `name`, a breaking change in `10xgraph`), and describe
+  `record_tool_result` and the checkpointer's tool results ledger. Refresh with `10xgraph skills --agent claude --force`.
 
 ### Fixes
 

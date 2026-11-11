@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "10xgraph-api"
-version = "1.0.0rc5"
+version = "1.0.0rc6"
 description = "API server and CLI of 10xGraph (formerly 10xscale-agentflow-cli), open-source self-hosted infrastructure for AI applications: REST, streaming and WebSocket from your graph, JWT or custom auth, roles with own/tenant/all reach, tenant isolation, rate limits, background jobs, metrics, audit log, and Docker and Kubernetes files. MIT."
 readme = "README.md"
 license = "MIT"
@@ -60,7 +60,7 @@ classifiers = [
 dependencies = [
     # This release needs core 1.0 (import `tenxgraph`). The explicit rc in the
     # specifier lets pip and uv pick the core pre-release until 1.0.0 is out.
-    "10xgraph>=1.0.0rc5,<2.0",
+    "10xgraph>=1.0.0rc6,<2.0",
     # Pre-1.0 and major-version-risky deps are capped; floors are the versions
     # the suite is verified against.
     "fastapi>=0.116,<1.0",
@@ -120,7 +120,7 @@ media = [
 # Pillow for image resize / EXIF / format conversion in core's media processor.
 # Without it, uploaded images pass through unchanged.
 images = [
-    "10xgraph[images]>=1.0.0rc5,<2.0",
+    "10xgraph[images]>=1.0.0rc6,<2.0",
 ]
 gcloud = [
     "google-cloud-logging",
@@ -400,7 +400,7 @@ ENVIRONMENT = "pytest"
 
 [dependency-groups]
 dev = [
-    "10xgraph>=1.0.0rc5",
+    "10xgraph>=1.0.0rc6",
     "snowflakekit",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
