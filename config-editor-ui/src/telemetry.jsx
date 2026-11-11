@@ -69,7 +69,7 @@ function CheckField({ path, label, checked }) {
   const id = `f-${path.join("-")}`;
   return (
     <label class="mt-3 inline-flex min-h-11 cursor-pointer items-center gap-2.5 text-sm font-semibold text-ink">
-      <input id={id} type="checkbox" class="size-[18px] accent-brand-solid" checked={checked} onChange={(e) => put(path, e.currentTarget.checked)} />
+      <input id={id} type="checkbox" class="size-4.5 accent-brand-solid" checked={checked} onChange={(e) => put(path, e.currentTarget.checked)} />
       {label}
     </label>
   );
@@ -83,11 +83,11 @@ const DESTINATIONS = [
   { key: "phoenix", name: "Phoenix", label: "Phoenix", text: "Arize Phoenix, local or hosted.", secret: <>API key: set <code class="font-mono text-xs">PHOENIX_API_KEY</code> in .env. A local Phoenix does not need one.</> },
   { key: "otlp", name: "OTLP endpoint", label: "OTLP endpoint", text: "Any OpenTelemetry endpoint: a collector, Tempo, Jaeger.", secret: <>Auth headers: set <code class="font-mono text-xs">OTEL_EXPORTER_OTLP_HEADERS</code> in .env.</> },
 ];
-const LEVELS = [["standard", "Standard"], ["spans", "Spans only"], ["full", "Full"]];
+const LEVELS = [["full", "Full"], ["standard", "Standard"], ["spans", "Spans only"]];
 const LEVEL_HELP = {
-  standard: "Adds model name, token counts and request parameters.",
+  standard: "Model name, token counts, request parameters and graph state. No prompts or tool I/O.",
   spans: "Timing and structure only. No inputs or outputs.",
-  full: "Records prompts and tool I/O. May contain PII.",
+  full: "Default. Records prompts, tool I/O and graph state. May contain PII.",
 };
 const USER_IDS = [["raw", "Raw"], ["hash", "Hashed"], ["mask", "Masked"]];
 const USER_ID_HELP = {
@@ -101,7 +101,7 @@ const isPicked = (key) => isObject(obs()[key]) && obs()[key].enabled === true;
 
 function addDestination(key) {
   commit((s) => {
-    if (!isObject(s.config.observability)) s.config.observability = { level: "standard", user_id_mode: "raw" };
+    if (!isObject(s.config.observability)) s.config.observability = { level: "full", user_id_mode: "raw" };
     s.config.observability[key] = { enabled: true };
   });
 }
@@ -259,13 +259,13 @@ export function TracingWidget() {
               </button>
             )
           ) : null}
-          <div class="max-w-[520px]"><KindNote /></div>
+          <div class="max-w-130"><KindNote /></div>
           <h2 class="eyebrow mt-8">Trace settings</h2>
           <div class="grid gap-x-6 sm:grid-cols-2">
             <SelectField
               path={["observability", "level"]} label="Level" options={LEVELS}
-              value={o.level ?? "standard"} onChange={(v) => put(["observability", "level"], v)}
-              help={LEVEL_HELP[o.level ?? "standard"]}
+              value={o.level ?? "full"} onChange={(v) => put(["observability", "level"], v)}
+              help={LEVEL_HELP[o.level ?? "full"]}
             />
             <SelectField
               path={["observability", "user_id_mode"]} label="User id in traces" options={USER_IDS}

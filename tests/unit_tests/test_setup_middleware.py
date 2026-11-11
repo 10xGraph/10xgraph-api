@@ -247,6 +247,7 @@ def test_attach_otel_publisher_import_error():
 def test_attach_otel_publisher_value_error():
     class FakeObservabilityLevel:
         STANDARD = "standard"
+        FULL = "full"
 
         def __init__(self, val):
             raise ValueError("invalid level")
@@ -279,6 +280,7 @@ def test_attach_otel_publisher_value_error():
 def test_attach_otel_publisher_no_existing():
     class FakeObservabilityLevel:
         STANDARD = "standard"
+        FULL = "full"
 
         def __init__(self, val):
             self.val = val
@@ -311,6 +313,7 @@ def test_attach_otel_publisher_no_existing():
 def test_attach_otel_publisher_existing_composite():
     class FakeObservabilityLevel:
         STANDARD = "standard"
+        FULL = "full"
 
         def __init__(self, val):
             self.val = val
@@ -357,6 +360,7 @@ def test_attach_otel_publisher_existing_composite():
 def test_attach_otel_publisher_existing_single():
     class FakeObservabilityLevel:
         STANDARD = "standard"
+        FULL = "full"
 
         def __init__(self, val):
             self.val = val
@@ -475,6 +479,7 @@ def _obs_modules(*, setup_side_effect=None, existing=None, composite_cls=None):
 
     class FakeObservabilityLevel:
         STANDARD = "standard"
+        FULL = "full"
 
         def __init__(self, val):
             if val not in ("standard", "spans", "full"):
@@ -647,8 +652,29 @@ def test_setup_observability_invalid_level_falls_back():
     with patch.dict(sys.modules, modules):
         _setup_observability(container, _graph_config(cfg))
 
-    # Falls back to STANDARD and still binds.
+    # Falls back to FULL and still binds.
     container.bind_instance.assert_called_once()
+
+
+def test_setup_observability_without_level_uses_full():
+    from tenxgraph_api.src.app.core.config.setup_middleware import _setup_observability
+
+    modules, _setup_obs, _base, _comp = _obs_modules()
+    cfg = {"logfire": {"enabled": True}}
+    container = MagicMock()
+    container.try_get.return_value = None
+
+    with patch.dict(sys.modules, modules):
+        _setup_observability(container, _graph_config(cfg))
+
+    publisher = container.bind_instance.call_args[0][1]
+    assert publisher.level.val == "full"
+
+
+def test_settings_otel_level_defaults_to_full():
+    from tenxgraph_api.src.app.core.config.settings import Settings
+
+    assert Settings(_env_file=None).OTEL_LEVEL == "full"
 
 
 def test_user_id_mode_reads_the_observability_block():
@@ -785,3 +811,111 @@ def test_setup_otel_provider_survives_missing_metrics_packages():
         assert module.setup_otel_provider(settings) is True  # traces still work
 
     assert "metrics are not exported" in warning.call_args.args[0]
+
+
+# ── _setup_observability: graph already has an observability publisher ───────
+
+
+def _kind_stubs():
+    class EventsStub:
+        kind = "events"
+
+    class ObsStub:
+        kind = "observability"
+
+    return EventsStub, ObsStub
+
+
+def test_setup_observability_reuses_existing_observability_publisher(caplog):
+    from tenxgraph_api.src.app.core.config.setup_middleware import _setup_observability
+
+    _events, obs_cls = _kind_stubs()
+    modules, setup_obs, _base, _comp = _obs_modules()
+    existing = obs_cls()
+    cfg = {"phoenix": {"enabled": True, "project": "p"}}
+    container = MagicMock()
+    container.try_get.return_value = existing
+
+    with patch.dict(sys.modules, modules), caplog.at_level("WARNING"):
+        _setup_observability(container, _graph_config(cfg))
+
+    setup_obs.assert_not_called()
+    container.bind_instance.assert_not_called()
+    msgs = [
+        r.getMessage() for r in caplog.records if "already has an observability" in r.getMessage()
+    ]
+    assert len(msgs) == 1
+    assert "ObsStub" in msgs[0]
+    assert "level" in msgs[0]
+
+
+def test_setup_observability_reuses_real_otel_publisher():
+    pytest.importorskip("opentelemetry")
+    from tenxgraph.runtime.publisher.otel_publisher import OtelPublisher
+
+    from tenxgraph_api.src.app.core.config.setup_middleware import _setup_observability
+
+    modules, setup_obs, _base, _comp = _obs_modules()
+    existing = OtelPublisher()
+    container = MagicMock()
+    container.try_get.return_value = existing
+
+    with patch.dict(sys.modules, modules):
+        _setup_observability(container, _graph_config({"logfire": {"enabled": True}}))
+
+    setup_obs.assert_not_called()
+    container.bind_instance.assert_not_called()
+
+
+def test_setup_observability_events_only_publisher_still_adds_otel():
+    from tenxgraph_api.src.app.core.config.setup_middleware import _setup_observability
+
+    events_cls, _obs = _kind_stubs()
+    modules, setup_obs, _base, comp_cls = _obs_modules()
+    existing = comp_cls([events_cls()])
+    cfg = {"logfire": {"enabled": True}}
+    container = MagicMock()
+    container.try_get.return_value = existing
+
+    with patch.dict(sys.modules, modules):
+        _setup_observability(container, _graph_config(cfg))
+
+    setup_obs.assert_called_once()
+    assert len(existing.publishers) == 2
+
+    # Non-composite events publisher is wrapped in a composite.
+    modules, setup_obs, _base, _comp = _obs_modules()
+    container = MagicMock()
+    container.try_get.return_value = events_cls()
+    with patch.dict(sys.modules, modules):
+        _setup_observability(container, _graph_config(cfg))
+    setup_obs.assert_called_once()
+    container.bind_instance.assert_called_once()
+
+
+def test_setup_observability_reuses_observability_inside_composite(caplog):
+    from tenxgraph_api.src.app.core.config.setup_middleware import _setup_observability
+
+    events_cls, obs_cls = _kind_stubs()
+    modules, setup_obs, _base, _comp = _obs_modules()
+
+    class RealShapeComposite:
+        kind = "events"
+
+        def __init__(self, publishers):
+            self._publishers = list(publishers)
+
+        def add_publisher(self, pub):
+            self._publishers.append(pub)
+
+    existing = RealShapeComposite([events_cls(), obs_cls()])
+    container = MagicMock()
+    container.try_get.return_value = existing
+
+    with patch.dict(sys.modules, modules), caplog.at_level("WARNING"):
+        _setup_observability(container, _graph_config({"otlp": {"enabled": True}}))
+
+    setup_obs.assert_not_called()
+    container.bind_instance.assert_not_called()
+    assert len(existing._publishers) == 2
+    assert len([r for r in caplog.records if "ObsStub" in r.getMessage()]) == 1

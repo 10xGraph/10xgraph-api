@@ -308,10 +308,10 @@ def _attach_otel_publisher(
         level = ObservabilityLevel(settings.OTEL_LEVEL.lower())
     except ValueError:
         logger.warning(
-            "Invalid OTEL_LEVEL=%r, falling back to 'standard'. Valid: spans, standard, full",
+            "Invalid OTEL_LEVEL=%r, falling back to 'full'. Valid: spans, standard, full",
             settings.OTEL_LEVEL,
         )
-        level = ObservabilityLevel.STANDARD
+        level = ObservabilityLevel.FULL
 
     otel_publisher = _make_otel_publisher(OtelPublisher, level, _user_id_mode(graph_config))
     existing = container.try_get(BasePublisher)
@@ -329,6 +329,19 @@ def _attach_otel_publisher(
             type(existing).__name__,
             level,
         )
+
+
+def _observability_publishers(publisher: Any) -> list[Any]:
+    """Return the publishers (walking composites) whose ``kind`` is ``"observability"``."""
+    if publisher is None:
+        return []
+    children = getattr(publisher, "_publishers", None)
+    if isinstance(children, list | tuple):
+        found: list[Any] = []
+        for child in children:
+            found.extend(_observability_publishers(child))
+        return found
+    return [publisher] if getattr(publisher, "kind", None) == "observability" else []
 
 
 def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | None) -> None:
@@ -372,6 +385,19 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
         )
         return
 
+    # The graph may already carry its own observability publisher (Phoenix, LangSmith,
+    # Logfire, plain OTel). A second one would duplicate spans, and OTel refuses to
+    # replace the global tracer provider, so reuse it and apply nothing from the block.
+    existing_obs = _observability_publishers(container.try_get(BasePublisher))
+    if existing_obs:
+        logger.warning(
+            "observability is set in 10xgraph.json, but the graph already has an "
+            "observability publisher (%s); reusing it. The observability block is not "
+            "applied, including its level.",
+            ", ".join(type(p).__name__ for p in existing_obs),
+        )
+        return
+
     # Configure the provider(s)/exporter(s) only. graph=None means no publisher
     # is attached here; we bind it into the container ourselves below so it is
     # in place before the graph compiles.
@@ -382,13 +408,13 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
         return
 
     try:
-        level = ObservabilityLevel(str(obs_cfg.get("level", "standard")).lower())
+        level = ObservabilityLevel(str(obs_cfg.get("level", "full")).lower())
     except ValueError:
         logger.warning(
-            "Invalid observability level=%r, falling back to 'standard'.",
+            "Invalid observability level=%r, falling back to 'full'.",
             obs_cfg.get("level"),
         )
-        level = ObservabilityLevel.STANDARD
+        level = ObservabilityLevel.FULL
 
     otel_publisher = _make_otel_publisher(OtelPublisher, level, _user_id_mode(graph_config))
     existing = container.try_get(BasePublisher)

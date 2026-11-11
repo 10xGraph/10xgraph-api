@@ -294,7 +294,7 @@ def _check_observability(config: dict, out: _Collector) -> None:
     if not isinstance(data, dict):
         out.error("observability", "observability must be an object.")
         return
-    level = data.get("level", "standard")
+    level = data.get("level", "full")
     if level not in _OBSERVABILITY_LEVELS:
         out.error(
             "observability.level", f"level must be one of {', '.join(_OBSERVABILITY_LEVELS)}."
