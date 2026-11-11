@@ -18,15 +18,22 @@ from tenxgraph_api.cli.exceptions import FileOperationError, ValidationError
 
 _MANIFEST_FILENAME = ".10xgraph-skill.json"
 
+# A "block" artifact is our section of a file the user owns (CLAUDE.md, AGENTS.md). Only the
+# text between these markers is ours; everything outside them is left byte for byte.
+BLOCK_START = b"<!-- 10xgraph:start -->"
+BLOCK_END = b"<!-- 10xgraph:end -->"
+
 
 @dataclass(frozen=True)
 class _InstallArtifact:
     """Describes one file or folder installed for an agent."""
 
-    kind: Literal["folder", "file"]
+    kind: Literal["folder", "file", "block"]
     install_relpath: str
     source_relpath: str
     manifest: bool = False
+    # Filled into a block template's ``{skill_path}``.
+    skill_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -38,16 +45,23 @@ class _AgentTarget:
 
     @property
     def kind(self) -> str:
-        kinds = {artifact.kind for artifact in self.artifacts}
-        if len(kinds) == 1:
-            return next(iter(kinds))
-        return "file+folder"
+        return "+".join(dict.fromkeys(artifact.kind for artifact in self.artifacts))
+
+    @property
+    def owned(self) -> tuple[_InstallArtifact, ...]:
+        """Artifacts that are ours whole; a block lives in a file the user owns."""
+        return tuple(a for a in self.artifacts if a.kind != "block")
+
+    @property
+    def blocks(self) -> tuple[_InstallArtifact, ...]:
+        return tuple(a for a in self.artifacts if a.kind == "block")
 
 
 # Every agent gets the same spec-conformant skill folder (SKILL.md + references/);
 # the SKILL.md uses paths relative to the skill directory, so one copy works in
 # any install location.
 _SKILL_SOURCE = "10xgraph"
+_BLOCK_SOURCE = "blocks/10xgraph.block.md"
 
 _TARGETS: tuple[_AgentTarget, ...] = (
     _AgentTarget(
@@ -59,6 +73,13 @@ _TARGETS: tuple[_AgentTarget, ...] = (
                 source_relpath=_SKILL_SOURCE,
                 manifest=True,
             ),
+            # Codex reads AGENTS.md at the project root on every session.
+            _InstallArtifact(
+                kind="block",
+                install_relpath="AGENTS.md",
+                source_relpath=_BLOCK_SOURCE,
+                skill_path=".agents/skills/10xgraph",
+            ),
         ),
     ),
     _AgentTarget(
@@ -69,6 +90,13 @@ _TARGETS: tuple[_AgentTarget, ...] = (
                 install_relpath=".claude/skills/10xgraph",
                 source_relpath=_SKILL_SOURCE,
                 manifest=True,
+            ),
+            # Skills load on demand; CLAUDE.md is always loaded, so it says to load the skill.
+            _InstallArtifact(
+                kind="block",
+                install_relpath="CLAUDE.md",
+                source_relpath=_BLOCK_SOURCE,
+                skill_path=".claude/skills/10xgraph",
             ),
         ),
     ),
@@ -155,7 +183,7 @@ class SkillsCommand(BaseCommand):
         try:
             self.output.command_header(
                 "skills",
-                "Install bundled 10xGraph skills for Codex, Claude, or GitHub Copilot.",
+                "Install the 10xGraph skill and project instructions for coding agents.",
                 color="magenta",
             )
 
@@ -295,9 +323,10 @@ class SkillsCommand(BaseCommand):
 
     @staticmethod
     def _existing_paths(project_root: Path, target: _AgentTarget) -> list[Path]:
+        """Installed files and folders that a reinstall would replace (never a block's file)."""
         return [
             project_root / artifact.install_relpath
-            for artifact in target.artifacts
+            for artifact in target.owned
             if (project_root / artifact.install_relpath).exists()
         ]
 
@@ -389,12 +418,19 @@ class SkillsCommand(BaseCommand):
             if not installed:
                 return 1
 
+        instructions = [
+            artifact.install_relpath
+            for target in targets
+            if target.name in installed
+            for artifact in target.blocks
+        ]
         self.output.completion_screen(
             "Skills installed" if installed else "Nothing to install",
             f"{len(installed)} agent(s) ready" if installed else "Every selection was skipped",
             details={
                 "Installed": ", ".join(installed) or "none",
                 "Skipped": ", ".join(skipped) or "none",
+                "Project instructions": ", ".join(instructions) or "none",
                 "Project": project_root,
             },
             next_steps=["Restart your coding agent so it loads the new skill directory."]
@@ -427,7 +463,11 @@ class SkillsCommand(BaseCommand):
                     f"Bundled skills template not found: {source}", file_path=str(source)
                 )
 
-        existing = [dest for _artifact, _source, dest in installs if dest.exists()]
+        existing = [
+            dest
+            for artifact, _source, dest in installs
+            if artifact.kind != "block" and dest.exists()
+        ]
         if existing and not force:
             paths = ", ".join(str(dest) for dest in existing)
             raise FileOperationError(
@@ -437,13 +477,14 @@ class SkillsCommand(BaseCommand):
 
         # Build every artifact next to its destination first, then swap it in. Removing the
         # old install before the copy would leave no skill folder if the copy failed.
-        staged: list[tuple[Path, Path]] = []
+        # Blocks first: a user file we refuse to edit fails before any directory is created.
+        staged: list[tuple[_InstallArtifact, Path, Path]] = []
         try:
-            for artifact, source, dest in installs:
+            for artifact, source, dest in sorted(installs, key=lambda i: i[0].kind != "block"):
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 temp = dest.parent / f".{dest.name}.installing-{os.getpid()}"
                 self._remove(temp)
-                staged.append((temp, dest))
+                staged.append((artifact, temp, dest))
                 if artifact.kind == "folder":
                     shutil.copytree(
                         source,
@@ -452,20 +493,63 @@ class SkillsCommand(BaseCommand):
                     )
                     if artifact.manifest:
                         self._write_manifest(temp, target.name)
+                elif artifact.kind == "block":
+                    self._stage_block(artifact, source, dest, temp)
                 else:
                     shutil.copyfile(source, temp)
         except BaseException:
-            for temp, _dest in staged:
+            for _artifact, temp, _dest in staged:
                 self._remove(temp)
             raise
 
-        installed_paths: list[str] = []
-        for temp, dest in staged:
-            self._remove(dest)
-            temp.rename(dest)
-            installed_paths.append(str(dest))
+        return self._commit_staged(staged)
 
+    def _commit_staged(self, staged: list[tuple[_InstallArtifact, Path, Path]]) -> list[str]:
+        """Swap every staged artifact into place."""
+        installed_paths: list[str] = []
+        for artifact, temp, dest in staged:
+            if artifact.kind == "block":
+                temp.replace(dest)  # atomic: the user's file is never half written
+            else:
+                self._remove(dest)
+                temp.rename(dest)
+            installed_paths.append(str(dest))
         return installed_paths
+
+    @staticmethod
+    def _stage_block(artifact: _InstallArtifact, source: Path, dest: Path, temp: Path) -> None:
+        """Write *dest* with our block set, to *temp*. Text outside the markers is kept as is.
+
+        Missing file: just the block. Markers present: only the text between them changes.
+        Otherwise the block is appended after one blank line.
+        """
+        body = source.read_text(encoding="utf-8").replace("{skill_path}", artifact.skill_path)
+        block = BLOCK_START + b"\n" + body.strip("\n").encode("utf-8") + b"\n" + BLOCK_END
+
+        if dest.exists() and not dest.is_file():
+            raise FileOperationError(
+                f"Refusing to write {dest}: it exists and is not a regular file.",
+                file_path=str(dest),
+            )
+        old = dest.read_bytes() if dest.exists() else None
+        if old is None or not old:
+            new = block + b"\n"
+        elif (start := old.find(BLOCK_START)) != -1:
+            end = old.find(BLOCK_END, start)
+            if end == -1:
+                raise FileOperationError(
+                    f"{dest} has a 10xgraph:start marker without a 10xgraph:end marker. "
+                    "Fix or remove the marker, then run the command again.",
+                    file_path=str(dest),
+                )
+            new = old[:start] + block + old[end + len(BLOCK_END) :]
+        else:
+            sep = b"" if old.endswith(b"\n\n") else b"\n" if old.endswith(b"\n") else b"\n\n"
+            new = old + sep + block + b"\n"
+
+        temp.write_bytes(new)
+        if old is not None:
+            shutil.copymode(dest, temp)
 
     @staticmethod
     def _remove(path: Path) -> None:
@@ -514,13 +598,13 @@ class SkillsCommand(BaseCommand):
         if target.name == "Claude":
             note = (
                 "Restart Claude Code (or run /exit then `claude`) so it loads the new "
-                ".claude/skills/ directory. Claude auto-invokes the skill from its "
-                "description; type /10xgraph to run it manually."
+                ".claude/skills/ directory. The 10xGraph block in CLAUDE.md tells Claude "
+                "and its subagents to load the skill first; type /10xgraph to run it manually."
             )
         elif target.name == "Codex":
             note = (
-                "Restart Codex so it picks up the new .agents/skills/ directory. Codex "
-                "auto-selects the skill when your task matches its description."
+                "Restart Codex so it picks up the new .agents/skills/ directory. The "
+                "10xGraph block in AGENTS.md tells Codex to load the skill first."
             )
         else:  # GitHub Copilot
             note = (
@@ -547,6 +631,11 @@ class SkillsCommand(BaseCommand):
             ["Agent", "Kind", "Install path (relative to --path)"],
             rows,
             title="Supported agents",
+        )
+        self.output.info(
+            "A block is a 10xGraph section between <!-- 10xgraph:start --> and "
+            "<!-- 10xgraph:end --> markers; the rest of that file is left unchanged.",
+            emoji=False,
         )
 
     def _safe_project_root(self, path: str) -> Path:

@@ -4,7 +4,7 @@ applyTo: "**"
 
 # 10xGraph project instructions
 
-This repo uses **10xGraph** — a multi-agent framework that wraps the official OpenAI and Google SDKs behind a unified graph, agent, tool, state, storage, API, CLI, and TypeScript-client interface.
+This repo uses **10xGraph**: open-source, self-hosted infrastructure for production AI agents and AI apps. You write the agents, tools and tasks; 10xGraph runs them behind an API server with auth, durable state, a CLI, and a TypeScript client. Multi-agent handoff is one feature, not the category.
 
 When generating, refactoring, or debugging code in this repo, prefer 10xGraph's own abstractions over hand-rolled equivalents.
 
@@ -34,8 +34,7 @@ Compile graphs once at startup. Keep graph code storage-agnostic; wire dependenc
 
 ## Core abstractions to reach for
 
-- Build workflows with `StateGraph`, `Agent`, `ToolNode`, `AgentState`, and `Message`.
-- **Use prebuilt agents for common patterns before hand-writing graph loops:**
+- **Use prebuilt agents (`ReactAgent` by default) before hand-writing graph loops:**
   - `ReactAgent` — standard tool-calling loop (use by default)
   - `PlanActReflectAgent` — plan → act → reflect loop for complex multi-step tasks
   - `StructuredOutputAgent` — forces JSON output matching a Pydantic schema
@@ -43,6 +42,10 @@ Compile graphs once at startup. Keep graph code storage-agnostic; wire dependenc
   - `SwarmAgent` — peer-to-peer agent handoff without a central supervisor
   - `RAGAgent` — retrieves documents from a vector store before each LLM call
   - `AudioAgent` — realtime full-duplex voice agent (Gemini Live); needs the `[realtime]` extra and is driven by `arealtime()`, not `invoke`/`stream`
+- For custom flows only, build workflows with `StateGraph`, `Agent`, `ToolNode`, `AgentState`, and `Message`.
+- Keep apps small: one agent unless asked for more, no unrequested routers, handoffs, guard or approval nodes. Business data and rules live in tools and the systems they call, not in graph nodes or state.
+- MCP: for a server that enforces per-user or per-tenant access, use `mcp_auth=` with a short-lived signed token the server verifies; `pass_user_info_to_mcp=True` sends unsigned metadata (`ctx.request_context.meta["user"]`) the server cannot verify, so use it only for a trusted internal server. Never add `user`, `user_id`, `org_id` or tenant arguments to MCP tools.
+- Do not work around 10xGraph bugs in app code (subclassing `ToolNode`, overriding private methods). Report them instead.
 - Persist conversation state with **checkpointers**. Use **stores** only for cross-thread memory.
 - Inject business services through **`InjectQ`**, not module-level globals.
 - Keep API/CLI graph modules storage-agnostic; wire dependencies via `10xgraph.json`.
@@ -64,7 +67,7 @@ Agent(
     system_prompt=[{"role": "system", "content": "Help {user_name}."}],  # state interpolation
     tool_node=tool_node,                        # ToolNode instance or graph node name string
     tools_tags={"search"},                      # expose only matching-tagged tools
-    extra_messages=[...],                       # injected after system_prompt every call
+    extra_messages=[...],                       # sent after history every call; {field} filled from state. Put mid-conversation values (date, status) here as role="user" in a <conversation_context> block, not in system_prompt (prompt caching)
     trim_context=True,                          # trim old messages to fit token limits
     reasoning_config={"effort": "medium"},      # on by default; None to disable
     retry_config=True,                          # default 3 retries with backoff

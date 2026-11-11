@@ -99,11 +99,11 @@ class TestJwtAuth:
         jwt_auth: JwtAuth,
         mock_response: Response,
     ):
-        """Test that null credentials raise UserAccountError with REVOKED_TOKEN."""
+        """Null credentials raise UserAccountError with INVALID_TOKEN, not REVOKED_TOKEN."""
         with pytest.raises(UserAccountError) as exc_info:
             jwt_auth.authenticate(None, mock_response, None)
 
-        assert exc_info.value.error_code == "REVOKED_TOKEN"
+        assert exc_info.value.error_code == "INVALID_TOKEN"
         assert "Invalid token" in exc_info.value.message
         assert exc_info.value.status_code == 401
 

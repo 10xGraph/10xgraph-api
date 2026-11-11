@@ -20,6 +20,12 @@ EXTRAS = {
     "taskiq_aio_pika": "jobs-rabbitmq",
     "taskiq_aio_kafka": "jobs-kafka",
 }
+GLOB_MARKS = ("*", "?", "[", "/")
+
+
+def is_glob(entry: str) -> bool:
+    """A ``worker.tasks`` entry that is a file path or glob, not a module name."""
+    return entry.endswith(".py") or any(mark in entry for mark in GLOB_MARKS)
 
 
 def _check_type(key: str, value: str, allowed: tuple[str, ...], what: str) -> None:

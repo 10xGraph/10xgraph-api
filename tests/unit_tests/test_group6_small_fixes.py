@@ -76,7 +76,7 @@ def test_mode_sets_app_debug():
     assert main.app.debug is (main.settings.MODE != "production")
 
 
-def test_production_warns_about_debug_logging_and_full_otel(caplog):
+def test_production_warns_about_debug_logging_but_not_full_otel(caplog):
     from tenxgraph_api.src.app.core.config.settings import Settings
 
     with caplog.at_level(logging.WARNING):
@@ -91,7 +91,7 @@ def test_production_warns_about_debug_logging_and_full_otel(caplog):
         )
     text = " ".join(r.getMessage() for r in caplog.records)
     assert "LOG_LEVEL=DEBUG" in text
-    assert "OTEL_LEVEL=full" in text
+    assert "OTEL_LEVEL" not in text
 
 
 def test_dev_command_warns_about_reload_and_open_host_in_production():

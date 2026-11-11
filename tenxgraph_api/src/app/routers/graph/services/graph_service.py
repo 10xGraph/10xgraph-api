@@ -10,13 +10,14 @@ from uuid import uuid4
 from fastapi import HTTPException
 from injectq import InjectQ, inject, singleton
 from pydantic import BaseModel, TypeAdapter, ValidationError
-from tenxgraph.core.authz import Identity
+from tenxgraph.core.authz import CREDENTIAL_KEY, Identity, UserCredential, public_config
 from tenxgraph.core.exceptions import GraphClosedError, ThreadNotFoundError
 from tenxgraph.core.exceptions.media_exceptions import UnsupportedMediaInputError
 from tenxgraph.core.graph import CompiledGraph
 from tenxgraph.core.state import AgentState, Message, StreamChunk, StreamEvent
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.utils import ResponseGranularity
+from tenxgraph.utils.validators import ValidationError as InputValidationError
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RunsConfig
@@ -70,11 +71,16 @@ from tenxgraph_api.src.app.utils.run_trace import (
 from tenxgraph_api.src.app.utils.telemetry_store import TelemetryStore
 
 
-def _set_user(config: dict[str, Any], user: Identity | None) -> None:
-    """Put the caller into a run config: ``user_id`` ("anonymous" with auth off) and identity."""
+def _set_user(
+    config: dict[str, Any], user: Identity | None, credential: UserCredential | None = None
+) -> None:
+    """Put the caller into a run config: ``user_id`` ("anonymous" with auth off), identity and,
+    for runs that call tools, the caller's credential (``BaseAuth.downstream_credential``)."""
     config["user_id"] = user.user_id if user is not None else "anonymous"
     if user is not None:
         config["user"] = user
+    if credential is not None:
+        config[CREDENTIAL_KEY] = credential
 
 
 def _run_tool_names(config: dict[str, Any]) -> set[str]:
@@ -138,8 +144,8 @@ def _reraise_framework_errors(exc: Exception) -> None:
     ``tenxgraph.core.exceptions`` package triggers a circular import through the core
     media modules during test collection.
     """
-    if isinstance(exc, HTTPException):
-        raise exc
+    if isinstance(exc, HTTPException | InputValidationError):
+        raise exc  # InputValidationError: an input validator refused the request (422)
     from tenxgraph.core.exceptions import (
         GraphError,
         GraphRecursionError,
@@ -224,6 +230,14 @@ def _stream_error_data(exc: Exception) -> dict[str, Any]:
             "code": SERVICE_UNAVAILABLE_CODE,
             "retry_after_seconds": RETRY_AFTER_SECONDS,
         }
+    if isinstance(exc, InputValidationError):
+        # The same code and text as the HTTP 422 handler: generic in production.
+        from tenxgraph_api.src.app.core.config.settings import get_settings
+        from tenxgraph_api.src.app.core.exceptions.handle_errors import _sanitize_error_message
+
+        is_production = get_settings().MODE == "production"
+        reason = _sanitize_error_message(str(exc), "VALIDATION_ERROR", is_production)
+        return {"reason": reason, "code": "VALIDATION_ERROR"}
     return {"reason": _stream_error_reason(exc)}
 
 
@@ -888,6 +902,7 @@ class GraphService:
         graph_input: GraphInputSchema,
         user: Identity | None = None,
         server_config: dict[str, Any] | None = None,
+        credential: UserCredential | None = None,
     ):
         is_new_thread = False
         config = client_config(graph_input.config)
@@ -910,7 +925,7 @@ class GraphService:
         # The authenticated user, before any checkpointer read below: PgCheckpointer refuses a
         # config without ``user_id``. Never taken from the request (``client_config`` strips it).
         # Storage reads the identity (tenant values, reach) from ``config["user"]``.
-        _set_user(config, user)
+        _set_user(config, user, credential)
 
         # check recursion limit set or not
         config["recursion_limit"] = graph_input.recursion_limit or 25
@@ -962,6 +977,7 @@ class GraphService:
         self,
         graph_input: GraphInputSchema,
         user: Identity | None,
+        credential: UserCredential | None = None,
     ) -> GraphInvokeOutputSchema:
         """
         Invokes the graph with the provided input and returns the final result.
@@ -982,7 +998,9 @@ class GraphService:
             logger.debug("Invoking graph with input: %s", log_safe(graph_input.messages))
 
             # Prepare the input
-            input_data, config, meta = await self._prepare_input(graph_input, user)
+            input_data, config, meta = await self._prepare_input(
+                graph_input, user, credential=credential
+            )
             thread_lock = await self._lock_new_thread(meta)
             await self._check_tool_results(input_data["messages"], config)
             await self._check_resume_target(graph_input, config)
@@ -1043,7 +1061,7 @@ class GraphService:
                 # Naming can be an extra model call; the caller should not wait for it. The
                 # name is saved on the thread (GET /v1/threads) once it is ready.
                 self._name_thread_in_background(
-                    dict(config),
+                    public_config(config),
                     config["thread_id"],
                     self.naming_texts(input_data["messages"], messages),
                 )
@@ -1127,6 +1145,7 @@ class GraphService:
         self,
         graph_input: GraphInputSchema,
         user: Identity | None,
+        credential: UserCredential | None = None,
     ) -> AsyncIterable[str]:
         """
         Streams the graph execution with the provided input.
@@ -1142,7 +1161,7 @@ class GraphService:
         async def lines() -> AsyncIterable[str]:
             last: StreamChunk | None = None
             errored = False
-            async for chunk in self.stream_chunks(graph_input, user):
+            async for chunk in self.stream_chunks(graph_input, user, credential=credential):
                 errored = errored or chunk.event == StreamEvent.ERROR
                 yield chunk.model_dump_json(serialize_as_any=True) + "\n"
                 # The graph reuses one chunk object, so keep only the ids, not the object.
@@ -1171,6 +1190,7 @@ class GraphService:
         graph_input: GraphInputSchema,
         user: Identity | None,
         server_config: dict[str, Any] | None = None,
+        credential: UserCredential | None = None,
     ) -> AsyncIterable[StreamChunk]:
         """
         Streams the graph execution as ``StreamChunk`` objects.
@@ -1179,6 +1199,7 @@ class GraphService:
         chunk object for successive messages, so consume each chunk before asking for the next.
         ``server_config`` carries server-owned run config (for example per-run
         ``remote_tools``) that a client could not set through ``graph_input.config``.
+        ``credential`` is the caller's run credential (``config["credential"]``), None for none.
 
         Yields:
             StreamChunk: Graph output; failures arrive as an ``ERROR`` chunk, never raised.
@@ -1194,7 +1215,9 @@ class GraphService:
             logger.debug("Streaming graph with input: %s", log_safe(graph_input.messages))
 
             # Prepare the config
-            input_data, config, meta = await self._prepare_input(graph_input, user, server_config)
+            input_data, config, meta = await self._prepare_input(
+                graph_input, user, server_config, credential
+            )
             thread_lock = await self._lock_new_thread(meta)
             await self._check_tool_results(input_data["messages"], config)
             await self._check_resume_target(graph_input, config)
@@ -1257,7 +1280,7 @@ class GraphService:
 
             if meta["is_new_thread"] and self.names_threads:
                 naming = (
-                    dict(config),
+                    public_config(config),
                     config["thread_id"],
                     self.naming_texts(input_data["messages"]) + messages_str,
                 )
@@ -1270,7 +1293,10 @@ class GraphService:
             # would cause: RuntimeError("Caught handled exception, but response
             # already started.")  Instead, we yield a structured error chunk so
             # the client can detect and display the failure.
-            logger.error(f"Graph streaming failed: {e}")
+            if isinstance(e, InputValidationError):
+                logger.warning("Graph stream rejected by an input validator: %s", log_safe(e))
+            else:
+                logger.error(f"Graph streaming failed: {e}")
             try:
                 if self.telemetry and thread_id and run_id:
                     self.telemetry.finish_run(
@@ -1363,6 +1389,7 @@ class GraphService:
         input_queue: Any,
         init: dict[str, Any],
         user: Identity | None,
+        credential: UserCredential | None = None,
     ):
         """Bridge a realtime (audio) session over the compiled graph.
 
@@ -1373,7 +1400,7 @@ class GraphService:
         """
         thread_id = normalize_thread_id(init.get("thread_id")) or await self._new_thread_id()
         config: dict[str, Any] = {"thread_id": thread_id}
-        _set_user(config, user)
+        _set_user(config, user, credential)
         # Map the client init frame onto RealtimeConfig field names so the live agent can
         # apply per-session overrides (model/voice/modalities/vad/...). Only present keys
         # are forwarded; absent ones fall back to the agent's build-time config.

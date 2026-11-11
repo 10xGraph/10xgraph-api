@@ -672,7 +672,8 @@ def init(  # noqa: PLR0913
 
 
 @app.command()
-def build(
+def build(  # noqa: PLR0913
+    ctx: typer.Context,
     output_file: str = typer.Option(
         "Dockerfile",
         "--output",
@@ -696,23 +697,47 @@ def build(
         "-p",
         help="Port to expose in the container",
     ),
-    docker_compose: bool = typer.Option(
-        False,
+    docker_compose: bool | None = typer.Option(
+        None,
         "--docker-compose/--no-docker-compose",
         help="Also generate docker-compose.yml and omit CMD in Dockerfile",
     ),
-    k8s: bool = typer.Option(
-        False,
+    k8s: bool | None = typer.Option(
+        None,
         "--k8s/--no-k8s",
         help=(
             "Also generate k8s.yaml (Deployment + Service) with a termination grace "
             "period long enough that a rolling deploy does not kill in-flight agent runs"
         ),
     ),
+    worker: bool | None = typer.Option(
+        None,
+        "--worker/--no-worker",
+        help=(
+            "Add a background worker service (default: on when the config has a worker key "
+            "with a broker other than memory)"
+        ),
+    ),
+    scheduler: bool | None = typer.Option(
+        None,
+        "--scheduler/--no-scheduler",
+        help="Add a scheduler service (default: off; run exactly one)",
+    ),
     service_name: str = typer.Option(
         "10xgraph-api",
         "--service-name",
         help="Service name to use in docker-compose.yml / k8s.yaml (if generated)",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Do not ask questions; use the flags and defaults",
+    ),
+    non_interactive: bool = typer.Option(
+        False,
+        "--non-interactive",
+        help="Fail instead of prompting; suitable for CI and coding agents.",
     ),
     verbose: bool = typer.Option(
         False,
@@ -730,6 +755,10 @@ def build(
     """Generate a Dockerfile for the 10xGraph API application."""
     # Setup logging
     _configure_command(verbose=verbose, quiet=quiet)
+    runtime = ctx.find_root().obj
+    if isinstance(runtime, CLIContext):
+        yes = yes or runtime.yes
+        non_interactive = non_interactive or runtime.non_interactive
 
     try:
         command = BuildCommand(output)
@@ -741,6 +770,10 @@ def build(
             docker_compose=docker_compose,
             k8s=k8s,
             service_name=service_name,
+            worker=worker,
+            scheduler=scheduler,
+            yes=yes,
+            non_interactive=non_interactive,
         )
         sys.exit(exit_code)
     except Exception as e:

@@ -656,18 +656,21 @@ _SECTIONS: list[dict[str, Any]] = [
         "optional": True,
         "off_summary": "Graph runs are not traced.",
         "self_managed": True,
-        "default": {"level": "standard", "user_id_mode": "raw"},
+        "default": {"level": "full", "user_id_mode": "raw"},
         "widget": "observability",
         "fields": [
             {
                 "path": ["observability", "level"],
                 "group": "Tracing",
                 "managed": True,
-                "default": "standard",
+                "default": "full",
                 "label": "Level",
                 "type": "select",
                 "options": ["spans", "standard", "full"],
-                "help": "full records prompts and tool I/O and may contain PII.",
+                "help": (
+                    "full (default) records prompts, tool I/O and graph state and may contain "
+                    "PII. Use standard or spans to keep content out."
+                ),
             },
             {
                 "path": ["observability", "user_id_mode"],
@@ -798,7 +801,7 @@ _SECTIONS: list[dict[str, Any]] = [
             },
             {
                 "name": "OTEL_LEVEL",
-                "purpose": "Detail of the OpenTelemetry traces: spans, standard or full.",
+                "purpose": "Detail of the OpenTelemetry traces: spans, standard or full (default).",
             },
             {
                 "name": "OTEL_SERVICE_NAME",

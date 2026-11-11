@@ -241,7 +241,7 @@ class Settings(BaseSettings):
     OTEL_ENABLED: bool = False
     OTEL_SERVICE_NAME: str = "10xgraph-api"
     OTEL_EXPORTER_OTLP_ENDPOINT: str | None = None
-    OTEL_LEVEL: str = "standard"  # spans | standard | full
+    OTEL_LEVEL: str = "full"  # spans | standard | full
 
     @field_validator("LOG_FORMAT", mode="before")
     @classmethod
@@ -325,17 +325,12 @@ class Settings(BaseSettings):
             if warnings:
                 logger.warning("\n".join(["\n🔒 PRODUCTION SECURITY WARNINGS:", *warnings]))
 
-            # Not security holes, but both leak request content into the logs and traces.
+            # Not a security hole, but it leaks request content into the logs.
             if (self.LOG_LEVEL or "").upper() in ("DEBUG", "NOTSET"):
                 logger.warning(
                     "LOG_LEVEL=%s in production writes request and run details to the logs. "
                     "Use INFO or WARNING.",
                     self.LOG_LEVEL,
-                )
-            if (self.OTEL_LEVEL or "").lower() == "full" and self.OTEL_ENABLED:
-                logger.warning(
-                    "OTEL_LEVEL=full in production exports message content to your trace "
-                    "backend. Use 'standard' unless you need it."
                 )
 
         return self

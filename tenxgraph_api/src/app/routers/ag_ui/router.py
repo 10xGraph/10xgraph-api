@@ -5,7 +5,11 @@ from injectq.integrations import InjectAPI
 from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.core import logger
-from tenxgraph_api.src.app.core.auth.permissions import RequirePermission, authorize_resource
+from tenxgraph_api.src.app.core.auth.permissions import (
+    RequirePermission,
+    authorize_resource,
+    run_credential,
+)
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
@@ -128,7 +132,12 @@ async def _run_ag_ui(request, run_input, service, identity, config, idem, named)
         recheck=(lambda: service.require_run_thread(thread_id, identity)) if named else None,
     )
     events = stream_ag_ui(
-        service, run_input, identity, encoder, allow_client_tools=config.ag_ui.allow_client_tools
+        service,
+        run_input,
+        identity,
+        encoder,
+        allow_client_tools=config.ag_ui.allow_client_tools,
+        credential=run_credential(request),
     )
     if idem is not None:
         events = idempotency.mark_when_done(events, idem, failed_marker="RUN_ERROR")

@@ -189,7 +189,7 @@ async def test_http_stream_graph_ends_with_the_interrupted_chunk():
 
     from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
 
-    async def chunks(self, graph_input, user, server_config=None):
+    async def chunks(self, graph_input, user, server_config=None, credential=None):
         yield StreamChunk(event=StreamEvent.UPDATES, data={"status": "started"})
         await asyncio.sleep(30)
 

@@ -21,6 +21,7 @@ from tenxgraph_api.src.app.core.audit import audit_event
 from tenxgraph_api.src.app.core.auth.permissions import (
     RequirePermission,
     authorize_resource,
+    run_credential,
     ws_bearer_subprotocol,
 )
 from tenxgraph_api.src.app.core.auth.revocation import (
@@ -434,6 +435,7 @@ async def invoke_graph(
         result: GraphInvokeOutputSchema = await service.invoke_graph(
             graph_input,
             identity,
+            credential=run_credential(request),
         )
         if idem:
             await idem.complete(result.model_dump_json())
@@ -500,7 +502,7 @@ async def stream_graph(
         if idem:
             idem.release()
         raise
-    lines = service.stream_graph(graph_input, identity)
+    lines = service.stream_graph(graph_input, identity, credential=run_credential(request))
     if idem:
         lines = idempotency.stream_with_record(lines, idem)
     result = release_when_done(lines, guard)
@@ -886,7 +888,7 @@ async def _ws_run(
     write. The run generator is closed before this returns, so the caller can release the
     thread lock knowing the run is over.
     """
-    stream = service.stream_graph(graph_input, user=identity)
+    stream = service.stream_graph(graph_input, user=identity, credential=run_credential(websocket))
 
     async def pump() -> None:
         async with contextlib.aclosing(stream):
@@ -944,9 +946,9 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
 
     Authentication
     --------------
-    Bearer token via the ``Authorization`` header, the ``10xgraph-bearer``
-    Sec-WebSocket-Protocol (browser-safe), or the ``?token=`` query fallback —
-    identical to the HTTP stream route. Handshakes are subject to the global rate
+    Bearer token via the ``Authorization`` header or the ``10xgraph-bearer``
+    Sec-WebSocket-Protocol (browser-safe). A ``?token=`` in the URL is not accepted.
+    Handshakes are subject to the global rate
     limit and the ``websocket.max_connections`` cap.
 
     Every run on the socket counts against the same rate limit (an error chunk with
@@ -1258,9 +1260,9 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
                    JSON text frame = every other event (transcripts, turn_complete,
                                      interrupted, tool_call, session/go_away, error)
 
-    Auth: ``RequirePermission("graph","stream")`` — bearer via the ``Authorization`` header,
-    the ``10xgraph-bearer`` Sec-WebSocket-Protocol (browser-safe), or the ``?token=`` query
-    fallback. Handshakes are subject to the global rate limit and the
+    Auth: ``RequirePermission("graph","stream")``: bearer via the ``Authorization`` header or
+    the ``10xgraph-bearer`` Sec-WebSocket-Protocol (browser-safe); ``?token=`` is not accepted.
+    Handshakes are subject to the global rate limit and the
     ``websocket.max_connections`` cap (rejected with close code 1013). A non-live
     (turn-based) graph is rejected up front with close code 1008 — use ``/v1/graph/ws``.
     """
@@ -1448,7 +1450,8 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
     async def downstream() -> None:
         """Stream normalized events back: audio as binary, everything else as JSON."""
         try:
-            async for event in service.realtime_graph(queue, init, identity):
+            credential = run_credential(websocket)
+            async for event in service.realtime_graph(queue, init, identity, credential=credential):
                 if getattr(event, "type", None) == "audio_delta":
                     await _ws_send_bytes(websocket, event.data)
                 else:

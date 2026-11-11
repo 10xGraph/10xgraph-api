@@ -105,7 +105,22 @@ Storage (checkpointer, store) filters every query by the caller's reach, taken f
 
 Tenant and extra column values (`org_id`, `project_id`, `public_id`) come only from `config["user"]`: return them from `BaseAuth.authenticate()` (or put them in the JWT claims; the decoded token is the user). Never read them from request config, metadata, state or model output.
 
-Server-owned config keys (`RESERVED_CONFIG_KEYS` in `core/validation/request_config.py`: `user`, `user_id`, `remote_tools`, `file_tool_root`, `workspace_root`, `tool_timeout`, `node_timeout`, `max_parallel_tool_calls`, `collection`, plus any `_`-prefixed key) are dropped from client config by `client_config` on every route. They are ignored, not refused (debug log). A client never picks a Qdrant `collection`; see memory-and-store.md.
+Server-owned config keys (`RESERVED_CONFIG_KEYS` in `core/validation/request_config.py`: `user`, `user_id`, `credential`, `remote_tools`, `file_tool_root`, `workspace_root`, `tool_timeout`, `node_timeout`, `max_parallel_tool_calls`, `collection`, plus any `_`-prefixed key) are dropped from client config by `client_config` on every route. They are ignored, not refused (debug log). A client never picks a Qdrant `collection`; see memory-and-store.md.
+
+## Calling services as the user
+
+The API sets `config["credential"]` (a `UserCredential` with the verified bearer token) for invoke, stream (resume included), WebSocket and AG-UI runs. Read it with `get_credential(config)` or a tool parameter named `credential`, or use it in `ToolNode(mcp_auth=...)`. It is never logged, stored, sent in events or traces, or given to background tasks.
+
+```python
+class MyAuth(BaseAuth):
+    async def downstream_credential(self, connection, credential, claims):
+        # default: the verified bearer token. Override for cookies or API keys.
+        return UserCredential(connection.cookies["session"], scheme="Session")  # or None
+```
+
+- `credential` is a reserved config key: clients cannot set it.
+- Tasks and jobs carry user data only (user_id, tenant, roles, claims), never the credential. Jobs call services with an M2M or self-issued token.
+- Details and patterns: agents-and-tools.md (MCP) and https://10xgraph.com/docs/guides/call-services-as-the-user
 
 ## Guarantees
 

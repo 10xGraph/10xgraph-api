@@ -20,7 +20,7 @@ from fastapi import HTTPException, Response, WebSocket, WebSocketException
 from fastapi.security import HTTPAuthorizationCredentials
 from injectq.integrations import InjectAPI
 from starlette.requests import HTTPConnection, Request
-from tenxgraph.core.authz import Identity
+from tenxgraph.core.authz import Identity, UserCredential
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.audit import audit_enabled, audit_event
@@ -86,17 +86,14 @@ def _extract_credential(
     """Extract bearer credentials from a request or WebSocket connection.
 
     Mirrors ``HTTPBearer(auto_error=False)`` but works for both HTTP and WebSocket routes
-    (FastAPI cannot inject ``HTTPBearer`` on a WebSocket route). Token sources, most secure
-    first:
+    (FastAPI cannot inject ``HTTPBearer`` on a WebSocket route). Token sources:
 
     1. ``Authorization: Bearer <token>`` header -- for non-browser clients.
     2. ``Sec-WebSocket-Protocol: 10xgraph-bearer, <token>`` (legacy: ``agentflow-bearer``) --
-       browser-settable and kept out of URLs/logs; the preferred browser mechanism.
-    3. ``?token=<token>`` query parameter -- last-resort fallback; the token is exposed in
-       URLs/access logs/history, so prefer (2) for browser clients.
+       WebSocket only, because browsers cannot set headers on a WebSocket.
 
-    Sources (2) and (3) exist only because browsers cannot set headers on a WebSocket, so
-    they are accepted on WebSocket connections only; HTTP routes take the header alone.
+    A ``?token=`` query parameter is never read: a token in the URL ends up in access logs,
+    proxy logs and HTTP trace spans.
     """
     authorization = connection.headers.get("Authorization")
     if authorization:
@@ -111,10 +108,6 @@ def _extract_credential(
     parts = _subprotocols(connection)
     if len(parts) >= _BEARER_SUBPROTOCOL_PARTS and parts[0] in _BEARER_SUBPROTOCOLS and parts[1]:
         return HTTPAuthorizationCredentials(scheme="Bearer", credentials=parts[1])
-
-    ws_token = connection.query_params.get("token")
-    if ws_token:
-        return HTTPAuthorizationCredentials(scheme="Bearer", credentials=ws_token)
 
     return None
 
@@ -145,6 +138,8 @@ def _reject(connection: HTTPConnection, status_code: int, detail: str) -> NoRetu
 
 
 _STATE_KEY = "tenxgraph_verified_claims"
+# The run credential from ``BaseAuth.downstream_credential``; read with ``run_credential``.
+_CREDENTIAL_STATE_KEY = "tenxgraph_run_credential"
 
 
 def _reusable(auth: BaseAuth) -> bool:
@@ -201,8 +196,8 @@ def _failure_reason(
 
 async def _authenticate(
     auth: BaseAuth, connection: HTTPConnection, response: Response | None
-) -> dict[str, Any]:
-    """The verified claims of this request, or a 401 (1008 on a WebSocket).
+) -> tuple[dict[str, Any], HTTPAuthorizationCredentials | None]:
+    """The verified claims of this request and its bearer credential, or a 401 (1008 on a WS).
 
     Claims the rate limiter already verified are reused (``_recall_claims``): the limiter
     emits nothing, so each request gets at most one ``auth`` event, from here or ``_identity``.
@@ -229,7 +224,7 @@ async def _authenticate(
         logger.error("%s.authenticate returned %s, not a dict", type(auth).__name__, type(claims))
         await _auth_failed("claims_rejected")
         _reject(connection, 401, "Authentication failed")
-    return claims
+    return claims, credential
 
 
 async def _identity(
@@ -240,7 +235,7 @@ async def _identity(
     Each refusal emits one ``auth`` audit event; the WARNING lines are written only while audit
     is off, so the record is not doubled.
     """
-    claims = await _authenticate(auth, connection, response)
+    claims, credential = await _authenticate(auth, connection, response)
     try:
         identity = resolve(claims, auth.rbac)
     except InvalidClaimsError as exc:
@@ -266,8 +261,36 @@ async def _identity(
             logger.warning("Rejected revoked credential for user %s", identity.user_id)
         await _auth_failed("revoked", identity.user_id)
         _reject(connection, 401, "Token has been revoked, please login again")
+    _keep_run_credential(
+        connection, await auth.downstream_credential(connection, credential, claims)
+    )
     set_request_user(identity.user_id)
     return identity
+
+
+def _keep_run_credential(connection: HTTPConnection, credential: Any) -> None:
+    """Keep the run credential on the connection, apart from the identity and claims."""
+    if credential is not None and not isinstance(credential, UserCredential):
+        # A plain string would be logged and published like any other config value.
+        raise TypeError(
+            f"downstream_credential must return a UserCredential or None, "
+            f"got {type(credential).__name__}"
+        )
+    scope = getattr(connection, "scope", None)
+    if isinstance(scope, dict):
+        scope.setdefault("state", {})[_CREDENTIAL_STATE_KEY] = credential
+
+
+def run_credential(connection: HTTPConnection | None) -> UserCredential | None:
+    """The caller's credential for the run config (``config["credential"]``), or None.
+
+    Set by ``RequireIdentity`` / ``RequirePermission``; None with auth off or before them.
+    """
+    scope = getattr(connection, "scope", None)
+    credential = (
+        scope.get("state", {}).get(_CREDENTIAL_STATE_KEY) if isinstance(scope, dict) else None
+    )
+    return credential if isinstance(credential, UserCredential) else None
 
 
 class RequireIdentity:

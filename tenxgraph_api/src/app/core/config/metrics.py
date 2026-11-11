@@ -232,9 +232,11 @@ def setup_metrics(metrics_cfg: MetricsConfig, *, role: Literal["api", "worker"])
 
 def _build_provider(metrics_cfg: MetricsConfig):
     from opentelemetry.sdk.metrics import Histogram, MeterProvider
+    from opentelemetry.sdk.metrics.export import MetricReader
     from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, View
     from opentelemetry.sdk.resources import Resource
 
+    reader: MetricReader
     if metrics_cfg.export == "otlp":
         from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
         from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader

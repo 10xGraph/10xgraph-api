@@ -147,7 +147,7 @@ async def test_second_concurrent_invoke_gets_429(fresh_slots):
 
     started, finish = asyncio.Event(), asyncio.Event()
 
-    async def slow_invoke(graph_input, user):
+    async def slow_invoke(graph_input, user, credential=None):
         started.set()
         await finish.wait()
         return {"messages": []}

@@ -349,7 +349,7 @@ def generate_dockerfile_content(
         [
             "# Production process manager: gunicorn supervising uvicorn workers. These are",
             "# not dependencies of 10xgraph-api, so the image installs them here.",
-            'RUN pip install "gunicorn>=23,<27" "uvicorn-worker>=0.4,<1"',
+            'RUN pip install "gunicorn>=25.1,<27" "uvicorn-worker>=0.4,<1"',
             "",
             "# Strip CLI-only assets the server never loads: project scaffolds, the bundled",
             "# agent skill, and the local config editor (HTML/JS). Only the server code and",
@@ -422,11 +422,14 @@ def generate_dockerfile_content(
                 "# graceful timeout is 30s, so on every rolling deploy SIGTERM would",
                 "# hard-kill runs that were still mid-flight, truncating them. Give",
                 "# in-flight runs time to finish draining instead.",
+                "# --no-control-socket (gunicorn 25.1+): the control server would write",
+                "# /app/.gunicorn, and the root filesystem is read-only.",
                 (
                     f'CMD ["gunicorn", "-k", "{GUNICORN_WORKER_CLASS}", '
                     f'"-b", "0.0.0.0:{port}", '
                     f'"--graceful-timeout", "{GRACEFUL_TIMEOUT_SECONDS}", '
                     f'"--timeout", "{WORKER_TIMEOUT_SECONDS}", '
+                    '"--no-control-socket", '
                     '"tenxgraph_api.src.app.main:app"]'
                 ),
                 "",
@@ -436,7 +439,176 @@ def generate_dockerfile_content(
     return "\n".join(dockerfile_lines)
 
 
-def generate_k8s_manifest_content(service_name: str, port: int) -> str:
+# Background jobs run through TaskIQ's own commands, not the `10xgraph` console script: the slim
+# step of the image uninstalls typer, which that script imports, so only `taskiq` (installed by
+# the `jobs` extras) is on PATH and works there. `tenxgraph_api.jobs.worker` reads
+# `10xgraph.json` from the working directory (/app), like the API.
+TASKIQ_WORKER_TARGET: Final[str] = "tenxgraph_api.jobs.worker:broker"
+TASKIQ_SCHEDULER_TARGET: Final[str] = "tenxgraph_api.jobs.scheduler:scheduler"
+
+# After SIGTERM TaskIQ stops fetching, waits for running tasks up to this long, then closes the
+# broker (worker_shutdown: closes the graph and flushes telemetry) within the second timeout.
+WORKER_SHUTDOWN_TIMEOUT_SECONDS: Final[int] = 60
+
+# TaskIQ's scheduler re-reads its schedule sources this often (the same default as
+# `10xgraph scheduler`).
+SCHEDULER_UPDATE_INTERVAL_SECONDS: Final[int] = 10
+
+SCHEDULER_COMMENT: Final[tuple[str, str]] = (
+    "Run exactly one scheduler: two send every scheduled task twice.",
+    "Remove this service if you have no schedules.",
+)
+
+
+def worker_command(tasks: list[str] | tuple[str, ...] = ()) -> list[str]:
+    """The ``taskiq worker`` argv: the project's broker, ``worker.tasks`` and the shutdown waits."""
+    return [
+        "taskiq",
+        "worker",
+        "--wait-tasks-timeout",
+        str(GRACEFUL_TIMEOUT_SECONDS),
+        "--shutdown-timeout",
+        str(WORKER_SHUTDOWN_TIMEOUT_SECONDS),
+        TASKIQ_WORKER_TARGET,
+        *_task_args(tasks),
+    ]
+
+
+def scheduler_command(tasks: list[str] | tuple[str, ...] = ()) -> list[str]:
+    """The ``taskiq scheduler`` argv: the project's scheduler and ``worker.tasks``."""
+    return [
+        "taskiq",
+        "scheduler",
+        TASKIQ_SCHEDULER_TARGET,
+        *_task_args(tasks),
+        "--update-interval",
+        str(SCHEDULER_UPDATE_INTERVAL_SECONDS),
+    ]
+
+
+def _task_args(tasks: list[str] | tuple[str, ...]) -> list[str]:
+    """Module names, then one ``--tasks-pattern`` per file path or glob (as ``10xgraph worker``)."""
+    from tenxgraph_api.jobs.config import is_glob
+
+    args = [t for t in tasks if not is_glob(t)]
+    patterns = [t for t in tasks if is_glob(t)]
+    if patterns:
+        args.append("--fs-discover")
+        for pattern in patterns:
+            args += ["--tasks-pattern", pattern]
+    return args
+
+
+def _yaml_flow_list(items: list[str]) -> str:
+    return "[ " + ", ".join("'" + item.replace("'", "''") + "'" for item in items) + " ]"
+
+
+def _k8s_pod_lines(grace_seconds: int) -> list[str]:
+    return [
+        # Must be > the app's graceful timeout, else the kubelet SIGKILLs a
+        # pod that is still finishing a run.
+        f"      terminationGracePeriodSeconds: {grace_seconds}",
+        "      # The app never calls the Kubernetes API; do not hand it a token.",
+        "      automountServiceAccountToken: false",
+        "      securityContext:",
+        "        runAsNonRoot: true",
+        f"        runAsUser: {APP_UID}",
+        f"        runAsGroup: {APP_UID}",
+        f"        fsGroup: {APP_UID}",
+        "        seccompProfile:",
+        "          type: RuntimeDefault",
+    ]
+
+
+_K8S_CONTAINER_SECURITY: Final[list[str]] = [
+    "          securityContext:",
+    "            allowPrivilegeEscalation: false",
+    "            readOnlyRootFilesystem: true",
+    "            capabilities:",
+    "              drop:",
+    '                - "ALL"',
+]
+
+
+def _k8s_env_lines(secret_name: str) -> list[str]:
+    return [
+        "          envFrom:",
+        "            - secretRef:",
+        f"                name: {secret_name}",
+        "          env:",
+        "            - name: MODE",
+        '              value: "production"',
+        "            - name: LOG_FORMAT",
+        '              value: "json"',
+    ]
+
+
+_K8S_RESOURCES: Final[list[str]] = [
+    "          resources:",
+    "            requests:",
+    '              cpu: "500m"',
+    '              memory: "512Mi"',
+    "            limits:",
+    '              cpu: "2"',
+    '              memory: "2Gi"',
+]
+
+
+def _k8s_background_deployment(
+    name: str,
+    secret_name: str,
+    command: list[str],
+    comments: list[str],
+    *,
+    recreate: bool = False,
+) -> list[str]:
+    """A one-replica Deployment for the worker or the scheduler: no port, Service or probes."""
+    return [
+        "---",
+        *comments,
+        "apiVersion: apps/v1",
+        "kind: Deployment",
+        "metadata:",
+        f"  name: {name}",
+        "spec:",
+        "  replicas: 1",
+        *(["  strategy:", "    type: Recreate"] if recreate else []),
+        "  selector:",
+        "    matchLabels:",
+        f"      app: {name}",
+        "  template:",
+        "    metadata:",
+        "      labels:",
+        f"        app: {name}",
+        "    spec:",
+        # No load balancer, so no preStop sleep.
+        *_k8s_pod_lines(GRACEFUL_TIMEOUT_SECONDS + SHUTDOWN_KILL_MARGIN_SECONDS),
+        "      containers:",
+        f"        - name: {name}",
+        # Same image as the API; only the command differs.
+        f"          image: registry.example.com/{name.rsplit('-', 1)[0]}:1.0.0",
+        "          imagePullPolicy: IfNotPresent",
+        f"          command: {_yaml_flow_list(command)}",
+        *_K8S_CONTAINER_SECURITY,
+        "          volumeMounts:",
+        "            - name: tmp",
+        "              mountPath: /tmp",
+        *_k8s_env_lines(secret_name),
+        # No HTTP server here, so no readiness or liveness probe.
+        *_K8S_RESOURCES,
+        "      volumes:",
+        "        - name: tmp",
+        "          emptyDir: {}",
+    ]
+
+
+def generate_k8s_manifest_content(
+    service_name: str,
+    port: int,
+    worker: bool = False,
+    scheduler: bool = False,
+    tasks: list[str] | tuple[str, ...] = (),
+) -> str:
     """Generate a Kubernetes Deployment + Service manifest.
 
     Exists because rolling deploys were the main way in-flight agent runs got
@@ -457,204 +629,240 @@ def generate_k8s_manifest_content(service_name: str, port: int) -> str:
     The pod is locked down by default: non-root, read-only root filesystem, no
     capabilities, no service account token, and secrets come from a Secret object
     rather than the manifest or the image.
+
+    ``worker`` and ``scheduler`` add one Deployment each (no Service) for the background jobs.
     """
     secret_name = f"{service_name}-secrets"
-    return "\n".join(
-        [
-            "# Generated by 10xgraph-api CLI. Before applying:",
-            "#   1. Push the image to your registry and set `image` below to a pinned",
-            "#      version tag or digest (never :latest).",
-            "#   2. Create the Secret the pod reads (API keys, JWT_SECRET_KEY, DB URLs),",
-            "#      one --from-literal per value (--from-env-file keeps quotes as part",
-            "#      of the value), or sync it from your secret manager:",
-            f"#        kubectl create secret generic {secret_name} \\",
-            "#          --from-literal=JWT_SECRET_KEY=... --from-literal=GOOGLE_API_KEY=... \\",
-            "#          --from-literal=ORIGINS=https://your-frontend.example.com \\",
-            "#          --from-literal=ALLOWED_HOST=your-app.example.com",
-            "#   3. ORIGINS (CORS origins, never *) and ALLOWED_HOST (your public hostname) are",
-            "#      required in production and are read from the same Secret.",
-            "#   4. Expose it through an Ingress or Gateway that terminates TLS.",
-            "# The root filesystem is read-only: only /tmp and /app/uploads are writable.",
-            "# If your graph writes anywhere else (a SQLite checkpointer under",
-            "# ~/.10xgraph, a local Qdrant folder), mount a volume at that path.",
-            "apiVersion: apps/v1",
-            "kind: Deployment",
-            "metadata:",
-            f"  name: {service_name}",
-            "spec:",
-            "  replicas: 2",
-            "  selector:",
-            "    matchLabels:",
-            f"      app: {service_name}",
-            "  template:",
-            "    metadata:",
-            "      labels:",
-            f"        app: {service_name}",
-            "    spec:",
-            # Must be > the app's graceful timeout, else the kubelet SIGKILLs a
-            # pod that is still finishing a run.
-            f"      terminationGracePeriodSeconds: {K8S_TERMINATION_GRACE_SECONDS}",
-            "      # The app never calls the Kubernetes API; do not hand it a token.",
-            "      automountServiceAccountToken: false",
-            "      securityContext:",
-            "        runAsNonRoot: true",
-            f"        runAsUser: {APP_UID}",
-            f"        runAsGroup: {APP_UID}",
-            f"        fsGroup: {APP_UID}",
-            "        seccompProfile:",
-            "          type: RuntimeDefault",
-            "      containers:",
-            f"        - name: {service_name}",
-            f"          image: registry.example.com/{service_name}:1.0.0",
-            "          imagePullPolicy: IfNotPresent",
-            "          ports:",
-            f"            - containerPort: {port}",
-            "          securityContext:",
-            "            allowPrivilegeEscalation: false",
-            "            readOnlyRootFilesystem: true",
-            "            capabilities:",
-            "              drop:",
-            '                - "ALL"',
-            "          volumeMounts:",
-            "            # Gunicorn worker heartbeats and Python temp files",
-            "            - name: tmp",
-            "              mountPath: /tmp",
-            "            # Local media uploads (MEDIA_STORAGE_TYPE=local, the default)",
-            "            - name: uploads",
-            "              mountPath: /app/uploads",
-            "          envFrom:",
-            "            - secretRef:",
-            f"                name: {secret_name}",
-            "          env:",
-            "            - name: MODE",
-            '              value: "production"',
-            "            - name: LOG_FORMAT",
-            '              value: "json"',
-            # ORIGINS and ALLOWED_HOST come from the Secret (an env entry here would
-            # override it). Production refuses to start while either is missing or a wildcard.
-            "          lifecycle:",
-            "            preStop:",
-            "              exec:",
-            "                # Let the load balancer stop sending new traffic before",
-            "                # the app starts shutting down.",
-            "                command:",
-            '                  - "/bin/sh"',
-            '                  - "-c"',
-            f'                  - "sleep {K8S_PRESTOP_SLEEP_SECONDS}"',
-            "          readinessProbe:",
-            "            httpGet:",
-            "              path: /health/ready",
-            f"              port: {port}",
-            "            initialDelaySeconds: 5",
-            "            periodSeconds: 10",
-            "          livenessProbe:",
-            "            httpGet:",
-            "              path: /ping",
-            f"              port: {port}",
-            "            # Deliberately slack: a worker busy with a long agent run",
-            "            # must not be mistaken for a hung one and restarted.",
-            "            initialDelaySeconds: 30",
-            "            periodSeconds: 30",
-            "            failureThreshold: 5",
-            "          resources:",
-            "            requests:",
-            '              cpu: "500m"',
-            '              memory: "512Mi"',
-            "            limits:",
-            '              cpu: "2"',
-            '              memory: "2Gi"',
-            "      volumes:",
-            "        - name: tmp",
-            "          emptyDir: {}",
-            "        # Per pod and lost on restart. With more than one replica a file",
-            "        # uploaded to one pod is missing on the others: set",
-            "        # MEDIA_STORAGE_TYPE=cloud (S3/GCS) for production uploads.",
-            "        - name: uploads",
-            "          emptyDir: {}",
-            "---",
-            "apiVersion: v1",
-            "kind: Service",
-            "metadata:",
-            f"  name: {service_name}",
-            "spec:",
-            "  selector:",
-            f"    app: {service_name}",
-            "  ports:",
-            "    - protocol: TCP",
-            "      port: 80",
-            f"      targetPort: {port}",
-            "",
-        ]
-    )
+    lines = [
+        "# Generated by 10xgraph-api CLI. Before applying:",
+        "#   1. Push the image to your registry and set `image` below to a pinned",
+        "#      version tag or digest (never :latest).",
+        "#   2. Create the Secret the pod reads (API keys, JWT_SECRET_KEY, DB URLs),",
+        "#      one --from-literal per value (--from-env-file keeps quotes as part",
+        "#      of the value), or sync it from your secret manager:",
+        f"#        kubectl create secret generic {secret_name} \\",
+        "#          --from-literal=JWT_SECRET_KEY=... --from-literal=GOOGLE_API_KEY=... \\",
+        "#          --from-literal=ORIGINS=https://your-frontend.example.com \\",
+        "#          --from-literal=ALLOWED_HOST=your-app.example.com",
+        "#   3. ORIGINS (CORS origins, never *) and ALLOWED_HOST (your public hostname) are",
+        "#      required in production and are read from the same Secret.",
+        "#   4. Expose it through an Ingress or Gateway that terminates TLS.",
+        "# The root filesystem is read-only: only /tmp and /app/uploads are writable.",
+        "# If your graph writes anywhere else (a SQLite checkpointer under",
+        "# ~/.10xgraph, a local Qdrant folder), mount a volume at that path.",
+        "apiVersion: apps/v1",
+        "kind: Deployment",
+        "metadata:",
+        f"  name: {service_name}",
+        "spec:",
+        "  replicas: 2",
+        "  selector:",
+        "    matchLabels:",
+        f"      app: {service_name}",
+        "  template:",
+        "    metadata:",
+        "      labels:",
+        f"        app: {service_name}",
+        "    spec:",
+        *_k8s_pod_lines(K8S_TERMINATION_GRACE_SECONDS),
+        "      containers:",
+        f"        - name: {service_name}",
+        f"          image: registry.example.com/{service_name}:1.0.0",
+        "          imagePullPolicy: IfNotPresent",
+        "          ports:",
+        f"            - containerPort: {port}",
+        *_K8S_CONTAINER_SECURITY,
+        "          volumeMounts:",
+        "            # Gunicorn worker heartbeats and Python temp files",
+        "            - name: tmp",
+        "              mountPath: /tmp",
+        "            # Local media uploads (MEDIA_STORAGE_TYPE=local, the default)",
+        "            - name: uploads",
+        "              mountPath: /app/uploads",
+        *_k8s_env_lines(secret_name),
+        # ORIGINS and ALLOWED_HOST come from the Secret (an env entry here would
+        # override it). Production refuses to start while either is missing or a wildcard.
+        "          lifecycle:",
+        "            preStop:",
+        "              exec:",
+        "                # Let the load balancer stop sending new traffic before",
+        "                # the app starts shutting down.",
+        "                command:",
+        '                  - "/bin/sh"',
+        '                  - "-c"',
+        f'                  - "sleep {K8S_PRESTOP_SLEEP_SECONDS}"',
+        "          readinessProbe:",
+        "            httpGet:",
+        "              path: /health/ready",
+        f"              port: {port}",
+        "            initialDelaySeconds: 5",
+        "            periodSeconds: 10",
+        "          livenessProbe:",
+        "            httpGet:",
+        "              path: /ping",
+        f"              port: {port}",
+        "            # Deliberately slack: a worker busy with a long agent run",
+        "            # must not be mistaken for a hung one and restarted.",
+        "            initialDelaySeconds: 30",
+        "            periodSeconds: 30",
+        "            failureThreshold: 5",
+        *_K8S_RESOURCES,
+        "      volumes:",
+        "        - name: tmp",
+        "          emptyDir: {}",
+        "        # Per pod and lost on restart. With more than one replica a file",
+        "        # uploaded to one pod is missing on the others: set",
+        "        # MEDIA_STORAGE_TYPE=cloud (S3/GCS) for production uploads.",
+        "        - name: uploads",
+        "          emptyDir: {}",
+        "---",
+        "apiVersion: v1",
+        "kind: Service",
+        "metadata:",
+        f"  name: {service_name}",
+        "spec:",
+        "  selector:",
+        f"    app: {service_name}",
+        "  ports:",
+        "    - protocol: TCP",
+        "      port: 80",
+        f"      targetPort: {port}",
+    ]
+    if worker:
+        lines += _k8s_background_deployment(
+            f"{service_name}-worker",
+            secret_name,
+            worker_command(tasks),
+            [
+                "# Background jobs (TaskIQ). One replica to start: scale it on queue depth.",
+                "# Needs the same Secret as the API, plus the broker URL if it is not in",
+                "# 10xgraph.json.",
+            ],
+        )
+    if scheduler:
+        lines += _k8s_background_deployment(
+            f"{service_name}-scheduler",
+            secret_name,
+            scheduler_command(tasks),
+            [
+                *(f"# {line}" for line in SCHEDULER_COMMENT),
+                "# Recreate: a rollout never runs two at once.",
+            ],
+            recreate=True,
+        )
+    return "\n".join([*lines, ""])
 
 
-def generate_docker_compose_content(service_name: str, port: int) -> str:
+def _compose_env_lines() -> list[str]:
+    return [
+        "    build: .",
+        "    image: 10xgraph-api:latest",
+        "    env_file:",
+        "      - .env",
+        "    environment:",
+        "      - PYTHONUNBUFFERED=1",
+        "      - PYTHONDONTWRITEBYTECODE=1",
+        # Default to production; local in-memory telemetry stays disabled.
+        "      - MODE=production",
+        "      - LOG_FORMAT=json",
+        "      # ORIGINS and ALLOWED_HOST come from .env (a value here would override it).",
+        "      # Production refuses to start while either is missing or a wildcard.",
+    ]
+
+
+def _compose_runtime_lines() -> list[str]:
+    return [
+        # Give in-flight agent runs time to drain on `docker compose down`
+        # instead of being killed after the default 10s.
+        # Longer than gunicorn's --graceful-timeout, or SIGKILL lands mid-drain.
+        f"    stop_grace_period: {COMPOSE_STOP_GRACE_SECONDS}s",
+        "    restart: unless-stopped",
+        "    # Locked down: read-only filesystem, no Linux capabilities, no setuid",
+        "    # escalation. Only /tmp and the uploads folder are writable.",
+        "    read_only: true",
+        "    tmpfs:",
+        "      - /tmp",
+        "    cap_drop:",
+        "      - ALL",
+        "    security_opt:",
+        "      - no-new-privileges:true",
+    ]
+
+
+def _compose_background_service(name: str, comments: list[str], command: list[str]) -> list[str]:
+    """The worker or scheduler service: the API's image and settings, no port, no uploads."""
+    return [
+        f"  {name}:",
+        *comments,
+        *_compose_env_lines(),
+        f"    command: {_yaml_flow_list(command)}",
+        # The image's HEALTHCHECK calls the API's /ping, and there is no HTTP server here.
+        "    healthcheck:",
+        "      disable: true",
+        *_compose_runtime_lines(),
+    ]
+
+
+def generate_docker_compose_content(
+    service_name: str,
+    port: int,
+    worker: bool = False,
+    scheduler: bool = False,
+    tasks: list[str] | tuple[str, ...] = (),
+) -> str:
     """Generate a docker-compose.yml for the API service.
 
     Published on 127.0.0.1 only, so the plain-HTTP port is reachable from this host and
     not from the network: a TLS reverse proxy on the same host is what faces the internet.
     Secrets come from ``.env`` at run time and never enter the image.
+
+    ``worker`` and ``scheduler`` add a service each for the background jobs (TaskIQ).
     """
-    return "\n".join(
-        [
-            "# Generated by 10xgraph-api CLI.",
-            "# Secrets (API keys, JWT_SECRET_KEY, DB URLs) are read from .env at run time;",
-            "# .dockerignore keeps .env out of the image. Copy .env.example to .env first.",
-            "services:",
-            f"  {service_name}:",
-            "    build: .",
-            "    image: 10xgraph-api:latest",
-            "    env_file:",
-            "      - .env",
-            "    environment:",
-            "      - PYTHONUNBUFFERED=1",
-            "      - PYTHONDONTWRITEBYTECODE=1",
-            # Default to production; local in-memory telemetry stays disabled.
-            "      - MODE=production",
-            "      - LOG_FORMAT=json",
-            "      # ORIGINS and ALLOWED_HOST come from .env (a value here would override it).",
-            "      # Production refuses to start while either is missing or a wildcard.",
-            "    # Loopback only: put a TLS reverse proxy (Caddy, nginx, a cloud load",
-            "    # balancer) in front. Drop the 127.0.0.1 prefix only if that proxy runs",
-            "    # on another host, and firewall the port to it.",
-            "    ports:",
-            f"      - '127.0.0.1:{port}:{port}'",
-            (
-                f"    command: [ 'gunicorn', '-k', '{GUNICORN_WORKER_CLASS}', "
-                f"'-b', '0.0.0.0:{port}', "
-                f"'--graceful-timeout', '{GRACEFUL_TIMEOUT_SECONDS}', "
-                f"'--timeout', '{WORKER_TIMEOUT_SECONDS}', "
-                "'tenxgraph_api.src.app.main:app' ]"
-            ),
-            # Give in-flight agent runs time to drain on `docker compose down`
-            # instead of being killed after the default 10s.
-            # Longer than gunicorn's --graceful-timeout, or SIGKILL lands mid-drain.
-            f"    stop_grace_period: {COMPOSE_STOP_GRACE_SECONDS}s",
-            "    restart: unless-stopped",
-            "    # Locked down: read-only filesystem, no Linux capabilities, no setuid",
-            "    # escalation. Only /tmp and the uploads folder are writable.",
-            "    read_only: true",
-            "    tmpfs:",
-            "      - /tmp",
-            "    cap_drop:",
-            "      - ALL",
-            "    security_opt:",
-            "      - no-new-privileges:true",
-            "    volumes:",
-            "      - uploads:/app/uploads",
-            "    # Consider adding resource limits and deploy configurations in a swarm/stack",
-            "    # deploy:",
-            "    #   replicas: 2",
-            "    #   resources:",
-            "    #     limits:",
-            "    #       cpus: '1.0'",
-            "    #       memory: 512M",
-            "",
-            "volumes:",
-            "  uploads:",
-            "",
-        ]
-    )
+    lines = [
+        "# Generated by 10xgraph-api CLI.",
+        "# Secrets (API keys, JWT_SECRET_KEY, DB URLs) are read from .env at run time;",
+        "# .dockerignore keeps .env out of the image. Copy .env.example to .env first.",
+        "services:",
+        f"  {service_name}:",
+        *_compose_env_lines(),
+        "    # Loopback only: put a TLS reverse proxy (Caddy, nginx, a cloud load",
+        "    # balancer) in front. Drop the 127.0.0.1 prefix only if that proxy runs",
+        "    # on another host, and firewall the port to it.",
+        "    ports:",
+        f"      - '127.0.0.1:{port}:{port}'",
+        (
+            f"    command: [ 'gunicorn', '-k', '{GUNICORN_WORKER_CLASS}', "
+            f"'-b', '0.0.0.0:{port}', "
+            f"'--graceful-timeout', '{GRACEFUL_TIMEOUT_SECONDS}', "
+            f"'--timeout', '{WORKER_TIMEOUT_SECONDS}', "
+            "'--no-control-socket', "
+            "'tenxgraph_api.src.app.main:app' ]"
+        ),
+        *_compose_runtime_lines(),
+        "    volumes:",
+        "      - uploads:/app/uploads",
+        "    # Consider adding resource limits and deploy configurations in a swarm/stack",
+        "    # deploy:",
+        "    #   replicas: 2",
+        "    #   resources:",
+        "    #     limits:",
+        "    #       cpus: '1.0'",
+        "    #       memory: 512M",
+    ]
+    if worker:
+        lines += _compose_background_service(
+            "worker",
+            [
+                "    # Background jobs (TaskIQ). Waits for running tasks on `docker compose down`;",
+                "    # scale with `docker compose up --scale worker=N`.",
+            ],
+            worker_command(tasks),
+        )
+    if scheduler:
+        lines += _compose_background_service(
+            "scheduler", [f"    # {line}" for line in SCHEDULER_COMMENT], scheduler_command(tasks)
+        )
+    return "\n".join([*lines, "", "volumes:", "  uploads:", ""])
 
 
 # Files that hold credentials. The Dockerfile runs ``COPY . .``, so anything not

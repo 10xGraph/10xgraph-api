@@ -31,6 +31,7 @@ Checkpointer methods exist in async and sync forms:
 - Messages: append/list/get/delete thread messages.
 - Threads: create/get/list/clean thread metadata and content.
 - Generic cache: namespaced key-value cache with optional TTL.
+- Tool results: every checkpointer keeps a ledger of finished tool calls so a replay or resume does not run them again. The graph clears a thread's ledger in the background after a completed run. `aclear_tool_results(config)` clears one thread; `aprune_tool_results(older_than=timedelta(...))` deletes old rows across threads and returns the count (schedule it yourself, 10xGraph never calls it). `record_tool_result=False` on `InMemoryCheckpointer`, `SqliteCheckpointer` or `PgCheckpointer` turns recording off; a tool can then run twice after a crash or resume.
 
 ## REST and Client
 

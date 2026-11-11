@@ -51,7 +51,7 @@ ReactAgent(
     model: str,
     state: StateT | None = None,
     context_manager: BaseContextManager | None = None,
-    publisher: BasePublisher | None = None,
+    publisher: BasePublisher | list[BasePublisher] | None = None,
     id_generator: BaseIDGenerator = DefaultIDGenerator(),
     container: InjectQ | None = None,
     *,
@@ -59,7 +59,8 @@ ReactAgent(
     system_prompt: list[dict] | None = None,
     tools: Iterable[Callable] | None = None,
     client: Any = None,                    # FastMCP client for MCP tools
-    pass_user_info_to_mcp: bool = False,
+    pass_user_info_to_mcp: bool = False,         # unsigned metadata, trusted internal servers only
+    mcp_auth: Any = None,                  # async (MCPAuthContext) -> dict of headers per MCP call
     extra_messages: list[Message] | None = None,
     trim_context: bool = False,
     tools_tags: set[str] | None = None,
@@ -76,20 +77,93 @@ ReactAgent(
 )
 ```
 
-`ReactAgent.compile()` accepts: `checkpointer`, `store`, `interrupt_before`, `interrupt_after`, `callback_manager`, `media_store`, `shutdown_timeout`.
+`ReactAgent.compile()` accepts: `checkpointer`, `store`, `interrupt_before`, `interrupt_after`, `callback_manager`, `media_store`, `shutdown_timeout`, `media_policy`.
 
 ### ReactAgent with MCP
 
 ```python
 from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
 
 agent = ReactAgent(
     model="gpt-4o",
-    tools=[],
-    client=Client("path/to/mcp/server"),
-    pass_user_info_to_mcp=True,
+    client=Client(StreamableHttpTransport(MCP_URL, auth=MCP_TOKEN)),
+    pass_user_info_to_mcp=True,   # unsigned metadata: trusted internal server only
 )
 ```
+
+`pass_user_info_to_mcp=True` sends the user as unsigned request metadata the server cannot verify. For a server that enforces per-user or per-tenant access, use `mcp_auth` instead:
+
+```python
+import os, time
+import jwt  # pip install pyjwt[crypto]
+from tenxgraph.core.graph.tool_node import MCPAuthContext
+
+async def mcp_auth(ctx: MCPAuthContext) -> dict[str, str]:
+    # ctx: identity, credential, tool_name, server, thread_id, run_id
+    now = int(time.time())
+    token = jwt.encode(
+        {"iss": "my-agent", "aud": "my-mcp-server", "sub": ctx.identity.user_id,
+         "act": {"sub": "my-agent"}, "iat": now, "exp": now + 60},
+        os.environ["MCP_SIGNING_KEY"], algorithm="HS256",
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+agent = ReactAgent(model="gpt-4o", client=Client(StreamableHttpTransport(MCP_URL)), mcp_auth=mcp_auth)
+```
+
+The server verifies the signature, `aud` and `exp`, and takes the user from the token.
+
+Server side, read the user from request metadata, never from a tool argument:
+
+```python
+from fastmcp import Context, FastMCP
+
+mcp = FastMCP("support")
+
+@mcp.tool
+async def my_tickets(ctx: Context) -> list[dict]:
+    """List the signed-in user's open tickets."""
+    meta = ctx.request_context.meta
+    if meta is not None and not isinstance(meta, dict):  # fastmcp 3.x: pydantic model
+        meta = meta.model_dump()
+    user = (meta or {}).get("user") or {}
+    return await tickets_api.list_open(user_id=user["user_id"])
+```
+
+The server never takes `user_id` as a tool argument. Tool arguments are visible to and set by the model, so the model could forge them. Request metadata is set by 10xGraph, outside the model.
+
+What `meta["user"]` holds:
+
+- Behind the API, `config["user"]` is an `Identity`, sent as `Identity.model_dump(mode="json")`: `{"user_id": "alice", "kind": "user", "tenant": {"org_id": "acme"}, "roles": ["member"], "permissions": [...] or null, "reach": "own", "claims": {...}}`.
+- With the SDK directly, a plain dict `config["user"]` is sent as is.
+- With no user, it is `{"user_id": config["user_id"]}`.
+
+The MCP server must authenticate the caller before it trusts this metadata. Send a service token from the client with `auth=`, for example `StreamableHttpTransport(url, auth="<token>")` (a string becomes a bearer token; an `httpx.Auth` object also works), and check it on the server.
+
+### Support agent over MCP
+
+One agent, business logic in the MCP server. No routers, handoffs or guard nodes.
+
+```python
+from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
+from tenxgraph.prebuilt.agent import ReactAgent
+from tenxgraph.runtime.publisher import ConsolePublisher
+
+app = ReactAgent(
+    model="gpt-4o",
+    client=Client(StreamableHttpTransport(MCP_URL, auth=MCP_TOKEN)),
+    mcp_auth=mcp_auth,            # per-user access control; see above
+    system_prompt=[{"role": "system", "content": "You are a support agent. Use the tools."}],
+    publisher=ConsolePublisher(),
+    trim_context=True,
+).compile(checkpointer=checkpointer)
+```
+
+The server tool is `my_tickets` above. All argument names match `ReactAgent.__init__` and `compile()`.
+
+To authenticate each MCP call as the signed-in user, add `mcp_auth=my_mcp_auth` (an async function returning headers, see "Authenticate MCP calls as the user" in agents-and-tools.md). `PlanActReflectAgent`, `StructuredOutputAgent` and `AudioAgent` take it too. Needs fastmcp >= 4.1.7 and an HTTP transport.
 
 ---
 
@@ -369,7 +443,7 @@ agent = Agent(model="gpt-4o", tool_node=tool_node, tools_tags={"search"})
 from tenxgraph.prebuilt.tools import fetch_url, safe_calculator
 from tenxgraph.utils.decorators import tool
 
-@tool(name="get_exchange_rate", tags=["finance"])
+@tool(tags=["finance"])
 async def get_exchange_rate(from_currency: str, to_currency: str) -> str:
     """Get the current exchange rate between two currencies."""
     ...

@@ -910,7 +910,7 @@ class GraphConfig:
         Shape mirrors ``tenxgraph.runtime.publisher.setup_observability``::
 
             {
-              "level": "standard",
+              "level": "full",
               "logfire":   {"enabled": true, "service_name": "my-agent", ...},
               "langsmith": {"enabled": true, "project": "my-agent", "endpoint": null},
               "phoenix":   {"enabled": true, "project": "my-agent", "endpoint": null}

@@ -295,7 +295,7 @@ def _live_service(events=None, hold=None):
     service.is_live_agent = True
     captured = {}
 
-    async def realtime(queue, init, user):
+    async def realtime(queue, init, user, credential=None):
         captured["started"] = True
         if hold is not None:
             captured.update(held=dict(hold._held))

@@ -484,3 +484,139 @@ def test_symlinked_project_path_itself_still_installs(cmd: SkillsCommand, tmp_pa
 
     assert cmd.execute(agent="claude", path=str(link)) == 0
     assert (real / ".claude" / "skills" / "10xgraph" / "SKILL.md").is_file()
+
+
+# --- always-on project instructions (CLAUDE.md / AGENTS.md block) ------------
+
+_START = "<!-- 10xgraph:start -->"
+_END = "<!-- 10xgraph:end -->"
+
+
+def _block_of(text: str) -> str:
+    return text[text.index(_START) : text.index(_END) + len(_END)]
+
+
+def test_claude_install_creates_claude_md_with_only_the_block(
+    cmd: SkillsCommand, tmp_path: Path
+) -> None:
+    assert cmd.execute(agent="claude", path=str(tmp_path)) == 0
+    text = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+    assert text.startswith(_START) and text.endswith(_END + "\n")
+    assert ".claude/skills/10xgraph" in text
+    assert "{skill_path}" not in text
+    assert not (tmp_path / "AGENTS.md").exists()
+
+
+def test_codex_install_writes_agents_md_with_its_skill_path(
+    cmd: SkillsCommand, tmp_path: Path
+) -> None:
+    assert cmd.execute(agent="codex", path=str(tmp_path)) == 0
+    text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert ".agents/skills/10xgraph" in text and ".claude/" not in text
+    assert not (tmp_path / "CLAUDE.md").exists()
+
+
+@pytest.mark.parametrize(
+    ("before", "sep"),
+    [("# Mine\n\nKeep me.\n", "\n"), ("# Mine\nno newline", "\n\n"), ("# Mine\n\n", "")],
+)
+def test_block_is_appended_and_user_text_kept_byte_for_byte(
+    cmd: SkillsCommand, tmp_path: Path, before: str, sep: str
+) -> None:
+    (tmp_path / "CLAUDE.md").write_bytes(before.encode())
+    assert cmd.execute(agent="claude", path=str(tmp_path)) == 0
+    after = (tmp_path / "CLAUDE.md").read_bytes().decode()
+    assert after.startswith(before + sep + _START)
+    assert after.endswith(_END + "\n")
+
+
+def test_existing_block_is_replaced_and_surroundings_kept(
+    cmd: SkillsCommand, tmp_path: Path
+) -> None:
+    head = "# Top\r\nwindows line\r\n\n"
+    tail = "\n\n## After\ntrailing, no newline"
+    stale = f"{_START}\nold 10xGraph text\n{_END}"
+    (tmp_path / "CLAUDE.md").write_bytes((head + stale + tail).encode())
+
+    assert cmd.execute(agent="claude", path=str(tmp_path)) == 0
+    after = (tmp_path / "CLAUDE.md").read_bytes().decode()
+    assert after.startswith(head) and after.endswith(tail)
+    assert "old 10xGraph text" not in after
+    assert "load the `10xgraph` skill" in _block_of(after)
+    assert after.count(_START) == 1
+
+
+def test_rerun_with_force_is_idempotent(cmd: SkillsCommand, tmp_path: Path) -> None:
+    (tmp_path / "CLAUDE.md").write_text("# Mine\n", encoding="utf-8")
+    assert cmd.execute(agent="claude", path=str(tmp_path)) == 0
+    first = (tmp_path / "CLAUDE.md").read_bytes()
+    assert cmd.execute(agent="claude", path=str(tmp_path), force=True) == 0
+    assert cmd.execute(agent="claude", path=str(tmp_path), force=True) == 0
+    assert (tmp_path / "CLAUDE.md").read_bytes() == first
+
+
+def test_existing_claude_md_alone_does_not_count_as_installed(
+    cmd: SkillsCommand, tmp_path: Path
+) -> None:
+    # The user's own CLAUDE.md is not our install: no --force needed, no skip.
+    (tmp_path / "CLAUDE.md").write_text("# Mine\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Mine too\n", encoding="utf-8")
+    assert cmd.execute(agent="claude", path=str(tmp_path)) == 0
+    assert cmd.execute(agent="codex", path=str(tmp_path)) == 0
+    assert _START in (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+    assert _START in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+
+
+def test_block_keeps_file_mode(cmd: SkillsCommand, tmp_path: Path) -> None:
+    claude_md = tmp_path / "CLAUDE.md"
+    claude_md.write_text("# Mine\n", encoding="utf-8")
+    claude_md.chmod(0o640)
+    assert cmd.execute(agent="claude", path=str(tmp_path)) == 0
+    assert claude_md.stat().st_mode & 0o777 == 0o640
+    assert [p.name for p in tmp_path.iterdir() if "installing" in p.name] == []
+
+
+@pytest.mark.parametrize(("agent", "name"), [("claude", "CLAUDE.md"), ("codex", "AGENTS.md")])
+def test_symlinked_instructions_file_is_refused(
+    cmd: SkillsCommand, out: _CapturingOutput, tmp_path: Path, agent: str, name: str
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside\n", encoding="utf-8")
+    (project / name).symlink_to(outside)
+
+    assert cmd.execute(agent=agent, path=str(project)) != 0
+    assert any("symlink" in e for e in out.errors)
+    assert outside.read_text(encoding="utf-8") == "outside\n"
+    assert not (project / (".claude" if agent == "claude" else ".agents")).exists()
+
+
+def test_start_marker_without_end_is_refused(
+    cmd: SkillsCommand, out: _CapturingOutput, tmp_path: Path
+) -> None:
+    original = f"# Mine\n{_START}\nhalf a block\n"
+    (tmp_path / "CLAUDE.md").write_text(original, encoding="utf-8")
+    assert cmd.execute(agent="claude", path=str(tmp_path)) != 0
+    assert any("10xgraph:end" in e for e in out.errors)
+    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == original
+    assert not (tmp_path / ".claude").exists()
+
+
+def test_all_writes_both_blocks_and_reports_them(
+    cmd: SkillsCommand, out: _CapturingOutput, tmp_path: Path
+) -> None:
+    assert cmd.execute(all_agents=True, path=str(tmp_path)) == 0
+    assert ".claude/skills/10xgraph" in (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+    assert ".agents/skills/10xgraph" in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    details = out.last_completion["details"]
+    assert details["Project instructions"] == "AGENTS.md, CLAUDE.md"
+
+
+def test_list_shows_block_files(cmd: SkillsCommand, out: _CapturingOutput) -> None:
+    assert cmd.execute(list_agents=True) == 0
+    _headers, rows = out.tables[0]
+    by_name = {row[0]: row for row in rows}
+    assert by_name["Claude"][1] == "folder+block" and "CLAUDE.md" in by_name["Claude"][2]
+    assert by_name["Codex"][1] == "folder+block" and "AGENTS.md" in by_name["Codex"][2]
+    assert by_name["GitHub"][1] == "file+folder"
