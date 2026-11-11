@@ -67,7 +67,8 @@ def ask_questions(  # noqa: PLR0912
         existing = [name for name in names if Path(name).exists()]
         overwrite = True
         if existing:
-            overwrite = prompts.confirm(f"Overwrite existing {', '.join(existing)}?", default=False)
-            if overwrite is None:
+            answer = prompts.confirm(f"Overwrite existing {', '.join(existing)}?", default=False)
+            if answer is None:
                 return None
+            overwrite = answer
     return BuildAnswers(target, worker, scheduler, overwrite)
