@@ -379,6 +379,8 @@ async def search_web(query: str, max_results: int = 5) -> list[str]:
 
 Without arguments: function name and docstring are used as defaults.
 
+`record_tool_result=False` keeps a read-only tool (search, weather, lookups) out of the checkpointer's tool execution ledger. The default is `True`, so a finished call is not run again after a crash or resume. With `False`, the tool can run twice in those cases. The checkpointer's own `record_tool_result=False` wins over the tool's.
+
 ---
 
 ## ReAct loop
