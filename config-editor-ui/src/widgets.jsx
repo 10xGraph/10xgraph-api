@@ -597,20 +597,20 @@ export function CacheStoreWidget({ sec }) {
 // ------------------------------------------------------------------ choice (id generator, thread naming)
 
 // A dropdown of built-in names plus "custom" (a module:attr field). An unset key is the
-// first option for id_generator ("Not set") and the default name for thread_name_generator.
+// first option for id_generator ("Not set") and "None" for thread_name_generator.
 export function ChoiceWidget({ sec }) {
   const key = sec.fields[0].path[0];
   const names = sec.choices.map((c) => c[0]);
   const value = store.config[key];
-  const unsetValue = key === "thread_name_generator" ? "random" : "";
+  const unsetValue = key === "thread_name_generator" ? "none" : "";
   const mode = value === undefined ? unsetValue : typeof value === "string" && names.includes(value) ? value : "custom";
   const options = [
     ...(key === "id_generator" ? [["", "Not set (the graph's own generator)"]] : []),
-    ...sec.choices.map(([v, label]) => [v, key === "thread_name_generator" && v === "random" ? `${label} (default)` : label]),
-    ["custom", "Custom (module:attr)"],
+    ...sec.choices.map(([v, label]) => [v, label]),
+    ["custom", key === "thread_name_generator" ? "Custom class" : "Custom (module:attr)"],
   ];
   const detail = mode === "" ? "The graph keeps the generator it was compiled with."
-    : mode === "custom" ? "Your own class, as module:attribute."
+    : mode === "custom" ? (key === "thread_name_generator" ? "Your own ThreadNameGenerator subclass, as module:attr." : "Your own class, as module:attribute.")
     : sec.choices.find((c) => c[0] === mode)?.[2];
   const pick = (v) => commit((s) => {
     if (v === unsetValue) delete s.config[key];

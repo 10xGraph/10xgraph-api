@@ -444,6 +444,13 @@ def _check_wiring(config: dict, out: _Collector, base_dir: Path | None) -> None:
     _check_choice("thread_name_generator", config, THREAD_NAME_CHOICES, out, base_dir)
 
 
+def thread_name_generator_issues(config: dict, base_dir: Path | None) -> list[Issue]:
+    """Issues for the ``thread_name_generator`` key alone (no user code is imported)."""
+    out = _Collector()
+    _check_choice("thread_name_generator", config, THREAD_NAME_CHOICES, out, base_dir)
+    return out.issues
+
+
 def _check_choice(
     key: str, config: dict, names: tuple[str, ...], out: _Collector, base_dir: Path | None
 ) -> None:
@@ -451,7 +458,7 @@ def _check_choice(
     value = config.get(key)
     if value is None or value == "" or value in names:
         return
-    if not isinstance(value, str) or ":" not in value:
+    if not isinstance(value, str) or not _IMPORT_PATH.match(value):
         out.error(key, f"{key} must be one of {', '.join(names)} or module:attribute.")
         return
     _check_import_path(key, value, out, base_dir)

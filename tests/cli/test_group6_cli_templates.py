@@ -82,12 +82,12 @@ def test_static_templates_load_through_graph_config(monkeypatch) -> None:
     assert prod.rate_limit is not None and prod.rate_limit.fail_open is False
     assert prod.id_generator == "uuid"
     assert prod.token_revocation is not None
-    assert prod.thread_name_generator == "graph.thread_name_generator:MyNameGenerator"
+    assert prod.thread_name_generator == "first_message"
 
     dev = GraphConfig(str(templates / "dev" / "10xgraph.json"))
     assert dev.cache_store.type == "memory" and not dev.cache_store.type_set
     assert dev.rate_limit is None and dev.token_revocation is None
-    assert dev.thread_name_generator == "random"
+    assert dev.thread_name_generator == "none"
 
 
 def test_generated_exclude_paths_use_the_real_redoc_path() -> None:

@@ -2,6 +2,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -476,7 +477,8 @@ ID_GENERATOR_NAMES: tuple[str, ...] = (
 )
 
 # Built-in ``thread_name_generator`` choices; anything else must be ``"module:attr"``.
-THREAD_NAME_CHOICES: tuple[str, ...] = ("random", "first_message", "none")
+THREAD_NAME_CHOICES: tuple[str, ...] = ("none", "random", "first_message")
+_IMPORT_PATH = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_][\w.]*$")
 
 
 # Finite defaults so an unconfigured server cannot be held open by one client.
@@ -871,12 +873,15 @@ class GraphConfig:
 
     @property
     def thread_name_generator(self) -> str:
-        """``thread_name_generator`` key: ``random`` (the default), ``first_message``, ``none``
-        or ``"module:attr"`` naming a ``ThreadNameGenerator`` subclass or instance."""
+        """``thread_name_generator`` key: ``none`` (unset means none: threads stay unnamed but
+        are saved), ``random``, ``first_message`` or ``"module:attr"`` naming a
+        ``ThreadNameGenerator`` subclass or instance."""
         value = self.data.get("thread_name_generator", None)
         if value is None or value == "":
-            return "random"
-        if not isinstance(value, str) or (value not in THREAD_NAME_CHOICES and ":" not in value):
+            return "none"
+        if not isinstance(value, str) or (
+            value not in THREAD_NAME_CHOICES and not _IMPORT_PATH.match(value)
+        ):
             raise ValueError(
                 f"thread_name_generator must be one of {', '.join(THREAD_NAME_CHOICES)} or "
                 f'"module:attr"; got {value!r}'

@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from tenxgraph_api.cli.commands import BaseCommand
+from tenxgraph_api.cli.config_editor.validation import thread_name_generator_issues
 from tenxgraph_api.cli.constants import DEFAULT_CONFIG_FILE, DEFAULT_PORT
 from tenxgraph_api.cli.core.config import resolve_default_config
 from tenxgraph_api.src.app.core.auth.auth_config import check_auth_config
@@ -186,7 +187,8 @@ class AuditCommand(BaseCommand):
 
         Warns when the default file is absent, because audit is also useful
         outside a project directory. A missing explicit path, invalid JSON,
-        missing ``agent``, or invalid remote tool definition is a hard failure.
+        missing ``agent``, invalid remote tool definition, or invalid ``thread_name_generator``
+        is a hard failure.
         """
         config_path = resolve_default_config(config).resolve()
         if not config_path.exists():
@@ -205,7 +207,13 @@ class AuditCommand(BaseCommand):
             tools = validate_remote_tools(data.get("remote_tools", []))
         except ValueError as exc:
             return Diagnostic("Project config", "fail", str(exc))
-        return Diagnostic("Project config", "pass", f"{config_path} ({len(tools)} remote tools)")
+        issues = thread_name_generator_issues(data, config_path.parent)
+        errors = [i["message"] for i in issues if i["level"] == "error"]
+        status = "fail" if errors else "warn" if issues else "pass"
+        detail = "; ".join(errors or [i["message"] for i in issues])
+        return Diagnostic(
+            "Project config", status, detail or f"{config_path} ({len(tools)} remote tools)"
+        )
 
     @staticmethod
     def _auth_check(config: str = DEFAULT_CONFIG_FILE) -> Diagnostic:

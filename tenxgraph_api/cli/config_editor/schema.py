@@ -73,7 +73,7 @@ ID_GENERATOR_NAMES: tuple[str, ...] = (
     "timestamp",
     "snowflake",
 )
-THREAD_NAME_CHOICES: tuple[str, ...] = ("random", "first_message", "none")
+THREAD_NAME_CHOICES: tuple[str, ...] = ("none", "random", "first_message")
 
 # Keys read by the CLI or the API server. Anything else is preserved but flagged.
 KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
@@ -1044,23 +1044,23 @@ _SECTIONS: list[dict[str, Any]] = [
         "optional": False,
         "widget": "thread_name_generator",
         "choices": [
+            ["none", "None", "Threads are saved without a name."],
             [
                 "random",
-                "random",
-                "A random two-word name such as thoughtful-dialogue. This is the default.",
+                "Random name",
+                "A random two-word name, such as thoughtful-dialogue.",
             ],
-            ["first_message", "first_message", "The user's first message, cut to 60 characters."],
-            ["none", "none", "Threads stay unnamed but are saved."],
+            ["first_message", "First message", "The user's first message, cut to 60 characters."],
         ],
         "fields": [
             {
                 "path": ["thread_name_generator"],
                 "managed": True,
-                "default": "random",
+                "default": "none",
                 "label": "Thread name generator",
                 "type": "text",
-                "placeholder": "graph.thread_name_generator:MyNameGenerator",
-                "help": "module:attr of a ThreadNameGenerator subclass or instance.",
+                "placeholder": "graph.titles:TitleGenerator",
+                "help": "Your own ThreadNameGenerator subclass, as module:attr.",
             },
         ],
     },

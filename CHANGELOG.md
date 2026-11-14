@@ -29,6 +29,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- **`thread_name_generator` defaults to none.** With the key unset, `null`, `""` or `"none"`, new
+  threads are saved without a name. Set `"random"` to keep the old behaviour (#80).
+- `AIThreadNameGenerator` and `DefaultThreadNameGenerator` are replaced by
+  `RandomThreadNameGenerator`. `ThreadNameGenerator` stays the public base class.
+- `thread_name_generator` must be `none`, `random`, `first_message` or `module:attribute`; any
+  other value is a config error.
+
+### Changed
+
+- `10xgraph init` Production writes `"thread_name_generator": "first_message"` and no longer
+  generates `graph/thread_name_generator.py`. Quick Start leaves the key unset.
+- `10xgraph audit` validates `thread_name_generator`: an invalid value fails, and a custom path
+  whose module file is missing next to `10xgraph.json` warns. No user code is imported.
+- `10xgraph config` offers None, Random name, First message and Custom class for it.
+
 ## [1.0.0rc6] - 2026-11-11
 
 The sixth release candidate of `10xgraph-api` 1.0. It requires `10xgraph` 1.0.0rc6. Tools and MCP

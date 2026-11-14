@@ -3,17 +3,16 @@
 import pytest
 
 from tenxgraph_api.src.app.utils.thread_name_generator import (
-    AIThreadNameGenerator,
-    DefaultThreadNameGenerator,
+    RandomThreadNameGenerator,
 )
 
 
-class TestAIThreadNameGeneratorSimpleName:
-    """Tests for AIThreadNameGenerator.generate_simple_name method."""
+class TestRandomThreadNameGeneratorSimpleName:
+    """Tests for RandomThreadNameGenerator.generate_simple_name method."""
 
     def test_generate_simple_name_default_separator(self):
         """Test generating simple name with default separator."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
         name = generator.generate_simple_name()
 
         # Should contain one hyphen
@@ -23,7 +22,7 @@ class TestAIThreadNameGeneratorSimpleName:
 
     def test_generate_simple_name_custom_separator(self):
         """Test generating simple name with custom separator."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
         name = generator.generate_simple_name(separator="_")
 
         # Should contain one underscore
@@ -33,7 +32,7 @@ class TestAIThreadNameGeneratorSimpleName:
 
     def test_generate_simple_name_space_separator(self):
         """Test generating simple name with space separator."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
         name = generator.generate_simple_name(separator=" ")
 
         # Should contain one space
@@ -43,7 +42,7 @@ class TestAIThreadNameGeneratorSimpleName:
 
     def test_generate_simple_name_contains_adjective(self):
         """Test that simple name contains a valid adjective."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
 
         for _ in range(10):
             name = generator.generate_simple_name()
@@ -52,7 +51,7 @@ class TestAIThreadNameGeneratorSimpleName:
 
     def test_generate_simple_name_contains_noun(self):
         """Test that simple name contains a valid noun."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
 
         for _ in range(10):
             name = generator.generate_simple_name()
@@ -61,7 +60,7 @@ class TestAIThreadNameGeneratorSimpleName:
 
     def test_generate_simple_name_empty_separator(self):
         """Test generating simple name with empty separator."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
         name = generator.generate_simple_name(separator="")
 
         # Should have no separator
@@ -78,12 +77,12 @@ class TestAIThreadNameGeneratorSimpleName:
         assert found
 
 
-class TestAIThreadNameGeneratorActionName:
-    """Tests for AIThreadNameGenerator.generate_action_name method."""
+class TestRandomThreadNameGeneratorActionName:
+    """Tests for RandomThreadNameGenerator.generate_action_name method."""
 
     def test_generate_action_name_default_separator(self):
         """Test generating action name with default separator."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
         name = generator.generate_action_name()
 
         # Should contain hyphen
@@ -93,7 +92,7 @@ class TestAIThreadNameGeneratorActionName:
 
     def test_generate_action_name_custom_separator(self):
         """Test generating action name with custom separator."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
         name = generator.generate_action_name(separator=":")
 
         # Should contain colon
@@ -103,7 +102,7 @@ class TestAIThreadNameGeneratorActionName:
 
     def test_generate_action_name_contains_valid_action(self):
         """Test that action name contains a valid action."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
 
         for _ in range(10):
             name = generator.generate_action_name()
@@ -112,7 +111,7 @@ class TestAIThreadNameGeneratorActionName:
 
     def test_generate_action_name_contains_valid_target(self):
         """Test that action name contains a valid target."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
 
         for _ in range(10):
             name = generator.generate_action_name()
@@ -121,7 +120,7 @@ class TestAIThreadNameGeneratorActionName:
 
     def test_generate_action_name_variations(self):
         """Test that action names have good variation."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
         names = set()
 
         # Generate multiple names
@@ -132,12 +131,12 @@ class TestAIThreadNameGeneratorActionName:
         assert len(names) >= 5
 
 
-class TestAIThreadNameGeneratorCompoundName:
-    """Tests for AIThreadNameGenerator.generate_compound_name method."""
+class TestRandomThreadNameGeneratorCompoundName:
+    """Tests for RandomThreadNameGenerator.generate_compound_name method."""
 
     def test_generate_compound_name_default_separator(self):
         """Test generating compound name with default separator."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
         name = generator.generate_compound_name()
 
         # Should contain hyphen
@@ -147,7 +146,7 @@ class TestAIThreadNameGeneratorCompoundName:
 
     def test_generate_compound_name_custom_separator(self):
         """Test generating compound name with custom separator."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
         name = generator.generate_compound_name(separator=".")
 
         # Should contain period
@@ -157,7 +156,7 @@ class TestAIThreadNameGeneratorCompoundName:
 
     def test_generate_compound_name_contains_valid_base(self):
         """Test that compound name contains a valid base."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
 
         valid_bases = [base for base, _ in generator.COMPOUND_PATTERNS]
 
@@ -168,7 +167,7 @@ class TestAIThreadNameGeneratorCompoundName:
 
     def test_generate_compound_name_contains_valid_complement(self):
         """Test that compound name contains a valid complement."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
         pattern_dict = dict(generator.COMPOUND_PATTERNS)
 
         for _ in range(10):
@@ -178,7 +177,7 @@ class TestAIThreadNameGeneratorCompoundName:
 
     def test_generate_compound_name_variations(self):
         """Test that compound names have good variation."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
         names = set()
 
         # Generate multiple names
@@ -189,33 +188,33 @@ class TestAIThreadNameGeneratorCompoundName:
         assert len(names) >= 10
 
 
-class TestAIThreadNameGeneratorGenerateName:
-    """Tests for AIThreadNameGenerator.generate_name method."""
+class TestRandomThreadNameGeneratorGenerateName:
+    """Tests for RandomThreadNameGenerator.generate_name method."""
 
     def test_generate_name_returns_string(self):
         """Test that generate_name returns a string."""
-        generator = AIThreadNameGenerator()
-        name = generator.generate_name()
+        generator = RandomThreadNameGenerator()
+        name = generator.random_name()
         assert isinstance(name, str)
 
     def test_generate_name_contains_separator(self):
         """Test that generate_name contains separator."""
-        generator = AIThreadNameGenerator()
-        name = generator.generate_name()
+        generator = RandomThreadNameGenerator()
+        name = generator.random_name()
         assert "-" in name
 
     def test_generate_name_default_separator(self):
         """Test generate_name with default separator."""
-        generator = AIThreadNameGenerator()
-        name = generator.generate_name()
+        generator = RandomThreadNameGenerator()
+        name = generator.random_name()
 
         # Should have hyphen as default separator
         assert "-" in name
 
     def test_generate_name_custom_separator(self):
         """Test generate_name with custom separator."""
-        generator = AIThreadNameGenerator()
-        name = generator.generate_name(separator="_")
+        generator = RandomThreadNameGenerator()
+        name = generator.random_name(separator="_")
 
         # Should use custom separator
         assert "_" in name
@@ -223,12 +222,12 @@ class TestAIThreadNameGeneratorGenerateName:
 
     def test_generate_name_uses_different_patterns(self):
         """Test that generate_name uses different patterns."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
 
         # Generate multiple names to likely get all patterns
         names = []
         for _ in range(30):
-            names.append(generator.generate_name())
+            names.append(generator.random_name())
 
         # All should be valid strings with separators
         for name in names:
@@ -239,31 +238,31 @@ class TestAIThreadNameGeneratorGenerateName:
 
     def test_generate_name_variations(self):
         """Test that generate_name produces varied names."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
         names = set()
 
         # Generate many names
         for _ in range(50):
-            names.add(generator.generate_name())
+            names.add(generator.random_name())
 
         # Should have significant variation
         assert len(names) >= 20
 
 
-class TestDefaultThreadNameGenerator:
-    """Tests for DefaultThreadNameGenerator."""
+class TestRandomThreadNameGenerator:
+    """Tests for RandomThreadNameGenerator."""
 
     @pytest.mark.asyncio
     async def test_default_generate_name_returns_string(self):
-        """Test that DefaultThreadNameGenerator.generate_name returns a string."""
-        generator = DefaultThreadNameGenerator()
+        """Test that RandomThreadNameGenerator.generate_name returns a string."""
+        generator = RandomThreadNameGenerator()
         name = await generator.generate_name([])
         assert isinstance(name, str)
 
     @pytest.mark.asyncio
     async def test_default_generate_name_ignores_messages(self):
-        """Test that DefaultThreadNameGenerator ignores input messages."""
-        generator = DefaultThreadNameGenerator()
+        """Test that RandomThreadNameGenerator ignores input messages."""
+        generator = RandomThreadNameGenerator()
 
         # Should work with any messages parameter
         name1 = await generator.generate_name([])
@@ -276,8 +275,8 @@ class TestDefaultThreadNameGenerator:
 
     @pytest.mark.asyncio
     async def test_default_generate_name_has_separator(self):
-        """Test that DefaultThreadNameGenerator uses separator."""
-        generator = DefaultThreadNameGenerator()
+        """Test that RandomThreadNameGenerator uses separator."""
+        generator = RandomThreadNameGenerator()
         name = await generator.generate_name([])
 
         # Should have hyphen as separator
@@ -285,8 +284,8 @@ class TestDefaultThreadNameGenerator:
 
     @pytest.mark.asyncio
     async def test_default_generate_name_multiple_calls(self):
-        """Test that DefaultThreadNameGenerator generates different names."""
-        generator = DefaultThreadNameGenerator()
+        """Test that RandomThreadNameGenerator generates different names."""
+        generator = RandomThreadNameGenerator()
 
         names = set()
         for _ in range(20):
@@ -297,24 +296,24 @@ class TestDefaultThreadNameGenerator:
         assert len(names) >= 5
 
 
-class TestAIThreadNameGeneratorEdgeCases:
-    """Tests for edge cases in AIThreadNameGenerator."""
+class TestRandomThreadNameGeneratorEdgeCases:
+    """Tests for edge cases in RandomThreadNameGenerator."""
 
     def test_generate_simple_name_none_separator(self):
         """Test generate_simple_name with None separator (uses default)."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
         # Should still work even if called in unexpected ways
         name = generator.generate_simple_name(separator="-")
         assert "-" in name
 
     def test_multiple_generators_independence(self):
         """Test that multiple generator instances are independent."""
-        gen1 = AIThreadNameGenerator()
-        gen2 = AIThreadNameGenerator()
+        gen1 = RandomThreadNameGenerator()
+        gen2 = RandomThreadNameGenerator()
 
         # Generate names from both
-        name1 = gen1.generate_name()
-        name2 = gen2.generate_name()
+        name1 = gen1.random_name()
+        name2 = gen2.random_name()
 
         # Both should be valid
         assert isinstance(name1, str)
@@ -324,12 +323,12 @@ class TestAIThreadNameGeneratorEdgeCases:
 
     def test_generate_name_pattern_distribution(self):
         """Test that generate_name uses all three patterns reasonably."""
-        generator = AIThreadNameGenerator()
+        generator = RandomThreadNameGenerator()
 
         # Track which patterns are used by looking at generated names
         names = []
         for _ in range(100):
-            names.append(generator.generate_name())
+            names.append(generator.random_name())
 
         # All should be valid
         assert len(names) == 100
