@@ -1,4 +1,4 @@
-"""``thread_name_generator``: random (default), first_message, none, or module:attr."""
+"""``thread_name_generator``: none (default), random, first_message, or module:attr."""
 
 # ruff: noqa: S101, PLR2004
 
@@ -23,8 +23,8 @@ from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import GraphInput
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
 from tenxgraph_api.src.app.utils.thread_name_generator import (
     FIRST_MESSAGE_NAME_LENGTH,
-    DefaultThreadNameGenerator,
     FirstMessageThreadNameGenerator,
+    RandomThreadNameGenerator,
     ThreadNameGenerator,
 )
 
@@ -60,17 +60,17 @@ def test_graph_config_choices(tmp_path):
         path.write_text(json.dumps({"agent": "g:app", "thread_name_generator": value}))
         return GraphConfig(str(path)).thread_name_generator
 
-    assert parsed(None) == "random"
-    assert parsed("") == "random"
+    assert parsed(None) == "none"
+    assert parsed("") == "none"
     for value in ("random", "first_message", "none", "graph.names:Namer"):
         assert parsed(value) == value
-    for bad in ("first", "llm", 3):
-        with pytest.raises(ValueError, match="thread_name_generator must be one of random"):
+    for bad in ("first", "llm", 3, "foo:", ":attr", "a:b:c"):
+        with pytest.raises(ValueError, match="thread_name_generator must be one of none"):
             parsed(bad)
 
 
 def test_each_choice_resolves_to_its_generator():
-    assert type(loader.resolve_thread_name_generator("random")) is DefaultThreadNameGenerator
+    assert type(loader.resolve_thread_name_generator("random")) is RandomThreadNameGenerator
     first = loader.resolve_thread_name_generator("first_message")
     assert type(first) is FirstMessageThreadNameGenerator
     assert loader.resolve_thread_name_generator("none") is None
@@ -197,3 +197,9 @@ async def test_none_leaves_the_thread_unnamed_but_saved(leases, stream):
 async def test_a_custom_generator_is_saved_the_same_way(leases):
     _, name = await _run(f"{THIS}:FixedNamer", stream=False)
     assert name == "fixed"
+
+
+def test_unset_key_resolves_to_none(tmp_path):
+    path = tmp_path / "10xgraph.json"
+    path.write_text(json.dumps({"agent": "g:app"}))
+    assert GraphConfig(str(path)).thread_name_generator == "none"

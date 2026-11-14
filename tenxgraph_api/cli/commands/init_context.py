@@ -242,7 +242,7 @@ def build_config(context: dict, is_prod: bool) -> dict:
     config["ag_ui"] = {"enabled": bool(context.get("ag_ui")), "allow_client_tools": False}
     config["remote_tools"] = []
 
-    config["thread_name_generator"] = "graph.thread_name_generator:MyNameGenerator"
+    config["thread_name_generator"] = "first_message"
     config["injectq"] = "graph.agent:container"
     if context.get("storage") == "postgres-memory":
         config["store"] = "graph.agent:store"

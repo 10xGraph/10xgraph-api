@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from typer.testing import CliRunner
 
 import tenxgraph_api.cli.main as main_mod
@@ -102,6 +103,37 @@ def test_audit_accepts_explicit_project_config(monkeypatch, tmp_path) -> None:
     missing = runner.invoke(main_mod.app, ["--no-animation", "audit", "--config", "missing.json"])
     assert missing.exit_code == 1
     assert "not found" in missing.output
+
+
+def _audit_with_namer(monkeypatch, tmp_path, value):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "10xgraph.json").write_text(
+        json.dumps({"agent": "graph.agent:app", "thread_name_generator": value})
+    )
+    return AuditCommand._config_check()
+
+
+@pytest.mark.parametrize("value", [None, "", "none", "random", "first_message"])
+def test_audit_accepts_builtin_thread_name_generators(monkeypatch, tmp_path, value) -> None:
+    assert _audit_with_namer(monkeypatch, tmp_path, value).status == "pass"
+
+
+def test_audit_accepts_custom_thread_name_generator_path(monkeypatch, tmp_path) -> None:
+    (tmp_path / "namer.py").write_text("")
+    assert _audit_with_namer(monkeypatch, tmp_path, "namer:MyNamer").status == "pass"
+
+
+@pytest.mark.parametrize("value", ["random_name", "firstmessage", "foo:", 3])
+def test_audit_fails_for_bad_thread_name_generator(monkeypatch, tmp_path, value) -> None:
+    diagnostic = _audit_with_namer(monkeypatch, tmp_path, value)
+    assert diagnostic.status == "fail"
+    assert "none, random, first_message or module:attribute" in diagnostic.detail
+
+
+def test_audit_warns_when_thread_name_module_is_missing(monkeypatch, tmp_path) -> None:
+    diagnostic = _audit_with_namer(monkeypatch, tmp_path, "missing_mod:Namer")
+    assert diagnostic.status == "warn"
+    assert "missing_mod" in diagnostic.detail
 
 
 def test_dev_delegates_to_api_with_open_policy(monkeypatch) -> None:

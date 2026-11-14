@@ -20,7 +20,7 @@ from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
 )
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
 from tenxgraph_api.src.app.utils.thread_name_generator import (
-    DefaultThreadNameGenerator,
+    RandomThreadNameGenerator,
     ThreadNameGenerator,
 )
 
@@ -99,7 +99,7 @@ class TestGraphServiceMethods:
         mock_checkpointer.aput_thread.assert_called_once()
 
         # The default (random) generator saves its name the same way.
-        service.thread_name_generator = DefaultThreadNameGenerator()
+        service.thread_name_generator = RandomThreadNameGenerator()
         mock_checkpointer.aput_thread.reset_mock()
         name = await service._save_thread_name({"thread_id": "1"}, 1, ["msg"])
         assert isinstance(name, str) and name

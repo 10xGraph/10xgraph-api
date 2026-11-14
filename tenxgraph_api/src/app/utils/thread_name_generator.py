@@ -1,30 +1,51 @@
 """
-Thread name generation utilities for AI agent conversations.
+Thread name generators for conversations.
 
-This module provides the AIThreadNameGenerator class and helper function for generating
-meaningful, varied, and human-friendly thread names for AI chat sessions using different
-patterns and themes.
+``ThreadNameGenerator`` is the base class to subclass for custom thread names.
+``RandomThreadNameGenerator`` picks a random readable name and ignores the messages.
+``FirstMessageThreadNameGenerator`` names a thread after the user's first message.
 
 Classes:
-    AIThreadNameGenerator: Generates thread names using adjective-noun, action-based,
-    and compound patterns.
-
-Functions:
-    generate_dummy_thread_name: Convenience function for generating a thread name.
+    ThreadNameGenerator: Abstract base class for thread name generators.
+    RandomThreadNameGenerator: Random adjective-noun, action and compound names.
+    FirstMessageThreadNameGenerator: The first message, cut to a short name.
 """
 
 import secrets
 from abc import ABC, abstractmethod
 
 
-class AIThreadNameGenerator:
-    """
-    Generates meaningful, varied thread names for AI conversations using different
-    patterns and themes. Patterns include adjective-noun, action-based, and compound
-    descriptive names.
+class ThreadNameGenerator(ABC):
+    """Base class to subclass for custom thread names.
+
+    Set it with ``thread_name_generator`` in 10xgraph.json as ``"module:attr"``.
 
     Example:
-        >>> AIThreadNameGenerator().generate_name()
+        >>> class UpperName(ThreadNameGenerator):
+        ...     async def generate_name(self, messages: list[str]) -> str:
+        ...         return messages[0].upper() if messages else "new thread"
+    """
+
+    @abstractmethod
+    async def generate_name(self, messages: list[str]) -> str:
+        """Generate a thread name using the list of message text.
+
+        Args:
+            messages (list[str]): List of message text.
+
+        Returns:
+            str: A meaningful thread name.
+        """
+
+
+class RandomThreadNameGenerator(ThreadNameGenerator):
+    """Random thread names (``"thread_name_generator": "random"``).
+
+    Patterns are adjective-noun, action-based and compound descriptive names. The messages
+    are ignored.
+
+    Example:
+        >>> RandomThreadNameGenerator().random_name()
         'thoughtful-dialogue'
     """
 
@@ -191,7 +212,7 @@ class AIThreadNameGenerator:
             str: Name like "thoughtful-dialogue" or "creative-exploration".
 
         Example:
-            >>> AIThreadNameGenerator().generate_simple_name()
+            >>> RandomThreadNameGenerator().generate_simple_name()
             'creative-exploration'
         """
         adj = secrets.choice(self.ADJECTIVES)
@@ -209,7 +230,7 @@ class AIThreadNameGenerator:
             str: Name like "exploring-ideas" or "building-understanding".
 
         Example:
-            >>> AIThreadNameGenerator().generate_action_name()
+            >>> RandomThreadNameGenerator().generate_action_name()
             'building-connections'
         """
         action = secrets.choice(list(self.ACTION_PATTERNS.keys()))
@@ -227,81 +248,30 @@ class AIThreadNameGenerator:
             str: Name like "deep-dive" or "bright-spark".
 
         Example:
-            >>> AIThreadNameGenerator().generate_compound_name()
+            >>> RandomThreadNameGenerator().generate_compound_name()
             'deep-reflection'
         """
         base, options = secrets.choice(self.COMPOUND_PATTERNS)
         complement = secrets.choice(options)
         return f"{base}{separator}{complement}"
 
-    def generate_name(self, separator: str = "-") -> str:
-        """
-        Generate a meaningful thread name using random pattern selection.
+    def random_name(self, separator: str = "-") -> str:
+        """Generate a name with a randomly chosen pattern.
 
         Args:
             separator (str): String to separate words (default: "-").
 
         Returns:
-            str: A meaningful thread name from various patterns.
-
-        Example:
-            >>> AIThreadNameGenerator().generate_name()
-            'engaging-discussion'
+            str: A name such as "engaging-discussion".
         """
-        # Randomly choose between different naming patterns
-        pattern = secrets.choice(["simple", "action", "compound"])
-
-        if pattern == "simple":
-            return self.generate_simple_name(separator)
-        if pattern == "action":
-            return self.generate_action_name(separator)
-        # compound
-        return self.generate_compound_name(separator)
-
-
-class ThreadNameGenerator(ABC):
-    """Deprecated class for generating thread names.
-
-    Use AIThreadNameGenerator instead.
-    """
-
-    @abstractmethod
-    async def generate_name(self, messages: list[str]) -> str:
-        """Generate a thread name using the list of message text.
-
-        Args:
-            messages (list[str]): List of message text.
-
-        Returns:
-            str: A meaningful thread name.
-
-        Example:
-            >>> ThreadNameGenerator().generate_name()
-            'insightful-conversation'
-        """
-
-
-class DefaultThreadNameGenerator(ThreadNameGenerator):
-    """Fallback thread name generator used when no custom generator is configured.
-
-    Delegates to AIThreadNameGenerator.
-    """
+        pattern = secrets.choice(
+            [self.generate_simple_name, self.generate_action_name, self.generate_compound_name]
+        )
+        return pattern(separator)
 
     async def generate_name(self, messages: list[str]) -> str:
-        """Generate a thread name.
-
-        Args:
-            messages (list[str]): List of message text.
-
-        Returns:
-            str: A meaningful thread name.
-
-        Example:
-            >>> DefaultThreadNameGenerator().generate_name()
-            'thoughtful-dialogue'
-        """
-        generator = AIThreadNameGenerator()
-        return generator.generate_name("-")
+        """Return a random name; ``messages`` is ignored."""
+        return self.random_name()
 
 
 # Longest name ``FirstMessageThreadNameGenerator`` makes, in characters.
@@ -325,7 +295,7 @@ class FirstMessageThreadNameGenerator(ThreadNameGenerator):
     The API passes the user's messages first, so this is the user's first message whenever it
     has text. Whitespace is collapsed and the text is cut to at most
     ``FIRST_MESSAGE_NAME_LENGTH`` characters on a word boundary, adding nothing. Without any
-    text the name is a random one, as ``DefaultThreadNameGenerator`` makes.
+    text the name is a random one, as ``RandomThreadNameGenerator`` makes.
     """
 
     async def generate_name(self, messages: list[str]) -> str:
@@ -333,4 +303,4 @@ class FirstMessageThreadNameGenerator(ThreadNameGenerator):
             text = " ".join(str(message or "").split())
             if text:
                 return _cut_on_word(text, FIRST_MESSAGE_NAME_LENGTH)
-        return AIThreadNameGenerator().generate_name("-")
+        return RandomThreadNameGenerator().random_name()

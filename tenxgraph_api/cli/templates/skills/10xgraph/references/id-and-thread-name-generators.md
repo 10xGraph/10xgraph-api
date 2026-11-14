@@ -56,13 +56,26 @@ Configure in `10xgraph.json`:
 }
 ```
 
-- `"random"` (the default when unset): a random readable name such as `deep-dive`.
-- `"first_message"`: the user's first message, whitespace collapsed, cut to at most 60
-  characters on a word boundary; random when there is no text.
-- `"none"`: new threads stay unnamed (the thread itself is saved).
-- `"module:attr"`: your `ThreadNameGenerator` subclass or instance
-  (`async def generate_name(self, messages: list[str]) -> str`). `messages` holds the user's
+- Unset, `null`, `""` or `"none"` (the default): new threads are saved without a name.
+- `"random"` (`RandomThreadNameGenerator`): a random two-word name such as `thoughtful-dialogue`.
+- `"first_message"` (`FirstMessageThreadNameGenerator`): the user's first message, whitespace
+  collapsed, cut to at most 60 characters on a word boundary; random when there is no text.
+- `"module:attr"`: your `ThreadNameGenerator` subclass or instance. `messages` holds the user's
   message texts first, then the replies.
+- Anything else is a config error: `thread_name_generator must be one of none, random,
+  first_message or module:attribute.` `10xgraph audit` checks the value and warns when a custom
+  module file is missing next to `10xgraph.json`.
+
+```python
+from tenxgraph_api import ThreadNameGenerator
+
+
+class TitleGenerator(ThreadNameGenerator):
+    async def generate_name(self, messages: list[str]) -> str:
+        return messages[0][:40] if messages else "new thread"
+```
+
+Set it as `"thread_name_generator": "graph.titles:TitleGenerator"`.
 
 The name is generated after the first run on a new thread, in the background, and saved on the
 thread (`GET /v1/threads`).

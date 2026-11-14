@@ -31,8 +31,8 @@ from tenxgraph_api.src.app.core.cache_store.base import BaseCacheStore
 from tenxgraph_api.src.app.core.cache_store.loader import load_and_bind_cache_store
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.utils.thread_name_generator import (
-    DefaultThreadNameGenerator,
     FirstMessageThreadNameGenerator,
+    RandomThreadNameGenerator,
     ThreadNameGenerator,
 )
 
@@ -274,7 +274,7 @@ def resolve_thread_name_generator(choice: str) -> ThreadNameGenerator | None:
     if choice == "none":
         return None
     if choice == "random":
-        return DefaultThreadNameGenerator()
+        return RandomThreadNameGenerator()
     if choice == "first_message":
         return FirstMessageThreadNameGenerator()
     return load_thread_name_generator(choice)
@@ -722,7 +722,7 @@ async def attach_all_modules(
             "single-user or trusted-network deployments; set `auth` in 10xgraph.json to enable it."
         )
 
-    # Thread names: random by default; None (``"none"``) leaves new threads unnamed.
+    # Thread names: unset means none (threads stay unnamed); see GraphConfig.thread_name_generator.
     container.bind_instance(
         ThreadNameGenerator,
         resolve_thread_name_generator(config.thread_name_generator),

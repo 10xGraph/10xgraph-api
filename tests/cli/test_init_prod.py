@@ -101,6 +101,8 @@ def test_full_mode_defaults_to_memory_storage_and_jwt(tmp_path: Path) -> None:
     assert config["cache_store"]["type"] == "memory"
     assert config["cache_store"]["rate_limit"]["enabled"] is True
     assert config["cache_store"]["token_revocation"] is True
+    assert config["thread_name_generator"] == "first_message"
+    assert not (target / "graph" / "thread_name_generator.py").exists()
     assert "InMemoryCheckpointer()" in (target / "graph" / "agent.py").read_text()
     assert (target / "evals").is_dir() and (target / "tests").is_dir()
 

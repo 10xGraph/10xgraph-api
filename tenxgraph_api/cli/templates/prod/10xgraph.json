@@ -9,7 +9,7 @@
     "enabled": false,
     "allow_client_tools": false
   },
-  "thread_name_generator": "graph.thread_name_generator:MyNameGenerator",
+  "thread_name_generator": "first_message",
   "injectq": "graph.agent:container",
   "id_generator": "uuid",
   "cache_store": {

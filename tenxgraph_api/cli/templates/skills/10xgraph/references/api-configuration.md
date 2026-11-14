@@ -19,7 +19,7 @@ Common full shape:
   "agent": "graph.react:app",
   "store": "graph.dependencies:my_store",
   "injectq": "graph.dependencies:container",
-  "thread_name_generator": "graph.thread_name_generator:MyNameGenerator",
+  "thread_name_generator": "first_message",
   "env": ".env",
   "auth": { "method": "jwt", "roles": { "admin": { "permissions": ["*"], "reach": "tenant" } } },
   "id_generator": "uuid",
@@ -45,7 +45,7 @@ Common full shape:
 - `checkpointer`: not applied by the server (a warning is logged when it is set). Pass the checkpointer to `graph.compile(checkpointer=...)` in your agent module.
 - `store`: optional import path to a `BaseStore` instance; required for store endpoints.
 - `injectq`: optional import path to an `InjectQ` container.
-- `thread_name_generator`: `"random"` (the default when unset), `"first_message"` (the user's first message, whitespace collapsed, cut to at most 60 characters on a word boundary), `"none"` (threads stay unnamed) or a `module:attr` import path to a `ThreadNameGenerator` class/instance. Every generated name is saved on the thread. See `references/id-and-thread-name-generators.md`.
+- `thread_name_generator`: unset, `null`, `""` or `"none"` (the default): threads are saved without a name. `"random"`: a random two-word name such as `thoughtful-dialogue`. `"first_message"`: the user's first message, whitespace collapsed, cut to at most 60 characters on a word boundary. Or a `module:attr` import path to a `ThreadNameGenerator` class/instance. Any other value is a config error. Every generated name is saved on the thread. See `references/id-and-thread-name-generators.md`.
 - `id_generator`: unset keeps the graph's own generator. A built-in name (`uuid`, `hex`, `short`, `int`, `bigint`, `timestamp`, `snowflake`) or a `module:attr` import path to a `BaseIDGenerator` instance, subclass or zero-argument factory. New thread, message and memory ids all come from it. Set it here or in `StateGraph(id_generator=...)`, not both (the server refuses to start).
 
 - `env`: optional `.env` path loaded before graph import.
