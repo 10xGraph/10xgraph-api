@@ -45,6 +45,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `10xgraph audit` validates `thread_name_generator`: an invalid value fails, and a custom path
   whose module file is missing next to `10xgraph.json` warns. No user code is imported.
 - `10xgraph config` offers None, Random name, First message and Custom class for it.
+- The CLI skill reference `callbacks-and-command.md` no longer describes `Command.PARENT` as parent-graph navigation. `Command.graph` is reserved and not acted on, and nested graphs are not supported: build a multi-agent system as one graph with several `Agent` nodes.
 
 ## [1.0.0rc6] - 2026-11-11
 

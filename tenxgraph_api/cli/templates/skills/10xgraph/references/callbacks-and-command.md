@@ -228,7 +228,7 @@ Fields:
 
 - `update`: state update, `Message`, string, converter, or `None`.
 - `goto`: next node name or `END`.
-- `graph`: optional graph target; `Command.PARENT` is reserved for parent graph navigation patterns.
+- `graph`: reserved; the runtime does not act on it (`Command.PARENT` included). Nested graphs are not supported: build multi-agent systems as one graph with several `Agent` nodes.
 - `state`: optional attached state.
 
 Prefer conditional edges for normal routing because they are easier to visualize and test. Use `Command(goto=...)` for dynamic jumps, recovery branches, handoffs, or side-effect-dependent routing.

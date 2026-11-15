@@ -8,6 +8,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/10xgraph-api)](https://pypi.org/project/10xgraph-api/)
 [![License](https://img.shields.io/github/license/10xGraph/10xgraph-api)](https://github.com/10xGraph/10xgraph-api/blob/main/LICENSE)
 [![Verified on FreeAPI](https://findfreeapi.com/api/badge/10xgraph-api)](https://findfreeapi.com/en/service/10xgraph-api)
+[![Star on GitHub](https://img.shields.io/badge/GitHub-Star-181717?logo=github)](https://github.com/10xGraph/10xGraph)
 
 10xGraph is open-source, self-hosted infrastructure for AI applications. You write the agents, tools and tasks; 10xGraph runs them behind an API server with authentication, role-based access, tenant isolation, durable state in Postgres and Redis, background jobs, metrics and tracing, and generates Docker and Kubernetes deploy files. MIT licensed, by 10xScale. Formerly Agentflow.
 
@@ -78,6 +79,8 @@ JWT_SECRET_KEY=<32+ characters>
 ```
 
 `"auth": "jwt"` is a shortcut for the same thing. Every authenticated user then gets the default permission set with reach `own`. Add `roles` and `tenant_claims` for the setup below, or pick the Production template in `10xgraph init`, which writes JWT auth, a Redis cache store with rate limits and token revocation, a prompt-injection validator, evals and tests.
+
+If this saved you time, star [10xGraph on GitHub](https://github.com/10xGraph/10xGraph). It helps other developers find it.
 
 ---
 
