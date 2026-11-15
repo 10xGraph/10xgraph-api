@@ -67,6 +67,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Expected 401s log at WARNING.** A missing, invalid, expired or revoked token logs one WARNING line
+  (method, path, status, code; no token, no traceback) through the same helper as 403, 404 and 429.
+  5xx stays at ERROR.
 - A correctly signed token without the configured tenant claim (`auth.tenant_claims`), or with
   a malformed roles or permissions claim, answers 401 with error code `INVALID_TOKEN` instead of
   `HTTPException`. So does a request without a credential when the auth class returns no claims.
@@ -82,6 +85,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `10xgraph dev` and `agentflow dev` fall back to `agentflow.json` again when `10xgraph.json` is
   missing.
 - `MEDIA_STORAGE_TYPE=cloud` no longer fails with `ImportError: cannot import name 'AwsConfig'`: the config classes are imported from `cloud_storage_manager.storage_schema` and the factory from `cloud_storage_manager.storage_provider`, where `cloud-storage-manager` 0.1.2 defines them.
+- **File uploads: the stored filename is cleaned, and two `file` parts are refused.** `POST /v1/files/upload` keeps only the base name (no path, control or bidi characters, at most 255 characters, `file` if nothing is left), so `info` and list no longer return `../../etc/passwd` or a right-to-left override as sent. A request with more than one `file` part answers 422 "Send exactly one file part" instead of silently keeping the last. `GET /v1/files` on a store that cannot list logs one warning line (no traceback) before its 501.
 
 ## [1.0.0rc6] - 2026-11-11
 

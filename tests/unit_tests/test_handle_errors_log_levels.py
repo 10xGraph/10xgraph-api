@@ -126,6 +126,18 @@ def test_http_500_logs_error_with_traceback(caplog):
     assert any(r.exc_info for r in errors)
 
 
+def test_http_501_logs_warning_and_keeps_its_message(caplog):
+    """A 501 says this setup does not offer the route: no traceback, and the reason is shown."""
+    client = _client(lambda: HTTPException(501, "The configured media store cannot list files"))
+    with caplog.at_level(logging.DEBUG):
+        response = client.get("/boom/1")
+
+    assert response.status_code == 501
+    assert "cannot list files" in response.text
+    assert not [r for r in _records(caplog) if r.levelno >= logging.ERROR]
+    assert not any(r.exc_info for r in _records(caplog))
+
+
 def test_graph_error_logs_error_with_traceback(caplog):
     client = _client(lambda: GraphError("broken"))
     with caplog.at_level(logging.DEBUG):
@@ -133,3 +145,22 @@ def test_graph_error_logs_error_with_traceback(caplog):
 
     assert response.status_code == 500
     assert any(r.levelno == logging.ERROR and r.exc_info for r in _records(caplog))
+
+
+def test_auth_rejection_logs_one_warning_without_token(caplog):
+    secret = "eyJhbGciOi.secret-token-value"
+    client = _client(
+        lambda: UserAccountError(
+            message=f"bad {secret}", error_code="INVALID_TOKEN", status_code=401
+        )
+    )
+    with caplog.at_level(logging.DEBUG):
+        response = client.get("/boom/1", headers={"Authorization": f"Bearer {secret}"})
+
+    assert response.status_code == 401
+    records = [r for r in _records(caplog) if "UserAccountError" in r.getMessage()]
+    assert [r.levelno for r in records] == [logging.WARNING]
+    assert "INVALID_TOKEN" in records[0].getMessage()
+    assert records[0].exc_info is None
+    assert not [r for r in _records(caplog) if r.levelno >= logging.ERROR]
+    assert secret not in caplog.text
