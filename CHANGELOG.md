@@ -40,6 +40,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `10xgraph init` writes `10xgraph>=1.0,<2.0` and `10xgraph-api>=1.0,<2.0` in the generated
+  pyproject.toml.
 - `10xgraph init` Production writes `"thread_name_generator": "first_message"` and no longer
   generates `graph/thread_name_generator.py`. Quick Start leaves the key unset.
 - `10xgraph audit` validates `thread_name_generator`: an invalid value fails, and a custom path

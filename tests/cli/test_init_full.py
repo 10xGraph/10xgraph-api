@@ -53,7 +53,7 @@ def test_storage_preset(storage: str, cache: str, store_key: bool, core_extras: 
     assert ("store" in config) is store_key
     if store_key:
         assert config["store"] == "graph.agent:store"
-    assert template_vars(context)["core_requirement"] == f"10xgraph[{core_extras}]"
+    assert template_vars(context)["core_requirement"] == f"10xgraph[{core_extras}]>=1.0,<2.0"
 
 
 def test_cache_store_flag_overrides_the_preset() -> None:
@@ -120,7 +120,7 @@ def test_extras_flags_skip_template_dirs_and_set_config(tmp_path: Path) -> None:
     assert config["websocket"] == {"enabled": True}
     assert config["ag_ui"]["enabled"] is True
     api = template_vars(_full(websocket=True, ag_ui=True, otel=True))["api_requirement"]
-    assert api == "10xgraph-api[jwt,websocket,ag-ui,otel]"
+    assert api == "10xgraph-api[jwt,websocket,ag-ui,otel]>=1.0,<2.0"
 
 
 # --- strip_blocks --------------------------------------------------------------------
@@ -223,10 +223,13 @@ def test_anthropic_store_adds_openai_extra_for_embeddings() -> None:
     context = _full(storage="postgres-memory", provider="anthropic")
     assert (
         template_vars(context)["core_requirement"]
-        == "10xgraph[anthropic,pg_checkpoint,pgvector,openai]"
+        == "10xgraph[anthropic,pg_checkpoint,pgvector,openai]>=1.0,<2.0"
     )
     openai = _full(storage="postgres-memory", provider="openai")
-    assert template_vars(openai)["core_requirement"] == "10xgraph[openai,pg_checkpoint,pgvector]"
+    assert (
+        template_vars(openai)["core_requirement"]
+        == "10xgraph[openai,pg_checkpoint,pgvector]>=1.0,<2.0"
+    )
 
 
 @pytest.mark.parametrize(("tests", "evals"), [(True, True), (True, False), (False, True)])
