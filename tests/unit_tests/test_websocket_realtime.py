@@ -28,7 +28,7 @@ def _credential_valid(monkeypatch):
     """The mock sockets carry no credential: treat it as valid unless a test says otherwise."""
     graph_router = _router_module()
 
-    monkeypatch.setattr(graph_router, "ws_identity_still_valid", lambda ws, user: True)
+    monkeypatch.setattr(graph_router, "ws_identity_still_valid", AsyncMock(return_value=True))
     monkeypatch.setattr(graph_router, "_ws_token_revoked", AsyncMock(return_value=False))
 
 
@@ -590,7 +590,9 @@ class TestRealtimeCredentialRecheck:
         monkeypatch.setattr(graph_router, "REALTIME_RECHECK_INTERVAL", 0.01)
         valid = iter([True])  # the token verifies at start, then stops verifying
         monkeypatch.setattr(
-            graph_router, "ws_identity_still_valid", lambda ws, user: next(valid, False)
+            graph_router,
+            "ws_identity_still_valid",
+            AsyncMock(side_effect=lambda ws, user: next(valid, False)),
         )
 
         async def _hang(*a, **k):

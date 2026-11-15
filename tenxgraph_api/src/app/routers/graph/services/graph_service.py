@@ -239,6 +239,12 @@ def _stream_error_data(exc: Exception) -> dict[str, Any]:
         is_production = get_settings().MODE == "production"
         reason = _sanitize_error_message(str(exc), "VALIDATION_ERROR", is_production)
         return {"reason": reason, "code": "VALIDATION_ERROR"}
+    from tenxgraph_api.src.app.core.exceptions.server_errors import BAD_DATA_CODE, classify
+
+    kind = classify(exc)
+    if kind is not None and kind.error_code == BAD_DATA_CODE:
+        # The same code and text as the HTTP 422 for data the database refuses.
+        return {"reason": kind.message, "code": BAD_DATA_CODE}
     return {"reason": _stream_error_reason(exc)}
 
 

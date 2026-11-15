@@ -8,6 +8,7 @@ import io
 import json
 import logging
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import Depends, FastAPI, HTTPException, WebSocket
@@ -46,15 +47,16 @@ from tenxgraph_api.src.app.core.threads import require_thread
 ROUTER = "tenxgraph_api.src.app.routers.graph.router"
 WS_POLICY_VIOLATION = 1008
 CLAIMS: dict[str, dict[str, Any]] = {
-    "alice": {"user_id": "alice", "org": "acme"},
+    "alice": {"user_id": "alice", "org": "acme", "jti": "a-1"},
     "revoked": {"user_id": "bob", "jti": "dead"},
+    "no-jti": {"user_id": "erin"},
     "reserved": {"user_id": "__system__:memory"},
     "bad-scope": {"user_id": "carol", "scope": 5},
 }
 
 
 class _Auth(BaseAuth):
-    def authenticate(self, request, response, credential):  # type: ignore[override]
+    async def authenticate(self, request, response, credential):  # type: ignore[override]
         if credential is None:
             return None
         if credential.credentials == "invalid":
@@ -264,6 +266,7 @@ def _revoke(client: TestClient) -> None:
         ("invalid", "invalid_token", None),
         ("unknown", "invalid_token", None),
         ("revoked", "revoked", "bob"),
+        ("no-jti", "missing_jti", "erin"),
         ("reserved", "reserved_id", None),
         ("bad-scope", "claims_rejected", "carol"),
     ],
@@ -440,7 +443,7 @@ def test_ws_session_recheck_records_auth_failure(sink, monkeypatch, valid, revok
             raise TokenRevocationUnavailableError("down")
         return revoked
 
-    monkeypatch.setattr(router, "ws_identity_still_valid", lambda ws, user: valid)
+    monkeypatch.setattr(router, "ws_identity_still_valid", AsyncMock(return_value=valid))
     monkeypatch.setattr(router, "token_revoked", token_revoked)
     assert asyncio.run(router._ws_credential_error(None, Identity(user_id="alice")))
     assert [(e.event, e.reason, e.user_id) for e in sink.events] == [("auth", reason, "alice")]
@@ -452,7 +455,7 @@ def test_ws_session_recheck_passes_quietly(sink, monkeypatch):
     async def token_revoked(identity):
         return False
 
-    monkeypatch.setattr(router, "ws_identity_still_valid", lambda ws, user: True)
+    monkeypatch.setattr(router, "ws_identity_still_valid", AsyncMock(return_value=True))
     monkeypatch.setattr(router, "token_revoked", token_revoked)
     assert not asyncio.run(router._ws_credential_error(None, Identity(user_id="alice")))
     assert not asyncio.run(router._ws_credential_error(None, None))  # auth off

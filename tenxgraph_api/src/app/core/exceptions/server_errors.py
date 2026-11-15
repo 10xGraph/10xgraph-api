@@ -29,6 +29,7 @@ from tenxgraph_api.src.app.utils import error_response
 logger = logging.getLogger("tenxgraph_api.errors")
 
 RETRY_AFTER_SECONDS = 5
+BAD_DATA_CODE = "INVALID_REQUEST_DATA"
 
 _DRIVER_MODULES = ("redis", "asyncpg", "psycopg", "psycopg2", "psycopg_pool")
 _MAX_CHAIN = 8
@@ -93,7 +94,7 @@ def classify(exc: BaseException) -> Classified | None:
         if module in _DRIVER_MODULES and _is_bad_data(item):
             return Classified(
                 422,
-                "INVALID_REQUEST_DATA",
+                BAD_DATA_CODE,
                 "The request contains data that cannot be stored, such as a NUL character "
                 "or a number out of range.",
             )

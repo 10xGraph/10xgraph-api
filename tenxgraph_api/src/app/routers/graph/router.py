@@ -25,6 +25,7 @@ from tenxgraph_api.src.app.core.auth.permissions import (
     ws_bearer_subprotocol,
 )
 from tenxgraph_api.src.app.core.auth.revocation import (
+    TokenJtiMissingError,
     TokenRevocationUnavailableError,
     token_revoked,
 )
@@ -273,7 +274,7 @@ async def _next_frame(frames: _WsFrames, websocket: WebSocket, identity: Identit
         try:
             return await asyncio.wait_for(frames.next(), wait)
         except TimeoutError:
-            if not ws_identity_still_valid(websocket, identity):
+            if not await ws_identity_still_valid(websocket, identity):
                 raise _SessionExpired from None
 
 
@@ -765,6 +766,8 @@ async def _ws_token_revoked(identity: Identity | None) -> bool:
         reason = "revoked"
     except TokenRevocationUnavailableError:
         revoked, reason = True, "revocation_unavailable"
+    except TokenJtiMissingError:
+        revoked, reason = True, "missing_jti"
     if revoked:
         await audit_event("auth", "failed", reason=reason, user_id=identity.user_id)
     return revoked
@@ -776,7 +779,7 @@ async def _ws_credential_error(websocket: WebSocket, identity: Identity | None) 
     Checked before each ``/v1/graph/ws`` run and on a timer during a ``/v1/graph/live``
     session: the token is re-verified (catches expiry) and the revocation backend is asked.
     """
-    if not ws_identity_still_valid(websocket, identity):
+    if not await ws_identity_still_valid(websocket, identity):
         user_id = identity.user_id if identity is not None else None
         await audit_event("auth", "failed", reason="invalid_token", user_id=user_id)
         return True

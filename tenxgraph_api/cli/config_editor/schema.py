@@ -157,11 +157,19 @@ _SECTIONS: list[dict[str, Any]] = [
             },
             {
                 "name": "JWT_ISSUER",
-                "purpose": "When set, tokens must carry a matching iss claim.",
+                "purpose": (
+                    "Unset: the issuer is not checked. Set: a token must carry a matching iss "
+                    "claim, or it is refused with 401."
+                ),
             },
             {
                 "name": "JWT_AUDIENCE",
-                "purpose": "When set, tokens must carry a matching aud claim.",
+                "purpose": (
+                    "Unset: a token without aud is accepted, but a token that carries aud is "
+                    "refused. Set: a token must carry a matching aud claim, or it is refused "
+                    "with 401. Set both in production when your signing key also issues tokens "
+                    "for other services."
+                ),
             },
         ],
     },

@@ -12,6 +12,7 @@ from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.core.auth import revocation
 from tenxgraph_api.src.app.core.auth.revocation import (
+    TokenJtiMissingError,
     TokenRevocationConfig,
     TokenRevocationUnavailableError,
     is_revoked,
@@ -86,10 +87,25 @@ async def test_revoke_user_defaults_to_the_store_clock():
 async def test_token_revoked_needs_an_identity_and_the_feature_on(monkeypatch):
     store = InMemoryCacheStore()
     await revoke_user(store, "a")
-    assert await token_revoked({}, store, ON) is False  # auth off: nothing to revoke
-    assert await token_revoked({"user_id": "a"}, store, ON) is True
+    assert await token_revoked({"user_id": "a", "jti": "t"}, store, ON) is True
     monkeypatch.setattr(revocation, "_bound", lambda: (None, store))
-    assert await token_revoked({"user_id": "a"}) is False  # not configured
+    assert await token_revoked({"user_id": "a"}) is False  # not configured: jti optional
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("jti", [None, "", "  ", True, 1.5, ["x"], {"a": 1}])
+async def test_token_revoked_refuses_a_token_without_a_usable_jti(jti):
+    claims = {"user_id": "a"} if jti is None else {"user_id": "a", "jti": jti}
+    with pytest.raises(TokenJtiMissingError):
+        await token_revoked(claims, InMemoryCacheStore(), ON)
+    with pytest.raises(TokenJtiMissingError):
+        await token_revoked(Identity(user_id="a", claims=claims), InMemoryCacheStore(), ON)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("jti", ["t-1", 7, 0])
+async def test_token_revoked_accepts_a_string_or_int_jti(jti):
+    assert await token_revoked({"user_id": "a", "jti": jti}, InMemoryCacheStore(), ON) is False
 
 
 @pytest.mark.asyncio
@@ -97,21 +113,21 @@ async def test_token_revoked_fails_closed_when_the_store_fails():
     store = MagicMock(spec=BaseCacheStore)
     store.get = AsyncMock(side_effect=ConnectionError("down"))
     with pytest.raises(TokenRevocationUnavailableError):
-        await token_revoked({"user_id": "a"}, store, ON)
+        await token_revoked({"user_id": "a", "jti": "t"}, store, ON)
 
 
 @pytest.mark.asyncio
 async def test_token_revoked_fails_closed_without_a_cache_store(monkeypatch):
     monkeypatch.setattr(revocation, "_bound", lambda: (ON, None))
     with pytest.raises(TokenRevocationUnavailableError):
-        await token_revoked({"user_id": "a"})
+        await token_revoked({"user_id": "a", "jti": "t"})
 
 
 @pytest.mark.asyncio
 async def test_token_revoked_uses_the_configured_token_lifetime():
     store = InMemoryCacheStore()
     await revoke_user(store, "a", before=NOW)
-    fresh = {"user_id": "a", "exp": NOW + 3600 + 100}
+    fresh = {"user_id": "a", "jti": "t", "exp": NOW + 3600 + 100}
     assert await token_revoked(fresh, store, ON) is True
     assert await token_revoked(fresh, store, TokenRevocationConfig(token_lifetime=3600)) is False
 
@@ -150,7 +166,7 @@ async def test_ws_run_gate_closes_on_revocation(monkeypatch, revoked):
         return True
 
     monkeypatch.setattr(graph_router, "token_revoked", fake_revoked)
-    monkeypatch.setattr(graph_router, "ws_identity_still_valid", lambda ws, user: True)
+    monkeypatch.setattr(graph_router, "ws_identity_still_valid", AsyncMock(return_value=True))
     websocket = MagicMock()
     websocket.send_text = AsyncMock()
     websocket.close = AsyncMock()
@@ -287,3 +303,23 @@ def test_config_editor_validates_token_revocation(monkeypatch):
         assert errors and "token_revocation must be true, false" in errors[0]["message"]
     warn = validate_config({"agent": "graph:app", "cache_store": {"token_revocation": True}})
     assert "warning" in [i["level"] for i in warn if "token_revocation" in i["path"]]
+
+
+@pytest.mark.asyncio
+async def test_ws_run_gate_closes_on_a_token_without_jti(monkeypatch):
+    import importlib
+
+    graph_router = importlib.import_module("tenxgraph_api.src.app.routers.graph.router")
+
+    async def no_jti(user):
+        raise TokenJtiMissingError("Token has no usable jti claim")
+
+    monkeypatch.setattr(graph_router, "token_revoked", no_jti)
+    monkeypatch.setattr(graph_router, "ws_identity_still_valid", AsyncMock(return_value=True))
+    monkeypatch.setattr(graph_router, "audit_event", AsyncMock())
+    websocket = MagicMock()
+    websocket.send_text = AsyncMock()
+    websocket.close = AsyncMock()
+
+    assert await graph_router._ws_run_gate(websocket, Identity(user_id="a")) == "close"
+    websocket.close.assert_awaited_once_with(code=1008)

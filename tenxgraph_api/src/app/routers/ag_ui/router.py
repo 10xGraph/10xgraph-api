@@ -27,8 +27,13 @@ from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import
     MediaURLBlockedError,
 )
 
-from .converter import check_client_tools, parse_run_input, to_tenxgraph_messages
-from .service import stream_ag_ui
+from .converter import (
+    check_client_tools,
+    check_not_server_tools,
+    parse_run_input,
+    to_tenxgraph_messages,
+)
+from .service import server_tool_names, stream_ag_ui
 
 
 # A threadId that asks the server to make the thread (same word as the WebSocket routes).
@@ -74,6 +79,8 @@ async def run_ag_ui(
     try:
         run_input = parse_run_input(body)
         check_client_tools(run_input.tools or [])
+        if run_input.tools and config.ag_ui.allow_client_tools:
+            check_not_server_tools(run_input.tools, await server_tool_names(service))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=client_error_detail(exc)) from exc
 

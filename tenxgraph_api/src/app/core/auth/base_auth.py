@@ -19,7 +19,7 @@ class BaseAuth(ABC):
     rbac: RbacConfig | None = None
 
     @abstractmethod
-    def authenticate(
+    async def authenticate(
         self,
         request: HTTPConnection,
         response: Response | None,

@@ -45,6 +45,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `RandomThreadNameGenerator`. `ThreadNameGenerator` stays the public base class.
 - `thread_name_generator` must be `none`, `random`, `first_message` or `module:attribute`; any
   other value is a config error.
+- **`BaseAuth.authenticate` is now async.** Custom auth classes must change `def authenticate` to
+  `async def authenticate`; the server awaits it, so a slow lookup no longer blocks the event loop.
+- **With `cache_store.token_revocation` on, every token needs a `jti`.** A token without a usable
+  `jti` claim (missing, empty, or not a string or int) answers 401 `INVALID_TOKEN` ("Invalid
+  token, jti missing"; audit reason `missing_jti`), on HTTP and WebSocket, whatever auth class
+  produced the claims. Before, it was accepted and could never be revoked by itself. With
+  revocation off, `jti` stays optional. Migration: issue tokens with a `jti` claim, or turn
+  `token_revocation` off.
 
 ### Changed
 
@@ -59,8 +67,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A correctly signed token without the configured tenant claim (`auth.tenant_claims`), or with
+  a malformed roles or permissions claim, answers 401 with error code `INVALID_TOKEN` instead of
+  `HTTPException`. So does a request without a credential when the auth class returns no claims.
+- A token whose `user_id` uses the reserved `__system__` prefix answers 401 `INVALID_TOKEN`
+  instead of `HTTPException`; the message stays "This user id is reserved".
+- `POST /v1/ag-ui` refuses a client tool that has the name of a server tool (local or MCP) with a
+  422 (`tools[2]: 'refund_order' is the name of a server tool`), as `ag_ui.allow_client_tools`
+  documents. A tool that repeats a declared `remote_tools` name is still accepted.
+- A `StorageError` caused by data the database refuses (Postgres SQLSTATE class 22, such as an
+  invalid text value) answers 422 `INVALID_REQUEST_DATA` instead of 500. Lost connections still
+  answer 503 and other storage errors 500.
+  A stream's error chunk carries the same `code` (`INVALID_REQUEST_DATA`) and message.
 - `10xgraph dev` and `agentflow dev` fall back to `agentflow.json` again when `10xgraph.json` is
   missing.
+- `MEDIA_STORAGE_TYPE=cloud` no longer fails with `ImportError: cannot import name 'AwsConfig'`: the config classes are imported from `cloud_storage_manager.storage_schema` and the factory from `cloud_storage_manager.storage_provider`, where `cloud-storage-manager` 0.1.2 defines them.
 
 ## [1.0.0rc6] - 2026-11-11
 

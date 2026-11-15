@@ -30,6 +30,10 @@ with the in-memory store only this process.
 
 A cache store error fails closed: the request is refused with 503 rather than served with a
 token that might have been revoked.
+
+While revocation is on, every token must carry a usable ``jti`` (a non-empty string or an int),
+whatever auth class produced its claims: a token without one could never be revoked by itself.
+:func:`token_revoked` raises :class:`TokenJtiMissingError` for it, and the API answers 401.
 """
 
 from __future__ import annotations
@@ -59,6 +63,7 @@ _MICROSECOND = Decimal("0.000001")
 
 __all__ = [
     "DEFAULT_USER_REVOCATION_TTL",
+    "TokenJtiMissingError",
     "TokenRevocationConfig",
     "TokenRevocationUnavailableError",
     "is_revoked",
@@ -72,6 +77,14 @@ def _number(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
     return float(value)
+
+
+def _has_usable_jti(identity: Identity | dict[str, Any]) -> bool:
+    """Whether the token carries a ``jti`` it can be revoked by: a non-empty string or an int."""
+    jti = identity.get("jti")
+    if isinstance(jti, bool):
+        return False
+    return isinstance(jti, int) or (isinstance(jti, str) and bool(jti.strip()))
 
 
 def _user_key_of(identity: Identity | dict[str, Any]) -> str | None:
@@ -174,6 +187,10 @@ class TokenRevocationUnavailableError(RuntimeError):
     """The cache store could not answer a revocation check; the request must not be served."""
 
 
+class TokenJtiMissingError(ValueError):
+    """Revocation is on and the token has no usable ``jti``, so it could never be revoked."""
+
+
 def _bound() -> tuple[TokenRevocationConfig | None, BaseCacheStore | None]:
     """The revocation settings and cache store bound in the app's container."""
     from tenxgraph_api.src.app.core.cache_store import BaseCacheStore
@@ -200,6 +217,7 @@ async def token_revoked(
     ``cache`` and ``config`` default to the ones bound in the app's container. False when token
     revocation is off. The ``jti`` is checked even when ``user_id`` is missing or odd; per-user
     revocation applies when ``user_id`` is a valid string. Raises
+    :class:`TokenJtiMissingError` when revocation is on and the token has no usable ``jti``, and
     :class:`TokenRevocationUnavailableError` when the cache store fails or none is bound (fail
     closed).
     """
@@ -211,6 +229,8 @@ async def token_revoked(
         cache = cache or bound_cache
     if config is None:
         return False
+    if not _has_usable_jti(identity):
+        raise TokenJtiMissingError("Token has no usable jti claim")
     if cache is None:
         logger.error("Token revocation is on but no cache store is bound")
         raise TokenRevocationUnavailableError("Token revocation check unavailable")

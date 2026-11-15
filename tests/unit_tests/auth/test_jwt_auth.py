@@ -94,14 +94,15 @@ class TestJwtAuth:
     # =========================================================================
     # Test: Null credentials
     # =========================================================================
-    def test_authenticate_with_null_credentials_raises_error(
+    @pytest.mark.asyncio
+    async def test_authenticate_with_null_credentials_raises_error(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
     ):
         """Null credentials raise UserAccountError with INVALID_TOKEN, not REVOKED_TOKEN."""
         with pytest.raises(UserAccountError) as exc_info:
-            jwt_auth.authenticate(None, mock_response, None)
+            await jwt_auth.authenticate(None, mock_response, None)
 
         assert exc_info.value.error_code == "INVALID_TOKEN"
         assert "Invalid token" in exc_info.value.message
@@ -110,7 +111,8 @@ class TestJwtAuth:
     # =========================================================================
     # Test: Missing JWT settings
     # =========================================================================
-    def test_authenticate_missing_jwt_secret_key_raises_error(
+    @pytest.mark.asyncio
+    async def test_authenticate_missing_jwt_secret_key_raises_error(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -124,12 +126,13 @@ class TestJwtAuth:
             credentials = self.create_credentials("some-token")
 
             with pytest.raises(UserAccountError) as exc_info:
-                jwt_auth.authenticate(None, mock_response, credentials)
+                await jwt_auth.authenticate(None, mock_response, credentials)
 
             assert exc_info.value.error_code == "JWT_SETTINGS_NOT_CONFIGURED"
             assert "JWT settings are not configured" in exc_info.value.message
 
-    def test_authenticate_uses_default_jwt_algorithm_when_env_var_missing(
+    @pytest.mark.asyncio
+    async def test_authenticate_uses_default_jwt_algorithm_when_env_var_missing(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -143,12 +146,13 @@ class TestJwtAuth:
             credentials = self.create_credentials("some-token")
 
             with pytest.raises(UserAccountError) as exc_info:
-                jwt_auth.authenticate(None, mock_response, credentials)
+                await jwt_auth.authenticate(None, mock_response, credentials)
 
             assert exc_info.value.error_code == "INVALID_TOKEN"
             assert "Invalid token" in exc_info.value.message
 
-    def test_authenticate_missing_both_jwt_settings_raises_error(
+    @pytest.mark.asyncio
+    async def test_authenticate_missing_both_jwt_settings_raises_error(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -158,14 +162,15 @@ class TestJwtAuth:
             credentials = self.create_credentials("some-token")
 
             with pytest.raises(UserAccountError) as exc_info:
-                jwt_auth.authenticate(None, mock_response, credentials)
+                await jwt_auth.authenticate(None, mock_response, credentials)
 
             assert exc_info.value.error_code == "JWT_SETTINGS_NOT_CONFIGURED"
 
     # =========================================================================
     # Test: Expired token
     # =========================================================================
-    def test_authenticate_expired_token_raises_error(
+    @pytest.mark.asyncio
+    async def test_authenticate_expired_token_raises_error(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -181,7 +186,7 @@ class TestJwtAuth:
         credentials = self.create_credentials(token)
 
         with pytest.raises(UserAccountError) as exc_info:
-            jwt_auth.authenticate(None, mock_response, credentials)
+            await jwt_auth.authenticate(None, mock_response, credentials)
 
         assert exc_info.value.error_code == "EXPIRED_TOKEN"
         assert "Token has expired" in exc_info.value.message
@@ -189,7 +194,8 @@ class TestJwtAuth:
     # =========================================================================
     # Test: Invalid token
     # =========================================================================
-    def test_authenticate_malformed_token_raises_error(
+    @pytest.mark.asyncio
+    async def test_authenticate_malformed_token_raises_error(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -199,12 +205,13 @@ class TestJwtAuth:
         credentials = self.create_credentials("not-a-valid-jwt-token")
 
         with pytest.raises(UserAccountError) as exc_info:
-            jwt_auth.authenticate(None, mock_response, credentials)
+            await jwt_auth.authenticate(None, mock_response, credentials)
 
         assert exc_info.value.error_code == "INVALID_TOKEN"
         assert "Invalid token" in exc_info.value.message
 
-    def test_authenticate_token_with_wrong_secret_raises_error(
+    @pytest.mark.asyncio
+    async def test_authenticate_token_with_wrong_secret_raises_error(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -220,11 +227,12 @@ class TestJwtAuth:
         credentials = self.create_credentials(token)
 
         with pytest.raises(UserAccountError) as exc_info:
-            jwt_auth.authenticate(None, mock_response, credentials)
+            await jwt_auth.authenticate(None, mock_response, credentials)
 
         assert exc_info.value.error_code == "INVALID_TOKEN"
 
-    def test_authenticate_token_with_wrong_algorithm_raises_error(
+    @pytest.mark.asyncio
+    async def test_authenticate_token_with_wrong_algorithm_raises_error(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -246,11 +254,12 @@ class TestJwtAuth:
             credentials = self.create_credentials(token)
 
             with pytest.raises(UserAccountError) as exc_info:
-                jwt_auth.authenticate(None, mock_response, credentials)
+                await jwt_auth.authenticate(None, mock_response, credentials)
 
             assert exc_info.value.error_code == "INVALID_TOKEN"
 
-    def test_authenticate_empty_token_raises_error(
+    @pytest.mark.asyncio
+    async def test_authenticate_empty_token_raises_error(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -260,14 +269,15 @@ class TestJwtAuth:
         credentials = self.create_credentials("")
 
         with pytest.raises(UserAccountError) as exc_info:
-            jwt_auth.authenticate(None, mock_response, credentials)
+            await jwt_auth.authenticate(None, mock_response, credentials)
 
         assert exc_info.value.error_code == "INVALID_TOKEN"
 
     # =========================================================================
     # Test: Token without user_id
     # =========================================================================
-    def test_authenticate_token_without_user_id_raises_error(
+    @pytest.mark.asyncio
+    async def test_authenticate_token_without_user_id_raises_error(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -283,7 +293,7 @@ class TestJwtAuth:
         credentials = self.create_credentials(token)
 
         with pytest.raises(UserAccountError) as exc_info:
-            jwt_auth.authenticate(None, mock_response, credentials)
+            await jwt_auth.authenticate(None, mock_response, credentials)
 
         assert exc_info.value.error_code == "INVALID_TOKEN"
         assert "user_id missing" in exc_info.value.message
@@ -291,7 +301,8 @@ class TestJwtAuth:
     # =========================================================================
     # Test: Successful authentication
     # =========================================================================
-    def test_authenticate_valid_token_returns_decoded_payload(
+    @pytest.mark.asyncio
+    async def test_authenticate_valid_token_returns_decoded_payload(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -302,13 +313,14 @@ class TestJwtAuth:
         token = self.create_token(valid_token_payload)
         credentials = self.create_credentials(token)
 
-        result = jwt_auth.authenticate(None, mock_response, credentials)
+        result = await jwt_auth.authenticate(None, mock_response, credentials)
 
         assert result is not None
         assert result["user_id"] == "user-123"
         assert result["email"] == "test@example.com"
 
-    def test_authenticate_returns_all_custom_claims(
+    @pytest.mark.asyncio
+    async def test_authenticate_returns_all_custom_claims(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -326,7 +338,7 @@ class TestJwtAuth:
         token = self.create_token(payload)
         credentials = self.create_credentials(token)
 
-        result = jwt_auth.authenticate(None, mock_response, credentials)
+        result = await jwt_auth.authenticate(None, mock_response, credentials)
 
         assert result["user_id"] == "user-456"
         assert result["email"] == "custom@example.com"
@@ -337,7 +349,8 @@ class TestJwtAuth:
     # =========================================================================
     # Test: Bearer scheme handling
     # =========================================================================
-    def test_authenticate_accepts_lowercase_bearer_scheme(
+    @pytest.mark.asyncio
+    async def test_authenticate_accepts_lowercase_bearer_scheme(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -348,12 +361,13 @@ class TestJwtAuth:
         actual_token = self.create_token(valid_token_payload)
         credentials = self.create_credentials(actual_token, scheme="bearer")
 
-        result = jwt_auth.authenticate(None, mock_response, credentials)
+        result = await jwt_auth.authenticate(None, mock_response, credentials)
 
         assert result is not None
         assert result["user_id"] == "user-123"
 
-    def test_authenticate_accepts_titlecase_bearer_scheme(
+    @pytest.mark.asyncio
+    async def test_authenticate_accepts_titlecase_bearer_scheme(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -364,12 +378,13 @@ class TestJwtAuth:
         actual_token = self.create_token(valid_token_payload)
         credentials = self.create_credentials(actual_token, scheme="Bearer")
 
-        result = jwt_auth.authenticate(None, mock_response, credentials)
+        result = await jwt_auth.authenticate(None, mock_response, credentials)
 
         assert result is not None
         assert result["user_id"] == "user-123"
 
-    def test_authenticate_accepts_uppercase_bearer_scheme(
+    @pytest.mark.asyncio
+    async def test_authenticate_accepts_uppercase_bearer_scheme(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -380,12 +395,13 @@ class TestJwtAuth:
         actual_token = self.create_token(valid_token_payload)
         credentials = self.create_credentials(actual_token, scheme="BEARER")
 
-        result = jwt_auth.authenticate(None, mock_response, credentials)
+        result = await jwt_auth.authenticate(None, mock_response, credentials)
 
         assert result is not None
         assert result["user_id"] == "user-123"
 
-    def test_authenticate_works_without_bearer_prefix(
+    @pytest.mark.asyncio
+    async def test_authenticate_works_without_bearer_prefix(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -396,7 +412,7 @@ class TestJwtAuth:
         token = self.create_token(valid_token_payload)
         credentials = self.create_credentials(token)
 
-        result = jwt_auth.authenticate(None, mock_response, credentials)
+        result = await jwt_auth.authenticate(None, mock_response, credentials)
 
         assert result is not None
         assert result["user_id"] == "user-123"
@@ -404,7 +420,8 @@ class TestJwtAuth:
     # =========================================================================
     # Test: WWW-Authenticate header
     # =========================================================================
-    def test_authenticate_sets_www_authenticate_header(
+    @pytest.mark.asyncio
+    async def test_authenticate_sets_www_authenticate_header(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -414,7 +431,7 @@ class TestJwtAuth:
         """Test that WWW-Authenticate header is set on successful auth."""
         token = self.create_token(valid_token_payload)
         credentials = self.create_credentials(token)
-        jwt_auth.authenticate(None, mock_response, credentials)
+        await jwt_auth.authenticate(None, mock_response, credentials)
 
         assert "WWW-Authenticate" in mock_response.headers
         assert mock_response.headers["WWW-Authenticate"] == 'Bearer realm="auth_required"'
@@ -422,7 +439,8 @@ class TestJwtAuth:
     # =========================================================================
     # Test: Edge cases
     # =========================================================================
-    def test_authenticate_with_minimal_valid_token(
+    @pytest.mark.asyncio
+    async def test_authenticate_with_minimal_valid_token(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -436,12 +454,13 @@ class TestJwtAuth:
         token = self.create_token(minimal_payload)
         credentials = self.create_credentials(token)
 
-        result = jwt_auth.authenticate(None, mock_response, credentials)
+        result = await jwt_auth.authenticate(None, mock_response, credentials)
 
         assert result is not None
         assert result["user_id"] == "minimal-user"
 
-    def test_authenticate_token_without_exp_raises_error(
+    @pytest.mark.asyncio
+    async def test_authenticate_token_without_exp_raises_error(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -455,12 +474,13 @@ class TestJwtAuth:
         credentials = self.create_credentials(token)
 
         with pytest.raises(UserAccountError) as exc_info:
-            jwt_auth.authenticate(None, mock_response, credentials)
+            await jwt_auth.authenticate(None, mock_response, credentials)
 
         assert exc_info.value.error_code == "INVALID_TOKEN"
         assert "Invalid token" in exc_info.value.message
 
-    def test_authenticate_with_numeric_user_id(
+    @pytest.mark.asyncio
+    async def test_authenticate_with_numeric_user_id(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -474,12 +494,13 @@ class TestJwtAuth:
         token = self.create_token(payload)
         credentials = self.create_credentials(token)
 
-        result = jwt_auth.authenticate(None, mock_response, credentials)
+        result = await jwt_auth.authenticate(None, mock_response, credentials)
 
         assert result is not None
         assert result["user_id"] == "12345"
 
-    def test_authenticate_with_uuid_user_id(
+    @pytest.mark.asyncio
+    async def test_authenticate_with_uuid_user_id(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -494,12 +515,13 @@ class TestJwtAuth:
         token = self.create_token(payload)
         credentials = self.create_credentials(token)
 
-        result = jwt_auth.authenticate(None, mock_response, credentials)
+        result = await jwt_auth.authenticate(None, mock_response, credentials)
 
         assert result is not None
         assert result["user_id"] == uuid_user_id
 
-    def test_authenticate_token_about_to_expire_still_valid(
+    @pytest.mark.asyncio
+    async def test_authenticate_token_about_to_expire_still_valid(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -513,12 +535,13 @@ class TestJwtAuth:
         token = self.create_token(payload)
         credentials = self.create_credentials(token)
 
-        result = jwt_auth.authenticate(None, mock_response, credentials)
+        result = await jwt_auth.authenticate(None, mock_response, credentials)
 
         assert result is not None
         assert result["user_id"] == "user-123"
 
-    def test_authenticate_with_special_characters_in_user_id(
+    @pytest.mark.asyncio
+    async def test_authenticate_with_special_characters_in_user_id(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -533,7 +556,7 @@ class TestJwtAuth:
         token = self.create_token(payload)
         credentials = self.create_credentials(token)
 
-        result = jwt_auth.authenticate(
+        result = await jwt_auth.authenticate(
             None,
             mock_response,
             credentials,
@@ -545,7 +568,8 @@ class TestJwtAuth:
     # =========================================================================
     # Test: Different algorithms
     # =========================================================================
-    def test_authenticate_with_hs384_algorithm(
+    @pytest.mark.asyncio
+    async def test_authenticate_with_hs384_algorithm(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -565,12 +589,13 @@ class TestJwtAuth:
             token = self.create_token(payload, algorithm="HS384")
             credentials = self.create_credentials(token)
 
-            result = jwt_auth.authenticate(None, mock_response, credentials)
+            result = await jwt_auth.authenticate(None, mock_response, credentials)
 
             assert result is not None
             assert result["user_id"] == "user-hs384"
 
-    def test_authenticate_with_hs512_algorithm(
+    @pytest.mark.asyncio
+    async def test_authenticate_with_hs512_algorithm(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -590,7 +615,7 @@ class TestJwtAuth:
             token = self.create_token(payload, algorithm="HS512")
             credentials = self.create_credentials(token)
 
-            result = jwt_auth.authenticate(None, mock_response, credentials)
+            result = await jwt_auth.authenticate(None, mock_response, credentials)
 
             assert result is not None
             assert result["user_id"] == "user-hs512"
@@ -598,7 +623,8 @@ class TestJwtAuth:
     # =========================================================================
     # Test: Logger is called on InvalidTokenError
     # =========================================================================
-    def test_authenticate_logs_invalid_token_error(
+    @pytest.mark.asyncio
+    async def test_authenticate_logs_invalid_token_error(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -609,7 +635,7 @@ class TestJwtAuth:
             credentials = self.create_credentials("invalid-token")
 
             with pytest.raises(UserAccountError):
-                jwt_auth.authenticate(None, mock_response, credentials)
+                await jwt_auth.authenticate(None, mock_response, credentials)
 
             mock_logger.warning.assert_called_once()
             mock_logger.exception.assert_not_called()
@@ -629,7 +655,8 @@ class TestJwtAuthIntegration:
         """Create a mock FastAPI Response object."""
         return Response()
 
-    def test_full_authentication_flow(self, jwt_auth: JwtAuth, mock_response: Response):
+    @pytest.mark.asyncio
+    async def test_full_authentication_flow(self, jwt_auth: JwtAuth, mock_response: Response):
         """Test complete authentication flow from token creation to validation."""
         secret = "integration-test-secret-key"
         algorithm = "HS256"
@@ -659,7 +686,7 @@ class TestJwtAuthIntegration:
             credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
 
             # Authenticate
-            result = jwt_auth.authenticate(None, mock_response, credentials)
+            result = await jwt_auth.authenticate(None, mock_response, credentials)
 
             # Verify all claims are returned
             assert result["user_id"] == "user-integration-test"
@@ -671,7 +698,8 @@ class TestJwtAuthIntegration:
             # Verify header is set
             assert mock_response.headers["WWW-Authenticate"] == 'Bearer realm="auth_required"'
 
-    def test_token_roundtrip_with_complex_payload(
+    @pytest.mark.asyncio
+    async def test_token_roundtrip_with_complex_payload(
         self,
         jwt_auth: JwtAuth,
         mock_response: Response,
@@ -704,7 +732,7 @@ class TestJwtAuthIntegration:
             token = jwt.encode(complex_payload, secret, algorithm=algorithm)
             credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
 
-            result = jwt_auth.authenticate(None, mock_response, credentials)
+            result = await jwt_auth.authenticate(None, mock_response, credentials)
 
             assert result["user_id"] == "complex-user"
             assert result["metadata"]["nested"]["deeply"] == "nested value"

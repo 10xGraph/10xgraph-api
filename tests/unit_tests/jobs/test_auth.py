@@ -62,7 +62,7 @@ class RoleAuth(BaseAuth):
     def __init__(self, auth: AuthConfig) -> None:
         self.rbac = auth.rbac_config()
 
-    def authenticate(self, request, response, credential):
+    async def authenticate(self, request, response, credential):
         rest, _, role = credential.credentials.partition("/")
         user_id, _, org_id = rest.partition("@")
         return {"user_id": user_id, "org_id": org_id, "roles": [role]}

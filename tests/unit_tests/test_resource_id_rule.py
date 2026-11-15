@@ -18,7 +18,7 @@ from tenxgraph_api.src.app.core.validation.request_config import resource_id_err
 
 
 class _Auth(BaseAuth):
-    def authenticate(self, request, response, credential):
+    async def authenticate(self, request, response, credential):
         return {"user_id": "alice"}
 
 

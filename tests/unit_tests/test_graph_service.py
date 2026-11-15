@@ -427,3 +427,21 @@ async def test_thread_naming_failure_is_logged_not_raised(caplog):
         srv._name_thread_in_background({"thread_id": "t1"}, "t1", ["hi"])
     await asyncio.gather(*srv._naming_tasks)
     assert "Thread naming failed for thread t1" in caplog.text
+
+
+def test_stream_error_data_carries_the_bad_data_code():
+    from tenxgraph_api.src.app.routers.graph.services.graph_service import _stream_error_data
+
+    class DataError(Exception):
+        sqlstate = "22021"
+
+    DataError.__module__ = "asyncpg.exceptions"
+    storage = Exception("write failed")
+    storage.__cause__ = DataError("invalid byte sequence")
+
+    data = _stream_error_data(storage)
+
+    assert data["code"] == "INVALID_REQUEST_DATA"
+    assert "invalid byte sequence" not in data["reason"]
+    assert "cannot be stored" in data["reason"]
+    assert "code" not in _stream_error_data(Exception("other"))

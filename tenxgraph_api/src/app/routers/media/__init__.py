@@ -149,12 +149,8 @@ def _create_media_store(settings: MediaSettings) -> BaseMediaStore:
         return LocalFileMediaStore(base_dir=settings.MEDIA_STORAGE_PATH, max_size_bytes=max_bytes)
 
     if stype == MediaStorageType.CLOUD:
-        from cloud_storage_manager import (
-            AwsConfig,
-            CloudStorageFactory,
-            StorageConfig,
-            StorageProvider,
-        )
+        from cloud_storage_manager.storage_provider import CloudStorageFactory, StorageProvider
+        from cloud_storage_manager.storage_schema import AwsConfig, StorageConfig
         from tenxgraph.storage.media.storage.cloud_store import CloudMediaStore
 
         provider_name = settings.MEDIA_CLOUD_PROVIDER.lower()
@@ -179,7 +175,7 @@ def _create_media_store(settings: MediaSettings) -> BaseMediaStore:
                 },
             )
         else:
-            from cloud_storage_manager import GcpConfig
+            from cloud_storage_manager.storage_schema import GcpConfig
 
             credentials = None
             if settings.MEDIA_CLOUD_CREDENTIALS_JSON:

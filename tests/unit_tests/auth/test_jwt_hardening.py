@@ -31,26 +31,28 @@ def _settings(**overrides) -> Settings:
     return Settings(**values)
 
 
-def _authenticate(claims: dict, **settings):
+async def _authenticate(claims: dict, **settings):
     token = jwt.encode({"user_id": "u1", "exp": int(time.time()) + 60, **claims}, SECRET)
     credential = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
     with patch(
         "tenxgraph_api.src.app.core.auth.jwt_auth.get_settings",
         return_value=_settings(**settings),
     ):
-        return JwtAuth().authenticate(None, Response(), credential)
+        return await JwtAuth().authenticate(None, Response(), credential)
 
 
-def test_bad_token_is_401():
+@pytest.mark.asyncio
+async def test_bad_token_is_401():
     credential = HTTPAuthorizationCredentials(scheme="Bearer", credentials="nope")
     with patch("tenxgraph_api.src.app.core.auth.jwt_auth.get_settings", return_value=_settings()):
         with pytest.raises(UserAccountError) as exc:
-            JwtAuth().authenticate(None, Response(), credential)
+            await JwtAuth().authenticate(None, Response(), credential)
     assert exc.value.status_code == 401
 
 
-def test_issuer_and_audience_are_enforced_when_configured():
-    ok = _authenticate(
+@pytest.mark.asyncio
+async def test_issuer_and_audience_are_enforced_when_configured():
+    ok = await _authenticate(
         {"iss": "auth.example", "aud": "10xgraph"},
         JWT_ISSUER="auth.example",
         JWT_AUDIENCE="10xgraph",
@@ -63,12 +65,50 @@ def test_issuer_and_audience_are_enforced_when_configured():
         {"iss": "auth.example"},
     ):
         with pytest.raises(UserAccountError) as exc:
-            _authenticate(claims, JWT_ISSUER="auth.example", JWT_AUDIENCE="10xgraph")
+            await _authenticate(claims, JWT_ISSUER="auth.example", JWT_AUDIENCE="10xgraph")
         assert exc.value.status_code == 401
 
 
-def test_issuer_and_audience_are_optional():
-    assert _authenticate({})["user_id"] == "u1"
+@pytest.mark.asyncio
+async def test_issuer_and_audience_are_optional():
+    assert (await _authenticate({}))["user_id"] == "u1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("issuer", [None, ""])
+async def test_empty_issuer_does_not_check_iss(issuer):
+    assert (await _authenticate({"iss": "anyone"}, JWT_ISSUER=issuer))["user_id"] == "u1"
+    assert (await _authenticate({}, JWT_ISSUER=issuer))["user_id"] == "u1"
+
+
+@pytest.mark.asyncio
+async def test_set_issuer_requires_a_matching_iss():
+    ok = await _authenticate({"iss": "auth.example"}, JWT_ISSUER="auth.example")
+    assert ok["user_id"] == "u1"
+    for claims in ({"iss": "other"}, {}):
+        with pytest.raises(UserAccountError) as exc:
+            await _authenticate(claims, JWT_ISSUER="auth.example")
+        assert (exc.value.status_code, exc.value.error_code) == (401, "INVALID_TOKEN")
+
+
+@pytest.mark.asyncio
+async def test_set_audience_requires_a_matching_aud():
+    ok = await _authenticate({"aud": "10xgraph"}, JWT_AUDIENCE="10xgraph")
+    assert ok["user_id"] == "u1"
+    for claims in ({"aud": "other"}, {}):
+        with pytest.raises(UserAccountError) as exc:
+            await _authenticate(claims, JWT_AUDIENCE="10xgraph")
+        assert (exc.value.status_code, exc.value.error_code) == (401, "INVALID_TOKEN")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("audience", [None, ""])
+async def test_aud_claim_is_refused_when_no_audience_is_set(audience):
+    # PyJWT's default: a token naming an audience is refused by a server that expects none.
+    assert (await _authenticate({}, JWT_AUDIENCE=audience))["user_id"] == "u1"
+    with pytest.raises(UserAccountError) as exc:
+        await _authenticate({"aud": "10xgraph"}, JWT_AUDIENCE=audience)
+    assert (exc.value.status_code, exc.value.error_code) == (401, "INVALID_TOKEN")
 
 
 def test_short_hmac_secret_is_refused_in_production():
@@ -102,7 +142,8 @@ def test_allowed_algorithms_pass_boot(algorithm):
     check_jwt_settings(_settings(JWT_SECRET_KEY="x" * 64, JWT_ALGORITHM=algorithm))
 
 
-def test_algorithm_none_never_authenticates():
+@pytest.mark.asyncio
+async def test_algorithm_none_never_authenticates():
     credential = HTTPAuthorizationCredentials(
         scheme="Bearer", credentials=jwt.encode({"user_id": "u1"}, None, algorithm="none")
     )
@@ -111,7 +152,7 @@ def test_algorithm_none_never_authenticates():
         return_value=_settings(JWT_ALGORITHM="none"),
     ):
         with pytest.raises(UserAccountError) as exc:
-            JwtAuth().authenticate(None, Response(), credential)
+            await JwtAuth().authenticate(None, Response(), credential)
     assert exc.value.status_code == 500
 
 

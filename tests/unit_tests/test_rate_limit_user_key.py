@@ -19,7 +19,7 @@ from tenxgraph_api.src.app.core.middleware.rate_limit.keying import client_key_f
 class TokenIsUserAuth(BaseAuth):
     """Accepts ``Bearer valid-<name>`` as user ``<name>``; anything else is a 401."""
 
-    def authenticate(self, request, response, credential):
+    async def authenticate(self, request, response, credential):
         token = credential.credentials if credential else ""
         if not token.startswith("valid-"):
             raise HTTPException(status_code=401, detail="bad token")
@@ -104,24 +104,27 @@ def _request(headers: list[tuple[str, str]], peer: str = "10.0.0.5") -> Request:
     )
 
 
-def test_repeated_forwarded_for_headers_are_combined():
+@pytest.mark.asyncio
+async def test_repeated_forwarded_for_headers_are_combined():
     # A proxy that appends its own header line (instead of merging) must not let the
     # attacker's first line win.
     config = _config(by="ip", trusted_proxy_headers=True)
     request = _request([("X-Forwarded-For", "6.6.6.6"), ("X-Forwarded-For", "203.0.113.9")])
-    assert client_key_for(request, config) == "203.0.113.9"
+    assert await client_key_for(request, config) == "203.0.113.9"
 
 
-def test_forwarded_for_ignored_from_untrusted_peer():
+@pytest.mark.asyncio
+async def test_forwarded_for_ignored_from_untrusted_peer():
     config = _config(by="ip", trusted_proxy_headers=True, trusted_proxies=["10.0.0.0/8"])
     direct = _request([("X-Forwarded-For", "6.6.6.6")], peer="198.51.100.7")
-    assert client_key_for(direct, config) == "198.51.100.7"
+    assert await client_key_for(direct, config) == "198.51.100.7"
 
 
-def test_forwarded_for_honoured_from_trusted_proxy():
+@pytest.mark.asyncio
+async def test_forwarded_for_honoured_from_trusted_proxy():
     config = _config(by="ip", trusted_proxy_headers=True, trusted_proxies=["10.0.0.0/8"])
     via_proxy = _request([("X-Forwarded-For", "203.0.113.9")], peer="10.0.0.5")
-    assert client_key_for(via_proxy, config) == "203.0.113.9"
+    assert await client_key_for(via_proxy, config) == "203.0.113.9"
 
 
 def test_trusted_proxies_must_be_valid_networks():

@@ -110,7 +110,7 @@ def _graph(checkpointer: BaseCheckpointer) -> CompiledGraph:
 class BearerAuth(BaseAuth):
     """The bearer token is ``<user_id>.<SECRET>``; the default ``downstream_credential``."""
 
-    def authenticate(self, request: Request, response: Response | None, credential: Any):
+    async def authenticate(self, request: Request, response: Response | None, credential: Any):
         if credential is None or not credential.credentials.endswith(SECRET):
             raise HTTPException(status_code=401, detail="bad token")
         return {"user_id": credential.credentials.split(".")[0]}
@@ -119,7 +119,7 @@ class BearerAuth(BaseAuth):
 class ApiKeyAuth(BaseAuth):
     """Authenticates an ``X-Api-Key``; the run credential is the key, not a bearer."""
 
-    def authenticate(self, request: Request, response: Response | None, credential: Any):
+    async def authenticate(self, request: Request, response: Response | None, credential: Any):
         key = request.headers.get("X-Api-Key")
         if not key:
             raise HTTPException(status_code=401, detail="no key")

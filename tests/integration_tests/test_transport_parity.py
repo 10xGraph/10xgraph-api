@@ -332,7 +332,7 @@ def _refused_on_thread(client, transport: str, headers: dict[str, str]) -> str:
     else:
         body = {"messages": [_user_message()], "config": {"thread_id": THREAD}}
         response = client.post(f"/v1/graph/{transport}", json=body, headers=headers)
-    assert response.status_code == 403  # noqa: PLR2004
+    assert response.status_code == 403
     return "403"
 
 
@@ -359,5 +359,5 @@ def test_authorize_gets_the_file_id_on_file_routes(app_container):
     )
     headers = {"Authorization": f"Bearer {mint(roles=['admin'])}"}
     response = make_client(app).get(f"/v1/files/{THREAD}", headers=headers)
-    assert response.status_code == 403  # noqa: PLR2004
+    assert response.status_code == 403
     assert auth.calls == [("files:read", THREAD)]

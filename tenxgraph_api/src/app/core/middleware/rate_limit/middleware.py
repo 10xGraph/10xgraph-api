@@ -57,8 +57,8 @@ class RateLimitMiddleware:
             self._fallback = InMemoryCacheStore()
         return bound_cache_store(self.container, self._fallback)
 
-    def _client_key(self, request: Request) -> str:
-        return client_key_for(request, self.config)
+    async def _client_key(self, request: Request) -> str:
+        return await client_key_for(request, self.config)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope.get("path", "") in self._exclude:
@@ -66,7 +66,7 @@ class RateLimitMiddleware:
             return
 
         request = Request(scope)
-        key = self._client_key(request)
+        key = await self._client_key(request)
         cache = self.cache if self.cache is not None else self._bound_cache()
         decision = await check(
             cache,

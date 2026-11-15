@@ -125,6 +125,20 @@ def check_client_tools(tools: list[Any]) -> None:
             )
 
 
+def check_not_server_tools(tools: list[Any], server_tool_names: set[str]) -> None:
+    """Refuse a client tool that has the name of a server tool.
+
+    A name that only repeats a ``remote_tools`` entry is allowed: the ToolNode ignores it and
+    the declared tool serves the call.
+
+    Raises:
+        ClientInputError: A client tool is named like a server tool.
+    """
+    for index, tool in enumerate(tools):
+        if tool.name in server_tool_names:
+            raise ClientInputError(f"tools[{index}]: {tool.name!r} is the name of a server tool")
+
+
 def _upgrade_message(message: Any) -> Any:
     if not isinstance(message, dict) or not isinstance(message.get("content"), list):
         return message

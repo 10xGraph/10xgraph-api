@@ -389,7 +389,7 @@ class TestIdleAndInvalidFrames:
 
         router_module = importlib.import_module("tenxgraph_api.src.app.routers.graph.router")
 
-        monkeypatch.setattr(router_module, "ws_identity_still_valid", lambda ws, user: False)
+        monkeypatch.setattr(router_module, "ws_identity_still_valid", AsyncMock(return_value=False))
         ws = _make_websocket([])
 
         async def never(*_a, **_k):

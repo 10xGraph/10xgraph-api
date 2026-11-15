@@ -33,7 +33,7 @@ from tenxgraph_api.src.app.routers.graph.realtime_guard import realtime_connecti
 
 
 class _FakeAuth(BaseAuth):
-    def authenticate(self, request, response, credential):  # type: ignore[override]
+    async def authenticate(self, request, response, credential):  # type: ignore[override]
         return {} if credential is None else {"user_id": credential.credentials}
 
 
@@ -95,7 +95,7 @@ def _build_app(config, rate_backend=None, *, auth=False):
         _guard: None = deps[0],
         # Must stay a lambda: FastAPI resolves the dependency via
         # inspect.signature(call, eval_str=True), which fails on the `dict` builtin.
-        user: Identity | None = (deps[1] if auth else Depends(lambda: None)),  # noqa: PIE807
+        user: Identity | None = (deps[1] if auth else Depends(lambda: None)),
     ):
         await websocket.accept(subprotocol=ws_bearer_subprotocol(websocket))
         active = realtime_guard.lease_manager().held("ws:all")

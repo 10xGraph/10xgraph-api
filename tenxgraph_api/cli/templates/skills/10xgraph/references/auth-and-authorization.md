@@ -15,11 +15,11 @@ rules.
 - `jwt` (`"auth": "jwt"` is a shortcut): requires `JWT_SECRET_KEY` and `JWT_ALGORITHM`. Token must carry `user_id` (non-empty string or int, else 401) and `exp`. Requests use `Authorization: Bearer <token>`. The decoded payload becomes the `user` context. With no roles configured: default permission set, reach `own`.
 - `custom` plus `path`: `{ "auth": { "method": "custom", "path": "graph.auth:MyAuth" } }`. `path` with another method, or `custom` without a valid `path`, refuses to boot.
 
-Custom classes subclass `BaseAuth` (`from tenxgraph_api import BaseAuth`). `authenticate` is **synchronous** (called without `await`)
+Custom classes subclass `BaseAuth` (`from tenxgraph_api import BaseAuth`). `authenticate` is **async** (`async def`, awaited by the server)
 and takes three args:
 
 ```python
-def authenticate(self, request, response, credential) -> dict | None: ...
+async def authenticate(self, request, response, credential) -> dict | None: ...
 ```
 
 - `request` may be a `Request` or a `WebSocket` (both are `HTTPConnection`): read
@@ -66,7 +66,7 @@ RBAC keys sit inside `auth` and apply to any auth class. They are refused when a
 
 ```python
 class MyAuth(BaseAuth):
-    def authenticate(self, request, response, credential): ...
+    async def authenticate(self, request, response, credential): ...
 
     async def authorize(self, identity, permission, resource=None) -> bool:
         if not await super().authorize(identity, permission, resource):  # keeps RBAC
@@ -140,7 +140,7 @@ const client = new TenxGraphClient({
 ## Rules
 
 - No unauthenticated API mode in production unless a trusted gateway handles auth.
-- Keep `authenticate` synchronous; keep authorization out of graph business logic.
+- Keep `authenticate` `async def`; keep authorization out of graph business logic.
 - Sanitize logging for tokens and user payloads.
 - Add new routes to the permission registry and guard them with `RequirePermission`.
 

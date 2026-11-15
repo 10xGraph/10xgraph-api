@@ -54,7 +54,7 @@ async def realtime_connection_guard(
         cache = bound_cache_store()
         # Kept on the connection so every run on this socket counts too (ws_run_allowed).
         websocket.state.ws_rate_limit = (rl_config, cache)
-        key = client_key_for(websocket, rl_config)
+        key = await client_key_for(websocket, rl_config)
         decision = await check(
             cache, key, rl_config.requests, rl_config.window, fail_open=rl_config.fail_open
         )
@@ -83,7 +83,7 @@ async def _connection_slots(
                 )
                 raise WebSocketException(code=WS_TRY_AGAIN_LATER, reason="Too many connections")
             leases.append(lease)
-        user_key = keying.verified_caller_key(websocket)
+        user_key = await keying.verified_caller_key(websocket)
         if user_key and ws_config.max_connections_per_user is not None:
             lease = await manager.acquire(f"ws:user:{user_key}", ws_config.max_connections_per_user)
             if lease is None:
@@ -112,7 +112,7 @@ async def ws_run_allowed(websocket: WebSocket) -> int | None:
     if not isinstance(limiter, tuple):  # the guard stored none: rate limiting is off
         return None
     rl_config, cache = limiter
-    key = client_key_for(websocket, rl_config)
+    key = await client_key_for(websocket, rl_config)
     decision = await check(
         cache, key, rl_config.requests, rl_config.window, fail_open=rl_config.fail_open
     )
@@ -122,7 +122,7 @@ async def ws_run_allowed(websocket: WebSocket) -> int | None:
     return decision.reset_after
 
 
-def ws_identity_still_valid(websocket: Any, user: Identity | None) -> bool:
+async def ws_identity_still_valid(websocket: Any, user: Identity | None) -> bool:
     """Whether the socket's credential still verifies as the caller it was opened by.
 
     Checked before each run: without it, a socket keeps working after its token expires or
@@ -131,4 +131,4 @@ def ws_identity_still_valid(websocket: Any, user: Identity | None) -> bool:
     """
     if user is None:
         return True
-    return keying.verified_caller_key(websocket) == identity_key(user)
+    return await keying.verified_caller_key(websocket) == identity_key(user)

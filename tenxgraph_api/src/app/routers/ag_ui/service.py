@@ -26,6 +26,26 @@ from .event_mapper import AgUiEventMapper
 _RESERVED_STATE_KEYS = frozenset({"context", "context_summary", "execution_meta"})
 
 
+async def server_tool_names(service: GraphService) -> set[str]:
+    """Names of the tools the server runs itself (local and MCP), for the client tool check.
+
+    ``mcp_tools`` fills on a ToolNode's first MCP listing; a node with an MCP client and no names
+    yet is listed here through ``all_tools()`` (the node's cached list, so no network call once
+    listed). A failed listing is skipped: the run reports it as before.
+    """
+    from tenxgraph.core.graph import ToolNode
+
+    state_graph = getattr(service._graph, "_state_graph", None)
+    for node in (getattr(state_graph, "nodes", None) or {}).values():
+        tool_node = getattr(node, "func", None)
+        if isinstance(tool_node, ToolNode) and tool_node._client and not tool_node.mcp_tools:
+            try:
+                await tool_node.all_tools()
+            except Exception as exc:
+                logger.warning("Could not list MCP tools to check client tools: %s", exc)
+    return service._server_tool_names()
+
+
 async def stream_ag_ui(
     service: GraphService,
     run_input: RunAgentInput,

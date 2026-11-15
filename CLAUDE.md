@@ -127,7 +127,7 @@ valid ones (`RATE_LIMIT_KEYS`).
   (removed, it is `graph:read`). `tenant_claims` and the tenant columns declared on the
   checkpointer and store must match both ways (boot only, `check_tenant_claims`; it needs the
   bound backends): refuse in production, warn in development. Reach `all` roles are logged at boot.
-- **`BaseAuth`**: `authenticate(request, response, credential)` returns claims (must include
+- **`BaseAuth`**: `async authenticate(request, response, credential)` returns claims (must include
   `user_id`); `async authorize(identity, permission, resource=None)` defaults to RBAC
   (`identity.can(permission)`) and takes no request, so the jobs worker can call it. Overriding
   it with `roles` set only keeps roles if it calls `super().authorize`. `rbac` is set by the

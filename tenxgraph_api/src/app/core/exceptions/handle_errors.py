@@ -1,4 +1,6 @@
 # Handle all exceptions of the 10xGraph API here
+from http import HTTPStatus
+
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException
@@ -23,6 +25,7 @@ from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.audit import audit_event, audit_http_not_found, audit_not_found
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.exceptions.server_errors import (
+    BAD_DATA_CODE,
     RETRY_AFTER_SECONDS,
     classify,
     unexpected_error_response,
@@ -416,8 +419,11 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
         logger.error(f"StorageError: url: {request.base_url}", exc_info=exc)
 
         kind = classify(exc)
-        if kind is not None and kind.status_code == 503:  # noqa: PLR2004
-            # The database or cache could not be reached: retryable, not a bug.
+        if kind is not None and (
+            kind.status_code == HTTPStatus.SERVICE_UNAVAILABLE or kind.error_code == BAD_DATA_CODE
+        ):
+            # The database or cache could not be reached (retryable), or it refused the
+            # client's data (422): not a bug in the server.
             return unexpected_error_response(request, exc)
 
         request_id = getattr(request.state, "request_id", "unknown")

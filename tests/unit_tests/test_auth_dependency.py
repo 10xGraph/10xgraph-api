@@ -22,6 +22,7 @@ from tenxgraph_api.src.app.core.auth.reserved_identity import identity_is_reserv
 from tenxgraph_api.src.app.core.auth.revocation import (
     TokenRevocationConfig,
     revoke_token,
+    revoke_user,
     token_revoked,
 )
 from tenxgraph_api.src.app.core.auth.route_guard import find_unprotected_routes
@@ -32,21 +33,28 @@ from tenxgraph_api.src.app.core.exceptions.handle_errors import init_errors_hand
 WS_POLICY_VIOLATION = 1008
 
 CLAIMS: dict[str, dict[str, Any]] = {
-    "alice": {"user_id": "alice"},
+    "alice": {"user_id": "alice", "jti": "a-1"},
     "no-id": {"email": "x@example.com"},
     "int-id": {"user_id": 7},
     "bad-scope": {"user_id": "alice", "scope": 5},
     "reserved": {"user_id": "__system__:memory"},
     "revoked": {"user_id": "bob", "jti": "dead"},
-    "read-only": {"user_id": "carol", "perms": ["graph:read"]},
-    "scoped": {"user_id": "dave", "scope": "graph:read"},
+    "read-only": {"user_id": "carol", "perms": ["graph:read"], "jti": "c-1"},
+    "scoped": {"user_id": "dave", "scope": "graph:read", "jti": "d-1"},
+    "int-jti": {"user_id": "erin", "jti": 42},
+    "no-jti": {"user_id": "frank"},
+    "empty-jti": {"user_id": "frank", "jti": " "},
+    "bool-jti": {"user_id": "frank", "jti": True},
+    "list-jti": {"user_id": "frank", "jti": ["x"]},
+    "no-tenant": {"user_id": "gina", "jti": "g-1"},
+    "tenant": {"user_id": "gina", "jti": "g-2", "org_id": "acme"},
 }
 
 
 class _Auth(BaseAuth):
     reusable_within_request = True
 
-    def authenticate(self, request, response, credential):  # type: ignore[override]
+    async def authenticate(self, request, response, credential):  # type: ignore[override]
         if credential is None:
             return None
         if credential.credentials == "invalid":
@@ -68,11 +76,12 @@ class _OnlyOwnThread(_Auth):
         return resource is None or resource.startswith(identity.user_id)
 
 
-def _build(auth: BaseAuth | None) -> TestClient:
+def _build(auth: BaseAuth | None, *, revocation: bool = True) -> TestClient:
     container = InjectQ()
     container.bind_instance(BaseAuth, auth, allow_none=True)
     container.bind_instance(BaseCacheStore, InMemoryCacheStore())
-    container.bind_instance(TokenRevocationConfig, TokenRevocationConfig())
+    if revocation:
+        container.bind_instance(TokenRevocationConfig, TokenRevocationConfig())
     app = FastAPI()
     init_errors_handler(app)
     setup_fastapi(container, app)
@@ -169,6 +178,68 @@ def test_revoked_token_is_refused_but_others_pass():
     assert refused.status_code == 401
     assert "REVOKED_TOKEN" in refused.text
     assert _http(client, "alice").status_code == 200
+
+
+def _error(response) -> tuple[int, str, str]:
+    error = response.json()["error"]
+    return response.status_code, error["code"], error["message"]
+
+
+@pytest.mark.parametrize("token", ["no-jti", "empty-jti", "bool-jti", "list-jti"])
+def test_revocation_on_refuses_a_token_without_a_usable_jti(token):
+    client = _build(_Auth())
+    expected = (401, "INVALID_TOKEN", "Invalid token, jti missing")
+    assert _error(_http(client, token)) == expected
+    assert _error(_http(client, token, "/me")) == expected
+    assert _ws(client, token) == WS_POLICY_VIOLATION
+
+
+@pytest.mark.parametrize("token", ["alice", "int-jti"])
+def test_revocation_on_accepts_a_token_with_a_jti(token):
+    client = _build(_Auth())
+    assert _http(client, token).status_code == 200
+    assert _ws(client, token) == CLAIMS[token]["user_id"]
+
+
+@pytest.mark.parametrize("token", ["no-jti", "empty-jti", "bool-jti"])
+def test_revocation_off_keeps_jti_optional(token):
+    client = _build(_Auth(), revocation=False)
+    assert _http(client, token).json() == {"user_id": "frank"}
+    assert _ws(client, token) == "frank"
+
+
+def test_user_revocation_still_refuses_older_tokens_with_a_jti():
+    client = _build(_Auth())
+    store = client.container.get(BaseCacheStore)  # type: ignore[attr-defined]
+    asyncio.run(revoke_user(store, "alice"))  # alice's token has no iat: counts as older
+    assert _error(_http(client, "alice"))[:2] == (401, "REVOKED_TOKEN")
+    assert _http(client, "read-only", "/read").status_code == 200
+
+
+def test_missing_tenant_claim_is_invalid_token():
+    auth = _Auth()
+    auth.rbac = RbacConfig(tenant_claims=["org_id"])
+    client = _build(auth)
+    assert _http(client, "tenant").status_code == 200
+    expected = (401, "INVALID_TOKEN", "Invalid token, please login again")
+    assert _error(_http(client, "no-tenant")) == expected
+    assert _error(_http(client, "no-tenant", "/me")) == expected
+    assert _ws(client, "no-tenant") == WS_POLICY_VIOLATION
+
+
+def test_reserved_user_id_is_invalid_token():
+    client = _build(_Auth())
+    status, code, message = _error(_http(client, "reserved"))
+    assert (status, code, message) == (401, "INVALID_TOKEN", "This user id is reserved")
+    assert _ws(client, "reserved") == WS_POLICY_VIOLATION
+
+
+def test_no_credential_is_invalid_token():
+    assert _error(_http(_build(_Auth()), None)) == (
+        401,
+        "INVALID_TOKEN",
+        "Authentication required",
+    )
 
 
 def test_integer_user_id_is_refused_not_coerced():

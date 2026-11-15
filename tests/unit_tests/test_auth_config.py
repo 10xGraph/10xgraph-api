@@ -176,7 +176,7 @@ def test_tenant_claims_declared_pass_and_store_is_compared():
 
 def test_custom_class_overriding_authorize_with_roles_warns():
     class Plain(BaseAuth):
-        def authenticate(self, request, response, credential):
+        async def authenticate(self, request, response, credential):
             return {}
 
     class Override(Plain):
