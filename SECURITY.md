@@ -7,8 +7,9 @@
 | `1.0.x` (`10xgraph-api`) | Yes |
 | `< 1.0` | No |
 
-`10xgraph-api` is at 1.0 (release candidate `1.0.0rc4`). Security fixes are applied to the
-latest published release only; there are no long-term support branches. The old
+`10xgraph-api` is at 1.0. Security fixes are released as a patch on the latest 1.x minor
+release; there are no long-term support branches. The 1.0 release candidates no longer receive
+fixes. The old
 `10xscale-agentflow-cli` package is no longer published; upgrade to `10xgraph-api` to receive
 fixes.
 

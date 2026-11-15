@@ -1,7 +1,7 @@
 """``meta.is_new_thread`` is true only for the call that creates the thread.
 
 Runs the real ``GraphService`` over a real graph and ``InMemoryCheckpointer``. Needs a core
-whose ``aput_thread`` returns True only when it created the thread (10xgraph >= 1.0.0rc7);
+whose ``aput_thread`` returns True only when it created the thread (10xgraph >= 1.0.0);
 older releases returned True on every call.
 """
 

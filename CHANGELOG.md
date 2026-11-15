@@ -27,7 +27,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [1.0.0] - 2026-11-15
+## [1.0.0] - 2026-11-16
 
 The first stable release of `10xgraph-api`. It requires `10xgraph` 1.0 and is released with
 `10xgraph-client` 1.0.0. From this version on the HTTP API, CLI and `10xgraph.json` keys are

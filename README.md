@@ -56,6 +56,9 @@ pip install "10xgraph-api[firebase]"  # Firebase Admin SDK
 
 Requires Python 3.12 or newer. Installs the core `10xgraph` package as a dependency.
 
+From 1.0 the public API is stable until 2.0. Keep `major.minor` the same across `10xgraph`,
+`10xgraph-api` and `10xgraph-client` (patch versions are independent).
+
 ---
 
 ## Quick start
