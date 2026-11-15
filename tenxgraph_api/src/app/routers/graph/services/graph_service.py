@@ -20,6 +20,7 @@ from tenxgraph.utils import ResponseGranularity
 from tenxgraph.utils.validators import ValidationError as InputValidationError
 
 from tenxgraph_api.src.app.core import logger
+from tenxgraph_api.src.app.core.audit import audit_event
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RunsConfig
 from tenxgraph_api.src.app.core.leases import Lease
 from tenxgraph_api.src.app.core.shutdown import (
@@ -1300,6 +1301,7 @@ class GraphService:
             # the client can detect and display the failure.
             if isinstance(e, InputValidationError):
                 logger.warning("Graph stream rejected by an input validator: %s", log_safe(e))
+                await audit_event("input", "denied", reason="validation")
             else:
                 logger.error(f"Graph streaming failed: {e}")
             try:
