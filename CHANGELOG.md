@@ -47,6 +47,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `10xgraph config` offers None, Random name, First message and Custom class for it.
 - The CLI skill reference `callbacks-and-command.md` no longer describes `Command.PARENT` as parent-graph navigation. `Command.graph` is reserved and not acted on, and nested graphs are not supported: build a multi-agent system as one graph with several `Agent` nodes.
 
+### Fixed
+
+- `10xgraph dev` and `agentflow dev` fall back to `agentflow.json` again when `10xgraph.json` is
+  missing.
+
 ## [1.0.0rc6] - 2026-11-11
 
 The sixth release candidate of `10xgraph-api` 1.0. It requires `10xgraph` 1.0.0rc6. Tools and MCP

@@ -15,18 +15,19 @@ from tenxgraph_api.cli.constants import (
 from tenxgraph_api.cli.exceptions import ConfigurationError
 
 
-def config_names(config_path: str) -> tuple[str, ...]:
+def config_names(config_path: str | Path) -> tuple[str, ...]:
     """Names to try for ``config_path``, in priority order.
 
     The default ``10xgraph.json`` falls back to the pre-rename ``agentflow.json``;
     any other name is used as given.
     """
-    if config_path == DEFAULT_CONFIG_FILE:
+    name = str(config_path)
+    if name == DEFAULT_CONFIG_FILE:
         return (DEFAULT_CONFIG_FILE, LEGACY_CONFIG_FILE)
-    return (config_path,)
+    return (name,)
 
 
-def resolve_default_config(config: str, directory: Path | None = None) -> Path:
+def resolve_default_config(config: str | Path, directory: Path | None = None) -> Path:
     """Resolve ``config`` against ``directory`` (default: cwd), honoring the legacy name.
 
     Returns the first existing candidate, or the preferred name when none exists so
@@ -49,7 +50,7 @@ class ConfigManager:
         self.config_path = config_path
         self._config_data: dict[str, Any] | None = None
 
-    def find_config_file(self, config_path: str) -> Path:
+    def find_config_file(self, config_path: str | Path) -> Path:
         """Find the config file in various locations.
 
         Args:
@@ -96,7 +97,7 @@ class ConfigManager:
         for path in searched_paths:
             error_msg += f"\n  - {path}"
 
-        raise ConfigurationError(error_msg, config_path=config_path)
+        raise ConfigurationError(error_msg, config_path=str(config_path))
 
     def auto_discover_config(self) -> Path | None:
         """Automatically discover config file using common names.
