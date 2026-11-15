@@ -47,7 +47,8 @@ uses them to skip messages the thread already stores.
 
 A request is also bounded in size before anything heavy runs (:func:`request_size_error`): the
 body cap lets a few MB of messages or content blocks through, and core then copies and serialises
-them on the event loop. The limits are fixed module constants (``MAX_MESSAGES`` and friends).
+them on the event loop. The limits are fixed module constants (``MAX_MESSAGES`` and friends); the nesting depth is the
+``MAX_NESTING_DEPTH`` setting.
 A resume that names the interrupt it answers is checked against the thread's open interrupt
 (:class:`InterruptConflictError`).
 """

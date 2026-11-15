@@ -56,6 +56,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`MAX_NESTING_DEPTH` setting.** The deepest nesting of objects and lists accepted in client
+  messages, `initial_state`, `config`, `resume` and `filters` is now a setting (default 64, range 1
+  to 900). The key, item and value count caps stay fixed.
+- The audit log has two more event kinds: `input` (a request refused by a validator with 422, or
+  by the size limit with 413) and `rate_limit` (429, or the limiter backend unavailable).
 - `10xgraph init` writes `10xgraph>=1.0,<2.0` and `10xgraph-api>=1.0,<2.0` in the generated
   pyproject.toml.
 - `10xgraph init` Production writes `"thread_name_generator": "first_message"` and no longer
@@ -82,6 +87,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   invalid text value) answers 422 `INVALID_REQUEST_DATA` instead of 500. Lost connections still
   answer 503 and other storage errors 500.
   A stream's error chunk carries the same `code` (`INVALID_REQUEST_DATA`) and message.
+- A NUL character or a lone surrogate in client messages or caller state is refused with 422
+  before the run starts. In model replies and tool results it is cleaned instead, so the run
+  does not fail on text the client did not send.
+- An upload on a server without the `media` extra, with `DOCUMENT_HANDLING=extract_text`, answers
+  422 with a message that names the extra. Before, it was a bare 500.
+- `GET /v1/files` answers 501 for reach `tenant` or `all` on a cloud store, which cannot list a
+  bucket, as it does with auth off.
 - `10xgraph dev` and `agentflow dev` fall back to `agentflow.json` again when `10xgraph.json` is
   missing.
 - `MEDIA_STORAGE_TYPE=cloud` no longer fails with `ImportError: cannot import name 'AwsConfig'`: the config classes are imported from `cloud_storage_manager.storage_schema` and the factory from `cloud_storage_manager.storage_provider`, where `cloud-storage-manager` 0.1.2 defines them.

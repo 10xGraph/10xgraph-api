@@ -97,7 +97,7 @@ the in-memory store a revocation reaches one process and `10xgraph revoke` refus
 (`--redis-url` points it at a Redis directly). It fails closed: while the cache store is
 unreachable, authenticated requests get 503 and the server refuses to start. The value is
 `true`, `false`, `null` or the object above; a string or a top-level `token_revocation` is a
-config error. It only applies with auth on.
+config error. It only applies with auth on. With it on, every token needs a `jti`: a token without one answers 401 `INVALID_TOKEN` ("Invalid token, jti missing").
 
 ## Data isolation (config["user"])
 
