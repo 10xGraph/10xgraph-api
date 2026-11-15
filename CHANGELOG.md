@@ -27,7 +27,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased]
+## [1.0.0] - 2026-11-15
+
+The first stable release of `10xgraph-api`. It requires `10xgraph` 1.0 and is released with
+`10xgraph-client` 1.0.0. From this version on the HTTP API, CLI and `10xgraph.json` keys are
+stable: no breaking change before 2.0, and the deprecated `agentflow` names (`agentflow_cli`
+import, `agentflow` command, `agentflow.json`, `AGENTFLOW_*` variables, `agentflow-bearer`
+subprotocol) keep working until then. There was no 1.0.0rc7 of this package, so this section
+lists every change since 1.0.0rc6. Read the Breaking entries before upgrading from an rc.
 
 ### Breaking
 
@@ -72,6 +79,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`meta.is_new_thread` is reported correctly on a continued thread.** A second invoke or stream on the thread id the first call returned reported `is_new_thread: true` with `InMemoryCheckpointer` and `SqliteCheckpointer`, because `aput_thread` in `10xgraph` 1.0.0rc6 returned `True` on every call. The API code is unchanged: it reports the correct value once it runs on the core release that fixes `aput_thread` (unreleased, see the core changelog). `tests/unit_tests/test_is_new_thread.py` covers invoke and stream over a real graph.
+- **`10xgraph init` Quick setup writes a `requirements.txt`.** It listed no dependencies, so `10xgraph build` warned "No requirements.txt file found" and the Dockerfile installed only `10xgraph-api`, leaving out the provider SDK the agent imports. The file lists `10xgraph[<provider extra>]` and `10xgraph-api` (with the `websocket` extra when chosen), the same requirements the Full `pyproject.toml` uses, and the next steps now say `pip install -r requirements.txt`.
 - **Expected 401s log at WARNING.** A missing, invalid, expired or revoked token logs one WARNING line
   (method, path, status, code; no token, no traceback) through the same helper as 403, 404 and 429.
   5xx stays at ERROR.

@@ -11,7 +11,6 @@ from tenxgraph_api.cli.commands.init_context import (
     DEFAULT_PROVIDER,
     PROVIDERS,
     STORAGE_PRESETS,
-    VERSION_RANGE,
     WORKERS,
     build_config,
     build_context,
@@ -233,12 +232,9 @@ class InitCommand(BaseCommand):
             details["WebSocket"] = "on"
 
         if not is_prod:
-            install = [f'pip install "{_template_vars(context)["core_requirement"]}"']
-            if context.get("websocket"):
-                install.append(f'pip install "10xgraph-api[websocket]{VERSION_RANGE}"')
             steps = [
                 f"cd {base_path}",
-                *install,
+                "pip install -r requirements.txt",
                 f"{key_step}.",
                 "10xgraph dev",
                 _CONFIG_HINT,

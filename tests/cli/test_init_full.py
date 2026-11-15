@@ -242,3 +242,39 @@ def test_config_test_and_evaluation_sections_follow_flags(tests: bool, evals: bo
     if evals:
         assert config["evaluation"]["threshold"] == 0.75
         assert config["evaluation"]["directory"] == "evals"
+
+
+# --- quick setup writes requirements.txt ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("provider", "extra"),
+    [("google", "google-genai"), ("openai", "openai"), ("anthropic", "anthropic")],
+)
+def test_quick_writes_requirements_with_the_provider_extra(
+    tmp_path: Path, monkeypatch, provider: str, extra: str
+) -> None:
+    code, text = _init(tmp_path, mode="quick", provider=provider)
+    assert code == 0
+    assert (tmp_path / "requirements.txt").read_text().splitlines() == [
+        f"10xgraph[{extra}]>=1.0,<2.0",
+        "10xgraph-api>=1.0,<2.0",
+    ]
+    assert not (tmp_path / "pyproject.toml").exists()
+    assert "pip install -r requirements.txt" in text
+
+    # `10xgraph build` finds the file and installs from it
+    from tenxgraph_api.cli.commands.build import BuildCommand
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CI", raising=False)
+    assert BuildCommand(OutputFormatter(stream=io.StringIO())).execute(non_interactive=True) == 0
+    dockerfile = (tmp_path / "Dockerfile").read_text()
+    assert "COPY requirements.txt requirements.txt" in dockerfile
+    assert "RUN pip install -r requirements.txt" in dockerfile
+
+
+def test_quick_requirements_follow_the_websocket_flag(tmp_path: Path) -> None:
+    code, _ = _init(tmp_path, mode="quick", websocket=True)
+    assert code == 0
+    assert "10xgraph-api[websocket]>=1.0,<2.0" in (tmp_path / "requirements.txt").read_text()
