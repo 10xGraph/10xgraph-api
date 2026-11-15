@@ -397,11 +397,6 @@ source = [
 [tool.pytest-env]
 ENVIRONMENT = "pytest"
 
-[tool.uv.sources]
-# TEMPORARY: lock core from GitHub main until 10xgraph 1.0.0 is on PyPI. Remove this
-# block and run `uv lock --upgrade-package 10xgraph` before releasing. uv only; the
-# published wheel keeps the plain `10xgraph>=1.0.0,<2.0` requirement.
-10xgraph = { git = "https://github.com/10xGraph/10xGraph", branch = "main" }
 
 [dependency-groups]
 dev = [

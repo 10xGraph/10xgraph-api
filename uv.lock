@@ -11,12 +11,16 @@ resolution-markers = [
 [[package]]
 name = "10xgraph"
 version = "1.0.0"
-source = { git = "https://github.com/10xGraph/10xGraph?branch=main#d5abda8d2b7b901958acf01fe4ed104f546d89f5" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "injectq" },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/69/24/a250c7f0af0642cd18dc4ee5eb3935732fb3497727138a1ae12842a19fe7/10xgraph-1.0.0.tar.gz", hash = "sha256:d6316a8acb8b4d02bc09a16bf42190d82db78f6d4d2637e819d3d42e945d77bd", size = 781285, upload-time = "2026-11-15T19:18:53.896Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/13/16/e86e3e5756c9ec0e83df4322aa6cc33d692e292489252fc51bec7cae1e8e/10xgraph-1.0.0-py3-none-any.whl", hash = "sha256:dbe26a4b5346aafdeeac8b1ae289b81007f978655811259374d61914b9ef5ffe", size = 839915, upload-time = "2026-11-15T19:18:47.455Z" },
 ]
 
 [package.optional-dependencies]
@@ -132,8 +136,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "10xgraph", git = "https://github.com/10xGraph/10xGraph?branch=main" },
-    { name = "10xgraph", extras = ["images"], marker = "extra == 'images'", git = "https://github.com/10xGraph/10xGraph?branch=main" },
+    { name = "10xgraph", specifier = ">=1.0.0,<2.0" },
+    { name = "10xgraph", extras = ["images"], marker = "extra == 'images'", specifier = ">=1.0.0,<2.0" },
     { name = "ag-ui-protocol", marker = "extra == 'ag-ui'", specifier = ">=1.0,<2" },
     { name = "fastapi", specifier = ">=0.116,<1.0" },
     { name = "firebase-admin", marker = "extra == 'firebase'", specifier = ">=6.5.0" },
@@ -177,7 +181,7 @@ provides-extras = ["sentry", "firebase", "snowflakekit", "redis", "jobs", "jobs-
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "10xgraph", git = "https://github.com/10xGraph/10xGraph?branch=main" },
+    { name = "10xgraph", specifier = ">=1.0.0,<2.0" },
     { name = "ag-ui-protocol", specifier = ">=1.0,<2" },
     { name = "gunicorn", specifier = ">=23,<27" },
     { name = "httpx", specifier = "==0.27.0" },
