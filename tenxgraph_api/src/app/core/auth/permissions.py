@@ -37,6 +37,7 @@ from tenxgraph_api.src.app.core.auth.revocation import (
     token_revoked,
 )
 from tenxgraph_api.src.app.core.exceptions.general_exception import GeneralException
+from tenxgraph_api.src.app.core.exceptions.user_exception import UserAccountError
 from tenxgraph_api.src.app.core.request_context import get_request_context, set_request_user
 from tenxgraph_api.src.app.core.utils.container import current_container
 from tenxgraph_api.src.app.core.validation.request_config import (
@@ -260,6 +261,12 @@ async def _identity(
         if not audit_enabled():
             logger.warning("Rejected revoked credential for user %s", identity.user_id)
         await _auth_failed("revoked", identity.user_id)
+        if not isinstance(connection, WebSocket):
+            raise UserAccountError(
+                message="Token has been revoked, please login again",
+                error_code="REVOKED_TOKEN",
+                status_code=401,
+            )
         _reject(connection, 401, "Token has been revoked, please login again")
     _keep_run_credential(
         connection, await auth.downstream_credential(connection, credential, claims)

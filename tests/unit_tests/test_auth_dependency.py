@@ -26,7 +26,7 @@ from tenxgraph_api.src.app.core.auth.revocation import (
 )
 from tenxgraph_api.src.app.core.auth.route_guard import find_unprotected_routes
 from tenxgraph_api.src.app.core.cache_store import BaseCacheStore, InMemoryCacheStore
-from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
+from tenxgraph_api.src.app.core.exceptions.handle_errors import init_errors_handler
 
 
 WS_POLICY_VIOLATION = 1008
@@ -74,6 +74,7 @@ def _build(auth: BaseAuth | None) -> TestClient:
     container.bind_instance(BaseCacheStore, InMemoryCacheStore())
     container.bind_instance(TokenRevocationConfig, TokenRevocationConfig())
     app = FastAPI()
+    init_errors_handler(app)
     setup_fastapi(container, app)
 
     @app.post("/invoke")
@@ -164,7 +165,9 @@ def test_revoked_token_is_refused_but_others_pass():
     client = _build(_Auth())
     assert _http(client, "revoked").status_code == 200
     _revoke(client, "dead")
-    assert _http(client, "revoked").status_code == 401
+    refused = _http(client, "revoked")
+    assert refused.status_code == 401
+    assert "REVOKED_TOKEN" in refused.text
     assert _http(client, "alice").status_code == 200
 
 
@@ -216,9 +219,7 @@ def test_custom_authorize_gets_the_resource_id():
 
 
 def test_bad_resource_id_is_refused_before_authorize():
-    # ClientInputError is rendered as 422 by the app's error handlers (not in this tiny app).
-    with pytest.raises(ClientInputError):
-        _http(_build(_Auth()), "alice", "/threads/a$b")
+    assert _http(_build(_Auth()), "alice", "/threads/a$b").status_code == 422
 
 
 # -- construction and route guard -------------------------------------------

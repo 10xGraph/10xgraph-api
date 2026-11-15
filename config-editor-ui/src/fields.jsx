@@ -23,7 +23,10 @@ const put = (path, value) => commit((s) => {
     deletePath(s.config, path);
     return;
   }
-  const sec = path.length > 1 ? s.sections.find((x) => x.optional && x.key === path[0]) : null;
+  const id = path.join(".");
+  const sec = path.length > 1
+    ? s.sections.find((x) => x.optional && x.key === path[0] && x.fields.some((f) => f.path.join(".") === id))
+    : null;
   if (sec && (s.config[sec.key] === undefined || s.config[sec.key] === null)) {
     s.config[sec.key] = JSON.parse(JSON.stringify(sec.default));
   }

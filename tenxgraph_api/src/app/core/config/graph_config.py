@@ -638,11 +638,17 @@ class RunsConfig:
     thread yet sends ``threadId`` blank or ``"new"`` and reads the server's id from
     ``RUN_STARTED``; a frontend that makes its own ids needs ``"client"``.
 
-    ``config_keys`` and ``state_keys`` are allow-lists for client input. When set, a request
-    whose ``config`` or ``initial_state`` carries any other key is rejected with 422.
-    ``thread_id`` is always allowed in ``config``. ``null`` (the default) accepts any key
-    except the server-owned ones. Set them when a graph tool or node trusts a value such as
-    ``role`` or ``plan`` from state or config: without an allow-list a client can send it.
+    ``config_keys`` and ``state_keys`` are allow-lists for client input. A request whose
+    ``config`` carries a key outside ``config_keys`` is rejected with 422; ``thread_id`` and
+    ``run_id`` are always allowed, and ``null`` (the default) accepts any key except the
+    server-owned ones.
+
+    ``state_keys`` denies by default, like ``remote_tools``: only the listed keys may be set by
+    a client in ``initial_state``, PUT state and AG-UI ``state``. Unset, ``null`` or ``[]``
+    allows none, and any other key is rejected with 422. ``context`` in PUT state is always
+    allowed (it has its own message rules). List only keys a client may be trusted with: a
+    graph tool or node that trusts a value such as ``role`` or ``plan`` from state must not
+    list it.
 
     ``max_concurrent_per_user`` caps the HTTP graph runs (invoke, stream, AG-UI) one verified
     user may have in flight at once in this process; over the cap the request gets 429.
@@ -660,7 +666,7 @@ class RunsConfig:
 
     thread_ids: str = "server"
     config_keys: frozenset[str] | None = None
-    state_keys: frozenset[str] | None = None
+    state_keys: frozenset[str] = frozenset()
     max_concurrent_per_user: int | None = DEFAULT_MAX_CONCURRENT_RUNS_PER_USER
     timeout: float | None = field(default_factory=default_run_timeout)
     max_parallel_tool_calls: int | None = None
@@ -679,7 +685,7 @@ class RunsConfig:
         return cls(
             thread_ids=thread_ids,
             config_keys=_key_allow_list(data, "config_keys"),
-            state_keys=_key_allow_list(data, "state_keys"),
+            state_keys=_key_allow_list(data, "state_keys") or frozenset(),
             max_concurrent_per_user=_runs_limit(data),
             timeout=_runs_timeout(data),
             max_parallel_tool_calls=_runs_max_parallel_tool_calls(data),

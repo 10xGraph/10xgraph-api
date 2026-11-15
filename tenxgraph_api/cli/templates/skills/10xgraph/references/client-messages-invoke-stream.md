@@ -46,7 +46,7 @@ The client serializes message content as arrays of content blocks. Avoid sending
 
 Options:
 
-- `initial_state`
+- `initial_state` (every key must be listed in `runs.state_keys` in `10xgraph.json`, otherwise 422)
 - `config`
 - `recursion_limit`
 - `response_granularity`: `"full"`, `"partial"`, or `"low"`

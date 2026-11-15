@@ -33,6 +33,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`thread_name_generator` defaults to none.** With the key unset, `null`, `""` or `"none"`, new
   threads are saved without a name. Set `"random"` to keep the old behaviour (#80).
+- **`runs.state_keys` denies by default.** Clients may set only the state keys it lists, in
+  `initial_state`, `PUT /v1/threads/{id}/state` and AG-UI `state`. Unset, `null` or `[]` allows
+  none, and any other key is a 422 that names the key and points to `runs.state_keys`. Before, an
+  unset value accepted any key. `context` in PUT state is always allowed (it has its own message
+  rules; a configured `state_keys` used to block it too). `runs.config_keys` is unchanged: `null`
+  still accepts any key. `10xgraph config` shows the setting in its own "Client state keys"
+  section. Migration: list every key your clients send, for example
+  `"runs": {"state_keys": ["preferences"]}`.
 - `AIThreadNameGenerator` and `DefaultThreadNameGenerator` are replaced by
   `RandomThreadNameGenerator`. `ThreadNameGenerator` stays the public base class.
 - `thread_name_generator` must be `none`, `random`, `first_message` or `module:attribute`; any

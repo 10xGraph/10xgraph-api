@@ -25,6 +25,7 @@ from tenxgraph.core.state.message_block import (
 )
 from tenxgraph.utils.thread_info import ThreadInfo
 
+from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
 from tenxgraph_api.src.app.core.validation.request_config import client_tool_call_error
 from tenxgraph_api.src.app.routers.checkpointer.services.checkpointer_service import (
     CheckpointerService,
@@ -137,7 +138,7 @@ def graph_service():
     srv._graph = SimpleNamespace(_state_graph=SimpleNamespace(nodes=nodes))
     srv.checkpointer = MagicMock()
     srv.checkpointer.aget_thread_owner = AsyncMock(return_value=None)
-    srv.config = MagicMock()
+    srv.config = SimpleNamespace(runs=RunsConfig(state_keys=frozenset({"current_node"})))
     srv.thread_name_generator = None
     srv._media_service = None
     srv._telemetry = None

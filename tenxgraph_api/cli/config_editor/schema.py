@@ -420,8 +420,9 @@ _SECTIONS: list[dict[str, Any]] = [
         "key": "runs",
         "optional": True,
         "off_summary": (
-            "The server picks new thread ids, any non-reserved input key reaches the graph, "
-            "each user may hold 10 HTTP runs at once, and runs have no time limit."
+            "The server picks new thread ids, any non-reserved config key reaches the graph, "
+            "each user may hold 10 HTTP runs at once, and runs have no time limit. "
+            "Client state keys are set in their own section."
         ),
         "default": {"thread_ids": "server", "max_concurrent_per_user": 10},
         "fields": [
@@ -447,13 +448,6 @@ _SECTIONS: list[dict[str, Any]] = [
                     "When set, a request config with any other key is rejected. thread_id is "
                     "always allowed. Empty means any non-reserved key."
                 ),
-            },
-            {
-                "path": ["runs", "state_keys"],
-                "label": "Allowed initial_state keys",
-                "type": "list",
-                "placeholder": "preferences",
-                "help": "When set, initial_state with any other key is rejected.",
             },
             {
                 "path": ["runs", "max_concurrent_per_user"],
@@ -511,6 +505,32 @@ _SECTIONS: list[dict[str, Any]] = [
                     "development sets no limit."
                 ),
             },
+        ],
+    },
+    {
+        "id": "state_keys",
+        "title": "Client state keys",
+        "description": (
+            "Which state keys a client may set. Denied by default: a key that is not listed "
+            "is refused with 422."
+        ),
+        "key": None,
+        "optional": False,
+        "fields": [
+            {
+                "path": ["runs", "state_keys"],
+                "label": "Allowed state keys",
+                "type": "list",
+                "placeholder": "preferences",
+                "help": (
+                    "State keys a client may set in initial_state, PUT state and AG-UI state. "
+                    "Empty: none."
+                ),
+            },
+        ],
+        "notes": [
+            "Saved under runs.state_keys in 10xgraph.json. Switching the Runs section back to "
+            "defaults removes it, which denies every key again.",
         ],
     },
     {

@@ -216,14 +216,20 @@ def _create_document_pipeline(settings: MediaSettings) -> DocumentPipeline:
     }
     handling = handling_map.get(settings.DOCUMENT_HANDLING, DocumentHandling.EXTRACT_TEXT)
 
-    extractor = (
-        DocumentExtractor(
-            max_pdf_bytes=int(settings.MEDIA_MAX_PDF_MB * 1024 * 1024),
-            max_pdf_pages=settings.MEDIA_MAX_PDF_PAGES,
-        )
-        if handling == DocumentHandling.EXTRACT_TEXT
-        else None
-    )
+    extractor = None
+    if handling == DocumentHandling.EXTRACT_TEXT:
+        try:
+            extractor = DocumentExtractor(
+                max_pdf_bytes=int(settings.MEDIA_MAX_PDF_MB * 1024 * 1024),
+                max_pdf_pages=settings.MEDIA_MAX_PDF_PAGES,
+            )
+        except ImportError as exc:
+            # A server setup problem, reported as a clear 422 instead of a bare 500.
+            raise ClientInputError(
+                "File uploads are not configured on this server: document text extraction "
+                'needs the media extra (pip install "10xgraph-api[media]"), or set '
+                "DOCUMENT_HANDLING to pass_raw or skip."
+            ) from exc
     return DocumentPipeline(document_extractor=extractor, handling=handling)
 
 

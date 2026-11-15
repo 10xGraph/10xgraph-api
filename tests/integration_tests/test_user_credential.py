@@ -356,7 +356,7 @@ def test_config_keys_allow_list_cannot_readmit_the_credential(make):
 
 
 def test_initial_state_cannot_carry_a_credential_to_the_tool(make):
-    h = make()
+    h = make(runs=RunsConfig(state_keys=frozenset({"credential"})))
     # A state field named ``credential`` is plain state: it never becomes the run credential.
     resp = h.invoke(ALICE, initial_state={"credential": "forged"})
     assert resp.status_code == 200, resp.text

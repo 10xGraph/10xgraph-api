@@ -25,8 +25,10 @@ A server-owned key from the client is dropped, not refused, and the drop is logg
 Every route and service that forwards client config to the graph, checkpointer or store must
 pass it through :func:`client_config` first, then set the server-owned keys itself.
 
-Operators may narrow the open dict further with ``runs.config_keys`` and ``runs.state_keys`` in
-10xgraph.json; :func:`reject_unlisted_keys` enforces them on graph input and state writes.
+Operators may narrow the open config dict with ``runs.config_keys`` (``null``, the default,
+accepts any key). Client state is closed by default: ``runs.state_keys`` lists the only keys a
+client may set in ``initial_state``, PUT state and AG-UI state, and an empty list allows none.
+:func:`reject_unlisted_keys` enforces both on graph input and state writes.
 
 The thread a request runs on is also server-controlled: routes use the thread the permission
 check approved, and both sides normalise it with :func:`normalize_thread_id`.
@@ -153,18 +155,23 @@ def reject_unlisted_keys(
     allowed: frozenset[str] | None,
     field: str,
     always: frozenset[str] = frozenset(),
+    setting: str = "",
 ) -> None:
     """Raise ``ValueError`` when ``data`` carries a key outside ``allowed`` (plus ``always``).
 
-    ``allowed=None`` means no allow-list is configured and every key passes. Used for the
-    ``runs.config_keys`` / ``runs.state_keys`` settings, so a graph that trusts a value such as
-    ``role`` from config or state cannot be handed one by the client.
+    ``allowed=None`` means no allow-list is configured and every key passes (``config_keys``);
+    an empty set allows none (``state_keys``). ``setting`` names the 10xgraph.json key to add the
+    key to, for the error message. Used for ``runs.config_keys`` and ``runs.state_keys``, so a
+    graph that trusts a value such as ``role`` from config or state cannot be handed one.
     """
     if allowed is None or not isinstance(data, dict):
         return
     unlisted = sorted(str(key) for key in data if key not in allowed and key not in always)
     if unlisted:
-        raise ClientInputError(f"{field} keys not allowed by this server: {', '.join(unlisted)}")
+        message = f"{field} keys not allowed by this server: {', '.join(unlisted)}"
+        if setting:
+            message += f". List them in {setting} in 10xgraph.json to allow them"
+        raise ClientInputError(message)
 
 
 # Content blocks that ask the server to run a tool. Only the model produces these; tool

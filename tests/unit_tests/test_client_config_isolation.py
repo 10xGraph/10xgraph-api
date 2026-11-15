@@ -365,14 +365,32 @@ async def test_unlisted_initial_state_key_is_rejected(graph_service):
 
 
 @pytest.mark.asyncio
-async def test_no_allow_list_keeps_the_open_dict(graph_service):
+async def test_config_is_open_and_state_is_closed_by_default(graph_service):
     from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
 
     graph_service.config.runs = RunsConfig()
-    input_data, config, _ = await graph_service._prepare_input(
-        _input(config={"plan": "pro", **T1}, initial_state={"role": "admin"})
+    _, config, _ = await graph_service._prepare_input(_input(config={"plan": "pro", **T1}))
+    assert config["plan"] == "pro"
+    with pytest.raises(ValueError, match=r"initial_state keys not allowed.*runs\.state_keys"):
+        await graph_service._prepare_input(_input(config=T1, initial_state={"role": "admin"}))
+    graph_service.config.runs = RunsConfig(state_keys=frozenset())
+    with pytest.raises(ValueError, match="role"):
+        await graph_service._prepare_input(_input(config=T1, initial_state={"role": "admin"}))
+
+
+@pytest.mark.asyncio
+async def test_ag_ui_state_goes_through_the_state_keys_check(graph_service):
+    from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+    from tenxgraph_api.src.app.routers.ag_ui.service import _client_state
+
+    graph_service.config.runs = RunsConfig(state_keys=frozenset({"preferences"}))
+    state = _client_state({"preferences": {"tone": "brief"}, "role": "admin"})
+    with pytest.raises(ValueError, match="initial_state keys not allowed.*role"):
+        await graph_service._prepare_input(_input(config=T1, initial_state=state))
+    input_data, _, _ = await graph_service._prepare_input(
+        _input(config=T1, initial_state=_client_state({"preferences": {"tone": "brief"}}))
     )
-    assert config["plan"] == "pro" and input_data["state"] == {"role": "admin"}
+    assert input_data["state"] == {"preferences": {"tone": "brief"}}
 
 
 @pytest.mark.asyncio
@@ -396,7 +414,7 @@ async def test_put_state_honours_the_state_allow_list(monkeypatch):
     from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RunsConfig
 
     graph_config = MagicMock(spec=GraphConfig)
-    graph_config.runs = RunsConfig(state_keys=frozenset({"context"}))
+    graph_config.runs = RunsConfig(state_keys=frozenset({"plan"}))
     container = InjectQ()
     container.bind_instance(GraphConfig, graph_config)
     monkeypatch.setattr(InjectQ, "get_instance", classmethod(lambda cls: container))

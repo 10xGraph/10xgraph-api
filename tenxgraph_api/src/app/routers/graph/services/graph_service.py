@@ -909,7 +909,12 @@ class GraphService:
         runs = self.runs_policy()
         reject_unlisted_keys(config, runs.config_keys, "config", ALWAYS_ALLOWED_CONFIG_KEYS)
         reject_builtin_state_keys(graph_input.initial_state, "initial_state")
-        reject_unlisted_keys(graph_input.initial_state, runs.state_keys, "initial_state")
+        reject_unlisted_keys(
+            graph_input.initial_state,
+            runs.state_keys,
+            "initial_state",
+            setting="runs.state_keys",
+        )
         # Server-owned keys set by a trusted caller (a protocol adapter), after the client's
         # own config has been stripped of them.
         config.update(server_config or {})

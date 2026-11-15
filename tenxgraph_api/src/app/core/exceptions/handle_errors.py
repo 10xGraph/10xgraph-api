@@ -20,7 +20,7 @@ from tenxgraph.core.exceptions import (
 from tenxgraph.utils.validators import ValidationError
 
 from tenxgraph_api.src.app.core import logger
-from tenxgraph_api.src.app.core.audit import audit_http_not_found, audit_not_found
+from tenxgraph_api.src.app.core.audit import audit_event, audit_http_not_found, audit_not_found
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.exceptions.server_errors import (
     RETRY_AFTER_SECONDS,
@@ -271,6 +271,7 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
     @app.exception_handler(ValidationError)
     async def graph_validation_exception_handler(request: Request, exc: ValidationError):
         _log_handled(request, exc, 422, "VALIDATION_ERROR", "10xGraph ValidationError")
+        await audit_event("input", "denied", reason="validation")
 
         request_id = getattr(request.state, "request_id", "unknown")
         message = _sanitize_error_message(str(exc), "VALIDATION_ERROR", is_production)
