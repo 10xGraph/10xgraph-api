@@ -40,9 +40,9 @@ def _token(**claims) -> str:
     return jwt.encode(payload, SECRET, algorithm="HS256")
 
 
-def _authenticate(**claims) -> dict:
+async def _authenticate(**claims) -> dict:
     credential = HTTPAuthorizationCredentials(scheme="Bearer", credentials=_token(**claims))
-    return JwtAuth().authenticate(None, Response(), credential)
+    return await JwtAuth().authenticate(None, Response(), credential)
 
 
 # ---------------------------------------------------------------------------
@@ -50,22 +50,25 @@ def _authenticate(**claims) -> dict:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "bad", [None, "", "   ", True, False, 1.5, 0.0, ["a"], [], {"a": 1}, {}], ids=repr
 )
-def test_bad_user_id_types_are_401(bad):
+async def test_bad_user_id_types_are_401(bad):
     with pytest.raises(UserAccountError) as exc:
-        _authenticate(user_id=bad)
+        await _authenticate(user_id=bad)
     assert exc.value.status_code == HTTP_UNAUTHORIZED
     assert exc.value.error_code == "INVALID_TOKEN"
 
 
-def test_int_user_id_is_stored_as_a_string():
-    assert _authenticate(user_id=7)["user_id"] == "7"
+@pytest.mark.asyncio
+async def test_int_user_id_is_stored_as_a_string():
+    assert (await _authenticate(user_id=7))["user_id"] == "7"
 
 
-def test_string_user_id_is_unchanged():
-    assert _authenticate(user_id="alice")["user_id"] == "alice"
+@pytest.mark.asyncio
+async def test_string_user_id_is_unchanged():
+    assert (await _authenticate(user_id="alice"))["user_id"] == "alice"
 
 
 @pytest.mark.asyncio
@@ -81,5 +84,5 @@ async def test_jti_revocation_is_checked_with_an_odd_user_id():
 async def test_user_revocation_still_applies_to_a_valid_user_id():
     store, on = InMemoryCacheStore(), TokenRevocationConfig()
     await revoke_user(store, "alice", before=100)
-    assert await token_revoked({"user_id": "alice", "iat": 50}, store, on) is True
-    assert await token_revoked({"user_id": "bob", "iat": 50}, store, on) is False
+    assert await token_revoked({"user_id": "alice", "jti": "a", "iat": 50}, store, on) is True
+    assert await token_revoked({"user_id": "bob", "jti": "b", "iat": 50}, store, on) is False

@@ -31,7 +31,7 @@ class HeaderAuth(BaseAuth):
     exercised without minting JWTs.
     """
 
-    def authenticate(
+    async def authenticate(
         self,
         request: Request,
         response: Response,

@@ -110,7 +110,7 @@ def _graph(checkpointer: BaseCheckpointer) -> CompiledGraph:
 class BearerAuth(BaseAuth):
     """The bearer token is ``<user_id>.<SECRET>``; the default ``downstream_credential``."""
 
-    def authenticate(self, request: Request, response: Response | None, credential: Any):
+    async def authenticate(self, request: Request, response: Response | None, credential: Any):
         if credential is None or not credential.credentials.endswith(SECRET):
             raise HTTPException(status_code=401, detail="bad token")
         return {"user_id": credential.credentials.split(".")[0]}
@@ -119,7 +119,7 @@ class BearerAuth(BaseAuth):
 class ApiKeyAuth(BaseAuth):
     """Authenticates an ``X-Api-Key``; the run credential is the key, not a bearer."""
 
-    def authenticate(self, request: Request, response: Response | None, credential: Any):
+    async def authenticate(self, request: Request, response: Response | None, credential: Any):
         key = request.headers.get("X-Api-Key")
         if not key:
             raise HTTPException(status_code=401, detail="no key")
@@ -356,7 +356,7 @@ def test_config_keys_allow_list_cannot_readmit_the_credential(make):
 
 
 def test_initial_state_cannot_carry_a_credential_to_the_tool(make):
-    h = make()
+    h = make(runs=RunsConfig(state_keys=frozenset({"credential"})))
     # A state field named ``credential`` is plain state: it never becomes the run credential.
     resp = h.invoke(ALICE, initial_state={"credential": "forged"})
     assert resp.status_code == 200, resp.text

@@ -28,7 +28,7 @@ class AgentAuth(BaseAuth):
             "Implement it in auth/agent_auth.py."
         )
 
-    def authenticate(
+    async def authenticate(
         self,
         request: Request,
         response: Response,

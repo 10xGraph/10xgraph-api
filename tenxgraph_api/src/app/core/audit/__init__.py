@@ -24,7 +24,7 @@ from tenxgraph_api.src.app.core.request_context import get_request_context
 
 logger = logging.getLogger("tenxgraph_api")
 
-EventType = Literal["access", "auth", "change"]
+EventType = Literal["access", "auth", "change", "input", "rate_limit"]
 Result = Literal["allowed", "denied", "not_found", "failed", "success"]
 
 

@@ -5,6 +5,7 @@ import logging
 import sys
 import textwrap
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import WebSocketException
@@ -313,7 +314,9 @@ async def test_websocket_caps_use_the_lease_manager(monkeypatch):
 
     store = RecordingStore()
     manager = LeaseManager(store)
-    monkeypatch.setattr(realtime_guard.keying, "verified_caller_key", lambda ws: "alice")
+    monkeypatch.setattr(
+        realtime_guard.keying, "verified_caller_key", AsyncMock(return_value="alice")
+    )
     ws_config = WebSocketConfig(max_connections=10, max_connections_per_user=1)
     websocket = SimpleNamespace()
 
@@ -336,7 +339,7 @@ async def test_websocket_caps_hold_per_process_without_a_shared_store(monkeypatc
     from tenxgraph_api.src.app.routers.graph import realtime_guard
 
     manager = LeaseManager(InMemoryCacheStore())
-    monkeypatch.setattr(realtime_guard.keying, "verified_caller_key", lambda ws: None)
+    monkeypatch.setattr(realtime_guard.keying, "verified_caller_key", AsyncMock(return_value=None))
     ws_config = WebSocketConfig(max_connections=1, max_connections_per_user=1)
     async with realtime_guard._connection_slots(manager, SimpleNamespace(), ws_config):
         assert manager.held("ws:all") == 1
@@ -528,7 +531,7 @@ async def test_custom_cache_store_backs_revocation_and_rate_limits(cache_module)
     bound = limiter.bound_cache_store(container)
     assert bound is store
     assert await revocation.token_revoked(
-        Identity(user_id="mallory", claims={"iat": 50}), bound, settings
+        Identity(user_id="mallory", claims={"jti": "m-1", "iat": 50}), bound, settings
     )
 
     assert (await limiter.check(bound, "ip:1.2.3.4", 5, 60)).allowed

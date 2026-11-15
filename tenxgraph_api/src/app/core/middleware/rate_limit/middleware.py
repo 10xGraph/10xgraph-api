@@ -8,6 +8,7 @@ from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from tenxgraph_api.src.app.core import logger
+from tenxgraph_api.src.app.core.audit import audit_event
 from tenxgraph_api.src.app.core.cache_store import BaseCacheStore, InMemoryCacheStore
 from tenxgraph_api.src.app.core.config.graph_config import RateLimitConfig
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
@@ -56,8 +57,8 @@ class RateLimitMiddleware:
             self._fallback = InMemoryCacheStore()
         return bound_cache_store(self.container, self._fallback)
 
-    def _client_key(self, request: Request) -> str:
-        return client_key_for(request, self.config)
+    async def _client_key(self, request: Request) -> str:
+        return await client_key_for(request, self.config)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope.get("path", "") in self._exclude:
@@ -65,7 +66,7 @@ class RateLimitMiddleware:
             return
 
         request = Request(scope)
-        key = self._client_key(request)
+        key = await self._client_key(request)
         cache = self.cache if self.cache is not None else self._bound_cache()
         decision = await check(
             cache,
@@ -79,10 +80,12 @@ class RateLimitMiddleware:
         if not decision.allowed and decision.unavailable:
             # The cache store failed and fail_open is off: an outage, not the client's fault.
             # check() logs the error itself, so this does not log per request.
+            await audit_event("rate_limit", "failed", reason="unavailable")
             await self._unavailable(decision, scope)(scope, receive, send)
             return
 
         if not decision.allowed:
+            await audit_event("rate_limit", "denied", reason="limit_exceeded")
             request_id = (scope.get("state") or {}).get("request_id", "unknown")
             logger.warning(
                 "Rate limit exceeded for %s on %s %s",

@@ -6,9 +6,10 @@ the security headers and CORS that the outer layers add), instead of Starlette's
 ``Internal Server Error`` text that skips them. The exception is also logged with its
 traceback and sent to Sentry when it is set up.
 
-``classify`` tells three kinds of failure from a plain bug: a database or Redis driver that
-cannot be reached (503 with ``Retry-After``), a model provider's rate limit (429 with
-``Retry-After``) and a graph that hit its recursion limit (422).
+``classify`` tells four kinds of failure from a plain bug: a database or Redis driver that
+cannot be reached (503 with ``Retry-After``), data the database refuses to store (422: a NUL
+character, a lone surrogate, a number out of range; the client's input, not an outage), a model
+provider's rate limit (429 with ``Retry-After``) and a graph that hit its recursion limit (422).
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from tenxgraph_api.src.app.utils import error_response
 logger = logging.getLogger("tenxgraph_api.errors")
 
 RETRY_AFTER_SECONDS = 5
+BAD_DATA_CODE = "INVALID_REQUEST_DATA"
 
 _DRIVER_MODULES = ("redis", "asyncpg", "psycopg", "psycopg2", "psycopg_pool")
 _MAX_CHAIN = 8
@@ -61,6 +63,14 @@ def _retry_after_of(exc: BaseException) -> int:
         return RETRY_AFTER_SECONDS
 
 
+def _is_bad_data(item: BaseException) -> bool:
+    """A database driver error caused by the data it was given (SQLSTATE class 22)."""
+    state = getattr(item, "sqlstate", None) or getattr(item, "pgcode", None)
+    if isinstance(state, str) and state.startswith("22"):
+        return True
+    return any(c.__name__ == "DataError" for c in type(item).__mro__)
+
+
 def classify(exc: BaseException) -> Classified | None:
     """A retryable or client-fixable reading of ``exc``, or ``None`` for a plain server bug."""
     for item in _chain(exc):
@@ -80,6 +90,13 @@ def classify(exc: BaseException) -> Classified | None:
                 "PROVIDER_RATE_LIMITED",
                 "The model provider is rate limiting this server. Retry shortly.",
                 _retry_after_of(item),
+            )
+        if module in _DRIVER_MODULES and _is_bad_data(item):
+            return Classified(
+                422,
+                BAD_DATA_CODE,
+                "The request contains data that cannot be stored, such as a NUL character "
+                "or a number out of range.",
             )
         if module in _DRIVER_MODULES and name.endswith(
             ("Error", "Exception", "Timeout", "Interrupted")

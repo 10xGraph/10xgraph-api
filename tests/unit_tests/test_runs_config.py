@@ -24,7 +24,7 @@ def test_defaults(monkeypatch):
     assert runs.thread_ids == "server"
     assert runs.server_thread_ids is True
     assert runs.config_keys is None
-    assert runs.state_keys is None
+    assert runs.state_keys == frozenset()
     assert runs.max_concurrent_per_user == DEFAULT_MAX_CONCURRENT_RUNS_PER_USER
     assert runs.timeout is None
     assert runs.max_parallel_tool_calls is None

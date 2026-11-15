@@ -66,3 +66,27 @@ def test_route_answers_422_validation_error() -> None:
     resp = client.post("/t", json={"messages": MSG, "initial_state": _chain(500)})
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_message_metadata_depth_is_refused():
+    from tenxgraph_api.src.app.core.validation.request_config import request_size_error
+
+    deep: dict = {}
+    for _ in range(5000):
+        deep = {"a": deep}
+    msg = {"role": "user", "content": "hi", "metadata": deep}
+    assert "nested more than" in request_size_error([msg])
+    assert request_size_error([{"role": "user", "content": "hi", "metadata": {"a": 1}}]) is None
+
+
+def test_max_nesting_depth_setting(monkeypatch):
+    from tenxgraph_api.src.app.core.config.settings import get_settings
+
+    monkeypatch.setenv("MAX_NESTING_DEPTH", "3")
+    get_settings.cache_clear()
+    try:
+        assert nesting_depth_error(_chain(4), "x") is not None
+        assert nesting_depth_error(_chain(2), "x") is None
+    finally:
+        monkeypatch.undo()
+        get_settings.cache_clear()

@@ -284,11 +284,18 @@ class CheckpointerService:
         new_thread: bool,
     ) -> StateResponseSchema:
         # The built-in fields are never client-writable; the thread's state is the next run's
-        # state, so the initial_state allow-list applies to the rest.
+        # state, so the state_keys allow-list applies to the rest. ``context`` is always allowed:
+        # it has its own message rules below.
         runs = self._runs()
         try:
             reject_builtin_state_keys(state, "state")
-            reject_unlisted_keys(state, runs.state_keys if runs is not None else None, "state")
+            reject_unlisted_keys(
+                state,
+                runs.state_keys if runs is not None else frozenset(),
+                "state",
+                frozenset({"context"}),
+                "runs.state_keys",
+            )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         # context is appended, so every message here is new and client-authored: user messages

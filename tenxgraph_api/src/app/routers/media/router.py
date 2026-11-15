@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import mimetypes
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
@@ -52,6 +53,12 @@ _INLINE_TYPES = frozenset(
     }
 )
 MAX_FILE_LIST_LIMIT = 200
+_MAX_FILENAME_CHARS = 255
+# C0 and C1 controls (NUL, CR, LF included), the bidi embedding, override and isolate
+# controls, the left-to-right and right-to-left marks, and the line and paragraph separators.
+_FILENAME_UNSAFE = re.compile(
+    "[\x00-\x1f\x7f-\x9f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]"
+)
 _INLINE_PREFIXES = ("audio/", "video/")
 
 
@@ -68,6 +75,13 @@ def _is_active_type(mime: str) -> bool:
         or "javascript" in subtype
         or "ecmascript" in subtype
     )
+
+
+def _clean_filename(filename: str) -> str:
+    """The uploaded name as stored: base name only, no control or bidi characters, capped."""
+    name = _FILENAME_UNSAFE.sub("", re.split(r"[/\\]", filename)[-1]).strip()
+    name = name[:_MAX_FILENAME_CHARS].strip()
+    return "file" if name in {"", ".", ".."} else name
 
 
 async def _read_upload(file: UploadFile, max_bytes: int, max_mb: float) -> bytes:
@@ -148,7 +162,10 @@ async def _uploaded_file(
     dependency runs, so an unauthenticated caller could force that work.
     """
     form = await request.form()
-    file = form.get("file")
+    parts = form.getlist("file")
+    if len(parts) > 1:
+        raise HTTPException(status_code=422, detail="Send exactly one file part")
+    file = parts[0] if parts else None
     if not isinstance(file, StarletteUploadFile):
         raise HTTPException(status_code=422, detail="multipart field 'file' is required")
     return file  # type: ignore[return-value]
@@ -189,8 +206,9 @@ async def upload_file(
     if file.filename is None:
         raise HTTPException(status_code=400, detail="filename is required")
 
+    filename = _clean_filename(file.filename)
     media_settings = get_media_settings()
-    mime = file.content_type or mimetypes.guess_type(file.filename)[0] or "application/octet-stream"
+    mime = file.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
     if not media_settings.is_content_type_allowed(mime):
         raise HTTPException(status_code=415, detail=f"Content type not allowed: {mime}")
@@ -206,21 +224,19 @@ async def upload_file(
 
     if not content_matches_mime(data, mime):
         logger.warning(
-            "Rejected upload %s: content does not match %s", log_safe(file.filename), log_safe(mime)
+            "Rejected upload %s: content does not match %s", log_safe(filename), log_safe(mime)
         )
         raise HTTPException(
             status_code=415, detail=f"file content does not match {mime.split(';', 1)[0].strip()}"
         )
 
-    logger.info(
-        "File upload: %s (%s, %d bytes)", log_safe(file.filename), log_safe(mime), len(data)
-    )
+    logger.info("File upload: %s (%s, %d bytes)", log_safe(filename), log_safe(mime), len(data))
 
     try:
         # Record the uploader as the owner, so the file cannot later be read by a
         # different user who knows the id.
         result = await service.upload_file(
-            data, file.filename, mime, user_id=_user_id(identity), user=identity
+            data, filename, mime, user_id=_user_id(identity), user=identity
         )
     except MissingTenantError:
         # Tenant columns are declared but the identity carries no value: the file could not

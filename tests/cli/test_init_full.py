@@ -53,7 +53,7 @@ def test_storage_preset(storage: str, cache: str, store_key: bool, core_extras: 
     assert ("store" in config) is store_key
     if store_key:
         assert config["store"] == "graph.agent:store"
-    assert template_vars(context)["core_requirement"] == f"10xgraph[{core_extras}]"
+    assert template_vars(context)["core_requirement"] == f"10xgraph[{core_extras}]>=1.0,<2.0"
 
 
 def test_cache_store_flag_overrides_the_preset() -> None:
@@ -120,7 +120,7 @@ def test_extras_flags_skip_template_dirs_and_set_config(tmp_path: Path) -> None:
     assert config["websocket"] == {"enabled": True}
     assert config["ag_ui"]["enabled"] is True
     api = template_vars(_full(websocket=True, ag_ui=True, otel=True))["api_requirement"]
-    assert api == "10xgraph-api[jwt,websocket,ag-ui,otel]"
+    assert api == "10xgraph-api[jwt,websocket,ag-ui,otel]>=1.0,<2.0"
 
 
 # --- strip_blocks --------------------------------------------------------------------
@@ -223,10 +223,13 @@ def test_anthropic_store_adds_openai_extra_for_embeddings() -> None:
     context = _full(storage="postgres-memory", provider="anthropic")
     assert (
         template_vars(context)["core_requirement"]
-        == "10xgraph[anthropic,pg_checkpoint,pgvector,openai]"
+        == "10xgraph[anthropic,pg_checkpoint,pgvector,openai]>=1.0,<2.0"
     )
     openai = _full(storage="postgres-memory", provider="openai")
-    assert template_vars(openai)["core_requirement"] == "10xgraph[openai,pg_checkpoint,pgvector]"
+    assert (
+        template_vars(openai)["core_requirement"]
+        == "10xgraph[openai,pg_checkpoint,pgvector]>=1.0,<2.0"
+    )
 
 
 @pytest.mark.parametrize(("tests", "evals"), [(True, True), (True, False), (False, True)])
@@ -239,3 +242,39 @@ def test_config_test_and_evaluation_sections_follow_flags(tests: bool, evals: bo
     if evals:
         assert config["evaluation"]["threshold"] == 0.75
         assert config["evaluation"]["directory"] == "evals"
+
+
+# --- quick setup writes requirements.txt ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("provider", "extra"),
+    [("google", "google-genai"), ("openai", "openai"), ("anthropic", "anthropic")],
+)
+def test_quick_writes_requirements_with_the_provider_extra(
+    tmp_path: Path, monkeypatch, provider: str, extra: str
+) -> None:
+    code, text = _init(tmp_path, mode="quick", provider=provider)
+    assert code == 0
+    assert (tmp_path / "requirements.txt").read_text().splitlines() == [
+        f"10xgraph[{extra}]>=1.0,<2.0",
+        "10xgraph-api>=1.0,<2.0",
+    ]
+    assert not (tmp_path / "pyproject.toml").exists()
+    assert "pip install -r requirements.txt" in text
+
+    # `10xgraph build` finds the file and installs from it
+    from tenxgraph_api.cli.commands.build import BuildCommand
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CI", raising=False)
+    assert BuildCommand(OutputFormatter(stream=io.StringIO())).execute(non_interactive=True) == 0
+    dockerfile = (tmp_path / "Dockerfile").read_text()
+    assert "COPY requirements.txt requirements.txt" in dockerfile
+    assert "RUN pip install -r requirements.txt" in dockerfile
+
+
+def test_quick_requirements_follow_the_websocket_flag(tmp_path: Path) -> None:
+    code, _ = _init(tmp_path, mode="quick", websocket=True)
+    assert code == 0
+    assert "10xgraph-api[websocket]>=1.0,<2.0" in (tmp_path / "requirements.txt").read_text()

@@ -22,7 +22,7 @@ SECRET = "s3cr3t-task-91be"
 class SecretTokenAuth(BaseAuth):
     """The bearer token is ``<user_id>.<SECRET>``; the default ``downstream_credential``."""
 
-    def authenticate(self, request, response, credential):
+    async def authenticate(self, request, response, credential):
         return {"user_id": credential.credentials.split(".")[0]} if credential else {}
 
 

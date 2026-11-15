@@ -45,7 +45,7 @@ def limiter(monkeypatch):
     monkeypatch.setattr(run_limits, "lease_manager", lambda: shared)
     monkeypatch.setattr(thread_lock, "THREAD_BUSY_WAIT_SECONDS", 0.2)
     router = _router()
-    monkeypatch.setattr(router, "ws_identity_still_valid", lambda ws, user: True)
+    monkeypatch.setattr(router, "ws_identity_still_valid", AsyncMock(return_value=True))
     monkeypatch.setattr(router, "_ws_token_revoked", AsyncMock(return_value=False))
     return shared
 

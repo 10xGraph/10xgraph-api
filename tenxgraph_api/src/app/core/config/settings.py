@@ -101,6 +101,10 @@ class Settings(BaseSettings):
     ###### Request Limits ###########
     #################################
     MAX_REQUEST_SIZE: int = 10 * 1024 * 1024  # 10MB default
+    # Deepest nesting of dicts and lists in client messages (metadata, raw, content blocks),
+    # ``initial_state``, ``config``, ``resume`` and ``filters``. Deeper input is refused with 422
+    # before the graph runs. Raise it only if your clients legitimately send deeper values.
+    MAX_NESTING_DEPTH: int = Field(default=64, ge=1, le=900)
 
     #################################
     ###### Security Headers #########

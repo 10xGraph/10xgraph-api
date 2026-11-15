@@ -8,7 +8,7 @@
 export const NAV = [
   { label: null, items: ["get-running"] },
   { label: "Before production", items: ["auth", "cache_store", "observability", "metrics", "audit"] },
-  { label: "Runs and streaming", items: ["runs", "websocket", "ag_ui", "remote_tools", "media"] },
+  { label: "Runs and streaming", items: ["runs", "state_keys", "websocket", "ag_ui", "remote_tools", "media"] },
   { label: "Project wiring", items: ["checkpointer", "id_generator", "thread_name_generator", "store", "injectq"] },
   { label: "Developer tools", items: ["test", "evaluation"] },
   { label: "Reference", items: ["environment"] },

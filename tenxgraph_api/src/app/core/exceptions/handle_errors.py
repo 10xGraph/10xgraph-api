@@ -1,4 +1,6 @@
 # Handle all exceptions of the 10xGraph API here
+from http import HTTPStatus
+
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException
@@ -20,9 +22,10 @@ from tenxgraph.core.exceptions import (
 from tenxgraph.utils.validators import ValidationError
 
 from tenxgraph_api.src.app.core import logger
-from tenxgraph_api.src.app.core.audit import audit_http_not_found, audit_not_found
+from tenxgraph_api.src.app.core.audit import audit_event, audit_http_not_found, audit_not_found
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.exceptions.server_errors import (
+    BAD_DATA_CODE,
     RETRY_AFTER_SECONDS,
     classify,
     unexpected_error_response,
@@ -107,9 +110,10 @@ def _log_handled(
     """Log a handled exception at the level of the status the handler returns.
 
     A 4xx is the client's mistake: one WARNING line (method, path, status, code), no traceback
-    and no body. A 5xx is a server fault: ERROR with the traceback.
+    and no body. A 5xx is a server fault: ERROR with the traceback. A 501 is neither: the
+    route is not offered by this setup, so it is logged like a 4xx.
     """
-    if status_code < 500:  # noqa: PLR2004
+    if status_code < 500 or status_code == 501:  # noqa: PLR2004
         logger.warning(
             "%s: %s %s -> %s %s",
             label,
@@ -152,7 +156,7 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
         # A 4xx detail is written by the API for the client (401 bad token, 403 missing permission,
         # 404, 413, 422 bad input, 429): hiding it leaves the client unable to fix the request.
         # A 5xx detail may embed internals, so production replaces it.
-        is_server_error = exc.status_code >= 500  # noqa: PLR2004
+        is_server_error = exc.status_code >= 500 and exc.status_code != 501  # noqa: PLR2004
         message = _sanitize_error_message(
             str(exc.detail), "HTTPException", is_production and is_server_error
         )
@@ -236,7 +240,7 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
     ########################################
     @app.exception_handler(UserAccountError)
     async def user_account_exception_handler(request: Request, exc: UserAccountError):
-        logger.warning("UserAccountError on %s: %s", request.url.path, exc.error_code)
+        _log_handled(request, exc, exc.status_code, exc.error_code, "UserAccountError")
         response = error_response(
             request,
             error_code=exc.error_code,
@@ -271,6 +275,7 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
     @app.exception_handler(ValidationError)
     async def graph_validation_exception_handler(request: Request, exc: ValidationError):
         _log_handled(request, exc, 422, "VALIDATION_ERROR", "10xGraph ValidationError")
+        await audit_event("input", "denied", reason="validation")
 
         request_id = getattr(request.state, "request_id", "unknown")
         message = _sanitize_error_message(str(exc), "VALIDATION_ERROR", is_production)
@@ -415,8 +420,11 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
         logger.error(f"StorageError: url: {request.base_url}", exc_info=exc)
 
         kind = classify(exc)
-        if kind is not None and kind.status_code == 503:  # noqa: PLR2004
-            # The database or cache could not be reached: retryable, not a bug.
+        if kind is not None and (
+            kind.status_code == HTTPStatus.SERVICE_UNAVAILABLE or kind.error_code == BAD_DATA_CODE
+        ):
+            # The database or cache could not be reached (retryable), or it refused the
+            # client's data (422): not a bug in the server.
             return unexpected_error_response(request, exc)
 
         request_id = getattr(request.state, "request_id", "unknown")

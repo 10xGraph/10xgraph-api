@@ -5,6 +5,7 @@ stay open long after its token expires. These tests cover the limits that apply 
 lifetime of the connection.
 """
 
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import Depends, FastAPI, WebSocket
@@ -107,7 +108,7 @@ def caller(monkeypatch):
     """Set which verified user the guard sees (``None`` = anonymous / invalid token)."""
 
     def _set(user_id: str | None):
-        monkeypatch.setattr(keying, "verified_caller_key", lambda connection: user_id)
+        monkeypatch.setattr(keying, "verified_caller_key", AsyncMock(return_value=user_id))
 
     _set(None)
     return _set
@@ -213,23 +214,27 @@ class _Ws:
     pass
 
 
-def test_identity_check_passes_while_token_is_valid(caller):
+@pytest.mark.asyncio
+async def test_identity_check_passes_while_token_is_valid(caller):
     caller("alice")
-    assert ws_identity_still_valid(_Ws(), Identity(user_id="alice")) is True
+    assert await ws_identity_still_valid(_Ws(), Identity(user_id="alice")) is True
 
 
-def test_identity_check_fails_once_token_stops_verifying(caller):
+@pytest.mark.asyncio
+async def test_identity_check_fails_once_token_stops_verifying(caller):
     caller(None)  # expired or revoked
-    assert ws_identity_still_valid(_Ws(), Identity(user_id="alice")) is False
+    assert await ws_identity_still_valid(_Ws(), Identity(user_id="alice")) is False
 
 
-def test_identity_check_fails_if_token_now_belongs_to_someone_else(caller):
+@pytest.mark.asyncio
+async def test_identity_check_fails_if_token_now_belongs_to_someone_else(caller):
     caller("mallory")
-    assert ws_identity_still_valid(_Ws(), Identity(user_id="alice")) is False
+    assert await ws_identity_still_valid(_Ws(), Identity(user_id="alice")) is False
 
 
-def test_identity_check_skipped_without_auth(caller):
-    assert ws_identity_still_valid(_Ws(), None) is True
+@pytest.mark.asyncio
+async def test_identity_check_skipped_without_auth(caller):
+    assert await ws_identity_still_valid(_Ws(), None) is True
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +255,7 @@ async def test_guard_and_runs_share_the_bound_cache_store(monkeypatch):
     store = InMemoryCacheStore()
     monkeypatch.setattr(realtime_guard, "bound_cache_store", lambda: store)
     monkeypatch.setattr(realtime_guard, "lease_manager", lambda: LeaseManager(store))
-    monkeypatch.setattr(keying, "verified_caller_key", lambda connection: None)
+    monkeypatch.setattr(keying, "verified_caller_key", AsyncMock(return_value=None))
     websocket = SimpleNamespace(state=SimpleNamespace())
     ws_config = WebSocketConfig(max_connections=None, max_connections_per_user=None)
     config = _Config(ws_config, rate_limit=_Global())

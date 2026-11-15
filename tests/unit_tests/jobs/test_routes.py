@@ -37,7 +37,7 @@ SECRET = "tests.secret"
 class TokenAuth(BaseAuth):
     """The bearer token is the user id."""
 
-    def authenticate(self, request, response, credential):
+    async def authenticate(self, request, response, credential):
         return {"user_id": credential.credentials} if credential else {}
 
 
@@ -46,7 +46,7 @@ class TenantTokenAuth(BaseAuth):
 
     rbac = RbacConfig(tenant_claims=["org_id"])
 
-    def authenticate(self, request, response, credential):
+    async def authenticate(self, request, response, credential):
         user_id, _, org_id = credential.credentials.partition("@")
         return {"user_id": user_id, "org_id": org_id}
 

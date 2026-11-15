@@ -31,9 +31,9 @@ from tenxgraph.utils.constants import END
 from tenxgraph.utils.thread_info import ThreadInfo
 
 from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
-from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.core.config.media_settings import MediaSettings, MediaStorageType
+from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
 from tenxgraph_api.src.app.routers.checkpointer.router import router as checkpointer_router
 from tenxgraph_api.src.app.routers.graph.router import router as graph_router
 from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import (

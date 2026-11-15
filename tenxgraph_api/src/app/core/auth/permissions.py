@@ -33,10 +33,12 @@ from tenxgraph_api.src.app.core.auth.reserved_identity import (
     log_reserved_rejection,
 )
 from tenxgraph_api.src.app.core.auth.revocation import (
+    TokenJtiMissingError,
     TokenRevocationUnavailableError,
     token_revoked,
 )
 from tenxgraph_api.src.app.core.exceptions.general_exception import GeneralException
+from tenxgraph_api.src.app.core.exceptions.user_exception import UserAccountError
 from tenxgraph_api.src.app.core.request_context import get_request_context, set_request_user
 from tenxgraph_api.src.app.core.utils.container import current_container
 from tenxgraph_api.src.app.core.validation.request_config import (
@@ -137,6 +139,13 @@ def _reject(connection: HTTPConnection, status_code: int, detail: str) -> NoRetu
     raise HTTPException(status_code=status_code, detail=detail)
 
 
+def _reject_token(connection: HTTPConnection, message: str, error_code: str) -> NoReturn:
+    """A 401 carrying ``error_code`` (``INVALID_TOKEN``, ``REVOKED_TOKEN``); 1008 on a WS."""
+    if isinstance(connection, WebSocket):
+        _reject(connection, 401, message)
+    raise UserAccountError(message=message, error_code=error_code, status_code=401)
+
+
 _STATE_KEY = "tenxgraph_verified_claims"
 # The run credential from ``BaseAuth.downstream_credential``; read with ``run_credential``.
 _CREDENTIAL_STATE_KEY = "tenxgraph_run_credential"
@@ -206,7 +215,7 @@ async def _authenticate(
     try:
         claims = _recall_claims(connection, auth, credential.credentials) if credential else None
         if claims is None:
-            claims = auth.authenticate(connection, response, credential)
+            claims = await auth.authenticate(connection, response, credential)
     except HTTPException as exc:
         await _auth_failed(_failure_reason(credential, exc))
         _reject(connection, exc.status_code, str(exc.detail))
@@ -219,7 +228,7 @@ async def _authenticate(
         raise
     if not claims:
         await _auth_failed(_failure_reason(credential))
-        _reject(connection, 401, "Authentication required")
+        _reject_token(connection, "Authentication required", "INVALID_TOKEN")
     if not isinstance(claims, dict):
         logger.error("%s.authenticate returned %s, not a dict", type(auth).__name__, type(claims))
         await _auth_failed("claims_rejected")
@@ -243,16 +252,22 @@ async def _identity(
             logger.warning("Rejected token claims: %s", exc)
         user_id = claims.get("user_id")
         await _auth_failed("claims_rejected", user_id if isinstance(user_id, str) else None)
-        _reject(connection, 401, "Invalid token, please login again")
+        _reject_token(connection, "Invalid token, please login again", "INVALID_TOKEN")
     if identity_is_reserved(identity):
         # Any auth class, any transport, cached or fresh: nobody acts as the shared owner.
         # The event leaves the reserved id out, like the log line.
         if not audit_enabled():
             log_reserved_rejection()
         await _auth_failed("reserved_id")
-        _reject(connection, 401, RESERVED_USER_ID_MESSAGE)
+        _reject_token(connection, RESERVED_USER_ID_MESSAGE, "INVALID_TOKEN")
     try:
         revoked = await token_revoked(identity)
+    except TokenJtiMissingError:
+        # Revocation is on: a token without a jti could never be revoked by itself.
+        if not audit_enabled():
+            logger.warning("Rejected credential without a jti for user %s", identity.user_id)
+        await _auth_failed("missing_jti", identity.user_id)
+        _reject_token(connection, "Invalid token, jti missing", "INVALID_TOKEN")
     except TokenRevocationUnavailableError:
         await _auth_failed("revocation_unavailable", identity.user_id)
         _reject(connection, 503, "Token revocation check unavailable")
@@ -260,7 +275,7 @@ async def _identity(
         if not audit_enabled():
             logger.warning("Rejected revoked credential for user %s", identity.user_id)
         await _auth_failed("revoked", identity.user_id)
-        _reject(connection, 401, "Token has been revoked, please login again")
+        _reject_token(connection, "Token has been revoked, please login again", "REVOKED_TOKEN")
     _keep_run_credential(
         connection, await auth.downstream_credential(connection, credential, claims)
     )

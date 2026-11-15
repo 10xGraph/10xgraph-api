@@ -69,7 +69,7 @@ class _Auth(BaseAuth):
 
     rbac = ROLES
 
-    def authenticate(self, request: Request, response: Response | None, credential: Any):
+    async def authenticate(self, request: Request, response: Response | None, credential: Any):
         user_id = request.headers.get("X-Test-User")
         if not user_id:
             raise HTTPException(status_code=401, detail="X-Test-User header required")

@@ -358,6 +358,49 @@ def test_storage_error_handler():
     cleanup_env()
 
 
+def _storage_error_caused_by(cause_name: str, sqlstate: str | None = None):
+    """A StorageError raised from a fake asyncpg error, as core wraps a failed write."""
+    attrs = {"__module__": "asyncpg.exceptions"}
+    if sqlstate:
+        attrs["sqlstate"] = sqlstate
+    cause = type(cause_name, (Exception,), attrs)("db text with secret detail")
+    error = StorageError("Cannot access storage", error_code="STORAGE_001")
+    error.__cause__ = cause
+    return error
+
+
+def _storage_status(error: StorageError, mode: str = "development"):
+    app = setup_app(mode)
+
+    @app.get("/storage")
+    def storage():
+        raise error
+
+    r = TestClient(app, raise_server_exceptions=False).get("/storage")
+    cleanup_env()
+    return r
+
+
+def test_storage_error_from_bad_client_data_is_422():
+    r = _storage_status(_storage_error_caused_by("InvalidTextRepresentationError", "22P02"))
+    assert r.status_code == 422
+    body = r.json()["error"]
+    assert body["code"] == "INVALID_REQUEST_DATA"
+    assert "secret detail" not in r.text
+
+
+def test_storage_error_from_lost_connection_is_503():
+    r = _storage_status(_storage_error_caused_by("ConnectionDoesNotExistError", "08003"))
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "SERVICE_UNAVAILABLE"
+
+
+def test_storage_error_without_a_driver_cause_stays_500():
+    r = _storage_status(StorageError("Cannot access storage", error_code="STORAGE_001"))
+    assert r.status_code == 500
+    assert r.json()["error"]["code"] == "STORAGE_001"
+
+
 def test_transient_storage_error_handler():
     """Test TransientStorageError handler."""
     app = setup_app("development")

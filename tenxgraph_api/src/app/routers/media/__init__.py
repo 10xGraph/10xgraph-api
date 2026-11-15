@@ -149,12 +149,8 @@ def _create_media_store(settings: MediaSettings) -> BaseMediaStore:
         return LocalFileMediaStore(base_dir=settings.MEDIA_STORAGE_PATH, max_size_bytes=max_bytes)
 
     if stype == MediaStorageType.CLOUD:
-        from cloud_storage_manager import (
-            AwsConfig,
-            CloudStorageFactory,
-            StorageConfig,
-            StorageProvider,
-        )
+        from cloud_storage_manager.storage_provider import CloudStorageFactory, StorageProvider
+        from cloud_storage_manager.storage_schema import AwsConfig, StorageConfig
         from tenxgraph.storage.media.storage.cloud_store import CloudMediaStore
 
         provider_name = settings.MEDIA_CLOUD_PROVIDER.lower()
@@ -179,7 +175,7 @@ def _create_media_store(settings: MediaSettings) -> BaseMediaStore:
                 },
             )
         else:
-            from cloud_storage_manager import GcpConfig
+            from cloud_storage_manager.storage_schema import GcpConfig
 
             credentials = None
             if settings.MEDIA_CLOUD_CREDENTIALS_JSON:
@@ -216,14 +212,20 @@ def _create_document_pipeline(settings: MediaSettings) -> DocumentPipeline:
     }
     handling = handling_map.get(settings.DOCUMENT_HANDLING, DocumentHandling.EXTRACT_TEXT)
 
-    extractor = (
-        DocumentExtractor(
-            max_pdf_bytes=int(settings.MEDIA_MAX_PDF_MB * 1024 * 1024),
-            max_pdf_pages=settings.MEDIA_MAX_PDF_PAGES,
-        )
-        if handling == DocumentHandling.EXTRACT_TEXT
-        else None
-    )
+    extractor = None
+    if handling == DocumentHandling.EXTRACT_TEXT:
+        try:
+            extractor = DocumentExtractor(
+                max_pdf_bytes=int(settings.MEDIA_MAX_PDF_MB * 1024 * 1024),
+                max_pdf_pages=settings.MEDIA_MAX_PDF_PAGES,
+            )
+        except ImportError as exc:
+            # A server setup problem, reported as a clear 422 instead of a bare 500.
+            raise ClientInputError(
+                "File uploads are not configured on this server: document text extraction "
+                'needs the media extra (pip install "10xgraph-api[media]"), or set '
+                "DOCUMENT_HANDLING to pass_raw or skip."
+            ) from exc
     return DocumentPipeline(document_extractor=extractor, handling=handling)
 
 

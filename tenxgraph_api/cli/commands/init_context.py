@@ -7,6 +7,9 @@ from typing import Any
 from tenxgraph_api.cli.exceptions import FileOperationError, ValidationError
 
 
+# Version range written into generated projects, so a future 2.0 cannot break them. Bump here.
+VERSION_RANGE = ">=1.0,<2.0"
+
 # AI provider choices: the core extra that installs the SDK, the model the scaffold
 # starts with, the model the eval user simulator uses, and the API key variable.
 PROVIDERS: dict[str, dict[str, str]] = {
@@ -394,8 +397,10 @@ def template_vars(context: dict[str, Any]) -> dict[str, Any]:
         "llm_model": provider["model"],
         "llm_sim_model": provider["sim_model"],
         "llm_api_key_env": provider["api_key_env"],
-        "core_requirement": f"10xgraph[{','.join(core_extras)}]",
+        "core_requirement": f"10xgraph[{','.join(core_extras)}]{VERSION_RANGE}",
         "api_requirement": (
-            f"10xgraph-api[{','.join(api_extras)}]" if api_extras else "10xgraph-api"
+            f"10xgraph-api[{','.join(api_extras)}]{VERSION_RANGE}"
+            if api_extras
+            else f"10xgraph-api{VERSION_RANGE}"
         ),
     }

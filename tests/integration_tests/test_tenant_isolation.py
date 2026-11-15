@@ -66,7 +66,7 @@ class TenantAuth(BaseAuth):
         default_role="member",
     )
 
-    def authenticate(self, request: Request, response: Response, credential: Any) -> dict:
+    async def authenticate(self, request: Request, response: Response, credential: Any) -> dict:
         user_id = request.headers.get("X-Test-User")
         if not user_id:
             raise HTTPException(status_code=401, detail="X-Test-User header required")

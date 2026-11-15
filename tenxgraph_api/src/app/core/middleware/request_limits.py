@@ -9,6 +9,7 @@ from starlette.exceptions import HTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from tenxgraph_api.src.app.core import logger
+from tenxgraph_api.src.app.core.audit import audit_event
 
 
 class RequestBodyTooLarge(HTTPException):
@@ -86,6 +87,7 @@ class RequestSizeLimitMiddleware:
                     f"Request rejected: size {declared} bytes exceeds limit of "
                     f"{max_size} bytes ({max_size_mb:.1f}MB)"
                 )
+                await audit_event("input", "denied", reason="request_too_large")
                 await self._too_large(scope, send, max_size)
                 return
 
@@ -102,6 +104,7 @@ class RequestSizeLimitMiddleware:
                         f"Request rejected: streamed body passed the limit of "
                         f"{max_size} bytes ({max_size_mb:.1f}MB)"
                     )
+                    await audit_event("input", "denied", reason="request_too_large")
                     raise RequestBodyTooLarge(max_size)
             return message
 

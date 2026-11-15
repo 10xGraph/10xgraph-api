@@ -26,6 +26,7 @@ from tenxgraph_api.src.app.core.auth.reserved_identity import (
 )
 from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RateLimitConfig
+from tenxgraph_api.src.app.core.exceptions.handle_errors import init_errors_handler
 from tenxgraph_api.src.app.core.middleware.rate_limit import RateLimitMiddleware, keying
 from tenxgraph_api.src.app.routers.graph.realtime_guard import ws_identity_still_valid
 
@@ -41,7 +42,7 @@ class _TokenAuth(BaseAuth):
     def __init__(self) -> None:
         self.calls = 0
 
-    def authenticate(self, request, response, credential):
+    async def authenticate(self, request, response, credential):
         self.calls += 1
         return {"user_id": credential.credentials if credential else ""}
 
@@ -49,8 +50,8 @@ class _TokenAuth(BaseAuth):
 class _ReusableTokenAuth(_TokenAuth):
     reusable_within_request = True
 
-    def authenticate(self, request, response, credential):
-        return super().authenticate(request, response, credential)
+    async def authenticate(self, request, response, credential):
+        return await super().authenticate(request, response, credential)
 
 
 class _AuthOn:
@@ -68,6 +69,7 @@ def _container(auth: BaseAuth) -> InjectQ:
 def _app(auth: BaseAuth, *, rate_limit_by_user: bool = False) -> tuple[FastAPI, InjectQ]:
     container = _container(auth)
     app = FastAPI()
+    init_errors_handler(app)
     if rate_limit_by_user:
         config = RateLimitConfig.from_dict(
             {"enabled": True, "requests": 100, "window": 60, "by": "user"}
@@ -152,6 +154,7 @@ def test_http_refuses_reserved_identity(token):
     app, _ = _app(_TokenAuth())
     resp = TestClient(app).get("/v1/threads", headers=_bearer(token))
     assert resp.status_code == HTTP_UNAUTHORIZED
+    assert resp.json()["error"]["code"] == "INVALID_TOKEN"
     assert "reserved" in resp.text
     assert "__system__" not in resp.text
 
@@ -205,12 +208,15 @@ def test_websocket_accepts_ordinary_user():
         assert conn.receive_json()["user_id"] == "alice"
 
 
-def test_live_recheck_fails_for_a_reserved_identity():
+@pytest.mark.asyncio
+async def test_live_recheck_fails_for_a_reserved_identity():
     """The periodic live/ws re-verification treats a reserved id as no longer valid."""
     container = _container(_TokenAuth())
     with patch("injectq.InjectQ.get_instance", return_value=container):
-        assert ws_identity_still_valid(_request("alice"), Identity(user_id="alice"))
-        assert not ws_identity_still_valid(_request("__system__"), Identity(user_id="__system__"))
+        assert await ws_identity_still_valid(_request("alice"), Identity(user_id="alice"))
+        assert not await ws_identity_still_valid(
+            _request("__system__"), Identity(user_id="__system__")
+        )
 
 
 # --- identity cache and rate-limit keying -------------------------------------------------
@@ -231,12 +237,13 @@ def test_cache_never_stores_or_returns_reserved_claims():
     assert _recall_claims(req, backend, "tok") is None
 
 
-def test_rate_limit_key_does_not_use_a_reserved_user():
+@pytest.mark.asyncio
+async def test_rate_limit_key_does_not_use_a_reserved_user():
     container = _container(_ReusableTokenAuth())
     with patch("injectq.InjectQ.get_instance", return_value=container):
-        assert keying.verified_caller_key(_request("alice")) == "alice"
-        assert keying.verified_caller_key(_request("__system__")) is None
-        assert keying.verified_caller_key(_request("  __system__")) is None
+        assert await keying.verified_caller_key(_request("alice")) == "alice"
+        assert await keying.verified_caller_key(_request("__system__")) is None
+        assert await keying.verified_caller_key(_request("  __system__")) is None
 
 
 def test_reusable_backend_with_rate_limit_by_user_is_still_refused():

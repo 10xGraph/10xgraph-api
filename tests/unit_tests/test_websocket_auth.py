@@ -26,7 +26,7 @@ from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 class _FakeAuth(BaseAuth):
     """Authenticate by treating the bearer token as the user_id."""
 
-    def authenticate(self, request, response, credential):  # type: ignore[override]
+    async def authenticate(self, request, response, credential):  # type: ignore[override]
         if credential is None:
             return {}
         return {"user_id": credential.credentials}

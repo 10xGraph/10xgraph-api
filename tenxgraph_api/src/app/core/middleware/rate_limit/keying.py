@@ -81,7 +81,7 @@ def _networks(
     return tuple(ipaddress.ip_network(net, strict=False) for net in trusted)
 
 
-def verified_caller_key(connection: HTTPConnection) -> str | None:
+async def verified_caller_key(connection: HTTPConnection) -> str | None:
     """Identify the caller, exactly as ``RequirePermission`` does: ``user_id`` and tenant values.
 
     The rate limiter runs before any route dependency, so it cannot read an authenticated
@@ -107,7 +107,7 @@ def verified_caller_key(connection: HTTPConnection) -> str | None:
         # A throwaway Response: anything the auth class sets on it belongs to the real
         # authentication in RequirePermission, which runs again for the route unless the class
         # allows reusing this result (remember_claims).
-        claims = auth.authenticate(connection, Response(), credential)
+        claims = await auth.authenticate(connection, Response(), credential)
         if not isinstance(claims, dict) or identity_is_reserved(claims):
             return None  # not a valid key; RequirePermission rejects it
         if credential is not None:
@@ -119,7 +119,7 @@ def verified_caller_key(connection: HTTPConnection) -> str | None:
     return identity_key(identity) if identity.user_id else None
 
 
-def client_key_for(connection: HTTPConnection, config: RateLimitConfig) -> str:
+async def client_key_for(connection: HTTPConnection, config: RateLimitConfig) -> str:
     """Derive the rate-limit bucket key for a connection.
 
     Supports ``by``:
@@ -139,7 +139,7 @@ def client_key_for(connection: HTTPConnection, config: RateLimitConfig) -> str:
         return "__global__"
 
     if config.by == "user":
-        caller = verified_caller_key(connection)
+        caller = await verified_caller_key(connection)
         if caller:
             return f"user:{caller}"
         return f"ip:{_client_ip(connection, config)}"

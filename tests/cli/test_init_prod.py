@@ -5,6 +5,9 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
+from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
+
 from tenxgraph_api.cli.commands.init import InitCommand
 from tenxgraph_api.cli.commands.init_context import build_config
 from tenxgraph_api.cli.core.output import OutputFormatter
@@ -107,7 +110,13 @@ def test_full_mode_defaults_to_memory_storage_and_jwt(tmp_path: Path) -> None:
     assert (target / "evals").is_dir() and (target / "tests").is_dir()
 
     dependencies = tomllib.loads((target / "pyproject.toml").read_text())["project"]["dependencies"]
-    assert dependencies == ["10xgraph[google-genai]", "10xgraph-api[jwt]"]
+    assert dependencies == [
+        "10xgraph[google-genai]>=1.0,<2.0",
+        "10xgraph-api[jwt]>=1.0,<2.0",
+    ]
+    for dependency in dependencies:
+        requirement = Requirement(dependency)
+        assert requirement.specifier == SpecifierSet(">=1.0,<2.0")
 
 
 def test_full_postgres_scaffolds_pg_checkpointer_and_env(tmp_path: Path) -> None:

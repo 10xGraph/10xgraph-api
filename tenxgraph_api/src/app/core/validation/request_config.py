@@ -25,8 +25,10 @@ A server-owned key from the client is dropped, not refused, and the drop is logg
 Every route and service that forwards client config to the graph, checkpointer or store must
 pass it through :func:`client_config` first, then set the server-owned keys itself.
 
-Operators may narrow the open dict further with ``runs.config_keys`` and ``runs.state_keys`` in
-10xgraph.json; :func:`reject_unlisted_keys` enforces them on graph input and state writes.
+Operators may narrow the open config dict with ``runs.config_keys`` (``null``, the default,
+accepts any key). Client state is closed by default: ``runs.state_keys`` lists the only keys a
+client may set in ``initial_state``, PUT state and AG-UI state, and an empty list allows none.
+:func:`reject_unlisted_keys` enforces both on graph input and state writes.
 
 The thread a request runs on is also server-controlled: routes use the thread the permission
 check approved, and both sides normalise it with :func:`normalize_thread_id`.
@@ -45,7 +47,9 @@ uses them to skip messages the thread already stores.
 
 A request is also bounded in size before anything heavy runs (:func:`request_size_error`): the
 body cap lets a few MB of messages or content blocks through, and core then copies and serialises
-them on the event loop. The limits are fixed module constants (``MAX_MESSAGES`` and friends).
+them on the event loop. The limits are fixed module constants (``MAX_MESSAGES`` and friends);
+the nesting depth is the
+``MAX_NESTING_DEPTH`` setting.
 A resume that names the interrupt it answers is checked against the thread's open interrupt
 (:class:`InterruptConflictError`).
 """
@@ -153,18 +157,23 @@ def reject_unlisted_keys(
     allowed: frozenset[str] | None,
     field: str,
     always: frozenset[str] = frozenset(),
+    setting: str = "",
 ) -> None:
     """Raise ``ValueError`` when ``data`` carries a key outside ``allowed`` (plus ``always``).
 
-    ``allowed=None`` means no allow-list is configured and every key passes. Used for the
-    ``runs.config_keys`` / ``runs.state_keys`` settings, so a graph that trusts a value such as
-    ``role`` from config or state cannot be handed one by the client.
+    ``allowed=None`` means no allow-list is configured and every key passes (``config_keys``);
+    an empty set allows none (``state_keys``). ``setting`` names the 10xgraph.json key to add the
+    key to, for the error message. Used for ``runs.config_keys`` and ``runs.state_keys``, so a
+    graph that trusts a value such as ``role`` from config or state cannot be handed one.
     """
     if allowed is None or not isinstance(data, dict):
         return
     unlisted = sorted(str(key) for key in data if key not in allowed and key not in always)
     if unlisted:
-        raise ClientInputError(f"{field} keys not allowed by this server: {', '.join(unlisted)}")
+        message = f"{field} keys not allowed by this server: {', '.join(unlisted)}"
+        if setting:
+            message += f". List them in {setting} in 10xgraph.json to allow them"
+        raise ClientInputError(message)
 
 
 # Content blocks that ask the server to run a tool. Only the model produces these; tool
@@ -193,14 +202,21 @@ MAX_AG_UI_HISTORY_MESSAGES = 10_000
 
 # Deepest nesting of dicts and lists accepted in client ``initial_state``, ``config`` and
 # ``resume``. Deeper input would fail with RecursionError inside the run (copy, serialise).
+# Default of the ``MAX_NESTING_DEPTH`` environment setting, which developers can change.
 MAX_NESTING_DEPTH = 64
 
 
-def nesting_depth_error(value: Any, field: str, max_depth: int = MAX_NESTING_DEPTH) -> str | None:
+def nesting_depth_error(value: Any, field: str, max_depth: int | None = None) -> str | None:
     """Describe a ``value`` nested deeper than ``max_depth`` dicts and lists, or ``None``.
+
+    ``max_depth=None`` uses the ``MAX_NESTING_DEPTH`` setting.
 
     Walks with an explicit stack, so a hostile value cannot trigger RecursionError here.
     """
+    if max_depth is None:
+        from tenxgraph_api.src.app.core.config.settings import get_settings
+
+        max_depth = getattr(get_settings(), "MAX_NESTING_DEPTH", MAX_NESTING_DEPTH)
     stack: list[tuple[Any, int]] = [(value, 1)]
     while stack:
         item, depth = stack.pop()
@@ -301,6 +317,9 @@ def request_size_error(
                 if _field(block, "type") == "text":
                     text = _field(block, "text")
                     total += len(text) if isinstance(text, str) else 0
+        # metadata, raw and content blocks are open dicts: too deep fails with RecursionError
+        if error := nesting_depth_error(message, f"{field}[{index}]"):
+            return error
         if max_text_chars is not None and total > max_text_chars:
             return (
                 f"{field}: at most {max_text_chars} characters of text in total across all "

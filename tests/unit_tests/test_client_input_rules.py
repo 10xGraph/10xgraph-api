@@ -26,6 +26,7 @@ from tenxgraph.core.state.message_block import TextBlock
 from tenxgraph.utils.thread_info import ThreadInfo
 
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
+from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
 from tenxgraph_api.src.app.core.validation.request_config import (
     ClientInputError,
     client_message_error,
@@ -171,7 +172,9 @@ def _graph_service() -> GraphService:
     srv._graph = SimpleNamespace(_state_graph=SimpleNamespace(nodes=nodes, _state=_AppState()))
     srv.checkpointer = MagicMock()
     srv.checkpointer.aget_thread_owner = AsyncMock(return_value=None)
-    srv.config = MagicMock()
+    srv.config = SimpleNamespace(
+        runs=RunsConfig(state_keys=frozenset({"approved", "count", "current_node", "extra"}))
+    )
     srv.thread_name_generator = None
     srv._media_service = None
     srv._telemetry = None
@@ -197,11 +200,23 @@ async def test_invoke_answers_422_for_builtin_state_fields():
 
 
 @pytest.mark.asyncio
-async def test_run_input_keeps_custom_state_fields():
-    input_data, _, _ = await _graph_service()._prepare_input(
+async def test_run_input_keeps_listed_state_fields():
+    srv = _graph_service()
+    srv.config = SimpleNamespace(
+        runs=RunsConfig(state_keys=frozenset({"approved", "count", "extra"}))
+    )
+    input_data, _, _ = await srv._prepare_input(
         _input({"approved": True, "count": 3, "extra": "ignored by core"})
     )
     assert input_data["state"] == {"approved": True, "count": 3, "extra": "ignored by core"}
+
+
+@pytest.mark.asyncio
+async def test_state_is_denied_by_default():
+    srv = _graph_service()
+    srv.config = SimpleNamespace(runs=RunsConfig())
+    with pytest.raises(ClientInputError, match=r"approved.*runs\.state_keys"):
+        await srv._prepare_input(_input({"approved": True}))
 
 
 @pytest.mark.asyncio
@@ -302,15 +317,21 @@ async def test_put_state_rejects_non_user_context(checkpointer_service, forged):
 
 
 @pytest.mark.asyncio
-async def test_put_state_accepts_user_context_and_custom_fields(checkpointer_service):
-    await _put(
-        checkpointer_service,
-        {"context": [{**USER_TEXT, "message_id": "attacker-chosen"}], "approved": True},
-    )
+async def test_put_state_accepts_user_context_even_when_no_key_is_listed(checkpointer_service):
+    # state_keys is empty here (deny by default); context is always allowed
+    await _put(checkpointer_service, {"context": [{**USER_TEXT, "message_id": "attacker-chosen"}]})
     stored = checkpointer_service.checkpointer.aput_state.await_args.args[1]
-    assert stored.approved is True
     assert [m.role for m in stored.context] == ["user"]
     assert stored.context[0].message_id not in ("attacker-chosen", "")
+
+
+@pytest.mark.asyncio
+async def test_put_state_denies_unlisted_keys_by_default(checkpointer_service):
+    with pytest.raises(HTTPException) as exc:
+        await _put(checkpointer_service, {"approved": True})
+    assert exc.value.status_code == 422
+    assert "runs.state_keys" in exc.value.detail
+    checkpointer_service.checkpointer.aput_state.assert_not_called()
 
 
 @pytest.mark.asyncio

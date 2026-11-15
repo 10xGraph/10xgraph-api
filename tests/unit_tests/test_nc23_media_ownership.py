@@ -71,10 +71,10 @@ class _Auth(HeaderAuth):
     """``X-Test-User`` for HTTP; a bearer token (the user id) also works, which the
     WebSocket pre-run credential check needs."""
 
-    def authenticate(self, request, response, credential):  # type: ignore[override]
+    async def authenticate(self, request, response, credential):  # type: ignore[override]
         if credential is not None and not request.headers.get("X-Test-User"):
             return {"user_id": credential.credentials}
-        return super().authenticate(request, response, credential)
+        return await super().authenticate(request, response, credential)
 
 
 class _Harness:

@@ -13,6 +13,7 @@ Important variables:
 - `MODE`
 - `LOG_LEVEL`
 - `MAX_REQUEST_SIZE`
+- `MAX_NESTING_DEPTH`
 - `ORIGINS`
 - `ALLOWED_HOST`
 - `ROOT_PATH`

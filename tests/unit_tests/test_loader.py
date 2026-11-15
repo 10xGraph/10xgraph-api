@@ -192,7 +192,7 @@ def test_load_auth():
         load_auth("invalid")
 
     class CustomAuth(BaseAuth):
-        def authenticate(self, *args, **kwargs):
+        async def authenticate(self, *args, **kwargs):
             pass
 
     # Class subclass of BaseAuth

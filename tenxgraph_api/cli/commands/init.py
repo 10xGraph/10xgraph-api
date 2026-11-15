@@ -232,12 +232,9 @@ class InitCommand(BaseCommand):
             details["WebSocket"] = "on"
 
         if not is_prod:
-            install = [f'pip install "{_template_vars(context)["core_requirement"]}"']
-            if context.get("websocket"):
-                install.append('pip install "10xgraph-api[websocket]"')
             steps = [
                 f"cd {base_path}",
-                *install,
+                "pip install -r requirements.txt",
                 f"{key_step}.",
                 "10xgraph dev",
                 _CONFIG_HINT,

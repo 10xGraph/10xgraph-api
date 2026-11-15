@@ -27,25 +27,86 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased]
+## [1.0.0] - 2026-11-15
+
+The first stable release of `10xgraph-api`. It requires `10xgraph` 1.0 and is released with
+`10xgraph-client` 1.0.0. From this version on the HTTP API, CLI and `10xgraph.json` keys are
+stable: no breaking change before 2.0, and the deprecated `agentflow` names (`agentflow_cli`
+import, `agentflow` command, `agentflow.json`, `AGENTFLOW_*` variables, `agentflow-bearer`
+subprotocol) keep working until then. There was no 1.0.0rc7 of this package, so this section
+lists every change since 1.0.0rc6. Read the Breaking entries before upgrading from an rc.
 
 ### Breaking
 
 - **`thread_name_generator` defaults to none.** With the key unset, `null`, `""` or `"none"`, new
   threads are saved without a name. Set `"random"` to keep the old behaviour (#80).
+- **`runs.state_keys` denies by default.** Clients may set only the state keys it lists, in
+  `initial_state`, `PUT /v1/threads/{id}/state` and AG-UI `state`. Unset, `null` or `[]` allows
+  none, and any other key is a 422 that names the key and points to `runs.state_keys`. Before, an
+  unset value accepted any key. `context` in PUT state is always allowed (it has its own message
+  rules; a configured `state_keys` used to block it too). `runs.config_keys` is unchanged: `null`
+  still accepts any key. `10xgraph config` shows the setting in its own "Client state keys"
+  section. Migration: list every key your clients send, for example
+  `"runs": {"state_keys": ["preferences"]}`.
 - `AIThreadNameGenerator` and `DefaultThreadNameGenerator` are replaced by
   `RandomThreadNameGenerator`. `ThreadNameGenerator` stays the public base class.
 - `thread_name_generator` must be `none`, `random`, `first_message` or `module:attribute`; any
   other value is a config error.
+- **`BaseAuth.authenticate` is now async.** Custom auth classes must change `def authenticate` to
+  `async def authenticate`; the server awaits it, so a slow lookup no longer blocks the event loop.
+- **With `cache_store.token_revocation` on, every token needs a `jti`.** A token without a usable
+  `jti` claim (missing, empty, or not a string or int) answers 401 `INVALID_TOKEN` ("Invalid
+  token, jti missing"; audit reason `missing_jti`), on HTTP and WebSocket, whatever auth class
+  produced the claims. Before, it was accepted and could never be revoked by itself. With
+  revocation off, `jti` stays optional. Migration: issue tokens with a `jti` claim, or turn
+  `token_revocation` off.
 
 ### Changed
 
+- **`MAX_NESTING_DEPTH` setting.** The deepest nesting of objects and lists accepted in client
+  messages, `initial_state`, `config`, `resume` and `filters` is now a setting (default 64, range 1
+  to 900). The key, item and value count caps stay fixed.
+- The audit log has two more event kinds: `input` (a request refused by a validator with 422, or
+  by the size limit with 413) and `rate_limit` (429, or the limiter backend unavailable).
+- `10xgraph init` writes `10xgraph>=1.0,<2.0` and `10xgraph-api>=1.0,<2.0` in the generated
+  pyproject.toml.
 - `10xgraph init` Production writes `"thread_name_generator": "first_message"` and no longer
   generates `graph/thread_name_generator.py`. Quick Start leaves the key unset.
 - `10xgraph audit` validates `thread_name_generator`: an invalid value fails, and a custom path
   whose module file is missing next to `10xgraph.json` warns. No user code is imported.
 - `10xgraph config` offers None, Random name, First message and Custom class for it.
 - The CLI skill reference `callbacks-and-command.md` no longer describes `Command.PARENT` as parent-graph navigation. `Command.graph` is reserved and not acted on, and nested graphs are not supported: build a multi-agent system as one graph with several `Agent` nodes.
+
+### Fixed
+
+- **`meta.is_new_thread` is reported correctly on a continued thread.** A second invoke or stream on the thread id the first call returned reported `is_new_thread: true` with `InMemoryCheckpointer` and `SqliteCheckpointer`, because `aput_thread` in `10xgraph` 1.0.0rc6 returned `True` on every call. The API code is unchanged: it reports the correct value on `10xgraph` 1.0.0, which fixes `aput_thread` and which this release requires. `tests/unit_tests/test_is_new_thread.py` covers invoke and stream over a real graph.
+- **`10xgraph init` Quick setup writes a `requirements.txt`.** It listed no dependencies, so `10xgraph build` warned "No requirements.txt file found" and the Dockerfile installed only `10xgraph-api`, leaving out the provider SDK the agent imports. The file lists `10xgraph[<provider extra>]` and `10xgraph-api` (with the `websocket` extra when chosen), the same requirements the Full `pyproject.toml` uses, and the next steps now say `pip install -r requirements.txt`.
+- **Expected 401s log at WARNING.** A missing, invalid, expired or revoked token logs one WARNING line
+  (method, path, status, code; no token, no traceback) through the same helper as 403, 404 and 429.
+  5xx stays at ERROR.
+- A correctly signed token without the configured tenant claim (`auth.tenant_claims`), or with
+  a malformed roles or permissions claim, answers 401 with error code `INVALID_TOKEN` instead of
+  `HTTPException`. So does a request without a credential when the auth class returns no claims.
+- A token whose `user_id` uses the reserved `__system__` prefix answers 401 `INVALID_TOKEN`
+  instead of `HTTPException`; the message stays "This user id is reserved".
+- `POST /v1/ag-ui` refuses a client tool that has the name of a server tool (local or MCP) with a
+  422 (`tools[2]: 'refund_order' is the name of a server tool`), as `ag_ui.allow_client_tools`
+  documents. A tool that repeats a declared `remote_tools` name is still accepted.
+- A `StorageError` caused by data the database refuses (Postgres SQLSTATE class 22, such as an
+  invalid text value) answers 422 `INVALID_REQUEST_DATA` instead of 500. Lost connections still
+  answer 503 and other storage errors 500.
+  A stream's error chunk carries the same `code` (`INVALID_REQUEST_DATA`) and message.
+- A NUL character or a lone surrogate in client messages or caller state is refused with 422
+  before the run starts. In model replies and tool results it is cleaned instead, so the run
+  does not fail on text the client did not send.
+- An upload on a server without the `media` extra, with `DOCUMENT_HANDLING=extract_text`, answers
+  422 with a message that names the extra. Before, it was a bare 500.
+- `GET /v1/files` answers 501 for reach `tenant` or `all` on a cloud store, which cannot list a
+  bucket, as it does with auth off.
+- `10xgraph dev` and `agentflow dev` fall back to `agentflow.json` again when `10xgraph.json` is
+  missing.
+- `MEDIA_STORAGE_TYPE=cloud` no longer fails with `ImportError: cannot import name 'AwsConfig'`: the config classes are imported from `cloud_storage_manager.storage_schema` and the factory from `cloud_storage_manager.storage_provider`, where `cloud-storage-manager` 0.1.2 defines them.
+- **File uploads: the stored filename is cleaned, and two `file` parts are refused.** `POST /v1/files/upload` keeps only the base name (no path, control or bidi characters, at most 255 characters, `file` if nothing is left), so `info` and list no longer return `../../etc/passwd` or a right-to-left override as sent. A request with more than one `file` part answers 422 "Send exactly one file part" instead of silently keeping the last. `GET /v1/files` on a store that cannot list logs one warning line (no traceback) before its 501.
 
 ## [1.0.0rc6] - 2026-11-11
 

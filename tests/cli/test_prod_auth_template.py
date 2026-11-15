@@ -26,11 +26,12 @@ def _agent_auth():
     return module.AgentAuth()
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "credential",
     [None, HTTPAuthorizationCredentials(scheme="Bearer", credentials="anything")],
 )
-def test_unimplemented_auth_denies_with_401(credential):
+async def test_unimplemented_auth_denies_with_401(credential):
     with pytest.raises(HTTPException) as exc:
-        _agent_auth().authenticate(None, Response(), credential)
+        await _agent_auth().authenticate(None, Response(), credential)
     assert exc.value.status_code == 401
