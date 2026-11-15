@@ -193,14 +193,21 @@ MAX_AG_UI_HISTORY_MESSAGES = 10_000
 
 # Deepest nesting of dicts and lists accepted in client ``initial_state``, ``config`` and
 # ``resume``. Deeper input would fail with RecursionError inside the run (copy, serialise).
+# Default of the ``MAX_NESTING_DEPTH`` environment setting, which developers can change.
 MAX_NESTING_DEPTH = 64
 
 
-def nesting_depth_error(value: Any, field: str, max_depth: int = MAX_NESTING_DEPTH) -> str | None:
+def nesting_depth_error(value: Any, field: str, max_depth: int | None = None) -> str | None:
     """Describe a ``value`` nested deeper than ``max_depth`` dicts and lists, or ``None``.
+
+    ``max_depth=None`` uses the ``MAX_NESTING_DEPTH`` setting.
 
     Walks with an explicit stack, so a hostile value cannot trigger RecursionError here.
     """
+    if max_depth is None:
+        from tenxgraph_api.src.app.core.config.settings import get_settings
+
+        max_depth = getattr(get_settings(), "MAX_NESTING_DEPTH", MAX_NESTING_DEPTH)
     stack: list[tuple[Any, int]] = [(value, 1)]
     while stack:
         item, depth = stack.pop()
@@ -301,6 +308,9 @@ def request_size_error(
                 if _field(block, "type") == "text":
                     text = _field(block, "text")
                     total += len(text) if isinstance(text, str) else 0
+        # metadata, raw and content blocks are open dicts: too deep fails with RecursionError
+        if error := nesting_depth_error(message, f"{field}[{index}]"):
+            return error
         if max_text_chars is not None and total > max_text_chars:
             return (
                 f"{field}: at most {max_text_chars} characters of text in total across all "
