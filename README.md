@@ -7,7 +7,7 @@
 [![PyPI](https://img.shields.io/pypi/v/10xgraph-api?color=blue)](https://pypi.org/project/10xgraph-api/)
 [![Python](https://img.shields.io/pypi/pyversions/10xgraph-api)](https://pypi.org/project/10xgraph-api/)
 [![License](https://img.shields.io/github/license/10xGraph/10xgraph-api)](https://github.com/10xGraph/10xgraph-api/blob/main/LICENSE)
-[![Verified on FreeAPI](https://findfreeapi.com/api/badge/10xgraph-api)](https://findfreeapi.com/en/service/10xgraph-api)
+[![FreeAPI Verified](https://findfreeapi.com/api/badge/10xgraph-api)](https://findfreeapi.com/en/service/10xgraph-api)
 [![Star on GitHub](https://img.shields.io/badge/GitHub-Star-181717?logo=github)](https://github.com/10xGraph/10xGraph)
 
 10xGraph is open-source, self-hosted infrastructure for AI applications. You write the agents, tools and tasks; 10xGraph runs them behind an API server with authentication, role-based access, tenant isolation, durable state in Postgres and Redis, background jobs, metrics and tracing, and generates Docker and Kubernetes deploy files. MIT licensed, by 10xScale. Formerly Agentflow.
