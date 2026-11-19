@@ -318,6 +318,8 @@ def template_flags(context: dict[str, Any]) -> dict[str, bool]:
         "ag_ui": bool(context.get("ag_ui")),
         "worker": worker != "none",
         "broker_url": worker in ("rabbitmq", "kafka"),
+        "tests": bool(context.get("tests")),
+        "evals": bool(context.get("evals")),
     }
 
 
