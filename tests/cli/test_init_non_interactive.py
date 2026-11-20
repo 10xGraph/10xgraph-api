@@ -380,10 +380,8 @@ def test_skills_replaces_the_init_block_and_keeps_user_text(tmp_path: Path) -> N
 
     assert _init(tmp_path, mode="quick") == 0
     agents_md = tmp_path / "AGENTS.md"
-    agents_md.write_text(
-        "# My notes\n\n" + agents_md.read_text(encoding="utf-8") + "\nKeep this line.\n",
-        encoding="utf-8",
-    )
+    # Bytes, not write_text: on Windows write_text turns "\n" into "\r\n".
+    agents_md.write_bytes(b"# My notes\n\n" + agents_md.read_bytes() + b"\nKeep this line.\n")
 
     skills = SkillsCommand(output=OutputFormatter(stream=io.StringIO()))
     assert skills.execute(agent="codex", path=str(tmp_path)) == 0
