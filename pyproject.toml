@@ -397,6 +397,13 @@ source = [
 [tool.pytest-env]
 ENVIRONMENT = "pytest"
 
+[tool.uv.sources]
+# Development and CI take core from GitHub main (uv only). The built wheel keeps the plain
+# `10xgraph>=1.0.0,<2.0` requirement from [project.dependencies]; release.yml builds with
+# --no-sources and fails if a git requirement reaches the metadata.
+# Before an API release that uses something only on core main, release core first and raise
+# the core floor in [project.dependencies] (and the dev group) to that version.
+10xgraph = { git = "https://github.com/10xGraph/10xGraph", branch = "main" }
 
 [dependency-groups]
 dev = [

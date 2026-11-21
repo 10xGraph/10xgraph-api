@@ -41,10 +41,38 @@ jobs:
           fi
 
       - name: Build sdist and wheel
-        run: uv build
+        run: uv build --no-sources
 
       - name: Check distribution metadata
         run: uvx twine check dist/*
+
+      - name: Fail if a git requirement reached the metadata
+        run: |
+          python - <<'PY'
+          import glob, re, sys, tarfile, zipfile
+
+          texts = {}
+          for whl in glob.glob("dist/*.whl"):
+              z = zipfile.ZipFile(whl)
+              name = next(n for n in z.namelist() if n.endswith(".dist-info/METADATA"))
+              texts[whl] = z.read(name).decode()
+          for sd in glob.glob("dist/*.tar.gz"):
+              t = tarfile.open(sd)
+              name = next(n for n in t.getnames() if n.count("/") == 1 and n.endswith("/PKG-INFO"))
+              texts[sd] = t.extractfile(name).read().decode()
+          if not texts:
+              print("::error::No built artifacts found in dist/")
+              sys.exit(1)
+          bad = False
+          for art, text in texts.items():
+              for line in text.splitlines():
+                  if line.startswith("Requires-Dist:") and re.search(r"git\+|@ git", line):
+                      print(f"::error::{art} has a git requirement: {line}")
+                      bad = True
+          if bad:
+              sys.exit(1)
+          print(f"No git requirements in {len(texts)} artifact(s).")
+          PY
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

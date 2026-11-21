@@ -33,7 +33,12 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --dev --upgrade-package 10xgraph
+
+      - name: Show installed core commit
+        run: |
+          uv pip show 10xgraph
+          uv run python -c "import importlib.metadata as m; print(m.distribution('10xgraph').read_text('direct_url.json'))"
 
       - name: Run pre-commit (ruff, bandit, hygiene hooks)
         run: uv run pre-commit run --all-files --show-diff-on-failure
@@ -80,7 +85,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --dev --upgrade-package 10xgraph
+
+      - name: Show installed core commit
+        run: |
+          uv pip show 10xgraph
+          uv run python -c "import importlib.metadata as m; print(m.distribution('10xgraph').read_text('direct_url.json'))"
 
       - name: Run tests with coverage
         run: uv run pytest --integration
@@ -112,7 +122,7 @@ jobs:
           python-version: "3.12"
 
       - name: Build sdist and wheel
-        run: uv build
+        run: uv build --no-sources
 
       - name: Check distribution metadata
         run: uvx twine check dist/*
@@ -146,6 +156,8 @@ jobs:
       - name: Smoke test the installed wheel
         run: |
           python -m venv /tmp/smoke
+          # Core from main: the API on this branch may import things not yet on PyPI.
+          /tmp/smoke/bin/pip install --quiet "10xgraph @ git+https://github.com/10xGraph/10xGraph@main"
           /tmp/smoke/bin/pip install --quiet dist/*.whl
           /tmp/smoke/bin/10xgraph version
           /tmp/smoke/bin/10xgraph --help
