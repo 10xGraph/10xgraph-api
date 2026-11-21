@@ -336,3 +336,75 @@ def test_next_steps_point_to_config_for_every_mode(tmp_path: Path) -> None:
     assert "10xgraph build" in texts["full"]
     assert "JWT_SECRET_KEY" in texts["full"]
     assert "10xgraph skills" in texts["full"]
+
+
+# --- AGENTS.md ---------------------------------------------------------------------------
+
+_SKILL_URL = "https://10xgraph.com/skill.md"
+
+
+def _init(target: Path, **kwargs) -> int:
+    return InitCommand(OutputFormatter(stream=io.StringIO())).execute(
+        path=str(target), agent_name="Agent", non_interactive=True, **kwargs
+    )
+
+
+@pytest.mark.parametrize("mode", ["quick", "full"])
+def test_init_writes_agents_md_inside_the_skills_markers(tmp_path: Path, mode: str) -> None:
+    from tenxgraph_api.cli.commands.skills import BLOCK_END, BLOCK_START
+
+    assert _init(tmp_path, mode=mode) == 0
+    content = (tmp_path / "AGENTS.md").read_bytes()
+    assert content.count(BLOCK_START) == 1
+    assert content.count(BLOCK_END) == 1
+    assert content.startswith(BLOCK_START)
+    assert content.rstrip().endswith(BLOCK_END)
+    assert _SKILL_URL.encode() in content
+    assert b"##[" not in content
+
+
+def test_full_agents_md_lists_tests_and_evals_only_when_generated(tmp_path: Path) -> None:
+    assert _init(tmp_path / "with", mode="full") == 0
+    text = (tmp_path / "with" / "AGENTS.md").read_text(encoding="utf-8")
+    assert "`tests/`" in text and "`evals/`" in text
+    assert "`requirements.txt`" not in text
+
+    assert _init(tmp_path / "without", mode="full", tests=False, evals=False) == 0
+    text = (tmp_path / "without" / "AGENTS.md").read_text(encoding="utf-8")
+    assert "`tests/`" not in text and "`evals/`" not in text
+    assert "`pyproject.toml`" in text
+
+
+def test_skills_replaces_the_init_block_and_keeps_user_text(tmp_path: Path) -> None:
+    from tenxgraph_api.cli.commands.skills import BLOCK_END, BLOCK_START, SkillsCommand
+
+    assert _init(tmp_path, mode="quick") == 0
+    agents_md = tmp_path / "AGENTS.md"
+    # Bytes, not write_text: on Windows write_text turns "\n" into "\r\n".
+    agents_md.write_bytes(b"# My notes\n\n" + agents_md.read_bytes() + b"\nKeep this line.\n")
+
+    skills = SkillsCommand(output=OutputFormatter(stream=io.StringIO()))
+    assert skills.execute(agent="codex", path=str(tmp_path)) == 0
+
+    content = agents_md.read_bytes()
+    assert content.startswith(b"# My notes\n\n")
+    assert content.endswith(b"\nKeep this line.\n")
+    assert content.count(BLOCK_START) == 1
+    assert content.count(BLOCK_END) == 1
+    assert _SKILL_URL.encode() not in content
+    assert b".agents/skills/10xgraph" in content
+
+
+def test_init_refuses_to_overwrite_an_existing_agents_md(tmp_path: Path) -> None:
+    agents_md = tmp_path / "AGENTS.md"
+    agents_md.write_text("my own agent notes\n", encoding="utf-8")
+    stream = io.StringIO()
+
+    result = InitCommand(OutputFormatter(stream=stream)).execute(
+        path=str(tmp_path), mode="quick", non_interactive=True
+    )
+
+    assert result != 0
+    assert "AGENTS.md" in stream.getvalue()
+    assert agents_md.read_text(encoding="utf-8") == "my own agent notes\n"
+    assert not (tmp_path / "10xgraph.json").exists()

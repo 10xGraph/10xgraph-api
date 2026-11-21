@@ -269,7 +269,8 @@ class InitCommand(BaseCommand):
         if before_production:
             self.output.print_list(before_production, title="Before production", bullet="→")
         self.output.info(
-            "10xgraph skills installs the 10xGraph skill for your AI coding assistant.",
+            "AGENTS.md points coding agents to the 10xGraph docs; "
+            "10xgraph skills installs the full skill.",
             emoji=False,
         )
 
