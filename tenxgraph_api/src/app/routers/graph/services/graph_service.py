@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from injectq import InjectQ, inject, singleton
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from tenxgraph.core.authz import CREDENTIAL_KEY, Identity, UserCredential, public_config
-from tenxgraph.core.exceptions import GraphClosedError, ThreadNotFoundError
+from tenxgraph.core.exceptions import GraphClosedError, ModelNotFoundError, ThreadNotFoundError
 from tenxgraph.core.exceptions.media_exceptions import UnsupportedMediaInputError
 from tenxgraph.core.graph import CompiledGraph
 from tenxgraph.core.state import AgentState, Message, StreamChunk, StreamEvent
@@ -32,6 +32,7 @@ from tenxgraph_api.src.app.core.threads import require_thread
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.core.validation.request_config import (
     ALWAYS_ALLOWED_CONFIG_KEYS,
+    CLIENT_MESSAGE_ERRORS,
     ClientInputError,
     InterruptConflictError,
     _field,
@@ -200,6 +201,8 @@ def _stream_error_reason(exc: Exception) -> str:
         return str(exc)  # our own message, nothing internal to hide
     if isinstance(exc, _resume_error_types()):
         return str(getattr(exc, "message", None) or exc)  # written for the client
+    if isinstance(exc, CLIENT_MESSAGE_ERRORS):
+        return str(exc)  # names the registered models only
     # Imported lazily: a top-level import of handle_errors creates a circular import through
     # the shared utils/exceptions modules.
     from tenxgraph_api.src.app.core.config.settings import get_settings
@@ -401,6 +404,9 @@ class GraphService:
     CompiledGraph, facilitating graph execution operations.
     """
 
+    # The graph is fixed after boot: the model choices are read once, on first use.
+    _model_choices: dict[str, dict[str, Any]] | None = None
+
     @inject
     def __init__(
         self,
@@ -467,6 +473,22 @@ class GraphService:
     def check_media_urls(self, messages: list[Any]) -> None:
         """Reject external media URLs the graph's fetch policy blocks (400, no network)."""
         check_external_media_urls(messages, self.media_policy)
+
+    def check_model_choice(self, config: Any) -> None:
+        """Reject a ``config[config_key]`` that is not a registered model name of its node.
+
+        Runs before a run starts, so a stream answers a real 422, not an error chunk.
+        """
+        if self._model_choices is None:
+            info = self._graph.generate_graph().get("info")
+            models = info.get("models") if isinstance(info, dict) else None
+            self._model_choices = models if isinstance(models, dict) else {}
+        config = client_config(config)
+        for node_name, choice in self._model_choices.items():
+            key = choice["config_key"]
+            # None means the node's default model, as in core.
+            if config.get(key) is not None and config[key] not in choice["names"]:
+                raise ModelNotFoundError(config[key], node_name, choice["names"])
 
     @property
     def names_threads(self) -> bool:
@@ -913,6 +935,7 @@ class GraphService:
     ):
         is_new_thread = False
         config = client_config(graph_input.config)
+        self.check_model_choice(config)
         runs = self.runs_policy()
         reject_unlisted_keys(config, runs.config_keys, "config", ALWAYS_ALLOWED_CONFIG_KEYS)
         reject_builtin_state_keys(graph_input.initial_state, "initial_state")

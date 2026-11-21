@@ -130,6 +130,7 @@ def test_ws_resume_rejects_tool_calls_but_accepts_results():
 @pytest.fixture
 def graph_service():
     srv = GraphService.__new__(GraphService)
+    srv._model_choices = {}  # this fake graph has no generate_graph()
     nodes = {
         "MAIN": SimpleNamespace(func=lambda state: state),
         "CV_AGENT": SimpleNamespace(func=lambda state: state),

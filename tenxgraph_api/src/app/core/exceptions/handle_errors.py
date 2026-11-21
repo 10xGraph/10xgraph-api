@@ -31,7 +31,10 @@ from tenxgraph_api.src.app.core.exceptions.server_errors import (
     unexpected_error_response,
 )
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
-from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
+from tenxgraph_api.src.app.core.validation.request_config import (
+    CLIENT_MESSAGE_ERRORS,
+    ClientInputError,
+)
 from tenxgraph_api.src.app.utils import error_response
 from tenxgraph_api.src.app.utils.schemas import ErrorSchemas
 
@@ -223,8 +226,9 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
         request_id = getattr(request.state, "request_id", "unknown")
 
         message = str(exc)
-        # A ClientInputError is written for the client, so its message survives production.
-        if is_production and not isinstance(exc, ClientInputError):
+        # A ClientInputError or ModelNotFoundError is written for the client, so its message
+        # survives production.
+        if is_production and not isinstance(exc, CLIENT_MESSAGE_ERRORS):
             logger.warning("Request %s - ValueError details: %s", request_id, log_safe(message))
             message = "Invalid input provided."
 
