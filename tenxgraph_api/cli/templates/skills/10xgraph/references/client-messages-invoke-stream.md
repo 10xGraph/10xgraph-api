@@ -47,7 +47,7 @@ The client serializes message content as arrays of content blocks. Avoid sending
 Options:
 
 - `initial_state` (every key must be listed in `runs.state_keys` in `10xgraph.json`, otherwise 422)
-- `config`
+- `config` (`config.model` picks an entry of an Agent `model_registry`; `GET /v1/graph` lists the names in `info.models`; an unknown name is 422)
 - `recursion_limit`
 - `response_granularity`: `"full"`, `"partial"`, or `"low"`
 - `onPartialResult`

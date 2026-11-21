@@ -60,6 +60,7 @@ import re
 from typing import Annotated, Any
 
 from pydantic import BeforeValidator, ValidationInfo
+from tenxgraph.core.exceptions import ModelNotFoundError
 
 from tenxgraph_api.src.app.core import logger
 
@@ -119,9 +120,14 @@ class ClientInputError(ValueError):
     """
 
 
+# Errors whose message is written for the client and so survives production. Core's
+# ``ModelNotFoundError`` lists only registered model names, no keys or URLs.
+CLIENT_MESSAGE_ERRORS = (ClientInputError, ModelNotFoundError)
+
+
 def client_error_detail(exc: Exception) -> str:
-    """The 422 detail for ``exc``: its message, unless production and not a ClientInputError."""
-    if isinstance(exc, ClientInputError):
+    """The 422 detail for ``exc``: its message, unless production and not a client message error."""
+    if isinstance(exc, CLIENT_MESSAGE_ERRORS):
         return str(exc)
     from tenxgraph_api.src.app.core.config.settings import get_settings
 

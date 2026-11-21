@@ -162,6 +162,7 @@ class _AppState(AgentState):
 
 def _graph_service() -> GraphService:
     srv = GraphService.__new__(GraphService)
+    srv._model_choices = {}  # this fake graph has no generate_graph()
     nodes = {
         "START": SimpleNamespace(func=lambda s: s),
         "__start__": SimpleNamespace(func=lambda s: s),
@@ -360,6 +361,7 @@ async def test_put_state_accepts_a_result_for_a_pending_remote_call(checkpointer
     tool_node = ToolNode([])
     tool_node.set_remote_tool([{"type": "function", "function": {"name": "get_location"}}])
     srv = GraphService.__new__(GraphService)
+    srv._model_choices = {}  # this fake graph has no generate_graph()
     srv._graph = SimpleNamespace(
         _state_graph=SimpleNamespace(nodes={"t": SimpleNamespace(func=tool_node)})
     )

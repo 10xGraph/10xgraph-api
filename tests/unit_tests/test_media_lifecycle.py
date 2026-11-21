@@ -120,6 +120,7 @@ def _img(url: str, message_id: str = "m1") -> Message:
 
 def _graph_service(policy: Any = None, media: Any = None) -> GraphService:
     srv = GraphService.__new__(GraphService)
+    srv._model_choices = {}  # this fake graph has no generate_graph()
     srv._graph = SimpleNamespace(media_policy=policy if policy is not None else _Policy())
     srv.checkpointer = MagicMock()
     srv.checkpointer.aget_thread_owner = AsyncMock(return_value=None)

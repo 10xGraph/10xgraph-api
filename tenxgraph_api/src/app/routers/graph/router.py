@@ -12,7 +12,7 @@ from injectq import InjectQ
 from injectq.integrations import InjectAPI
 from pydantic import ValidationError
 from tenxgraph.core.authz import Identity
-from tenxgraph.core.exceptions import ThreadNotFoundError
+from tenxgraph.core.exceptions import ModelNotFoundError, ThreadNotFoundError
 from tenxgraph.core.realtime.base import ErrorEvent
 from tenxgraph.core.realtime.queue import LiveInputQueue
 from tenxgraph.core.state import StreamChunk, StreamEvent
@@ -473,6 +473,7 @@ async def stream_graph(
     # Before the response starts, so a blocked URL is a real 400 and a thread the caller
     # cannot run on a real 404, not an error chunk.
     service.check_media_urls(graph_input.messages)
+    service.check_model_choice(graph_input.config)
     await service.require_run_thread(requested_thread_id(graph_input.config), identity)
 
     # Opt-in Idempotency-Key: a finished run's final state is replayed, a running one is 409.
@@ -846,15 +847,24 @@ def _resolve_ws_thread(frame: dict[str, Any]) -> str | None:
 async def _ws_media_urls_allowed(
     websocket: WebSocket, service: GraphService, graph_input: GraphInputSchema
 ) -> bool:
-    """Apply the media URL policy to a WebSocket run; a blocked URL is sent as an error chunk."""
+    """Apply the media URL policy and the model choice to a WebSocket run.
+
+    A blocked URL or an unregistered model name is sent as an error chunk before the run, so
+    the message is not replaced by the production error-chunk sanitizer.
+    """
     try:
         service.check_media_urls(graph_input.messages)
+        service.check_model_choice(graph_input.config)
     except HTTPException as exc:
-        await websocket.send_text(
-            StreamChunk(event=StreamEvent.ERROR, data={"reason": str(exc.detail)}).model_dump_json()
-        )
-        return False
-    return True
+        reason = str(exc.detail)
+    except ModelNotFoundError as exc:
+        reason = str(exc)
+    else:
+        return True
+    await websocket.send_text(
+        StreamChunk(event=StreamEvent.ERROR, data={"reason": reason}).model_dump_json()
+    )
+    return False
 
 
 def _guard_refusal(exc: HTTPException) -> str:

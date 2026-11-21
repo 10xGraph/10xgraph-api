@@ -6,36 +6,40 @@ Use this when adding model behavior, tools, tool routing, provider options, retr
 
 ## Agent
 
-`Agent` is a graph node that calls an LLM provider and appends the response to state. It supports OpenAI, Google GenAI, and any OpenAI-compatible API behind a unified interface.
+`Agent` is a graph node that calls an LLM provider and appends the response to state. It supports OpenAI, Google GenAI, Anthropic, and any OpenAI-compatible API behind a unified interface.
 
 ### Constructor reference
 
 ```python
 Agent(
     model: str,                                          # required
-    output_type: str = "text",                           # "text" | "image" | "video" | "audio"
+    output_type: str = "text",                           # "text" | "image" | "video" | "audio" | "json"
     system_prompt: list[dict] | None = None,
     tool_node: str | ToolNode | None = None,
     extra_messages: list[Message] | None = None,
     trim_context: bool = False,
     tools_tags: set[str] | None = None,
-    reasoning_config: dict | bool | None = {"effort": "medium"},
+    reasoning_config: dict | bool | None = <default>,   # on at the provider's lowest reasoning effort; None/False = off
     skills: SkillConfig | None = None,
     memory: MemoryConfig | None = None,
     retry_config: RetryConfig | bool | None = True,
     fallback_models: list[str | tuple[str, str]] | None = None,
     multimodal_config: MultimodalConfig | None = None,
     output_schema: type[BaseModel] | None = None,
-    # extra kwargs forwarded to provider SDK:
-    provider: str | None = None,       # "openai" | "google"; auto-detected if omitted
+    # extra kwargs: provider settings are forwarded only if the SDK call defines them
+    provider: str | None = None,       # "openai" | "google" | "anthropic"; auto-detected if omitted
     base_url: str | None = None,
-    api_style: str = "chat",           # "chat" | "responses" (OpenAI only)
+    api_style: str | None = None,     # "chat" | "responses" (OpenAI only); default "responses", or "chat" when base_url is set
     use_vertex_ai: bool = False,
     temperature: float | None = None,
     max_tokens: int | None = None,
     # ...any other provider kwargs
 )
 ```
+
+### Provider-specific settings
+
+Extra kwargs such as `cache_control`, `service_tier` or `seed` are forwarded only if the SDK call being made defines that parameter (method signature for Anthropic and OpenAI, `GenerateContentConfig` fields for Google). Others are dropped with one warning. Settings 10xGraph reads itself (`stream_idle_timeout`, `anthropic_cache`, `anthropic_backend`, `provider`, `base_url`, `api_style`, `use_vertex_ai`, `api_key`) are never forwarded. Anthropic prompt caching is on by default; `anthropic_cache=False` turns it off. See `providers-and-adapters.md`.
 
 ### Model and provider
 
@@ -61,6 +65,36 @@ Agent(model="deepseek-chat", provider="openai", base_url="https://api.deepseek.c
 Agent(model="anthropic/claude-3-5-sonnet", provider="openai", base_url="https://openrouter.ai/api/v1")
 ```
 
+### Model registry
+
+One Agent can run on several models, each with its own provider, base URL, key and settings. The run picks one by name.
+
+```python
+agent = Agent(
+    model="openai",  # the default entry
+    model_registry={
+        "openai": {"model": "gpt-5-mini"},
+        "gemini": {"model": "gemini-2.5-flash", "safety_settings": [...]},
+        "vllm": {"provider": "openai", "model": "deepseek-r1",
+                 "base_url": "http://gpu1:8000/v1", "api_style": "chat"},
+    },
+    fallback_models=["gemini"],
+)
+await app.ainvoke(state, config={"thread_id": "t1", "model": "vllm"})
+```
+
+- An entry is a plain dict: `model` (required), `provider`, `base_url`, `api_key`, `api_style`, `use_vertex_ai`, `anthropic_backend`, `reasoning_config`, `retry_config`, plus provider kwargs.
+- `model=` names the default entry. With a registry, `provider`, `base_url`, `api_key`, `api_style`, `use_vertex_ai` or `anthropic_backend` on the Agent too is a `ValueError`. Put them in the entries.
+- Provider kwargs and `reasoning_config` on the Agent are shared defaults; entry keys win. Each call filters kwargs by that entry's SDK. Names two SDKs share with different meanings (`service_tier`, `metadata`) belong in the entry.
+- Per run: `config["model"]` (or the Agent's `model_config_key`). `None` or missing is the default entry. An unknown name or a non-string raises `ModelNotFoundError` (in `tenxgraph.core.exceptions`, a `ValueError`). A raw model string is never accepted. An Agent without a registry ignores the key.
+- Every Agent node with a registry reads its own key, so a supervisor and a worker can use different `model_config_key` values.
+- Each entry has its own client, built once on first use, with only that entry's key and `base_url`. Concurrent runs on different entries do not affect each other.
+- `fallback_models`: a string that is a registry name is that entry. Other strings and tuples work as before and use the default entry's provider and credentials.
+- Switching entries inside a thread is allowed. The other provider's earlier reasoning is not replayed and the prompt cache starts cold.
+- Prebuilt agents (`ReactAgent`, `PlanActReflectAgent`, `StructuredOutputAgent`, `SupervisorTeamAgent`) pass `model_registry` through; `plan_model` and `reflect_model` may be entry names. `StructuredOutputAgent` chooses its Gemini two-step path from the default entry at build time, so a run on a Gemini entry does not use it.
+- `generate_graph()["info"]["models"]` is `{node: {"default", "names", "config_key"}}`, names only. The API returns it in `GET /v1/graph` as `info.models`; the TS client types it as `GraphInfo.models` (`GraphModelChoice`). Build a model dropdown from it.
+- API: an unknown name is 422 before the run on invoke and HTTP stream, and an error chunk before the run on the WebSocket. The message is kept in production. There is no `10xgraph.json` setting; the registry in code is the allowlist.
+
 ### System prompt
 
 Pass a list of message dicts. `{field_name}` placeholders are replaced at runtime with values from `AgentState` (a missing field stays as written, the rest is still filled):
@@ -78,10 +112,10 @@ agent = Agent(
 
 ### Reasoning config
 
-Reasoning is **on by default** at medium effort. Applies to both OpenAI and Google models.
+Reasoning is **on by default** at the lowest effort that still reasons: OpenAI `"minimal"`, Google `"low"` (512-token thinking budget), Anthropic `"low"` with a summarized display. The value is resolved per request from the provider actually called, so a cross-provider fallback gets its own provider's value. Applies to OpenAI, Google and Anthropic models.
 
 ```python
-agent = Agent(model="gpt-4o")                                          # on, medium effort
+agent = Agent(model="gpt-4o")                                          # on, lowest effort for the provider
 agent = Agent(model="gpt-4o", reasoning_config={"effort": "high"})
 agent = Agent(model="gpt-4o", reasoning_config=None)                   # off
 agent = Agent(model="o4-mini", reasoning_config={"effort": "low", "summary": "auto"})  # OpenAI
@@ -93,7 +127,7 @@ Google effort → thinking_budget mapping:
 | `effort` | `thinking_budget` |
 |---|---|
 | `"low"` | 512 |
-| `"medium"` (default) | 8192 |
+| `"medium"` | 8192 |
 | `"high"` | 24576 |
 
 ### Retry config
@@ -212,8 +246,10 @@ agent = Agent(
 
 ### API style (OpenAI)
 
+Default is `"responses"`. When `base_url` is set (OpenAI-compatible servers) the default is `"chat"`. An explicit value always wins.
+
 ```python
-agent = Agent(model="gpt-4o",  api_style="chat")       # default — Chat Completions
+agent = Agent(model="gpt-4o",  api_style="chat")       # Chat Completions
 agent = Agent(model="o4-mini", api_style="responses")  # Responses API
 ```
 

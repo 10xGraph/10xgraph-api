@@ -54,7 +54,7 @@ Keep apps small. Follow these rules unless the user asks otherwise.
    - Prebuilt agents (ReactAgent, PlanActReflectAgent, StructuredOutputAgent, SupervisorTeamAgent, SwarmAgent, RAGAgent) and tools: `references/prebuilt-agents-and-tools.md`
    - Event publishers and A2A/ACP runtime protocols: `references/publishers-and-runtime-protocols.md`
    - Context management, ID generation, and background tasks: `references/context-id-background.md`
-   - Provider internals and adapters: `references/providers-and-adapters.md`
+   - Provider internals, adapters, provider-specific settings and Anthropic caching: `references/providers-and-adapters.md`
    - Prompt-injection and validation safety: `references/security-and-validators.md`
    - Realtime audio-to-audio voice agents (AudioAgent, Gemini Live, `arealtime`, WebSocket bridge): `references/realtime.md`
 
@@ -99,4 +99,6 @@ Keep apps small. Follow these rules unless the user asks otherwise.
 - For production, avoid process-local storage for shared state; use durable checkpointer/store backends.
 - Add observability or audit side effects by registering a `GraphLifecycleHook` on `CallbackManager` — do not wrap `ainvoke()` / `astream()` calls in application code to achieve the same result.
 - `reasoning_config` is on by default at medium effort; disable explicitly with `reasoning_config=None` when not needed.
+- Provider settings go to `Agent(...)` as SDK-named keyword arguments (`service_tier`, `seed`, `prompt_cache_key`). They are forwarded only if the called SDK defines them, else dropped with a warning. Anthropic prompt caching is on by default (`anthropic_cache=False` turns it off). Details in `references/providers-and-adapters.md`.
+- To let a run pick between models (OpenAI, Gemini, a self-hosted vLLM), use `Agent(model=<default name>, model_registry={name: {...}})` and pass `config={"model": name}` per run. The registry is the allowlist; an unknown name is `ModelNotFoundError` (422 over the API). Names are in `GET /v1/graph` `info.models`. Details in `references/agents-and-tools.md`.
 - Provider is auto-detected from the model name; use `base_url` for third-party OpenAI-compatible APIs (Ollama, DeepSeek, OpenRouter).

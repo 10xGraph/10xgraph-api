@@ -176,6 +176,14 @@ class RealtimeOptionsSchema(BaseModel):
     tools_tags: bool = Field(True, description="Whether the client may narrow the tool tags")
 
 
+class ModelChoiceSchema(BaseModel):
+    """The models a client may pick for one agent node (names only)."""
+
+    default: str = Field(..., description="The model used when the run config names none")
+    names: list[str] = Field(..., description="Registered model names the client may pick")
+    config_key: str = Field(..., description="Run config key that carries the chosen name")
+
+
 class GraphInfoSchema(BaseModel):
     """Schema for graph metadata and configuration."""
 
@@ -200,6 +208,10 @@ class GraphInfoSchema(BaseModel):
     id_type: str | None = Field(None, description="ID type for the graph")
     state_type: str | None = Field(None, description="State type for the graph")
     state_fields: list[str] | None = Field(None, description="State fields for the graph")
+    models: dict[str, ModelChoiceSchema] = Field(
+        default_factory=dict,
+        description="Per agent node, the model names a run may pick with `config[config_key]`",
+    )
 
 
 class GraphSchema(BaseModel):
