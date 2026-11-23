@@ -10,7 +10,7 @@ from injectq import InjectQ
 from tenxgraph.core.authz import Identity
 from tenxgraph.core.graph import StateGraph
 from tenxgraph.core.state import AgentState, Message
-from tenxgraph.storage.checkpointer import BaseCheckpointer, InMemoryCheckpointer
+from tenxgraph.storage.checkpointer import InMemoryCheckpointer
 from tenxgraph.storage.checkpointer.pg_checkpointer import PgCheckpointer
 from tenxgraph.utils.constants import END
 from tenxgraph.utils.id_generator import (
