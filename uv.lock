@@ -11,7 +11,7 @@ resolution-markers = [
 [[package]]
 name = "10xgraph"
 version = "1.0.0"
-source = { git = "https://github.com/10xGraph/10xGraph?branch=main#af573529313d5c9e0493c7e6b83358e3ecd959c6" }
+source = { git = "https://github.com/10xGraph/10xGraph?branch=main#c29e17e3c02c59d035cc9f335785b8b9a62b51bc" }
 dependencies = [
     { name = "injectq" },
     { name = "pydantic" },

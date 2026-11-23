@@ -3,7 +3,6 @@
 import inspect
 import logging
 import sys
-from typing import Any
 
 from injectq import InjectQ
 from tenxgraph.runtime.publisher.base_publisher import BasePublisher
