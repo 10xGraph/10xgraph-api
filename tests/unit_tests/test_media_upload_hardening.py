@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 from starlette.datastructures import FormData, UploadFile
+from tenxgraph.storage.media.security import sanitize_filename
 
 from tenxgraph_api.src.app.routers.media.router import (
-    _clean_filename,
     _uploaded_file,
     list_files,
 )
@@ -26,23 +26,24 @@ from tenxgraph_api.src.app.routers.media.router import (
         ("invoice\u202egpj.exe", "invoicegpj.exe"),
         ("\u2066x\u2069.txt", "x.txt"),
         ("  spaced.txt  ", "spaced.txt"),
-        ("", "file"),
-        ("..", "file"),
-        ("dir/", "file"),
-        ("\u202e\x00", "file"),
+        ("", "unnamed"),
+        ("..", "unnamed"),
+        ("dir/", "unnamed"),
+        ("\u202e\x00", "unnamed"),
         (
             "r\u00e9sum\u00e9 \u65e5\u672c\u8a9e 2026.pdf",
             "r\u00e9sum\u00e9 \u65e5\u672c\u8a9e 2026.pdf",
         ),
-        (".env", ".env"),
+        (".env", "env"),
     ],
 )
 def test_clean_filename(sent, stored):
-    assert _clean_filename(sent) == stored
+    # Uploads use core's sanitize_filename.
+    assert sanitize_filename(sent) == stored
 
 
 def test_clean_filename_is_capped():
-    assert len(_clean_filename("a" * 1000 + ".txt")) == 255
+    assert len(sanitize_filename("a" * 1000 + ".txt")) == 255
 
 
 def _request(*names_and_files):

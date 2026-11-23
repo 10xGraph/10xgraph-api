@@ -1,6 +1,7 @@
+import sys
 import types
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from tenxgraph.qa.evaluation import CriteriaConfig, CriterionConfig, EvalConfig
@@ -43,21 +44,23 @@ def cmd() -> EvalCommand:
     return EvalCommand(output=_SilentOutput())
 
 
-def test_load_agent_from_config_success(cmd):
+def test_load_agent_from_config_success(cmd, tmp_path):
     mock_cm = MagicMock()
-    mock_cm.auto_discover_config.return_value = "10xgraph.json"
+    mock_cm.auto_discover_config.return_value = tmp_path / "10xgraph.json"
     mock_cm.get_config_value.return_value = "my_module:my_agent"
 
     mock_agent = MagicMock()
-    mock_module = types.SimpleNamespace(my_agent=mock_agent)
+    load_graph = AsyncMock(return_value=mock_agent)
 
     with (
         patch("tenxgraph_api.cli.commands.eval.ConfigManager", return_value=mock_cm),
-        patch("importlib.import_module", return_value=mock_module) as mock_import,
+        patch("tenxgraph_api.src.app.loader.load_graph", load_graph),
     ):
         agent = cmd._load_agent_from_config()
         assert agent is mock_agent
-        mock_import.assert_called_once_with("my_module")
+        load_graph.assert_awaited_once_with("my_module:my_agent")
+        assert str(tmp_path) in sys.path
+    sys.path.remove(str(tmp_path))
 
 
 def test_load_agent_from_config_no_json(cmd):
@@ -79,18 +82,6 @@ def test_load_agent_from_config_invalid_spec(cmd):
             cmd._load_agent_from_config()
 
 
-def test_print_criteria_block(cmd):
-    cfg = EvalConfig(
-        criteria=CriteriaConfig(
-            tool_name_match=CriterionConfig.tool_name_match(threshold=1.0),
-        )
-    )
-    cmd._print_criteria_block(cfg, Path("some_dir"))
-    rendered = "\n".join(cmd.output.infos)
-    assert "Criteria  source:" in rendered
-    assert "tool_name_match" in rendered
-
-
 def test_case_progress_fields_for_a_passing_case(cmd):
     res = EvalCaseResult.success(
         eval_id="c1",
@@ -101,16 +92,6 @@ def test_case_progress_fields_for_a_passing_case(cmd):
     res.duration_seconds = 1.23
     assert cmd._case_status(res) == "passed"
     assert "1.23s" in cmd._case_detail(res)
-
-
-def test_resolve_eval_dir(cmd):
-    mock_cm = MagicMock()
-    mock_cm.auto_discover_config.return_value = "10xgraph.json"
-    mock_cm.get_evaluation_config.return_value = {"directory": "custom_evals"}
-
-    with patch("tenxgraph_api.cli.commands.eval.ConfigManager", return_value=mock_cm):
-        eval_dir = cmd._resolve_eval_dir()
-        assert eval_dir == Path.cwd() / "custom_evals"
 
 
 def test_collect_simulations(cmd):
@@ -354,7 +335,6 @@ def test_execute_success(cmd, tmp_path):
         patch.object(cmd, "_discover", return_value=[Path("test_eval.py")]),
         patch.object(cmd, "_load_confeval", return_value=None),
         patch.object(cmd, "_collect_from_file", return_value=[fake_case]),
-        patch.object(cmd, "_print_criteria_block"),
         patch.object(cmd, "_run_flat_pool", return_value=quads),
         patch.object(cmd, "_merge_reports", return_value=mock_report),
         patch("tenxgraph_api.cli.commands.eval.ReporterManager", return_value=mock_rep_mgr),
@@ -397,7 +377,6 @@ def test_execute_below_threshold(cmd, tmp_path):
         patch.object(cmd, "_discover", return_value=[Path("test_eval.py")]),
         patch.object(cmd, "_load_confeval", return_value=None),
         patch.object(cmd, "_collect_from_file", return_value=[fake_case]),
-        patch.object(cmd, "_print_criteria_block"),
         patch.object(cmd, "_run_flat_pool", return_value=quads),
         patch.object(cmd, "_merge_reports", return_value=mock_report),
         patch("tenxgraph_api.cli.commands.eval.ReporterManager", return_value=mock_rep_mgr),
@@ -497,21 +476,6 @@ def test_make_pending_loads_agent_from_config(cmd):
         res = cmd._make_pending(fake_mod, eval_set, config, "file.py")
         assert len(res) == 1
         assert res[0].evaluator.graph is mock_agent
-
-
-def test_print_criteria_block_custom(cmd):
-    cfg_match = CriterionConfig.tool_name_match(threshold=1.0)
-    cfg_match.num_samples = 3
-    cfg_match.judge_model = "gpt-4"
-    cfg = EvalConfig(
-        criteria=CriteriaConfig(
-            tool_name_match=cfg_match,
-        )
-    )
-    cmd._print_criteria_block(cfg, Path("some_dir"))
-    rendered = "\n".join(cmd.output.infos)
-    assert "samples=3" in rendered
-    assert "judge=gpt-4" in rendered
 
 
 def _pending_case(file_name, config, source):
@@ -634,16 +598,6 @@ async def test_run_flat_pool_parallel(cmd):
         results = await cmd._run_flat_pool([pc], max_concurrency=2, parallel=True)
         assert len(results) == 1
         assert results[0][3].passed is True
-
-
-def test_resolve_eval_dir_error(cmd):
-    mock_cm = MagicMock()
-    mock_cm.auto_discover_config.return_value = "10xgraph.json"
-    mock_cm.get_evaluation_config.side_effect = ValueError("config load error")
-
-    with patch("tenxgraph_api.cli.commands.eval.ConfigManager", return_value=mock_cm):
-        eval_dir = cmd._resolve_eval_dir()
-        assert eval_dir == Path.cwd() / "evals"
 
 
 def test_execute_load_config_error(cmd, tmp_path):

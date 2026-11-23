@@ -120,7 +120,12 @@ class TestListFiles:
 
     @pytest.mark.asyncio
     async def test_store_without_listing_raises(self):
-        store = SimpleNamespace(get_metadata=AsyncMock())  # no list_keys
+        # BaseMediaStore's default listing raises NotImplementedError when a backend cannot list.
+        store = SimpleNamespace(
+            get_metadata=AsyncMock(),
+            list_keys=AsyncMock(side_effect=NotImplementedError),
+            list_keys_for_owner=AsyncMock(side_effect=NotImplementedError),
+        )
         with pytest.raises(NotImplementedError):
             await _media(store).list_files("alice", 0, 10)
 

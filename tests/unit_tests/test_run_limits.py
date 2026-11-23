@@ -147,13 +147,14 @@ async def test_second_concurrent_invoke_gets_429(fresh_slots):
 
     started, finish = asyncio.Event(), asyncio.Event()
 
-    async def slow_invoke(graph_input, user, credential=None):
+    async def slow_invoke(graph_input, user, credential=None, checks=None):
         started.set()
         await finish.wait()
         return {"messages": []}
 
     service = MagicMock()
     service.require_run_thread = AsyncMock()
+    service.check_inline_media = AsyncMock()
     service.runs_policy.return_value = RunsConfig(max_concurrent_per_user=1)
     service.invoke_graph = slow_invoke
     request = MagicMock()
@@ -177,6 +178,7 @@ async def test_stream_route_refuses_before_streaming(fresh_slots):
 
     service = MagicMock()
     service.require_run_thread = AsyncMock()
+    service.check_inline_media = AsyncMock()
     service.runs_policy.return_value = RunsConfig(max_concurrent_per_user=1)
     service.check_resume_target = AsyncMock()
     service.stream_graph = MagicMock(return_value=_items("a"))

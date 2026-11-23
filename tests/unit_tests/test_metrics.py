@@ -17,6 +17,7 @@ from tenxgraph_api.src.app.core.auth.route_guard import (
     find_unprotected_routes,
 )
 from tenxgraph_api.src.app.core.config import metrics as metrics_module
+from tenxgraph_api.src.app.core.config import observability as observability_module
 from tenxgraph_api.src.app.core.config import setup_middleware as sm
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.core.config.metrics import (
@@ -386,7 +387,7 @@ def test_metrics_and_legacy_otel_share_one_instrument_call_and_one_meter_provide
         patch.object(sm, "get_settings", return_value=settings),
         patch.object(sm, "init_sentry"),
         patch.object(sm, "setup_metrics", return_value=provider),
-        patch.object(sm, "_setup_otel_metrics") as legacy_metrics,
+        patch.object(observability_module, "_setup_otel_metrics") as legacy_metrics,
         patch.object(sm, "_attach_otel_publisher"),
         caplog.at_level(logging.INFO, logger="10xgraph-api"),
     ):
@@ -467,7 +468,7 @@ def test_legacy_otel_without_metrics_block_keeps_legacy_metrics():
     modules = _otel_modules()
     with (
         patch.dict("sys.modules", modules),
-        patch.object(sm, "_setup_otel_metrics") as legacy_metrics,
+        patch.object(observability_module, "_setup_otel_metrics") as legacy_metrics,
     ):
         assert sm.setup_otel_provider(settings) is True
     legacy_metrics.assert_called_once()
@@ -580,7 +581,7 @@ def test_setup_observability_hands_resolved_otlp_to_core():
     graph_config = _graph_config(_cfg(), observability={"level": "standard", **OBS})
     with (
         patch("tenxgraph.runtime.publisher.exporters.setup_observability") as core_setup,
-        patch.object(sm, "_bind_publisher"),
+        patch.object(observability_module, "_bind_publisher"),
     ):
         sm._setup_observability(container, graph_config)
     core_setup.assert_called_once()
@@ -593,7 +594,7 @@ def test_setup_observability_runs_for_otlp_alone():
     obs = {"otlp": {"enabled": True, "endpoint": "http://t:4318"}}
     with (
         patch("tenxgraph.runtime.publisher.exporters.setup_observability") as core_setup,
-        patch.object(sm, "_bind_publisher"),
+        patch.object(observability_module, "_bind_publisher"),
     ):
         sm._setup_observability(container, _graph_config(MetricsConfig(), observability=obs))
     core_setup.assert_called_once()

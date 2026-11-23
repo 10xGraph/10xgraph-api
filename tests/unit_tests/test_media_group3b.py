@@ -202,7 +202,7 @@ async def test_image_pixel_limit_is_enforced_on_upload():
         seen.append(max_pixels)
         raise ValueError("Image has 999 pixels; the limit is 123 pixels")
 
-    with patch("tenxgraph_api.src.app.routers.media.check_image_pixels", fake):
+    with patch("tenxgraph_api.src.app.routers.media.service.check_image_pixels", fake):
         with pytest.raises(ClientInputError, match="pixels"):
             await svc.upload_file(PNG, "a.png", "image/png", user_id="a")
     assert seen == [123]
@@ -212,7 +212,7 @@ async def test_image_pixel_limit_is_enforced_on_upload():
 @pytest.mark.asyncio
 async def test_pixel_check_skips_non_images():
     svc = _media(MEDIA_MAX_IMAGE_PIXELS=1)
-    with patch("tenxgraph_api.src.app.routers.media.check_image_pixels") as check:
+    with patch("tenxgraph_api.src.app.routers.media.service.check_image_pixels") as check:
         await svc.upload_file(b"hello", "a.txt", "text/plain", user_id="a")
     check.assert_not_called()
 

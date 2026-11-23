@@ -20,7 +20,7 @@ from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     KEEP_MESSAGE_IDS,
     GraphInputSchema,
 )
-from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
+from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService, RunChecks
 
 from .converter import select_new_messages, to_tenxgraph_messages
 from .event_mapper import AgUiEventMapper
@@ -53,12 +53,14 @@ async def stream_ag_ui(
     encoder: EventEncoder,
     allow_client_tools: bool = True,
     credential: UserCredential | None = None,
+    checks: RunChecks | None = None,
 ) -> AsyncIterator[str]:
     """Stream one AG-UI run as encoded events.
 
     With ``allow_client_tools`` the tools the client sends are offered to the model for this run
     (see ``ag_ui.allow_client_tools``); without it only ``remote_tools`` from 10xgraph.json are.
-    ``credential`` goes into the run config for the graph's tools.
+    ``credential`` goes into the run config for the graph's tools. ``checks`` is what the
+    router already checked (``GraphService.check_run_input``).
 
     The thread's checkpoint is the record of the conversation: only client messages it has not
     seen are sent to the graph. A run with nothing new (a client syncing state) still gets a
@@ -71,7 +73,7 @@ async def stream_ag_ui(
 
     try:
         async for event in _run_events(
-            service, run_input, user, mapper, initial_state, allow_client_tools, credential
+            service, run_input, user, mapper, initial_state, allow_client_tools, credential, checks
         ):
             yield encoder.encode(event)
     except ValueError as exc:
@@ -99,9 +101,13 @@ async def _run_events(
     initial_state: dict[str, Any] | None,
     allow_client_tools: bool,
     credential: UserCredential | None,
+    checks: RunChecks | None = None,
 ) -> AsyncIterator[Any]:
     """The events between ``RUN_STARTED`` and the terminal event of one run."""
     checkpoint_state = await _checkpoint_state(service, run_input.thread_id, user)
+    # Read under the thread lock: the run's checks use this read instead of their own.
+    checks = checks or RunChecks()
+    checks.state = checkpoint_state
     context = list(getattr(checkpoint_state, "context", None) or [])
     new_messages = select_new_messages(
         run_input.messages,
@@ -126,7 +132,7 @@ async def _run_events(
     graph_input, server_config = _graph_request(
         run_input, messages, initial_state, resume, allow_client_tools
     )
-    async for chunk in service.stream_chunks(graph_input, user, server_config, credential):
+    async for chunk in service.stream_chunks(graph_input, user, server_config, credential, checks):
         for event in mapper.map(chunk):
             yield event
 

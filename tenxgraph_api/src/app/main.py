@@ -23,12 +23,9 @@ from tenxgraph_api.src.app.core.auth.route_guard import (
     assert_all_routes_protected,
 )
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, default_config_path
-from tenxgraph_api.src.app.core.config.metrics import (
-    check_scrape_route,
-    flush_telemetry,
-    native_telemetry_off,
-)
-from tenxgraph_api.src.app.loader import attach_all_modules, load_container
+from tenxgraph_api.src.app.core.config.metrics import check_scrape_route, native_telemetry_off
+from tenxgraph_api.src.app.core.lifecycle import build_container, check_backends, close_resources
+from tenxgraph_api.src.app.loader import attach_all_modules
 from tenxgraph_api.src.app.routers import init_routes
 
 
@@ -45,11 +42,8 @@ graph_path = os.environ.get("GRAPH_PATH") or default_config_path()
 graph_config = GraphConfig(graph_path)
 
 settings = get_settings()
-# Load the container
-container: InjectQ = load_container(graph_config.injectq_path) or InjectQ.get_instance()
-
-# Save config instance
-container.bind_instance(GraphConfig, graph_config)
+# The app's container, with the config bound (the jobs worker builds it the same way).
+container: InjectQ = build_container(graph_config)
 
 
 def _media_store():
@@ -119,45 +113,8 @@ async def _prepare_checkpointer() -> None:
 
 
 async def _check_backends(app: FastAPI) -> None:
-    """Refuse to start while the checkpointer, the store or a required cache store is down.
-
-    Calls ``aping()`` on each, retrying for ``STARTUP_CHECK_TIMEOUT_SECONDS``, then raises
-    ``StartupCheckError``, which stops uvicorn and gunicorn with the failed components in the
-    log. The cache store is required only by fail-closed features (token revocation, a rate
-    limiter with ``fail_open: false``); otherwise an outage is one warning. Off with
-    ``STARTUP_CHECKS=false``.
-    """
-    if not settings.STARTUP_CHECKS:
-        logger.warning(
-            "STARTUP_CHECKS is off: starting without checking that the configured backends "
-            "are reachable."
-        )
-        return
-    from tenxgraph_api.src.app.routers.ping.startup_checks import check_backends_at_startup
-
-    await check_backends_at_startup(container, timeout=settings.STARTUP_CHECK_TIMEOUT_SECONDS)
-
-
-async def _close_cache_store() -> None:
-    """Give back the leases whose releases are still running, then close the cache store.
-
-    A release that can no longer reach the store leaves its slot (a run lock, a cap) held
-    until the lease ttl, so the next pod would answer 409 for that thread meanwhile.
-    """
-    try:
-        from tenxgraph_api.src.app.core.cache_store import BaseCacheStore
-        from tenxgraph_api.src.app.core.leases import LeaseManager, wait_for_releases
-
-        leases = container.try_get(LeaseManager)
-        if leases is not None:
-            await leases.aclose()
-        else:
-            await wait_for_releases()
-        cache_store = container.try_get(BaseCacheStore)
-        if cache_store is not None:
-            await cache_store.aclose()
-    except Exception as exc:
-        logger.debug("Cache store close failed: %s", exc)
+    """Refuse to start while a configured backend is down (``lifecycle.check_backends``)."""
+    await check_backends(container, settings)
 
 
 async def _cleanup_temp_media_cache() -> None:
@@ -232,46 +189,20 @@ async def lifespan(app: FastAPI):
         sweeper.cancel()
         await asyncio.gather(sweeper, return_exceptions=True)
 
-    # Shutdown. Order matters: the sweeper is already stopped, so nothing touches the media
-    # store while the graph closes. One core call ends active runs in phases (finish, stop,
-    # cancel; each saved INTERRUPTED), drains its own background work (events, checkpoint
-    # writes) and then releases the checkpointer, publisher and store. The API's own clients
-    # close after it because that work may still use them.
-    if graph:
-        try:
-            stats = await graph.aclose(
-                grace=settings.SHUTDOWN_GRACE_SECONDS,
-                stop_timeout=settings.SHUTDOWN_STOP_SECONDS,
-                timeout=settings.SHUTDOWN_TIMEOUT_SECONDS,
-            )
-            logger.info("Graph closed: %s", stats)
-        except Exception as exc:
-            logger.warning("Graph close did not finish cleanly: %s", exc)
-
+    # Shutdown. The sweeper is already stopped, so nothing touches the media store while the
+    # graph closes. Then the same order as the jobs worker: graph, task broker, leases and
+    # cache store, auth, telemetry (``lifecycle.close_resources``).
+    stop_broker = None
     if graph_config.worker is not None:
         from tenxgraph_api.src.app.routers.tasks import stop_broker
 
-        try:
-            await stop_broker()
-        except Exception as exc:
-            logger.warning("Task broker close failed: %s", exc)
-
-    # The rate limiter and token revocation share the cache store: closed
-    # once here.
-    await _close_cache_store()
-
-    # A custom auth class may hold its own clients.
-    try:
-        from tenxgraph_api import BaseAuth
-
-        auth = container.try_get(BaseAuth)
-        if auth is not None and hasattr(auth, "aclose"):
-            await auth.aclose()
-    except Exception as exc:
-        logger.debug("Auth close failed: %s", exc)
-
-    # Last, so a slow collector delays nothing else: the final metrics push and AI spans.
-    await flush_telemetry(getattr(app.state, "meter_provider", None))
+    await close_resources(
+        container,
+        graph,
+        settings,
+        meter_provider=getattr(app.state, "meter_provider", None),
+        stop_broker=stop_broker,
+    )
 
 
 app = FastAPI(

@@ -351,9 +351,7 @@ def test_attach_otel_publisher_existing_composite():
         settings = MagicMock()
         settings.OTEL_LEVEL = "standard"
 
-        with patch(
-            "tenxgraph_api.src.app.core.config.setup_middleware.isinstance", return_value=True
-        ):
+        with patch("tenxgraph_api.src.app.core.config.observability.isinstance", return_value=True):
             _attach_otel_publisher(container, settings)
 
 

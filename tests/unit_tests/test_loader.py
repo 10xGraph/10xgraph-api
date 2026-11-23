@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from injectq import InjectQ
 from tenxgraph.core import CompiledGraph
-from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.storage.store import BaseStore
 
 from tenxgraph_api import BaseAuth
@@ -16,7 +15,6 @@ from tenxgraph_api.src.app.loader import (
     check_auth_at_boot,
     load_and_bind_auth,
     load_auth,
-    load_checkpointer,
     load_container,
     load_graph,
     load_store,
@@ -99,43 +97,6 @@ async def test_load_graph_errors():
     with patch("importlib.import_module", return_value=mock_module):
         with pytest.raises(AttributeError):
             await load_graph("foo:bar")
-
-
-def test_load_checkpointer():
-    assert load_checkpointer(None) is None
-
-    with pytest.raises(ValueError, match="Invalid checkpointer path format"):
-        load_checkpointer("invalid_no_colon")
-
-    mock_cp = MagicMock(spec=BaseCheckpointer)
-    mock_module = MagicMock()
-    mock_module.cp = mock_cp
-    with patch("importlib.import_module", return_value=mock_module):
-        assert load_checkpointer("mod:cp") == mock_cp
-
-    # RuntimeError
-    mock_module.cp = None
-    with patch("importlib.import_module", return_value=mock_module):
-        with pytest.raises(Exception, match="Failed to obtain a BaseCheckpointer"):
-            load_checkpointer("mod:cp")
-
-    # TypeError
-    mock_module.cp = "not cp"
-    with patch("importlib.import_module", return_value=mock_module):
-        with pytest.raises(Exception, match="Loaded object is not a BaseCheckpointer"):
-            load_checkpointer("mod:cp")
-
-    # ModuleNotFoundError
-    with patch("importlib.import_module", side_effect=ModuleNotFoundError()):
-        with pytest.raises(ModuleNotFoundError):
-            load_checkpointer("mod:cp")
-
-    # AttributeError
-    mock_module = MagicMock()
-    del mock_module.cp
-    with patch("importlib.import_module", return_value=mock_module):
-        with pytest.raises(AttributeError):
-            load_checkpointer("mod:cp")
 
 
 def test_load_store():
@@ -431,7 +392,7 @@ def test_warns_for_in_memory_checkpointer_and_missing_redis_in_production(monkey
 
     from tenxgraph_api.src.app import loader
 
-    monkeypatch.setattr(loader, "_is_production", lambda: True)
+    monkeypatch.setattr(loader, "is_production", lambda: True)
     with caplog.at_level(logging.WARNING):
         loader.warn_per_process_state(_warn_container(InMemoryCheckpointer()))
     text = " ".join(r.getMessage() for r in caplog.records)
@@ -446,7 +407,7 @@ def test_no_warning_in_single_process_development(monkeypatch, caplog):
 
     from tenxgraph_api.src.app import loader
 
-    monkeypatch.setattr(loader, "_is_production", lambda: False)
+    monkeypatch.setattr(loader, "is_production", lambda: False)
     monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
     with caplog.at_level(logging.WARNING):
         loader.warn_per_process_state(_warn_container(InMemoryCheckpointer()))
@@ -460,7 +421,7 @@ def test_web_concurrency_above_one_warns_even_in_development(monkeypatch, caplog
     from tenxgraph_api.src.app import loader
     from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore, RedisCacheStore
 
-    monkeypatch.setattr(loader, "_is_production", lambda: False)
+    monkeypatch.setattr(loader, "is_production", lambda: False)
     monkeypatch.setenv("WEB_CONCURRENCY", "4")
     with caplog.at_level(logging.WARNING):
         shared = RedisCacheStore(client=MagicMock())

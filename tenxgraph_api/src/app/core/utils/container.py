@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import logging
+
 from injectq import InjectQ
+
+
+logger = logging.getLogger("tenxgraph_api")
 
 
 def current_container() -> InjectQ:
@@ -19,3 +24,16 @@ def current_container() -> InjectQ:
         return get_container_fastapi()
     except InjectionError:  # outside a request
         return InjectQ.get_instance()
+
+
+def lookup[T](service_type: type[T]) -> T | None:
+    """An optional service from the app's container (:func:`current_container`), else None.
+
+    For services the app may not have (media, telemetry, auth): a lookup that fails is the
+    same as none bound.
+    """
+    try:
+        return current_container().try_get(service_type)
+    except Exception as exc:
+        logger.debug("No %s available: %s", service_type.__name__, exc)
+        return None

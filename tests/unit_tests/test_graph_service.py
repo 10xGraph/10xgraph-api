@@ -444,4 +444,5 @@ def test_stream_error_data_carries_the_bad_data_code():
     assert data["code"] == "INVALID_REQUEST_DATA"
     assert "invalid byte sequence" not in data["reason"]
     assert "cannot be stored" in data["reason"]
-    assert "code" not in _stream_error_data(Exception("other"))
+    # Any other error carries the code invoke gives it (a 500 HTTPException).
+    assert _stream_error_data(Exception("other"))["code"] == "HTTPException"

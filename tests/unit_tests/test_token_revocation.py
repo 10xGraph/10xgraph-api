@@ -219,7 +219,7 @@ def test_loader_warns_when_revocations_stay_in_one_process(
 ):
     from tenxgraph_api.src.app import loader
 
-    monkeypatch.setattr(loader, "_is_production", lambda: mode == "production")
+    monkeypatch.setattr(loader, "is_production", lambda: mode == "production")
     monkeypatch.setenv("WEB_CONCURRENCY", workers)
     container = InjectQ()
     container.bind_instance(BaseCacheStore, InMemoryCacheStore())
@@ -233,7 +233,7 @@ def test_loader_does_not_warn_with_a_shared_cache_store(monkeypatch, caplog):
     from tenxgraph_api.src.app import loader
     from tenxgraph_api.src.app.core.cache_store import RedisCacheStore
 
-    monkeypatch.setattr(loader, "_is_production", lambda: True)
+    monkeypatch.setattr(loader, "is_production", lambda: True)
     container = InjectQ()
     container.bind_instance(BaseCacheStore, RedisCacheStore(client=MagicMock()))
     with caplog.at_level(logging.WARNING, logger="tenxgraph_api"):

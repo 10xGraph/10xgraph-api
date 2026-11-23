@@ -174,20 +174,6 @@ class TestConfigManager:
             manager._validate_config(config_data)
         assert "must be a string" in str(exc_info.value)
 
-    def test_get_config_without_loading(self):
-        """Test getting config without loading first."""
-        manager = ConfigManager()
-        with pytest.raises(ConfigurationError) as exc_info:
-            manager.get_config()
-        assert "No configuration loaded" in str(exc_info.value)
-
-    def test_get_config_after_loading(self, temp_config_file):
-        """Test getting config after loading."""
-        manager = ConfigManager()
-        manager.load_config(temp_config_file)
-        config = manager.get_config()
-        assert config["agent"] == "test_agent"
-
     def test_get_config_value_simple_key(self, temp_config_file):
         """Test getting config value with simple key."""
         manager = ConfigManager()

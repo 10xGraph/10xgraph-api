@@ -363,3 +363,12 @@ class TestLogSafe:
     def test_leaves_plain_values_and_stringifies(self):
         assert log_safe("runs:user:alice") == "runs:user:alice"
         assert log_safe(42) == "42"
+
+    def test_escapes_unicode_line_separators(self):
+        out = log_safe("a\u2028b\u2029c")
+        assert out == "a\\u2028b\\u2029c"
+        assert "\u2028" not in out and "\u2029" not in out
+
+
+def test_log_safe_keeps_long_values_whole():
+    assert log_safe("x" * 500) == "x" * 500

@@ -117,9 +117,11 @@ async def run_ag_ui(
 async def _run_ag_ui(request, run_input, service, identity, config, idem, named):
     thread_id = run_input.thread_id
     # External media URLs in the request, checked before the response starts so a blocked
-    # one is a 400. Anything the converter rejects is left to the run, which reports it.
+    # one is a 400 (the run then skips the check). Anything the converter rejects is left to
+    # the run, which checks and reports it. AG-UI sends no model choice (config is only ids).
+    checks = None
     try:
-        service.check_media_urls(to_tenxgraph_messages(run_input.messages))
+        checks = service.check_run_input(to_tenxgraph_messages(run_input.messages), None)
     except MediaURLBlockedError:
         raise
     except ValueError:
@@ -145,6 +147,7 @@ async def _run_ag_ui(request, run_input, service, identity, config, idem, named)
         encoder,
         allow_client_tools=config.ag_ui.allow_client_tools,
         credential=run_credential(request),
+        checks=checks,
     )
     if idem is not None:
         events = idempotency.mark_when_done(events, idem, failed_marker="RUN_ERROR")

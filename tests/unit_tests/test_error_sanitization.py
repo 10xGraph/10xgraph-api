@@ -1,14 +1,31 @@
 """Unit tests for error message sanitization."""
 
+import os
+from unittest.mock import patch
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.exceptions import HTTPException
 
+from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.exceptions.handle_errors import (
     _sanitize_error_message,
     init_errors_handler,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_mode():
+    """Restore os.environ and the cached settings after each test.
+
+    The tests set MODE and cache settings; a failed assertion skipped their cleanup, so a
+    cached "production" leaked into later tests (``is_production()`` reads the cache).
+    """
+    with patch.dict(os.environ):
+        get_settings.cache_clear()
+        yield
+    get_settings.cache_clear()
 
 
 def test_sanitize_error_message_in_production():

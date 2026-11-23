@@ -1,17 +1,63 @@
-import ipaddress
 import json
 import logging
-import os
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
 from tenxgraph.core.graph.remote_tool import RemoteToolConfig
 
 from tenxgraph_api.config_names import CONFIG_FILE, LEGACY_CONFIG_FILE
 from tenxgraph_api.import_path import is_import_path
+from tenxgraph_api.src.app.core.config.sections.cache_store import (
+    _CACHE_STORE_SETTINGS,
+    CACHE_STORE_KEYS,
+    CACHE_STORE_TYPES,
+    DEFAULT_USER_REVOCATION_TTL,
+    CacheStoreConfig,
+    TokenRevocationConfig,
+    _positive_seconds,
+    check_cache_store_settings,
+    redis_url_or_env,
+)
+from tenxgraph_api.src.app.core.config.sections.common import (
+    _expand_env,
+    _parse_bool,
+)
+from tenxgraph_api.src.app.core.config.sections.misc import (
+    _REMOTE_TOOLS_ADAPTER,
+    ID_GENERATOR_NAMES,
+    THREAD_NAME_CHOICES,
+    AgUiConfig,
+    MediaConfig,
+    validate_remote_tools,
+)
+from tenxgraph_api.src.app.core.config.sections.rate_limit import (
+    DEFAULT_TRUSTED_PROXIES,
+    RATE_LIMIT_KEYS,
+    RateLimitConfig,
+    _parse_networks,
+)
+from tenxgraph_api.src.app.core.config.sections.runs import (
+    DEFAULT_MAX_CONCURRENT_RUNS_PER_USER,
+    DEFAULT_PRODUCTION_RUN_TIMEOUT_SECONDS,
+    THREAD_ID_MODES,
+    RunsConfig,
+    _key_allow_list,
+    _runs_limit,
+    _runs_max_parallel_tool_calls,
+    _runs_timeout,
+    default_run_timeout,
+)
+from tenxgraph_api.src.app.core.config.sections.websocket import (
+    DEFAULT_REALTIME_CLIENT_OVERRIDES,
+    DEFAULT_WS_MAX_CONNECTIONS,
+    DEFAULT_WS_MAX_CONNECTIONS_PER_USER,
+    REALTIME_CLIENT_OVERRIDE_KEYS,
+    WebSocketConfig,
+    _connection_limit,
+    _realtime_client_overrides,
+    _string_list,
+)
 
 
 if TYPE_CHECKING:
@@ -22,737 +68,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("tenxgraph_api")
-
-
-_REMOTE_TOOLS_ADAPTER = TypeAdapter(list[RemoteToolConfig])
-
-
-def validate_remote_tools(raw: object) -> list[RemoteToolConfig]:
-    """Validate remote-tool declarations for both CLI audit and API startup."""
-    if not isinstance(raw, list):
-        raise ValueError("remote_tools must be a list")
-
-    try:
-        tools = _REMOTE_TOOLS_ADAPTER.validate_python(raw)
-    except ValidationError as exc:
-        raise ValueError(f"Invalid remote_tools configuration: {exc}") from exc
-
-    seen: set[str] = set()
-    for tool in tools:
-        if tool.name in seen:
-            raise ValueError(f"Duplicate remote tool name '{tool.name}'")
-        seen.add(tool.name)
-    return tools
-
-
-def _parse_bool(value: object, *, field: str) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off"}:
-            return False
-    raise ValueError(f"{field} must be a boolean")
-
-
-def _expand_env(value: str | None) -> str | None:
-    if value is None:
-        return None
-    expanded = os.path.expandvars(value)
-    if expanded == value and (value.startswith("$") or "${" in value):
-        raise ValueError(f"Unresolved environment variable in value: {value}")
-    return expanded
-
-
-# Where X-Forwarded-For is trusted from when ``trusted_proxy_headers`` is on but no
-# ``trusted_proxies`` are listed: loopback and private networks, which is where a reverse proxy,
-# ingress or sidecar in front of the app connects from. A client on the public internet that
-# reaches the app directly is keyed by its own address. List ``0.0.0.0/0`` and ``::/0`` to
-# trust every peer (only when nothing can reach the app except through your proxy).
-DEFAULT_TRUSTED_PROXIES: tuple[str, ...] = (
-    "127.0.0.0/8",
-    "10.0.0.0/8",
-    "172.16.0.0/12",
-    "192.168.0.0/16",
-    "169.254.0.0/16",
-    "100.64.0.0/10",
-    "::1/128",
-    "fc00::/7",
-    "fe80::/10",
-)
-
-
-def _parse_networks(raw: object) -> tuple[str, ...]:
-    if not isinstance(raw, list | tuple):
-        raise ValueError("rate_limit.trusted_proxies must be a list of IPs or CIDR ranges")
-    networks = []
-    for item in raw:
-        try:
-            networks.append(str(ipaddress.ip_network(str(item).strip(), strict=False)))
-        except ValueError as exc:
-            raise ValueError(f"rate_limit.trusted_proxies: invalid network {item!r}") from exc
-    return tuple(networks)
-
-
-RATE_LIMIT_KEYS: tuple[str, ...] = (
-    "enabled",
-    "requests",
-    "window",
-    "by",
-    "fail_open",
-    "trusted_proxy_headers",
-    "trusted_proxies",
-    "trusted_proxy_hops",
-    "exclude_paths",
-)
-
-
-@dataclass
-class RateLimitConfig:
-    """Rate limit configuration: ``cache_store.rate_limit`` in 10xgraph.json.
-
-    Example::
-
-        "cache_store": {
-            "type": "redis",
-            "url": "${REDIS_URL}",
-            "rate_limit": {
-                "enabled": true,
-                "requests": 100,
-                "window": 60,
-                "by": "ip",
-                "trusted_proxy_headers": false,
-                "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"],
-                "fail_open": true
-            }
-        }
-
-    The counters live in the API's cache store, like the run locks and caps: shared between
-    workers with a Redis or custom store, per process with the in-memory one.
-    """
-
-    enabled: bool
-    requests: int
-    window: int
-    by: str  # "ip" | "user" | "global"
-    exclude_paths: tuple[str, ...]
-    trusted_proxy_headers: bool  # honour X-Forwarded-For only when True
-    # Number of proxies you control in front of the app. Only this many entries,
-    # counted from the RIGHT of X-Forwarded-For, were appended by your own
-    # infrastructure; anything further left came from the caller and is forgeable.
-    trusted_proxy_hops: int = 1
-    fail_open: bool = True  # on a cache store error: True=allow, False=deny with 503
-    # Networks your proxies connect from. X-Forwarded-For is honoured only for requests
-    # whose peer address is in one of them, so a client that reaches the app directly
-    # (bypassing the proxy) cannot pick its own address. Empty means
-    # DEFAULT_TRUSTED_PROXIES (loopback and private networks), never "everyone".
-    trusted_proxies: tuple[str, ...] = ()
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "RateLimitConfig":
-        if not isinstance(data, dict):
-            raise ValueError("rate_limit must be an object")
-        unknown = sorted(set(data) - set(RATE_LIMIT_KEYS))
-        if unknown:
-            raise ValueError(
-                f"rate_limit: unknown keys {unknown}; valid keys: {', '.join(RATE_LIMIT_KEYS)}"
-            )
-
-        enabled = _parse_bool(data.get("enabled", True), field="rate_limit.enabled")
-        requests = int(data.get("requests", 100))
-        window = int(data.get("window", 60))
-        by = data.get("by", "ip")
-        trusted_proxy_headers = _parse_bool(
-            data.get("trusted_proxy_headers", False),
-            field="rate_limit.trusted_proxy_headers",
-        )
-        exclude_paths_raw = data.get("exclude_paths", [])
-        if not isinstance(exclude_paths_raw, list | tuple):
-            raise ValueError("rate_limit.exclude_paths must be a list of paths")
-        exclude_paths = tuple(str(path) for path in exclude_paths_raw)
-        fail_open = _parse_bool(data.get("fail_open", True), field="rate_limit.fail_open")
-
-        # How many proxies of YOUR OWN sit in front of the app and append to
-        # X-Forwarded-For. Only that many entries, counted from the right, were
-        # written by infrastructure you control; everything to the left of them came
-        # from the caller and is forgeable. See keying._client_ip.
-        trusted_proxy_hops = int(data.get("trusted_proxy_hops", 1))
-        trusted_proxies = _parse_networks(data.get("trusted_proxies", []))
-
-        # Validation
-        if by not in ("ip", "global", "user"):
-            raise ValueError(f"rate_limit.by must be 'ip', 'user', or 'global', got '{by}'")
-        if requests <= 0:
-            raise ValueError("rate_limit.requests must be a positive integer")
-        if window <= 0:
-            raise ValueError("rate_limit.window must be a positive integer")
-        if trusted_proxy_hops < 1:
-            raise ValueError("rate_limit.trusted_proxy_hops must be >= 1")
-        if enabled and trusted_proxy_headers and not trusted_proxies:
-            logger.warning(
-                "rate_limit.trusted_proxy_headers is on without rate_limit.trusted_proxies; "
-                "X-Forwarded-For is trusted only from loopback and private networks. List "
-                "your proxy's addresses in trusted_proxies (or 0.0.0.0/0 and ::/0 if nothing "
-                "can reach the app except through it)."
-            )
-
-        return cls(
-            enabled=enabled,
-            requests=requests,
-            window=window,
-            by=by,
-            exclude_paths=exclude_paths,
-            trusted_proxy_headers=trusted_proxy_headers,
-            trusted_proxy_hops=trusted_proxy_hops,
-            fail_open=fail_open,
-            trusted_proxies=trusted_proxies,
-        )
-
-
-# A revoke_user entry is kept this long unless told otherwise. It has to outlive the longest
-# token you issue, or an old token comes back to life when the entry goes.
-DEFAULT_USER_REVOCATION_TTL = 30 * 24 * 3600
-
-
-def _positive_seconds(value: object, *, field: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float) or not value > 0:
-        raise ValueError(f"{field} must be a positive number of seconds, got {value!r}")
-    return float(value)
-
-
-@dataclass(frozen=True)
-class TokenRevocationConfig:
-    """``cache_store.token_revocation`` in 10xgraph.json: ``true``, or an object.
-
-    Example::
-
-        "cache_store": {
-            "type": "redis",
-            "url": "${REDIS_URL}",
-            "token_revocation": {"enabled": true, "token_lifetime": 3600, "user_ttl": 2592000}
-        }
-
-    Revocations live in the API's cache store: shared between workers with a Redis or custom
-    store, per process with the in-memory one. ``token_lifetime`` is the longest lifetime of the
-    tokens you issue, in seconds; it dates a token that has no ``iat`` from its ``exp``.
-    ``user_ttl`` is how long a ``revoke_user`` entry is kept by default (``null`` keeps it
-    until deleted).
-    """
-
-    token_lifetime: float | None = None
-    user_ttl: float | None = DEFAULT_USER_REVOCATION_TTL
-
-    @classmethod
-    def parse(cls, value: object) -> "TokenRevocationConfig | None":
-        """The settings for ``value``; None when token revocation is off."""
-        if value is None or value is False:
-            return None
-        if value is True:
-            return cls()
-        if not isinstance(value, dict):
-            raise ValueError(
-                "token_revocation must be true, false, or an object with enabled, "
-                f"token_lifetime, user_ttl; got {value!r}"
-            )
-        unknown = set(value) - {"enabled", "token_lifetime", "user_ttl"}
-        if unknown:
-            raise ValueError(
-                f"token_revocation: unknown keys {sorted(unknown)}; use enabled, "
-                "token_lifetime and user_ttl"
-            )
-        if not _parse_bool(value.get("enabled", True), field="token_revocation.enabled"):
-            return None
-        lifetime = value.get("token_lifetime")
-        user_ttl = value.get("user_ttl", DEFAULT_USER_REVOCATION_TTL)
-        return cls(
-            token_lifetime=(
-                None
-                if lifetime is None
-                else _positive_seconds(lifetime, field="token_revocation.token_lifetime")
-            ),
-            user_ttl=(
-                None
-                if user_ttl is None
-                else _positive_seconds(user_ttl, field="token_revocation.user_ttl")
-            ),
-        )
-
-
-CACHE_STORE_TYPES: tuple[str, ...] = ("memory", "redis", "custom")
-CACHE_STORE_KEYS: tuple[str, ...] = ("type", "url", "path", "rate_limit", "token_revocation")
-
-# Top-level keys whose setting belongs inside ``cache_store``, with where it goes. A leftover
-# top-level key is a config error, never ignored: a forgotten ``rate_limit`` would otherwise
-# turn rate limiting off without a word.
-_CACHE_STORE_SETTINGS = {
-    "redis": (
-        '`redis` goes inside `cache_store` as `url`: {"cache_store": {"type": "redis", '
-        '"url": "${REDIS_URL}"}}'
-    ),
-    "rate_limit": (
-        '`rate_limit` goes inside `cache_store`: {"cache_store": {"type": ..., '
-        '"rate_limit": {...}}}'
-    ),
-    "token_revocation": (
-        '`token_revocation` goes inside `cache_store`: {"cache_store": {"type": ..., '
-        '"token_revocation": true}}'
-    ),
-}
-
-
-def check_cache_store_settings(data: dict) -> None:
-    """Raise when a setting that belongs inside ``cache_store`` sits at the top level."""
-    for key, message in _CACHE_STORE_SETTINGS.items():
-        if key in data:
-            raise ValueError(message)
-
-
-@dataclass(frozen=True)
-class CacheStoreConfig:
-    """``cache_store`` in 10xgraph.json: the API's cache store and the features it backs.
-
-    Example::
-
-        "cache_store": {
-            "type": "redis",
-            "url": "${REDIS_URL}",
-            "rate_limit": {"requests": 100, "window": 60, "by": "user"},
-            "token_revocation": true
-        }
-
-    ``type`` picks the store: ``memory`` (the default; one process, not shared between
-    workers), ``redis`` (a ``RedisCacheStore`` on ``url``; also Valkey, Dragonfly, KeyDB) or
-    ``custom`` (``path`` is ``"module:attr"``, a ``BaseCacheStore`` instance or zero-argument
-    factory). ``url`` expands ``$VAR`` / ``${VAR}`` when the store is built, and an unset
-    variable is a config error. The store holds the run locks and caps, idempotency records
-    and the ownership cache, plus the counters of ``rate_limit`` (:class:`RateLimitConfig`) and
-    the revocations of ``token_revocation`` (:class:`TokenRevocationConfig`); both are off
-    when absent. ``rate_limit`` is kept here even when its ``enabled`` is false.
-    """
-
-    type: str = "memory"
-    url: str | None = None  # as written; see expanded_url
-    path: str | None = None
-    rate_limit: RateLimitConfig | None = None
-    token_revocation: TokenRevocationConfig | None = None
-    type_set: bool = False  # whether 10xgraph.json names the type
-
-    @classmethod
-    def parse(cls, value: object) -> "CacheStoreConfig":
-        """The settings for ``value`` (the raw ``cache_store``); memory defaults for None."""
-        if value is None:
-            return cls()
-        if not isinstance(value, dict):
-            raise ValueError(
-                'cache_store must be an object: {"type": "memory"}, {"type": "redis", "url": '
-                '"${REDIS_URL}"} or {"type": "custom", "path": "module:attr"}'
-            )
-        unknown = sorted(set(value) - set(CACHE_STORE_KEYS))
-        if unknown:
-            raise ValueError(
-                f"cache_store: unknown keys {unknown}; valid keys: {', '.join(CACHE_STORE_KEYS)}"
-            )
-        kind = value.get("type")
-        type_set = kind is not None
-        if kind is None:
-            kind = "memory"
-        if kind not in CACHE_STORE_TYPES:
-            raise ValueError(
-                f"cache_store.type must be one of {', '.join(CACHE_STORE_TYPES)}; got {kind!r}"
-            )
-        url = value.get("url")
-        path = value.get("path")
-        if url is not None and kind != "redis":
-            raise ValueError('cache_store.url goes with "type": "redis"')
-        if path is not None and kind != "custom":
-            raise ValueError('cache_store.path goes with "type": "custom"')
-        if url is not None and (not isinstance(url, str) or not url.strip()):
-            raise ValueError(
-                'cache_store.url must be a Redis URL string, such as "redis://host:6379/0" '
-                'or "${CACHE_REDIS_URL}". Leave it out to use the REDIS_URL environment variable.'
-            )
-        if kind == "custom" and (not isinstance(path, str) or ":" not in path):
-            raise ValueError(
-                'cache_store.path is required with "type": "custom": "module:attr" naming a '
-                "BaseCacheStore instance or a zero-argument factory"
-            )
-        rate_limit = value.get("rate_limit")
-        return cls(
-            type=kind,
-            url=url,
-            path=path,
-            rate_limit=None if rate_limit is None else RateLimitConfig.from_dict(rate_limit),
-            token_revocation=TokenRevocationConfig.parse(value.get("token_revocation")),
-            type_set=type_set,
-        )
-
-    @property
-    def url_source(self) -> str:
-        """Where the Redis URL comes from: ``cache_store.url``, else the ``REDIS_URL`` variable."""
-        return "cache_store.url" if self.url is not None else "REDIS_URL"
-
-    def expanded_url(self) -> str | None:
-        """The Redis URL: ``url`` with ``$VAR`` / ``${VAR}`` expanded, else ``REDIS_URL``.
-
-        Only for ``type`` redis. An unset variable, or neither ``url`` nor ``REDIS_URL``,
-        raises ValueError.
-        """
-        if self.type != "redis":
-            return None
-        return redis_url_or_env(self.url, "cache_store.url")
-
-
-def redis_url_or_env(raw: str | None, key: str) -> str:
-    """``raw`` with ``$VAR`` / ``${VAR}`` expanded, else the ``REDIS_URL`` variable.
-
-    ``key`` names the config value in the errors. Raises ValueError for an unset variable,
-    or when neither ``raw`` nor ``REDIS_URL`` is set.
-    """
-    if raw is None:
-        env_url = os.environ.get("REDIS_URL", "").strip()
-        if not env_url:
-            raise ValueError(
-                f"{key} is required: set it in 10xgraph.json, or the REDIS_URL environment variable"
-            )
-        return env_url
-    try:
-        return _expand_env(raw) or raw
-    except ValueError:
-        raise ValueError(f"{key}: {raw} uses an environment variable that is not set") from None
-
-
-# ``id_generator`` names: the concrete generators in core ``tenxgraph.utils.id_generator`` plus
-# the API's ``snowflake`` (``SnowFlakeIdGenerator``). Mapped to classes by the app loader.
-ID_GENERATOR_NAMES: tuple[str, ...] = (
-    "uuid",
-    "hex",
-    "short",
-    "int",
-    "bigint",
-    "timestamp",
-    "snowflake",
-)
-
-# Built-in ``thread_name_generator`` choices; anything else must be ``"module:attr"``.
-THREAD_NAME_CHOICES: tuple[str, ...] = ("none", "random", "first_message")
-
-
-# Finite defaults so an unconfigured server cannot be held open by one client.
-DEFAULT_WS_MAX_CONNECTIONS = 1000
-DEFAULT_WS_MAX_CONNECTIONS_PER_USER = 10
-
-# Realtime init-frame options a client may set (``model`` and ``tools_tags`` are restricted
-# separately). ``system_prompt`` is off by default: it replaces the agent's instructions.
-REALTIME_CLIENT_OVERRIDE_KEYS = frozenset({"voice", "modalities", "vad", "system_prompt"})
-DEFAULT_REALTIME_CLIENT_OVERRIDES: tuple[str, ...] = ("voice", "modalities", "vad")
-
-
-@dataclass
-class WebSocketConfig:
-    """WebSocket settings and connection limits parsed from 10xgraph.json.
-
-    Example::
-
-        "websocket": {
-            "enabled": true,
-            "max_connections": 1000,
-            "max_connections_per_user": 10,
-            "realtime_models": ["gemini-3.8-live"],
-            "realtime_client_overrides": ["voice", "modalities", "vad"]
-        }
-
-    ``max_connections`` caps the concurrent WebSocket connections the server accepts
-    (realtime ``/v1/graph/live`` + streaming ``/v1/graph/ws``).
-    ``max_connections_per_user`` caps how many of those one verified user may hold, so a
-    single account cannot take every slot. Both are counted in the API's cache store: across
-    workers with a shared one (``cache_store`` type ``redis`` or ``custom``), per process with
-    the in-memory one (then size them per worker).
-
-    A missing key gets a finite default (1000 and 10). Set a key to ``0`` or ``null`` to make
-    it unlimited. WebSocket handshakes, and every graph run started over ``/v1/graph/ws``, also
-    count against the global ``rate_limit`` bucket shared with REST requests.
-
-    ``realtime_models`` lists the models a ``/v1/graph/live`` client may ask for in its init
-    frame. Any other requested model is ignored and the agent's own model is used. Empty (the
-    default) means clients cannot choose the model.
-
-    ``realtime_client_overrides`` lists the other init-frame session options a client may set:
-    any of ``voice``, ``modalities``, ``vad``, ``system_prompt``. The default allows the
-    presentation options (voice, modalities, vad) only. ``system_prompt`` replaces the agent's
-    instructions, so a client could rewrite its rules; list it only when every caller is
-    trusted to do that. ``model`` and ``tools_tags`` have their own rules and are not listed.
-
-    ``enabled`` mounts ``/v1/graph/ws`` and ``/v1/graph/live``. ``false`` leaves both out, so the
-    server needs no WebSocket library. Unset (``None``) keeps them mounted, as before this key
-    existed. Serving them needs ``websockets`` or ``wsproto`` (``10xgraph-api[websocket]``):
-    ``true`` without one refuses to boot, unset only logs a warning.
-    """
-
-    max_connections: int | None
-    enabled: bool | None = None
-    max_connections_per_user: int | None = DEFAULT_WS_MAX_CONNECTIONS_PER_USER
-    realtime_models: tuple[str, ...] = ()
-    realtime_client_overrides: tuple[str, ...] = DEFAULT_REALTIME_CLIENT_OVERRIDES
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "WebSocketConfig":
-        if not isinstance(data, dict):
-            raise ValueError("websocket must be an object")
-        enabled = data.get("enabled")
-        return cls(
-            max_connections=_connection_limit(data, "max_connections", DEFAULT_WS_MAX_CONNECTIONS),
-            enabled=None if enabled is None else _parse_bool(enabled, field="websocket.enabled"),
-            max_connections_per_user=_connection_limit(
-                data, "max_connections_per_user", DEFAULT_WS_MAX_CONNECTIONS_PER_USER
-            ),
-            realtime_models=_string_list(data, "realtime_models"),
-            realtime_client_overrides=_realtime_client_overrides(data),
-        )
-
-
-def _realtime_client_overrides(data: dict) -> tuple[str, ...]:
-    if "realtime_client_overrides" not in data:
-        return DEFAULT_REALTIME_CLIENT_OVERRIDES
-    keys = _string_list(data, "realtime_client_overrides")
-    unknown = sorted(set(keys) - REALTIME_CLIENT_OVERRIDE_KEYS)
-    if unknown:
-        raise ValueError(
-            f"websocket.realtime_client_overrides has unknown keys {unknown}; allowed: "
-            f"{sorted(REALTIME_CLIENT_OVERRIDE_KEYS)}"
-        )
-    return keys
-
-
-def _string_list(data: dict, key: str) -> tuple[str, ...]:
-    raw = data.get(key)
-    if raw is None:
-        return ()
-    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
-        raise ValueError(f"websocket.{key} must be a list of strings")
-    return tuple(item.strip() for item in raw if item.strip())
-
-
-def _connection_limit(data: dict, key: str, default: int) -> int | None:
-    """A missing key gets ``default``; an explicit ``0`` or ``null`` means unlimited."""
-    if key not in data:
-        return default
-    raw = data[key]
-    if raw in (None, 0):
-        return None
-    value = int(raw)
-    if value < 0:
-        raise ValueError(f"websocket.{key} must be a non-negative integer")
-    return value
-
-
-# Finite default so one account cannot hold an unbounded number of HTTP graph runs open.
-DEFAULT_MAX_CONCURRENT_RUNS_PER_USER = 10
-THREAD_ID_MODES = ("client", "server")
-
-# Longest a graph run may take when MODE=production and ``runs.timeout`` is not set.
-DEFAULT_PRODUCTION_RUN_TIMEOUT_SECONDS = 300.0
-
-
-def default_run_timeout() -> float | None:
-    """``runs.timeout`` when the config leaves it unset: 300 s in production, else no limit.
-
-    MODE is read from the environment (as the settings validators do). An invalid MODE is
-    reported by ``Settings`` itself, so here it counts as development.
-    """
-    from tenxgraph_api.src.app.core.config.settings import normalize_mode_value
-
-    try:
-        mode = normalize_mode_value(os.environ.get("MODE"))
-    except ValueError:
-        return None
-    return DEFAULT_PRODUCTION_RUN_TIMEOUT_SECONDS if mode == "production" else None
-
-
-@dataclass
-class RunsConfig:
-    """Per-run policy for graph runs (``runs`` key in 10xgraph.json).
-
-    Example::
-
-        "runs": {
-            "thread_ids": "server",
-            "config_keys": ["locale", "tenant_hint"],
-            "state_keys": ["preferences"],
-            "max_concurrent_per_user": 10,
-            "timeout": 600,
-            "max_parallel_tool_calls": 10
-        }
-
-    ``thread_ids`` decides who may name a new thread, with auth on or off. ``"server"`` (the
-    default) accepts only ids of threads that already exist; a new thread is started by
-    omitting the id (or sending ``"new"`` over WebSocket), and the server picks it.
-    ``"client"`` lets a request start a thread under any id it picks; the first writer of an id
-    then owns it, so a user who claims a guessable id (``"default"``) first locks its intended
-    owner out. A thread the caller cannot see and an unknown one both answer 404. AG-UI
-    (``POST /v1/ag-ui``) and realtime (``/v1/graph/live``) follow the same rule as REST: with
-    ``"server"`` an id the server has never seen is refused (404). An AG-UI client that has no
-    thread yet sends ``threadId`` blank or ``"new"`` and reads the server's id from
-    ``RUN_STARTED``; a frontend that makes its own ids needs ``"client"``.
-
-    ``config_keys`` and ``state_keys`` are allow-lists for client input. A request whose
-    ``config`` carries a key outside ``config_keys`` is rejected with 422; ``thread_id`` and
-    ``run_id`` are always allowed, and ``null`` (the default) accepts any key except the
-    server-owned ones.
-
-    ``state_keys`` denies by default, like ``remote_tools``: only the listed keys may be set by
-    a client in ``initial_state``, PUT state and AG-UI ``state``. Unset, ``null`` or ``[]``
-    allows none, and any other key is rejected with 422. ``context`` in PUT state is always
-    allowed (it has its own message rules). List only keys a client may be trusted with: a
-    graph tool or node that trusts a value such as ``role`` or ``plan`` from state must not
-    list it.
-
-    ``max_concurrent_per_user`` caps the HTTP graph runs (invoke, stream, AG-UI) one verified
-    user may have in flight at once in this process; over the cap the request gets 429.
-    Default 10; ``0`` or ``null`` means unlimited. Requests without a verified user (auth off)
-    are not capped. ``timeout`` is the longest a single graph run may take, in seconds; a run
-    that passes it is cancelled (invoke answers 504; a stream, ``/v1/graph/ws`` run or AG-UI
-    run ends with an error). Realtime sessions are not limited. When the key is absent the
-    default is 300 seconds with MODE=production and no limit in development; an explicit
-    number overrides it, and an explicit ``null`` means no limit in either mode.
-
-    ``max_parallel_tool_calls`` caps the tool calls one model turn may run at once. The API
-    puts it into every run's config (clients cannot set it). Default ``null``: core decides,
-    from the ``TENXGRAPH_MAX_PARALLEL_TOOL_CALLS`` environment variable, else 10.
-    """
-
-    thread_ids: str = "server"
-    config_keys: frozenset[str] | None = None
-    state_keys: frozenset[str] = frozenset()
-    max_concurrent_per_user: int | None = DEFAULT_MAX_CONCURRENT_RUNS_PER_USER
-    timeout: float | None = field(default_factory=default_run_timeout)
-    max_parallel_tool_calls: int | None = None
-
-    @property
-    def server_thread_ids(self) -> bool:
-        return self.thread_ids == "server"
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "RunsConfig":
-        if not isinstance(data, dict):
-            raise ValueError("runs must be an object")
-        thread_ids = data.get("thread_ids", "server")
-        if thread_ids not in THREAD_ID_MODES:
-            raise ValueError(f"runs.thread_ids must be one of {list(THREAD_ID_MODES)}")
-        return cls(
-            thread_ids=thread_ids,
-            config_keys=_key_allow_list(data, "config_keys"),
-            state_keys=_key_allow_list(data, "state_keys") or frozenset(),
-            max_concurrent_per_user=_runs_limit(data),
-            timeout=_runs_timeout(data),
-            max_parallel_tool_calls=_runs_max_parallel_tool_calls(data),
-        )
-
-
-def _key_allow_list(data: dict, key: str) -> frozenset[str] | None:
-    raw = data.get(key)
-    if raw is None:
-        return None
-    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
-        raise ValueError(f"runs.{key} must be a list of strings or null")
-    return frozenset(item.strip() for item in raw if item.strip())
-
-
-def _runs_limit(data: dict) -> int | None:
-    key = "max_concurrent_per_user"
-    if key not in data:
-        return DEFAULT_MAX_CONCURRENT_RUNS_PER_USER
-    raw = data[key]
-    if raw in (None, 0):
-        return None
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
-        raise ValueError(f"runs.{key} must be a non-negative integer or null")
-    return raw
-
-
-def _runs_timeout(data: dict) -> float | None:
-    if "timeout" not in data:
-        return default_run_timeout()  # unset: mode default. An explicit null is no limit.
-    raw = data["timeout"]
-    if raw is None:
-        return None
-    if isinstance(raw, bool) or not isinstance(raw, int | float) or raw <= 0:
-        raise ValueError("runs.timeout must be a positive number of seconds or null")
-    return float(raw)
-
-
-def _runs_max_parallel_tool_calls(data: dict) -> int | None:
-    raw = data.get("max_parallel_tool_calls")
-    if raw is None:
-        return None
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
-        raise ValueError("runs.max_parallel_tool_calls must be a positive integer or null")
-    return raw
-
-
-@dataclass
-class AgUiConfig:
-    """AG-UI protocol endpoint settings parsed from 10xgraph.json.
-
-    Example::
-
-        "ag_ui": {
-            "enabled": true,
-            "allow_client_tools": true
-        }
-
-    When enabled, ``POST /v1/ag-ui`` streams the graph as AG-UI events, so AG-UI clients
-    such as CopilotKit can use the agent. It needs the ``ag-ui`` extra
-    (``pip install "10xgraph-api[ag-ui]"``). Off unless explicitly enabled.
-
-    ``allow_client_tools`` (default ``true``) offers the tools an AG-UI client sends with each
-    run to the model for that run. They run in the caller's own browser, cannot take the name of
-    a server tool, and must pass size limits. Set it to ``false`` to accept only the client tools
-    declared under ``remote_tools``.
-    """
-
-    enabled: bool = False
-    allow_client_tools: bool = True
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "AgUiConfig":
-        if not isinstance(data, dict):
-            raise ValueError("ag_ui must be an object")
-        return cls(
-            enabled=_parse_bool(data.get("enabled", False), field="ag_ui.enabled"),
-            allow_client_tools=_parse_bool(
-                data.get("allow_client_tools", True), field="ag_ui.allow_client_tools"
-            ),
-        )
-
-
-@dataclass
-class MediaConfig:
-    """Uploaded-file lifecycle settings parsed from 10xgraph.json.
-
-    Example::
-
-        "media": {"delete_with_thread": true}
-
-    The API records which threads use an uploaded file (``graph://media/`` references in
-    accepted messages). With ``delete_with_thread`` (default ``true``), deleting a message or a
-    thread drops that link, and a file with no thread left is deleted too. Set it to ``false``
-    to keep the links but never delete automatically. Files uploaded before link tracking
-    existed are never deleted automatically either way.
-    """
-
-    delete_with_thread: bool = True
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "MediaConfig":
-        if not isinstance(data, dict):
-            raise ValueError("media must be an object")
-        return cls(
-            delete_with_thread=_parse_bool(
-                data.get("delete_with_thread", True), field="media.delete_with_thread"
-            ),
-        )
 
 
 def default_config_path() -> str:
@@ -964,3 +279,47 @@ class GraphConfig:
         """Uploaded-file lifecycle settings (``media`` key); defaults when absent."""
         data = self.data.get("media", None)
         return MediaConfig.from_dict({} if data is None else data)
+
+
+__all__ = [
+    "CACHE_STORE_KEYS",
+    "CACHE_STORE_TYPES",
+    "DEFAULT_MAX_CONCURRENT_RUNS_PER_USER",
+    "DEFAULT_PRODUCTION_RUN_TIMEOUT_SECONDS",
+    "DEFAULT_REALTIME_CLIENT_OVERRIDES",
+    "DEFAULT_TRUSTED_PROXIES",
+    "DEFAULT_USER_REVOCATION_TTL",
+    "DEFAULT_WS_MAX_CONNECTIONS",
+    "DEFAULT_WS_MAX_CONNECTIONS_PER_USER",
+    "ID_GENERATOR_NAMES",
+    "RATE_LIMIT_KEYS",
+    "REALTIME_CLIENT_OVERRIDE_KEYS",
+    "THREAD_ID_MODES",
+    "THREAD_NAME_CHOICES",
+    "_CACHE_STORE_SETTINGS",
+    "_REMOTE_TOOLS_ADAPTER",
+    "AgUiConfig",
+    "CacheStoreConfig",
+    "GraphConfig",
+    "MediaConfig",
+    "RateLimitConfig",
+    "RunsConfig",
+    "TokenRevocationConfig",
+    "WebSocketConfig",
+    "_connection_limit",
+    "_expand_env",
+    "_key_allow_list",
+    "_parse_bool",
+    "_parse_networks",
+    "_positive_seconds",
+    "_realtime_client_overrides",
+    "_runs_limit",
+    "_runs_max_parallel_tool_calls",
+    "_runs_timeout",
+    "_string_list",
+    "check_cache_store_settings",
+    "default_config_path",
+    "default_run_timeout",
+    "redis_url_or_env",
+    "validate_remote_tools",
+]

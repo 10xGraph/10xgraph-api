@@ -63,6 +63,7 @@ from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
 from tenxgraph_api.src.app.routers.graph.services.graph_service import (
     SERVICE_UNAVAILABLE_CODE,
     GraphService,
+    RunChecks,
 )
 from tenxgraph_api.src.app.routers.graph.thread_lock import (
     THREAD_BUSY_DETAIL,
@@ -335,21 +336,19 @@ router = APIRouter(
 
 
 async def _bind_ws_container() -> None:
-    """Set the active InjectQ container for a WebSocket handshake.
+    """Make sure a WebSocket handshake has an active InjectQ container.
 
-    ``setup_fastapi`` installs its container-activation via Starlette middleware,
-    which runs for HTTP scopes only — WebSocket handshakes bypass it, so every
-    ``InjectAPI`` dependency (here and inside ``RequirePermission``) would raise
-    "No InjectQ container in current request context". Declaring this dependency
-    *before* the ``InjectAPI`` ones makes FastAPI resolve it first, so the
-    ContextVar is set by the time the container-backed deps resolve.
-
-    Idempotent and cheap; harmless if the container is already active.
+    The InjectQ middleware ``setup_fastapi`` installs sets the app's container for HTTP and
+    WebSocket scopes alike; that one is kept (an embedded app may run on its own container).
+    Only when none is active (an older InjectQ whose middleware skipped WebSocket scopes) is
+    the global container set, so the ``InjectAPI`` dependencies that FastAPI resolves after
+    this one find a container.
     """
     try:
         from injectq.integrations.fastapi import _request_container
 
-        _request_container.set(InjectQ.get_instance())
+        if _request_container.get() is None:
+            _request_container.set(InjectQ.get_instance())
     except Exception:  # pragma: no cover - defensive: never block the handshake here
         logger.exception("Failed to bind InjectQ container for WebSocket scope")
 
@@ -400,7 +399,7 @@ async def invoke_graph(
     Invoke the graph with the provided input and return the final result.
     """
     logger.info(f"Graph invoke request received with {len(graph_input.messages)} messages")
-    service.check_media_urls(graph_input.messages)
+    checks = service.check_run_input(graph_input.messages, graph_input.config)
     # A thread the caller cannot run on is a 404 before anything is held.
     await service.require_run_thread(requested_thread_id(graph_input.config), identity)
     # Inline media the run would store gets the upload checks (signature, quota): 422.
@@ -427,6 +426,7 @@ async def invoke_graph(
             graph_input,
             identity,
             credential=run_credential(request),
+            checks=checks,
         )
         if idem:
             await idem.complete(result.model_dump_json())
@@ -462,8 +462,7 @@ async def stream_graph(
     logger.info(f"Graph stream request received with {len(graph_input.messages)} messages")
     # Before the response starts, so a blocked URL is a real 400 and a thread the caller
     # cannot run on a real 404, not an error chunk.
-    service.check_media_urls(graph_input.messages)
-    service.check_model_choice(graph_input.config)
+    checks = service.check_run_input(graph_input.messages, graph_input.config)
     await service.require_run_thread(requested_thread_id(graph_input.config), identity)
     # Inline media the run would store gets the upload checks (signature, quota): a real 422.
     await service.check_inline_media(graph_input.messages, identity)
@@ -489,14 +488,17 @@ async def stream_graph(
             idem.release()
         raise
     try:
-        # Same for a resume aimed at the wrong interrupt: a 409, as invoke answers it.
-        await service.check_resume_target(graph_input, identity)
+        # Same for a resume aimed at the wrong interrupt: a 409, as invoke answers it. The
+        # state read here is the run's one read (kept on ``checks``).
+        await service.check_resume_target(graph_input, identity, checks)
     except BaseException:
         guard.release()
         if idem:
             idem.release()
         raise
-    lines = service.stream_graph(graph_input, identity, credential=run_credential(request))
+    lines = service.stream_graph(
+        graph_input, identity, credential=run_credential(request), checks=checks
+    )
     if idem:
         lines = idempotency.stream_with_record(lines, idem)
     result = release_when_done(lines, guard)
@@ -828,23 +830,20 @@ def _resolve_ws_thread(frame: dict[str, Any]) -> str | None:
 
 async def _ws_media_urls_allowed(
     websocket: WebSocket, service: GraphService, graph_input: GraphInputSchema
-) -> bool:
+) -> RunChecks | None:
     """Apply the media URL policy and the model choice to a WebSocket run.
 
     A blocked URL or an unregistered model name is sent as an error chunk before the run, so
-    the message is not replaced by the production error-chunk sanitizer.
+    the message is not replaced by the production error-chunk sanitizer. None when refused.
     """
     try:
-        service.check_media_urls(graph_input.messages)
-        service.check_model_choice(graph_input.config)
+        return service.check_run_input(graph_input.messages, graph_input.config)
     except HTTPException as exc:
         reason = str(exc.detail)
     except ModelNotFoundError as exc:
         reason = str(exc)
-    else:
-        return True
     await _send_ws_error(websocket, reason)
-    return False
+    return None
 
 
 def _guard_refusal(exc: HTTPException) -> str:
@@ -873,6 +872,7 @@ async def _ws_run(
     graph_input: GraphInputSchema,
     identity: Identity | None,
     frames: _WsFrames,
+    checks: RunChecks | None = None,
 ) -> bool:
     """Stream one run to the socket; ``False`` when the client left and the run was stopped.
 
@@ -881,7 +881,9 @@ async def _ws_run(
     write. The run generator is closed before this returns, so the caller can release the
     thread lock knowing the run is over.
     """
-    stream = service.stream_graph(graph_input, user=identity, credential=run_credential(websocket))
+    stream = service.stream_graph(
+        graph_input, user=identity, credential=run_credential(websocket), checks=checks
+    )
 
     async def pump() -> None:
         async with contextlib.aclosing(stream):
@@ -1027,7 +1029,8 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
                 continue
 
             graph_input = ws_input.to_graph_input()
-            if not await _ws_media_urls_allowed(websocket, service, graph_input):
+            checks = await _ws_media_urls_allowed(websocket, service, graph_input)
+            if checks is None:
                 continue
             idem = None
             if ws_input.idempotency_key is not None:
@@ -1066,7 +1069,7 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
                 await _send_thread_not_found(websocket)
                 continue
             try:
-                finished = await _ws_run(websocket, service, graph_input, identity, frames)
+                finished = await _ws_run(websocket, service, graph_input, identity, frames, checks)
                 if idem and finished:
                     await idem.complete(None)
             finally:

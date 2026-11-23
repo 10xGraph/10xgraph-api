@@ -17,6 +17,7 @@ from tenxgraph_api.src.app.core.config.graph_config import (
     RateLimitConfig,
 )
 from tenxgraph_api.src.app.core.redis_client import identity_key
+from tenxgraph_api.src.app.core.utils.container import lookup
 
 
 logger = logging.getLogger("tenxgraph_api")
@@ -92,8 +93,6 @@ async def verified_caller_key(connection: HTTPConnection) -> str | None:
     is two callers. Returns ``None`` when auth is off or the request does not authenticate;
     the caller is then limited by address, so forged tokens cannot buy fresh buckets.
     """
-    from injectq import InjectQ
-
     from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
     from tenxgraph_api.src.app.core.auth.permissions import _extract_credential, remember_claims
     from tenxgraph_api.src.app.core.auth.rbac import resolve
@@ -101,7 +100,7 @@ async def verified_caller_key(connection: HTTPConnection) -> str | None:
 
     credential = _extract_credential(connection)
     try:
-        auth = InjectQ.get_instance().try_get(BaseAuth)
+        auth = lookup(BaseAuth)
         if auth is None:
             return None
         # A throwaway Response: anything the auth class sets on it belongs to the real

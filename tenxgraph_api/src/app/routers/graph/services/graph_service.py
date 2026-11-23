@@ -3,7 +3,8 @@ import contextlib
 import inspect
 import sys
 from collections.abc import AsyncIterable, AsyncIterator, Iterator
-from dataclasses import dataclass, field as dataclass_field
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import datetime
 from http import HTTPStatus
 from typing import Any
@@ -134,6 +135,7 @@ class _Run:
     thread_id: str | None = None
     run_id: str | None = None
     started: float = 0.0
+
 
 # ``data.code`` of the error chunk for a run refused while the graph is closing.
 SERVICE_UNAVAILABLE_CODE = "SERVICE_UNAVAILABLE"
@@ -888,12 +890,14 @@ class GraphService:
         graph_input: GraphInputSchema,
         user: Identity | None,
         credential: UserCredential | None = None,
+        checks: RunChecks | None = None,
     ) -> GraphInvokeOutputSchema:
         """
         Invokes the graph with the provided input and returns the final result.
 
         Args:
             graph_input (GraphInputSchema): The input data for graph execution.
+            checks: What the router already checked (``check_run_input``); None checks all.
 
         Returns:
             GraphInvokeOutputSchema: The final result from graph execution.
@@ -901,35 +905,12 @@ class GraphService:
         Raises:
             HTTPException: If graph execution fails.
         """
-        thread_lock = Lease(None)
-        inv_thread_id: str | None = None
-        inv_run_id: str | None = None
+        run = _Run()
         try:
             logger.debug("Invoking graph with input: %s", log_safe(graph_input.messages))
-
-            # Prepare the input
-            input_data, config, meta = await self._prepare_input(
-                graph_input, user, credential=credential
-            )
-            thread_lock = await self._lock_new_thread(meta)
-            await self._check_tool_results(input_data["messages"], config)
-            await self._check_resume_target(graph_input, config)
-
-            # Try to save thread info in the db even for existing threads
-            # this will help in updating last accessed time
-            # and get is thread newly created or not, this way it's consistent
-            is_new_thread = await self._save_thread(config, config["thread_id"])
-            if is_new_thread and type(is_new_thread) is bool:
-                meta["is_new_thread"] = True
-
-            # Telemetry run (invoke has no chunk stream; we record from the final
-            # messages so cost/usage still shows on the observability page).
-            inv_thread_id = str(config["thread_id"])
-            inv_run_id = str(config.get("run_id") or uuid4())
-            config.setdefault("run_id", inv_run_id)
-            inv_started = datetime.now().timestamp()
-            if self.telemetry:
-                self.telemetry.start_run(inv_thread_id, inv_run_id, inv_started)
+            await self._start_run(run, graph_input, user, None, credential, checks)
+            input_data, config, meta = run.input_data, run.config, run.meta
+            inv_thread_id, inv_run_id, inv_started = run.thread_id, run.run_id, run.started
 
             # Execute the graph
             result = await self._ainvoke_bounded(
@@ -990,8 +971,47 @@ class GraphService:
             _log_run_error(e, "Graph execution failed")
             raise as_http_error(e, "Graph execution failed")
         finally:
-            self._close_run_trace(inv_thread_id, inv_run_id)
-            thread_lock.release()
+            self._end_run(run)
+
+    async def _start_run(
+        self,
+        run: _Run,
+        graph_input: GraphInputSchema,
+        user: Identity | None,
+        server_config: dict[str, Any] | None,
+        credential: UserCredential | None,
+        checks: RunChecks | None,
+    ) -> None:
+        """The steps before every run (invoke, stream, WebSocket, AG-UI), filled into ``run``.
+
+        Fills ``run`` as it goes, so the caller's ``_end_run`` frees whatever was taken when
+        a step fails. The thread's state is read at most once (``RunChecks.state``).
+        """
+        checks = checks or RunChecks()
+        run.input_data, run.config, run.meta = await self._prepare_input(
+            graph_input, user, server_config, credential, checks
+        )
+        run.lock = await self._lock_new_thread(run.meta)
+        await self._check_tool_results(run.input_data["messages"], run.config, checks)
+        await self._check_resume_target(graph_input, run.config, checks)
+
+        # Saved for existing threads too: it refreshes the last-access time, and True means
+        # the checkpointer created the thread just now.
+        if await self._save_thread(run.config, run.config["thread_id"]) is True:
+            run.meta["is_new_thread"] = True
+
+        # A telemetry run, so the observability endpoint can rebuild the trace.
+        run.thread_id = str(run.config["thread_id"])
+        run.run_id = str(run.config.get("run_id") or uuid4())
+        run.config.setdefault("run_id", run.run_id)
+        run.started = datetime.now().timestamp()
+        if self.telemetry:
+            self.telemetry.start_run(run.thread_id, run.run_id, run.started)
+
+    def _end_run(self, run: _Run) -> None:
+        """Close the run's trace if nothing else did, then free the lock on a new thread."""
+        self._close_run_trace(run.thread_id, run.run_id)
+        run.lock.release()
 
     @staticmethod
     async def _lock_new_thread(meta: dict[str, Any]) -> Lease:
@@ -1040,13 +1060,14 @@ class GraphService:
         graph_input: GraphInputSchema,
         user: Identity | None,
         credential: UserCredential | None = None,
+        checks: RunChecks | None = None,
     ) -> AsyncIterable[str]:
         """
         Streams the graph execution with the provided input.
 
         Args:
             graph_input (GraphInputSchema): The input data for graph execution.
-            stream_mode (str): The stream mode ("values", "updates", "messages", etc.).
+            checks: What the router already checked (``check_run_input``); None checks all.
 
         Yields:
             str: Individual JSON chunks from graph execution with newline delimiters.
@@ -1055,7 +1076,9 @@ class GraphService:
         async def lines() -> AsyncIterable[str]:
             last: StreamChunk | None = None
             errored = False
-            async for chunk in self.stream_chunks(graph_input, user, credential=credential):
+            async for chunk in self.stream_chunks(
+                graph_input, user, credential=credential, checks=checks
+            ):
                 errored = errored or chunk.event == StreamEvent.ERROR
                 yield chunk.model_dump_json(serialize_as_any=True) + "\n"
                 # The graph reuses one chunk object, so keep only the ids, not the object.
@@ -1079,12 +1102,13 @@ class GraphService:
         async for line in end_on_shutdown(lines(), keepalive_seconds=KEEPALIVE_SECONDS):
             yield line
 
-    async def stream_chunks(  # noqa: PLR0912, PLR0915
+    async def stream_chunks(  # noqa: PLR0912
         self,
         graph_input: GraphInputSchema,
         user: Identity | None,
         server_config: dict[str, Any] | None = None,
         credential: UserCredential | None = None,
+        checks: RunChecks | None = None,
     ) -> AsyncIterable[StreamChunk]:
         """
         Streams the graph execution as ``StreamChunk`` objects.
@@ -1094,44 +1118,19 @@ class GraphService:
         ``server_config`` carries server-owned run config (for example per-run
         ``remote_tools``) that a client could not set through ``graph_input.config``.
         ``credential`` is the caller's run credential (``config["credential"]``), None for none.
+        ``checks`` is what the router already checked (``check_run_input``).
 
         Yields:
             StreamChunk: Graph output; failures arrive as an ``ERROR`` chunk, never raised.
         """
-        # Initialize meta here so it is available in the except blocks even if
-        # _prepare_input raises before assigning it.
-        meta: dict[str, Any] = {}
-        thread_id: str | None = None
-        run_id: str | None = None
+        run = _Run()
         naming: tuple[dict[str, Any], Any, list[str]] | None = None
-        thread_lock = Lease(None)
         try:
             logger.debug("Streaming graph with input: %s", log_safe(graph_input.messages))
-
-            # Prepare the config
-            input_data, config, meta = await self._prepare_input(
-                graph_input, user, server_config, credential
-            )
-            thread_lock = await self._lock_new_thread(meta)
-            await self._check_tool_results(input_data["messages"], config)
-            await self._check_resume_target(graph_input, config)
-
-            # Try to save thread info in the db even for existing threads
-            # this will help in updating last accessed time
-            # and get is thread newly created or not, this way it's consistent
-            is_new_thread = await self._save_thread(config, config["thread_id"])
-            if is_new_thread and type(is_new_thread) is bool:
-                meta["is_new_thread"] = True
-
+            await self._start_run(run, graph_input, user, server_config, credential, checks)
+            input_data, config, meta = run.input_data, run.config, run.meta
+            thread_id, run_id = run.thread_id, run.run_id
             messages_str = []
-
-            # Begin a telemetry run so the observability endpoint can rebuild the trace.
-            thread_id = str(config["thread_id"])
-            run_id = str(config.get("run_id") or uuid4())
-            config.setdefault("run_id", run_id)
-            started_at = datetime.now().timestamp()
-            if self.telemetry:
-                self.telemetry.start_run(thread_id, run_id, started_at)
             run_status = "done"
 
             # Stream the graph execution
@@ -1193,20 +1192,19 @@ class GraphService:
             else:
                 logger.error(f"Graph streaming failed: {e}")
             try:
-                if self.telemetry and thread_id and run_id:
+                if self.telemetry and run.thread_id and run.run_id:
                     self.telemetry.finish_run(
-                        thread_id, run_id, datetime.now().timestamp(), "error"
+                        run.thread_id, run.run_id, datetime.now().timestamp(), "error"
                     )
             except Exception as telemetry_exc:
                 logger.debug("Telemetry finish_run failed on stream error: %s", telemetry_exc)
             yield StreamChunk(
                 event=StreamEvent.ERROR,
                 data=_stream_error_data(e),
-                metadata=meta,
+                metadata=run.meta,
             )
         finally:
-            self._close_run_trace(thread_id, run_id)
-            thread_lock.release()
+            self._end_run(run)
             if naming is not None:
                 # An extra model call: started once the thread is free, never awaited here.
                 self._name_thread_in_background(*naming)
