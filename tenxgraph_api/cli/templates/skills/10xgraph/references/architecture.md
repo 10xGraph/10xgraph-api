@@ -23,11 +23,11 @@ Use this when deciding where a change belongs or explaining how 10xGraph package
 | `tenxgraph.core` | `StateGraph`, `Agent`, `ToolNode`, `AgentState`, `Message`, `StreamChunk` |
 | `tenxgraph.prebuilt.agent` | `ReactAgent`, `PlanActReflectAgent`, `StructuredOutputAgent`, `SupervisorTeamAgent`, `SwarmAgent`, `RAGAgent`, `AudioAgent` (realtime voice) |
 | `tenxgraph.core.realtime` | `LiveInputQueue`, `RealtimeConfig`, `RealtimeEvent` (Gemini Live audio-to-audio) |
-| `tenxgraph.prebuilt.tools` | `fetch_url`, `safe_calculator`, `file_read`, `file_write`, `file_search`, `google_web_search`, `vertex_ai_search`, `make_user_memory_tool`, `make_agent_memory_tool`, `create_handoff_tool` |
+| `tenxgraph.prebuilt.tools` | `make_user_memory_tool`, `make_agent_memory_tool`, `create_handoff_tool` (the calculator, fetch, search and file tools are deprecated in 1.1.0, removed in 2.0) |
 | `tenxgraph.storage.checkpointer` | `InMemoryCheckpointer`, `PgCheckpointer` |
 | `tenxgraph.storage.store` | `PgVectorStore`, `QdrantStore`, `MemoryConfig` |
 | `tenxgraph.storage.media` | `InMemoryMediaStore`, `LocalFileMediaStore`, `CloudMediaStore` |
-| `tenxgraph.runtime` | Publisher adapters (SSE, A2A, Kafka, RabbitMQ, Redis Pub/Sub) |
+| `tenxgraph.runtime` | Publisher adapters (Console, Kafka, RabbitMQ, Redis Pub/Sub, OTEL, Phoenix, Logfire, LangSmith) |
 | `tenxgraph.utils` | `ResponseGranularity`, `CallbackManager`, `tool` decorator |
 | `tenxgraph.qa` | Testing helpers and evaluation tools |
 

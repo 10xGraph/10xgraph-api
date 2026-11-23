@@ -9,6 +9,9 @@ from typing import TYPE_CHECKING, Any
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
+from tenxgraph.core.graph.remote_tool import RemoteToolConfig
+
+from tenxgraph_api.config_names import CONFIG_FILE, LEGACY_CONFIG_FILE
 
 
 if TYPE_CHECKING:
@@ -19,56 +22,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("tenxgraph_api")
-
-
-def _empty_parameters() -> dict[str, Any]:
-    return {"type": "object", "properties": {}, "required": []}
-
-
-class RemoteToolConfig(BaseModel):
-    """Trusted model-facing schema for a tool executed by the client."""
-
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
-
-    node_name: str = Field(alias="node", min_length=1)
-    name: str = Field(min_length=1)
-    description: str = Field(min_length=1)
-    parameters: dict[str, Any] = Field(default_factory=_empty_parameters)
-
-    @field_validator("node_name", "name", "description")
-    @classmethod
-    def _must_not_be_blank(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("must not be blank")
-        return value
-
-    @field_validator("parameters")
-    @classmethod
-    def _validate_parameters(cls, value: dict[str, Any]) -> dict[str, Any]:
-        parameters = dict(value)
-        parameters.setdefault("type", "object")
-        parameters.setdefault("properties", {})
-        parameters.setdefault("required", [])
-        if parameters["type"] != "object":
-            raise ValueError("remote tool parameters.type must be 'object'")
-        if not isinstance(parameters["properties"], dict):
-            raise ValueError("remote tool parameters.properties must be an object")
-        if not isinstance(parameters["required"], list) or not all(
-            isinstance(item, str) for item in parameters["required"]
-        ):
-            raise ValueError("remote tool parameters.required must be a list of strings")
-        return parameters
-
-    def to_tool_schema(self) -> dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.parameters,
-            },
-        }
 
 
 _REMOTE_TOOLS_ADAPTER = TypeAdapter(list[RemoteToolConfig])
@@ -797,11 +750,6 @@ class MediaConfig:
         )
 
 
-CONFIG_FILE = "10xgraph.json"
-# Pre-rename name, read only when no 10xgraph.json exists. Removed in 2.0.
-LEGACY_CONFIG_FILE = "agentflow.json"
-
-
 def default_config_path() -> str:
     """``10xgraph.json`` in the cwd, or ``agentflow.json`` when only the legacy file exists."""
     if not Path(CONFIG_FILE).exists() and Path(LEGACY_CONFIG_FILE).exists():
@@ -902,7 +850,9 @@ class GraphConfig:
         value = self.data.get("id_generator", None)
         if value is None or value == "":
             return None
-        if not isinstance(value, str) or (value not in ID_GENERATOR_NAMES and ":" not in value):
+        if not isinstance(value, str) or (
+            value not in ID_GENERATOR_NAMES and not _IMPORT_PATH.match(value)
+        ):
             raise ValueError(
                 f"id_generator must be one of {', '.join(ID_GENERATOR_NAMES)} or "
                 f'"module:attr"; got {value!r}'

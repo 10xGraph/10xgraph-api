@@ -74,11 +74,5 @@ def setup_cli_logging(
     root_logger.propagate = False
 
 
-def create_debug_logger(name: str) -> logging.Logger:
-    """Return a child logger after enabling debug output globally."""
-    setup_cli_logging(level=logging.DEBUG)
-    return get_logger(name)
-
-
 def _formatter() -> logging.Formatter:
     return logging.Formatter(fmt=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)

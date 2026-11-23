@@ -56,8 +56,9 @@ RBAC keys sit inside `auth` and apply to any auth class. They are refused when a
 - `roles_claim` or `permissions_claim` (not both): the token claim that carries roles or direct permissions. Token `scope`/`scopes` only narrow what is granted.
 - `tenant_claims`: claims copied to the identity's tenant (needs to match the checkpointer and store `tenant_columns`; boot refuses in production on a mismatch, warns in development).
 - `default_role`: role for callers with none. `system_identities`: non-user callers (below).
-- No `roles`: default permission set (everything except `admin:*`), reach `own`.
+- No `roles`: default permission set (everything except `admin:*` and tool permissions), reach `own`.
 - Permissions are `resource:action`, from one registry: `graph` (read, invoke, stream, stop, fix), `threads` (read, write, delete), `store` (read, write, delete), `files` (read, upload, delete), `config:read`, `tasks` (trigger, read, cancel), `admin` (read, write). Wildcards: `resource:*` and `*`. There is no `tasks:pause`. Reading the graph is `graph:read`.
+- Tool permissions for core's `ToolGuard`: `tools:<tool_name>` (1-128 of `A-Z a-z 0-9 _ - .`) and `tools:*`. The tool names are open, not listed in the registry. `*` includes `tools:*`; the default set (no roles) has no tool permissions, so a tool behind a `ToolGuard` rule is denied until a role or permissions claim grants it. `tools:*` never grants a route permission. Token `scope`/`scopes` narrow tools too (`tools:refund`).
 - Reach is `own` | `tenant` | `all`. It widens reads, lists, deletes and stop only. Runs and state/message writes always stay `own`, admins included. `tenant` needs `tenant_claims`; `all` roles are logged at boot.
 - Unknown permission, unknown role in `default_role`/`inherits`/`system_identities`, an inheritance cycle, or an unknown reach refuses to boot. `10xgraph config`, `audit` and `build` run the same check.
 - The top-level `authorization` and `graph_introspection` keys are removed: the server refuses to boot with either.

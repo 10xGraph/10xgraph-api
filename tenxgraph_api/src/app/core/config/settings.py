@@ -353,3 +353,8 @@ def get_settings() -> Settings:
     """
     logger.info("Loading settings from environment variables and .env if present")
     return Settings()  # type: ignore
+
+
+def is_production() -> bool:
+    """True when ``MODE`` is production: client-facing errors hide internal details."""
+    return get_settings().MODE == "production"

@@ -8,7 +8,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 from tenxgraph.core.authz import Identity, Reach
 
-from .permissions_registry import DEFAULT_PERMISSIONS, expand
+from .permissions_registry import DEFAULT_PERMISSIONS, expand, intersect
 
 
 logger = logging.getLogger("tenxgraph_api.auth")
@@ -200,7 +200,8 @@ def _narrow(claims: dict[str, Any], granted: frozenset[str]) -> frozenset[str]:
 
     An entry is permission-shaped when it is ``*`` or contains ``:``. Unknown permission-shaped
     entries still turn narrowing on and add nothing (a stale ``checkpointer:read`` never means
-    "no narrowing"). Plain OIDC scopes such as ``openid profile`` are ignored.
+    "no narrowing"). Plain OIDC scopes such as ``openid profile`` are ignored. A ``tools:*``
+    grant narrowed by ``tools:refund`` keeps ``tools:refund``, and the other way round.
     """
     entries = (_string_list(claims.get("scope"), "scope") or []) + (
         _string_list(claims.get("scopes"), "scopes") or []
@@ -208,4 +209,4 @@ def _narrow(claims: dict[str, Any], granted: frozenset[str]) -> frozenset[str]:
     shaped = [e for e in entries if e == "*" or ":" in e]
     if not shaped:
         return granted
-    return granted & _expand_known(shaped)
+    return intersect(granted, _expand_known(shaped))

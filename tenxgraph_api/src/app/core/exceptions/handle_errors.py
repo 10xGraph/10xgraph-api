@@ -23,7 +23,12 @@ from tenxgraph.utils.validators import ValidationError
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.audit import audit_event, audit_http_not_found, audit_not_found
-from tenxgraph_api.src.app.core.config.settings import get_settings
+from tenxgraph_api.src.app.core.config.settings import is_production as production_mode
+from tenxgraph_api.src.app.core.exceptions.client_errors import (
+    THREAD_NOT_FOUND_CODE,
+    THREAD_NOT_FOUND_MESSAGE,
+    _sanitize_error_message,
+)
 from tenxgraph_api.src.app.core.exceptions.server_errors import (
     BAD_DATA_CODE,
     RETRY_AFTER_SECONDS,
@@ -43,56 +48,6 @@ from .user_exception import (
     UserAccountError,
     UserPermissionError,
 )
-
-
-# The answer for a thread the caller cannot see: one body whether it is missing or another
-# user's, so the response never reveals that an id exists. Streams use the same code and text.
-THREAD_NOT_FOUND_CODE = "THREAD_NOT_FOUND"
-THREAD_NOT_FOUND_MESSAGE = "Thread not found"
-
-
-def _sanitize_error_message(message: str, error_code: str, is_production: bool) -> str:
-    """
-    Sanitize error messages for production to avoid exposing internal details.
-
-    Args:
-        message: Original error message
-        error_code: Error code for the exception
-        is_production: Whether the app is in production mode
-
-    Returns:
-        Sanitized message (generic in production, detailed in development)
-    """
-    if not is_production:
-        return message
-
-    # Generic messages by status code category
-    generic_messages = {
-        "VALIDATION_ERROR": "The request data is invalid. Please check your input.",
-        "HTTPException": "An error occurred processing your request.",
-        # Before "GRAPH_": the first matching prefix wins.
-        "GRAPH_NODE_MISSING_": (
-            "This thread was saved at a step that no longer exists in the graph. "
-            "Start a new thread, or ask the operator to map the old step."
-        ),
-        "GRAPH_": "An error occurred executing the graph.",
-        "STATE_": (
-            "This thread was saved by a newer server version. "
-            "The server must be upgraded to read it."
-        ),
-        "NODE_": "An error occurred in a graph node.",
-        "STORAGE_": "An error occurred accessing storage.",
-        "METRICS_": "An error occurred collecting metrics.",
-        "SCHEMA_VERSION_": "Schema version mismatch.",
-        "SERIALIZATION_": "An error occurred processing data.",
-    }
-
-    # Return generic message based on error code prefix
-    for prefix, generic_msg in generic_messages.items():
-        if error_code.startswith(prefix):
-            return generic_msg
-
-    return "An unexpected error occurred. Please contact support."
 
 
 def _context_details(exc: Exception) -> list[ErrorSchemas]:
@@ -144,8 +99,7 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
         UserPermissionError: Handles custom user permission errors.
         APIResourceNotFoundError: Handles custom API resource not found errors.
     """
-    settings = get_settings()
-    is_production = settings.MODE == "production"
+    is_production = production_mode()
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request: Request, exc: HTTPException):
@@ -342,70 +296,6 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
             status_code=500,
         )
 
-    @app.exception_handler(GraphError)
-    async def graph_error_exception_handler(request: Request, exc: GraphError):
-        logger.error(f"GraphError: url: {request.base_url}", exc_info=exc)
-
-        request_id = getattr(request.state, "request_id", "unknown")
-        error_code = getattr(exc, "error_code", "GRAPH_000")
-        original_message = getattr(exc, "message", str(exc))
-        message = _sanitize_error_message(original_message, error_code, is_production)
-
-        if is_production:
-            logger.error(f"Request {request_id} - GraphError: {original_message}")
-
-        return error_response(
-            request,
-            error_code=error_code,
-            message=message,
-            details=_context_details(exc) if not is_production else None,
-            status_code=500,
-        )
-
-    @app.exception_handler(NodeError)
-    async def node_error_exception_handler(request: Request, exc: NodeError):
-        logger.error(f"NodeError: url: {request.base_url}", exc_info=exc)
-
-        request_id = getattr(request.state, "request_id", "unknown")
-        error_code = getattr(exc, "error_code", "NODE_000")
-        original_message = getattr(exc, "message", str(exc))
-        message = _sanitize_error_message(original_message, error_code, is_production)
-
-        if is_production:
-            logger.error(f"Request {request_id} - NodeError: {original_message}")
-
-        return error_response(
-            request,
-            error_code=error_code,
-            message=message,
-            details=_context_details(exc) if not is_production else None,
-            status_code=500,
-        )
-
-    @app.exception_handler(GraphRecursionError)
-    async def graph_recursion_error_exception_handler(request: Request, exc: GraphRecursionError):
-        # The run hit its recursion limit: not a server fault, and the client can raise the
-        # limit, so it is a 422 and not a 500.
-        _log_handled(request, exc, 422, "RECURSION", "GraphRecursionError")
-
-        request_id = getattr(request.state, "request_id", "unknown")
-        error_code = getattr(exc, "error_code", "GRAPH_RECURSION_000")
-        original_message = getattr(exc, "message", str(exc))
-        message = _sanitize_error_message(original_message, error_code, is_production)
-
-        if is_production:
-            logger.warning(
-                "Request %s - GraphRecursionError: %s", request_id, log_safe(original_message)
-            )
-
-        return error_response(
-            request,
-            error_code=error_code,
-            message=message,
-            details=_context_details(exc) if not is_production else None,
-            status_code=422,
-        )
-
     @app.exception_handler(ThreadNotFoundError)
     async def thread_not_found_exception_handler(request: Request, exc: ThreadNotFoundError):
         # A subclass of StorageError: Starlette picks the handler of the closest class, so this
@@ -447,87 +337,47 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
             status_code=500,
         )
 
-    @app.exception_handler(TransientStorageError)
-    async def transient_storage_error_exception_handler(
-        request: Request, exc: TransientStorageError
-    ):
-        logger.error(f"TransientStorageError: url: {request.base_url}", exc_info=exc)
+    def add_handler(
+        exc_class: type[Exception],
+        default_code: str,
+        status_code: int,
+        *,
+        log_code: str | None = None,
+        retry_after: bool = False,
+    ) -> None:
+        """Register the handler shared by the core errors that only differ in class, default
+        code and status: the message is generic in production, details come from the context."""
+        name = exc_class.__name__
 
-        request_id = getattr(request.state, "request_id", "unknown")
-        error_code = getattr(exc, "error_code", "TRANSIENT_STORAGE_000")
-        original_message = getattr(exc, "message", str(exc))
-        message = _sanitize_error_message(original_message, error_code, is_production)
+        @app.exception_handler(exc_class)
+        async def handler(request: Request, exc: Exception):
+            error_code = getattr(exc, "error_code", default_code)
+            _log_handled(request, exc, status_code, log_code or error_code, name)
 
-        if is_production:
-            logger.error(f"Request {request_id} - TransientStorageError: {original_message}")
+            request_id = getattr(request.state, "request_id", "unknown")
+            original_message = getattr(exc, "message", str(exc))
+            message = _sanitize_error_message(original_message, error_code, is_production)
 
-        response = error_response(
-            request,
-            error_code=error_code,
-            message=message,
-            details=_context_details(exc) if not is_production else None,
-            status_code=503,
-        )
-        response.headers["Retry-After"] = str(RETRY_AFTER_SECONDS)
-        return response
+            if is_production and status_code >= 500:  # noqa: PLR2004
+                logger.error(f"Request {request_id} - {name}: {original_message}")
+            elif is_production:
+                logger.warning("Request %s - %s: %s", request_id, name, log_safe(original_message))
 
-    @app.exception_handler(MetricsError)
-    async def metrics_error_exception_handler(request: Request, exc: MetricsError):
-        logger.error(f"MetricsError: url: {request.base_url}", exc_info=exc)
-
-        request_id = getattr(request.state, "request_id", "unknown")
-        error_code = getattr(exc, "error_code", "METRICS_000")
-        original_message = getattr(exc, "message", str(exc))
-        message = _sanitize_error_message(original_message, error_code, is_production)
-
-        if is_production:
-            logger.error(f"Request {request_id} - MetricsError: {original_message}")
-
-        return error_response(
-            request,
-            error_code=error_code,
-            message=message,
-            details=_context_details(exc) if not is_production else None,
-            status_code=500,
-        )
-
-    @app.exception_handler(SchemaVersionError)
-    async def schema_version_error_exception_handler(request: Request, exc: SchemaVersionError):
-        request_id = getattr(request.state, "request_id", "unknown")
-        error_code = getattr(exc, "error_code", "SCHEMA_VERSION_000")
-        _log_handled(request, exc, 422, error_code, "SchemaVersionError")
-        original_message = getattr(exc, "message", str(exc))
-        message = _sanitize_error_message(original_message, error_code, is_production)
-
-        if is_production:
-            logger.warning(
-                "Request %s - SchemaVersionError: %s", request_id, log_safe(original_message)
+            response = error_response(
+                request,
+                error_code=error_code,
+                message=message,
+                details=_context_details(exc) if not is_production else None,
+                status_code=status_code,
             )
+            if retry_after:
+                response.headers["Retry-After"] = str(RETRY_AFTER_SECONDS)
+            return response
 
-        return error_response(
-            request,
-            error_code=error_code,
-            message=message,
-            details=_context_details(exc) if not is_production else None,
-            status_code=422,
-        )
-
-    @app.exception_handler(SerializationError)
-    async def serialization_error_exception_handler(request: Request, exc: SerializationError):
-        logger.error(f"SerializationError: url: {request.base_url}", exc_info=exc)
-
-        request_id = getattr(request.state, "request_id", "unknown")
-        error_code = getattr(exc, "error_code", "SERIALIZATION_000")
-        original_message = getattr(exc, "message", str(exc))
-        message = _sanitize_error_message(original_message, error_code, is_production)
-
-        if is_production:
-            logger.error(f"Request {request_id} - SerializationError: {original_message}")
-
-        return error_response(
-            request,
-            error_code=error_code,
-            message=message,
-            details=_context_details(exc) if not is_production else None,
-            status_code=500,
-        )
+    add_handler(GraphError, "GRAPH_000", 500)
+    add_handler(NodeError, "NODE_000", 500)
+    add_handler(GraphRecursionError, "GRAPH_RECURSION_000", 422, log_code="RECURSION")
+    add_handler(TransientStorageError, "TRANSIENT_STORAGE_000", 503, retry_after=True)
+    add_handler(MetricsError, "METRICS_000", 500)
+    add_handler(SchemaVersionError, "SCHEMA_VERSION_000", 422)
+    add_handler(SerializationError, "SERIALIZATION_000", 500)

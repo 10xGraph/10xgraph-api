@@ -412,39 +412,6 @@ class EvalCommand(BaseCommand):
     # Criteria display
     # ------------------------------------------------------------------
 
-    def _print_criteria_block(
-        self,
-        confeval_config: EvalConfig | None,
-        confeval_path: Path | None,
-    ) -> None:
-        """Print the active global criteria and their source before any case runs.
-
-        This is the global fallback config (confeval.py, else built-in defaults)
-        applied to files without their own get_eval_config()/EVAL_CONFIG. Files
-        that define a per-file config override this for their own cases.
-        """
-        if confeval_config is not None:
-            source = str(confeval_path) if confeval_path else "confeval.py"
-            criteria = confeval_config.criteria
-        else:
-            source = "built-in defaults"
-            criteria = self._default_config().criteria
-
-        lines = [f"Criteria  source: {source}"]
-        for name in criteria.model_fields:
-            cfg = getattr(criteria, name)
-            if cfg is None:
-                continue
-
-            parts = [f"threshold={cfg.threshold}"]
-            parts.append(cfg.match_type.value)
-            if cfg.judge_model:
-                parts.append(f"judge={cfg.judge_model}")
-            if cfg.num_samples and cfg.num_samples != 1:
-                parts.append(f"samples={cfg.num_samples}")
-            lines.append(f"  {name:<40} {'  '.join(parts)}")
-        self.output.info("\n".join(lines), emoji=False)
-
     def _criteria_rows(self, config: EvalConfig) -> list[tuple[str, str, dict[str, Any]]]:
         """Return (name, human_summary, machine_dict) for each active criterion."""
         criteria = config.criteria
@@ -770,25 +737,6 @@ class EvalCommand(BaseCommand):
             results=all_results,
             config_used=base_config.model_dump() if base_config else {},
         )
-
-    # ------------------------------------------------------------------
-    # Eval directory from 10xgraph.json
-    # ------------------------------------------------------------------
-
-    def _resolve_eval_dir(self) -> Path:
-        config_manager = ConfigManager()
-        discovered = config_manager.auto_discover_config()
-        directory = "evals"
-        if discovered:
-            try:
-                config_manager.load_config(str(discovered))
-                eval_cfg = config_manager.get_evaluation_config()
-                directory = eval_cfg.get("directory", "evals")
-            except Exception:
-                self.logger.warning(
-                    "Failed to load eval directory from config; using default 'evals/'"
-                )
-        return Path.cwd() / directory
 
     def _should_open_report(
         self, open_report: bool | None, *, quiet: bool, non_interactive: bool

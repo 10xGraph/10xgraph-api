@@ -2,6 +2,7 @@
 
 import importlib
 import os
+from collections.abc import Sequence
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -26,6 +27,11 @@ GLOB_MARKS = ("*", "?", "[", "/")
 def is_glob(entry: str) -> bool:
     """A ``worker.tasks`` entry that is a file path or glob, not a module name."""
     return entry.endswith(".py") or any(mark in entry for mark in GLOB_MARKS)
+
+
+def split_tasks(tasks: Sequence[str]) -> tuple[list[str], list[str]]:
+    """``worker.tasks`` as (module names, file globs)."""
+    return [t for t in tasks if not is_glob(t)], [t for t in tasks if is_glob(t)]
 
 
 def _check_type(key: str, value: str, allowed: tuple[str, ...], what: str) -> None:

@@ -27,6 +27,39 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Tool permissions in roles and tokens, for core's `ToolGuard`.** A new `tools` resource
+  takes any tool name as its action: `tools:refund`, `tools:mcp.search-v2`, or `tools:*` for
+  every tool. A tool name is 1 to 128 of `A-Z a-z 0-9 _ - .`; an empty name, whitespace, `:`
+  or any other character refuses to boot in a role and is ignored in a token claim. They work
+  in `auth.roles`, in a `permissions_claim`, and token `scope`/`scopes` narrow them (a
+  `tools:refund` scope narrows a `tools:*` grant to that one tool). `*` now also grants
+  `tools:*`; what it grants for the route permissions is unchanged. The default permission
+  set (auth on, no roles and no permissions claim) has no tool permissions, so a tool behind
+  a `ToolGuard` rule is denied until a role or claim grants it. Tool permissions never grant
+  a route, and a route cannot require one. `10xgraph config` suggests `tools:*` in the role
+  editor.
+
+### Changed
+
+- Upload file names are cleaned by core's `sanitize_filename`: an empty or `..` name is stored as `unnamed` (it was `file`), and leading dots are removed (`.env` becomes `env`).
+
+### Fixed
+
+- Every command (`audit`, `build`, `worker`, `scheduler`, `revoke` and `config`, as `dev`, `test` and `eval` already did) now finds `10xgraph.json`, or `agentflow.json`, in the current folder or the nearest parent folder, as the docs say. `build` writes its files and `config` saves next to the config it found.
+- Invoke, stream, WebSocket and AG-UI now give the same error message for the same error. In production, an `UnsupportedMediaInputError` and other client input errors keep their message on every transport (before, stream, WebSocket and AG-UI replaced it with a generic one), and AG-UI no longer sends raw exception text. AG-UI keeps its documented codes (`INVALID_INPUT`, `GRAPH_ERROR`, `AG_UI_ERROR`).
+- On invoke, a database or provider error that the server recognises (no data, an outage, a provider rate limit) now answers 422, 503 with `Retry-After`, or 429, as stream already did, instead of a generic 500.
+- Invoke, fix, stream, WebSocket and AG-UI no longer return provider `raw` payloads or `internal_data` keys other than `error` in messages and state; the thread routes already removed them.
+- Log lines now escape U+2028 and U+2029, so a client value cannot start a new line in text logs. Values are not cut.
+
+### Security
+
+- Inline media in a run is now checked like an upload before it is stored: the per-user file and size quota, the file signature against the declared type, and the size and pixel limits. Before, a user over the quota could store files by sending them inline. A refused run answers 422 before it starts on invoke and stream, and ends with an error event with the same message on WebSocket and AG-UI; nothing is stored.
+- File signatures and file names are checked by core's `validate_magic_bytes` and `sanitize_filename`, so the API and core apply one rule.
+
 ## [1.0.0] - 2026-11-16
 
 The first stable release of `10xgraph-api`. It requires `10xgraph` 1.0 and is released with

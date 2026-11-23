@@ -17,13 +17,9 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import anyio
+from tenxgraph.core.graph.utils.utils import FINALIZE_TIMEOUT_SECONDS
 from tenxgraph.core.state import StreamChunk, StreamEvent
 
-
-try:
-    from tenxgraph.core.graph.utils.utils import FINALIZE_TIMEOUT_SECONDS
-except ImportError:  # an older core; same value
-    FINALIZE_TIMEOUT_SECONDS = 10.0
 
 logger = logging.getLogger("tenxgraph_api.shutdown")
 

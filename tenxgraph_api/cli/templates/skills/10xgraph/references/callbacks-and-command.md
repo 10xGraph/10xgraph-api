@@ -228,7 +228,7 @@ Fields:
 
 - `update`: state update, `Message`, string, converter, or `None`.
 - `goto`: next node name or `END`.
-- `graph`: reserved; the runtime does not act on it (`Command.PARENT` included). Nested graphs are not supported: build multi-agent systems as one graph with several `Agent` nodes.
+- `graph`: reserved; the runtime does not act on it (`Command.PARENT` included). Nested graphs are not supported: build multi-agent systems as one graph with several `Agent` nodes. To run a sub-workflow, wrap it as a tool call: the tool runs the sub-workflow, keeps its data in a custom state field (stored per thread, and not sent to the model unless you put it in the prompt) and returns a short summary to the model. See the section "Run a sub-workflow as a tool call" in the handoff guide (`docs/guides/handoff-between-agents.md`).
 - `state`: optional attached state.
 
 Prefer conditional edges for normal routing because they are easier to visualize and test. Use `Command(goto=...)` for dynamic jumps, recovery branches, handoffs, or side-effect-dependent routing.

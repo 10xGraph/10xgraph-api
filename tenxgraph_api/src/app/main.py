@@ -218,10 +218,6 @@ async def lifespan(app: FastAPI):
             BOOT_CLEANUP_TIMEOUT_SECONDS,
         )
 
-    # load Store
-    # store = load_store(graph_config.store_path)
-    # injector.binder.bind(BaseStore, store)
-
     sweeper: asyncio.Task | None = None
     from tenxgraph_api.src.app.core.config.media_settings import get_media_settings
 

@@ -14,25 +14,27 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from tenxgraph.runtime.publisher.identity import validate_user_id_mode
+from tenxgraph.runtime.publisher.otel_publisher import ObservabilityLevel
+
 from tenxgraph_api.cli.config_editor.schema import (
     ID_GENERATOR_NAMES,
     KNOWN_TOP_LEVEL_KEYS,
     THREAD_NAME_CHOICES,
     section_for_key,
 )
+from tenxgraph_api.import_path import is_import_path
+from tenxgraph_api.src.app.core.audit.config import AuditConfig
 from tenxgraph_api.src.app.core.auth.auth_config import check_auth_config
+from tenxgraph_api.src.app.core.config.graph_config import _expand_env
 
 
 Issue = dict[str, str]
 
-_IMPORT_PATH = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_][\w.]*$")
 # RbacConfig reports a bad role as "role 'name': ..." on the whole auth object.
 _ROLE_IN_MESSAGE = re.compile(r"role '([^']+)'")
-_OBSERVABILITY_LEVELS = ("spans", "standard", "full")
-_USER_ID_MODES = ("raw", "hash", "mask")
 _TRACE_DESTINATIONS = ("logfire", "langsmith", "phoenix", "otlp")
 _MAX_PERCENT = 100
-_AUDIT_KEYS = ("enabled", "sinks", "include_reads")
 # Settings that live inside cache_store; at the top level the server refuses them.
 _CACHE_STORE_SETTINGS = ("redis", "rate_limit", "token_revocation")
 
@@ -157,6 +159,21 @@ def production_readiness_warnings(config: dict) -> list[Issue]:
     return out.issues
 
 
+def readiness_lines(config: dict, error_suffix: str = "") -> list[str]:
+    """The production-readiness warnings as printable lines, auth findings included.
+
+    ``error_suffix`` is appended to auth findings that would stop the server from booting.
+    """
+    lines = [
+        f"{issue['path']}: {issue['message']}"
+        for issue in production_readiness_warnings(config)
+        if issue["path"] not in ("auth", "authorization")
+    ]
+    for auth_issue in check_auth_config(config, production=True):
+        lines.append(f"{auth_issue}{error_suffix if auth_issue.level == 'error' else ''}")
+    return lines
+
+
 def has_errors(issues: list[Issue]) -> bool:
     return any(issue["level"] == "error" for issue in issues)
 
@@ -204,7 +221,7 @@ def _check_auth(config: dict, out: _Collector, base_dir: Path | None) -> None:
         out.add(issue.level, field, issue.message)
     auth = config.get("auth")
     path = auth.get("path") if isinstance(auth, dict) else None
-    if isinstance(path, str) and _IMPORT_PATH.match(path):
+    if isinstance(path, str) and is_import_path(path):
         _check_import_path("auth.path", path, out, base_dir)
 
 
@@ -295,16 +312,15 @@ def _check_observability(config: dict, out: _Collector) -> None:
         out.error("observability", "observability must be an object.")
         return
     level = data.get("level", "full")
-    if level not in _OBSERVABILITY_LEVELS:
-        out.error(
-            "observability.level", f"level must be one of {', '.join(_OBSERVABILITY_LEVELS)}."
-        )
-    user_id_mode = data.get("user_id_mode", "raw")
-    if user_id_mode not in _USER_ID_MODES:
-        out.error(
-            "observability.user_id_mode",
-            f"user_id_mode must be one of {', '.join(_USER_ID_MODES)}.",
-        )
+    try:
+        ObservabilityLevel(str(level).lower())  # the server lowercases it too
+    except ValueError:
+        levels = ", ".join(item.value for item in ObservabilityLevel)
+        out.error("observability.level", f"level must be one of {levels}.")
+    try:
+        validate_user_id_mode(data.get("user_id_mode", "raw"))
+    except ValueError as exc:
+        out.error("observability.user_id_mode", str(exc))
     enabled_blocks: dict[str, dict] = {}
     for backend in _TRACE_DESTINATIONS:
         block = data.get(backend)
@@ -396,31 +412,12 @@ def _check_audit(config: dict, out: _Collector) -> None:
     data = config.get("audit")
     if data is None:
         return
-    if not isinstance(data, dict):
-        out.error("audit", "audit must be an object.")
-        return
-    for key in data:
-        if key not in _AUDIT_KEYS:
-            out.error(
-                f"audit.{key}", f"audit.{key} is not a setting. Use {', '.join(_AUDIT_KEYS)}."
-            )
-    for key in ("enabled", "include_reads"):
-        if key in data and not isinstance(data[key], bool):
-            out.error(f"audit.{key}", f"audit.{key} must be true or false.")
-    sinks = data.get("sinks")
-    if sinks is None:
-        return
-    if not isinstance(sinks, list) or not sinks:
-        out.error("audit.sinks", "audit.sinks must be a non-empty list.")
-        return
-    for sink in sinks:
-        if sink not in ("log", "publisher") and not (
-            isinstance(sink, str) and _IMPORT_PATH.match(sink)
-        ):
-            out.error(
-                "audit.sinks",
-                f'Unknown sink {sink!r}. Use "log", "publisher" or "module:Class".',
-            )
+    try:
+        AuditConfig.model_validate(data)
+    except ValidationError as exc:
+        for err in exc.errors():
+            path = ".".join(["audit", *(str(part) for part in err["loc"])])
+            out.error(path, err["msg"].removeprefix("Value error, "))
 
 
 def _check_wiring(config: dict, out: _Collector, base_dir: Path | None) -> None:
@@ -458,7 +455,7 @@ def _check_choice(
     value = config.get(key)
     if value is None or value == "" or value in names:
         return
-    if not isinstance(value, str) or not _IMPORT_PATH.match(value):
+    if not isinstance(value, str) or not is_import_path(value):
         out.error(key, f"{key} must be one of {', '.join(names)} or module:attribute.")
         return
     _check_import_path(key, value, out, base_dir)
@@ -510,23 +507,17 @@ def _check_evaluation(config: dict, out: _Collector) -> None:
         out.error("evaluation.max_concurrency", "max_concurrency must be a whole number >= 1.")
 
 
-_WORKER_TYPES = {
-    "broker": ("redis_stream", "rabbitmq", "kafka", "memory"),
-    "result_backend": ("redis", "memory"),
-}
-
-
 def _check_worker(config: dict, out: _Collector) -> None:
     data = config.get("worker")
     if data is None:
         return
     from pydantic import ValidationError
 
-    from tenxgraph_api.jobs.config import WorkerConfig
+    from tenxgraph_api.jobs.config import BROKER_TYPES, RESULT_BACKEND_TYPES, WorkerConfig
 
     refused: set[str] = set()
     if isinstance(data, dict):
-        for part, allowed in _WORKER_TYPES.items():
+        for part, allowed in (("broker", BROKER_TYPES), ("result_backend", RESULT_BACKEND_TYPES)):
             value = (data.get(part) or {}).get("type") if isinstance(data.get(part), dict) else None
             if value is not None and value not in allowed:
                 path = f"worker.{part}.type"
@@ -548,7 +539,7 @@ def _check_worker(config: dict, out: _Collector) -> None:
 
 
 def _check_import_path(path: str, value: Any, out: _Collector, base_dir: Path | None) -> None:
-    if not isinstance(value, str) or not _IMPORT_PATH.match(value):
+    if not isinstance(value, str) or not is_import_path(value):
         out.error(path, f"Expected module:attribute, got {value!r}.")
         return
     if base_dir is None:
@@ -578,8 +569,12 @@ def _quietly(parse: Callable[[], Any], out: _Collector, path: str) -> Any:
 
 
 def _has_unresolved_env(value: str) -> bool:
-    # Same rule as graph_config._expand_env, which raises for these at startup.
-    return os.path.expandvars(value) == value and (value.startswith("$") or "${" in value)
+    # The server raises for these at startup.
+    try:
+        _expand_env(value)
+    except ValueError:
+        return True
+    return False
 
 
 def _is_int(value: Any) -> bool:

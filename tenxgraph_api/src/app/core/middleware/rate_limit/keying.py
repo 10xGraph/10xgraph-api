@@ -16,6 +16,7 @@ from tenxgraph_api.src.app.core.config.graph_config import (
     DEFAULT_TRUSTED_PROXIES,
     RateLimitConfig,
 )
+from tenxgraph_api.src.app.core.redis_client import identity_key
 
 
 logger = logging.getLogger("tenxgraph_api")
@@ -87,7 +88,7 @@ async def verified_caller_key(connection: HTTPConnection) -> str | None:
     The rate limiter runs before any route dependency, so it cannot read an authenticated
     user from request state. It runs the bound auth class itself instead, with whatever
     credential the request carries (none for a class that reads a cookie), and returns
-    ``run_limits.identity_key`` of the resolved identity: the same ``user_id`` in two tenants
+    ``identity_key`` of the resolved identity: the same ``user_id`` in two tenants
     is two callers. Returns ``None`` when auth is off or the request does not authenticate;
     the caller is then limited by address, so forged tokens cannot buy fresh buckets.
     """
@@ -97,7 +98,6 @@ async def verified_caller_key(connection: HTTPConnection) -> str | None:
     from tenxgraph_api.src.app.core.auth.permissions import _extract_credential, remember_claims
     from tenxgraph_api.src.app.core.auth.rbac import resolve
     from tenxgraph_api.src.app.core.auth.reserved_identity import identity_is_reserved
-    from tenxgraph_api.src.app.routers.graph.run_limits import identity_key
 
     credential = _extract_credential(connection)
     try:

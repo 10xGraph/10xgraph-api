@@ -140,7 +140,10 @@ valid ones (`RATE_LIMIT_KEYS`).
 - **Permissions** come from one registry (`core/auth/permissions_registry.py`): `graph`
   (read, invoke, stream, stop, fix), `threads` (read, write, delete), `store`, `files`
   (read, upload, delete), `config:read`, `tasks`, `admin`; wildcards `resource:*` and `*`.
-  Default set (no roles): everything except `admin:*`. `rbac.py` resolves
+  Default set (no roles): everything except `admin:*` (and no tool permissions). `tools` is
+  the one open resource, for core's `ToolGuard`: `tools:<name>` (1-128 of `A-Z a-z 0-9 _ - .`)
+  and `tools:*`, kept as written; `*` adds `tools:*`; never a route permission
+  (`RequirePermission` only takes `ALL_PERMISSIONS`); scope narrowing uses `intersect`. `rbac.py` resolves
   roles (`RbacConfig`, `resolve`, `InvalidClaimsError`).
 - **Reach** (`own` | `tenant` | `all`) widens reads, lists, deletes and stop only. Runs and
   state/message writes always stay `own`, admins included. `/v1/tasks`: GET and cancel widen
@@ -218,7 +221,7 @@ valid ones (`RATE_LIMIT_KEYS`).
 - **Store (memory)**: `POST /v1/store/memories`, `/v1/store/memories/list`,
   `/v1/store/memories/forget`, `/v1/store/memories/{memory_id}`, `POST /v1/store/search`.
 - **Media / files** (`tags=["Files"]`): `POST /v1/files/upload` (first bytes must match the
-  declared type for formats with a signature, else 415; table in `utils/media/signatures.py`),
+  declared type for formats with a signature, else 415; table in core `tenxgraph.storage.media.security.validate_magic_bytes`, names cleaned by core `sanitize_filename`),
   `GET /v1/files/{file_id}`, `/{file_id}/info`, `/{file_id}/url`, `DELETE /v1/files/{file_id}`
   (owner only, 404 otherwise, permission `files:delete`), `GET /v1/config/multimodal`. Deleting a message or thread also releases
   the files it referenced (`CheckpointerService.delete_message` / `delete_thread`; a thread delete

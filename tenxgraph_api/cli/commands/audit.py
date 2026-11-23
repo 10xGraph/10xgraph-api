@@ -36,7 +36,7 @@ from typing import Any
 from tenxgraph_api.cli.commands import BaseCommand
 from tenxgraph_api.cli.config_editor.validation import thread_name_generator_issues
 from tenxgraph_api.cli.constants import DEFAULT_CONFIG_FILE, DEFAULT_PORT
-from tenxgraph_api.cli.core.config import resolve_default_config
+from tenxgraph_api.cli.core.config import read_config_json, resolve_default_config
 from tenxgraph_api.src.app.core.auth.auth_config import check_auth_config
 from tenxgraph_api.src.app.core.config.graph_config import validate_remote_tools
 
@@ -183,7 +183,7 @@ class AuditCommand(BaseCommand):
 
     @staticmethod
     def _config_check(config: str = DEFAULT_CONFIG_FILE) -> Diagnostic:
-        """Validate ``10xgraph.json`` (or legacy ``agentflow.json``) in the working directory.
+        """Validate ``10xgraph.json`` (or legacy ``agentflow.json``) in the cwd or a parent folder.
 
         Warns when the default file is absent, because audit is also useful
         outside a project directory. A missing explicit path, invalid JSON,
@@ -223,11 +223,8 @@ class AuditCommand(BaseCommand):
         or the checkpointer (custom class type, tenant columns) are checked at boot.
         """
         config_path = resolve_default_config(config).resolve()
-        try:
-            data = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return Diagnostic("Auth", "pass", "no readable config to check")
-        if not isinstance(data, dict):
+        data = read_config_json(config_path)
+        if data is None:
             return Diagnostic("Auth", "pass", "no readable config to check")
         issues = check_auth_config(data, production=True)
         errors = [i for i in issues if i.level == "error"]
@@ -247,11 +244,8 @@ class AuditCommand(BaseCommand):
         from tenxgraph_api.cli.config_editor.validation import production_readiness_warnings
 
         config_path = resolve_default_config(config).resolve()
-        try:
-            data = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return Diagnostic("Security", "pass", "no readable config to check")
-        if not isinstance(data, dict):
+        data = read_config_json(config_path)
+        if data is None:
             return Diagnostic("Security", "pass", "no readable config to check")
         # auth findings come from the shared auth rules (see _auth_check)
         issues = [
@@ -271,11 +265,10 @@ class AuditCommand(BaseCommand):
         if os.environ.get("MODE", "").lower() != "production":
             return Diagnostic("Audit log", "pass", "not checked outside MODE=production")
         config_path = resolve_default_config(config).resolve()
-        try:
-            data = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        data = read_config_json(config_path)
+        if data is None:
             return Diagnostic("Audit log", "pass", "no readable config to check")
-        section = data.get("audit") if isinstance(data, dict) else None
+        section = data.get("audit")
         if isinstance(section, dict) and section.get("enabled") is True:
             return Diagnostic("Audit log", "pass", "on")
         return Diagnostic("Audit log", "warn", "audit log off in production")

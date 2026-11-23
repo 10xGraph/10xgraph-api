@@ -58,22 +58,14 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from tenxgraph_api.src.app.core.auth.permissions_registry import REGISTRY
+from tenxgraph_api.src.app.core.auth.permissions_registry import REGISTRY, TOOLS
+from tenxgraph_api.src.app.core.config.graph_config import (  # noqa: F401  (re-exported)
+    ID_GENERATOR_NAMES,
+    THREAD_NAME_CHOICES,
+)
 
 
 DOCS_URL = "https://10xgraph.com/docs/reference/api-cli/configuration"
-
-# Mirrors graph_config.ID_GENERATOR_NAMES and THREAD_NAME_CHOICES; kept in sync by a unit test.
-ID_GENERATOR_NAMES: tuple[str, ...] = (
-    "uuid",
-    "hex",
-    "short",
-    "int",
-    "bigint",
-    "timestamp",
-    "snowflake",
-)
-THREAD_NAME_CHOICES: tuple[str, ...] = ("none", "random", "first_message")
 
 # Keys read by the CLI or the API server. Anything else is preserved but flagged.
 KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
@@ -141,7 +133,11 @@ _SECTIONS: list[dict[str, Any]] = [
         "widget": "auth",
         "fields": [],
         # The permission picker reads this, so the UI never hard-codes a permission.
-        "registry": {resource: list(actions) for resource, actions in REGISTRY.items()},
+        # ``tools`` has open actions (tool names), so it only suggests ``tools:*``.
+        "registry": {
+            **{resource: list(actions) for resource, actions in REGISTRY.items()},
+            TOOLS: [],
+        },
         "notes": [
             "JWT needs JWT_SECRET_KEY and JWT_ALGORITHM in your .env file.",
             "Custom auth points at a BaseAuth subclass, as module:attribute.",

@@ -85,11 +85,6 @@ class AppFrame:
         """Whether this frame currently owns the alternate screen."""
         return self._open
 
-    @property
-    def chrome_installed(self) -> bool:
-        """Whether pinned header/footer chrome is currently drawn."""
-        return self._chrome
-
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -195,11 +190,11 @@ class AppFrame:
         if self._version:
             identity.append(" " * max(width - identity.cell_len - len(self._version) - 1, 1))
             identity.append(self._version, style="tenxgraph.muted")
-        _pad(identity, width)
+        pad_to_width(identity, width)
 
         caption = Text(" ", style="tenxgraph.header")
         caption.append(self._subtitle or "", style="tenxgraph.muted")
-        _pad(caption, width)
+        pad_to_width(caption, width)
 
         rows = (
             gradient_rule(width, glyphs=glyphs),
@@ -229,7 +224,7 @@ class AppFrame:
             label = f"10xgraph {self._command}"
             status.append(" " * max(width - status.cell_len - len(label) - 1, 1))
             status.append(label, style="tenxgraph.muted")
-        _pad(status, width)
+        pad_to_width(status, width)
 
         # An anchored footer keeps the cursor parked on it, so there is nothing
         # to save and restore around the write.
@@ -281,7 +276,7 @@ class AppFrame:
             return
 
 
-def _pad(text: Text, width: int) -> None:
+def pad_to_width(text: Text, width: int) -> None:
     padding = width - text.cell_len
     if padding > 0:
         text.append(" " * padding)
