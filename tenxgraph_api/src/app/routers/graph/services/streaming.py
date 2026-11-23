@@ -9,6 +9,7 @@ from tenxgraph.core.authz import Identity, UserCredential, public_config
 from tenxgraph.core.graph.utils.stream_handler import is_pause_chunk
 from tenxgraph.core.state import StreamChunk, StreamEvent
 from tenxgraph.utils import ResponseGranularity
+from tenxgraph.utils.interrupt import pending_interrupt
 from tenxgraph.utils.validators import ValidationError as InputValidationError
 
 from tenxgraph_api.src.app.core import logger
@@ -22,7 +23,6 @@ from tenxgraph_api.src.app.core.shutdown import (
     end_on_shutdown,
 )
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
-from tenxgraph_api.src.app.routers.graph.late_module import LateModule
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     GraphInputSchema,
 )
@@ -35,11 +35,6 @@ from tenxgraph_api.src.app.routers.graph.services.stream_utils import (
 from tenxgraph_api.src.app.utils.parse_output import (
     client_chunk,
 )
-
-
-# The names tests patch on ``graph_service`` (``pending_interrupt``, the limits) are read
-# through this, at call time.
-service_module = LateModule("tenxgraph_api.src.app.routers.graph.services.graph_service")
 
 
 class StreamingMixin:
@@ -248,7 +243,7 @@ class StreamingMixin:
             return None
         if state is None:
             return None
-        pending = service_module.pending_interrupt(state)
+        pending = pending_interrupt(state)
         step = getattr(getattr(state, "execution_meta", None), "step", None)
         if pending is not None:
             data: dict[str, Any] = {

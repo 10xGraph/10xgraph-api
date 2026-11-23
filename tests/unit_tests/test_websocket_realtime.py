@@ -19,8 +19,12 @@ from tenxgraph_api.src.app.routers.graph.router import realtime_graph_ws
 
 
 def _router_module():
-    # ``routers.graph.router`` the attribute is the APIRouter; patch the module itself.
-    return sys.modules["tenxgraph_api.src.app.routers.graph.router"]
+    # The module that reads the credential checks (``routers.graph.router`` is the APIRouter).
+    return sys.modules["tenxgraph_api.src.app.routers.graph.ws_frames"]
+
+
+def _live_module():
+    return sys.modules["tenxgraph_api.src.app.routers.graph.live"]
 
 
 @pytest.fixture(autouse=True)
@@ -550,7 +554,7 @@ class TestRealtimeCredentialRecheck:
     async def test_revoked_mid_session_closes_with_1008(self, monkeypatch):
         graph_router = _router_module()
 
-        monkeypatch.setattr(graph_router, "REALTIME_RECHECK_INTERVAL", 0.01)
+        monkeypatch.setattr(_live_module(), "REALTIME_RECHECK_INTERVAL", 0.01)
         revoked = iter([False, True])  # valid at start, revoked at the first re-check
         monkeypatch.setattr(
             graph_router, "_ws_token_revoked", AsyncMock(side_effect=lambda u: next(revoked, True))
@@ -576,7 +580,7 @@ class TestRealtimeCredentialRecheck:
     async def test_expired_token_mid_session_closes_with_1008(self, monkeypatch):
         graph_router = _router_module()
 
-        monkeypatch.setattr(graph_router, "REALTIME_RECHECK_INTERVAL", 0.01)
+        monkeypatch.setattr(_live_module(), "REALTIME_RECHECK_INTERVAL", 0.01)
         valid = iter([True])  # the token verifies at start, then stops verifying
         monkeypatch.setattr(
             graph_router,
@@ -615,7 +619,7 @@ class TestRealtimeCredentialRecheck:
     async def test_normal_session_is_unaffected(self, monkeypatch):
         graph_router = _router_module()
 
-        monkeypatch.setattr(graph_router, "REALTIME_RECHECK_INTERVAL", 0.01)
+        monkeypatch.setattr(_live_module(), "REALTIME_RECHECK_INTERVAL", 0.01)
         ws = _make_websocket([WebSocketDisconnect()], init={"model": "m"})
         service = _make_service([_audio_event(b"\x01")])
 

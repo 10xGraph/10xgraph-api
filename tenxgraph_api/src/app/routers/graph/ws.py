@@ -25,7 +25,11 @@ from tenxgraph_api.src.app.core.validation.request_config import (
     resource_id_error,
 )
 from tenxgraph_api.src.app.routers.graph import idempotency
-from tenxgraph_api.src.app.routers.graph.realtime_guard import realtime_connection_guard
+from tenxgraph_api.src.app.routers.graph.realtime_guard import (
+    realtime_connection_guard,
+    ws_identity_still_valid,
+    ws_run_allowed,
+)
 from tenxgraph_api.src.app.routers.graph.router import router
 from tenxgraph_api.src.app.routers.graph.run_guard import acquire_run_guard
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
@@ -57,9 +61,10 @@ from tenxgraph_api.src.app.routers.graph.ws_frames import (
     _send_thread_not_found,
     _send_ws_error,
     _SessionExpired,
+    _ws_max_frame_chars,
+    _ws_run_gate,
     _ws_send,
     _WsFrames,
-    router_module,
 )
 
 
@@ -76,7 +81,7 @@ async def _next_frame(frames: _WsFrames, websocket: WebSocket, identity: Identit
         try:
             return await asyncio.wait_for(frames.next(), wait)
         except TimeoutError:
-            if not await router_module.ws_identity_still_valid(websocket, identity):
+            if not await ws_identity_still_valid(websocket, identity):
                 raise _SessionExpired from None
 
 
@@ -279,7 +284,7 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
             await websocket.close(code=1008)
         return
 
-    max_frame = router_module._ws_max_frame_chars()
+    max_frame = _ws_max_frame_chars()
     frames = _WsFrames(websocket)
     invalid_frames = 0
     try:
@@ -291,7 +296,7 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
                 # A frame that was refused still cost a parse: it counts against the rate
                 # limit, and a socket that only sends junk is closed.
                 invalid_frames += 1
-                retry_after = await router_module.ws_run_allowed(websocket)
+                retry_after = await ws_run_allowed(websocket)
                 if retry_after is not None or invalid_frames > WS_MAX_INVALID_FRAMES:
                     code = 1008 if retry_after is None else WS_TRY_AGAIN_LATER
                     logger.warning("WebSocket closed after too many invalid frames")
@@ -302,7 +307,7 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
             invalid_frames = 0
 
             # The handshake checks happen once; these apply to every run on the socket.
-            gate = await router_module._ws_run_gate(websocket, identity)
+            gate = await _ws_run_gate(websocket, identity)
             if gate == "close":
                 break
             if gate == "skip":

@@ -157,8 +157,8 @@ def test_bound_settings_outside_a_request_use_the_global_container(monkeypatch):
 async def test_ws_run_gate_closes_on_revocation(monkeypatch, revoked):
     import importlib
 
-    # The package re-exports the APIRouter as ``router``; patch the module itself.
-    graph_router = importlib.import_module("tenxgraph_api.src.app.routers.graph.router")
+    # Patch the module that reads the names.
+    graph_router = importlib.import_module("tenxgraph_api.src.app.routers.graph.ws_frames")
 
     async def fake_revoked(user):
         if revoked == "outage":
@@ -309,7 +309,7 @@ def test_config_editor_validates_token_revocation(monkeypatch):
 async def test_ws_run_gate_closes_on_a_token_without_jti(monkeypatch):
     import importlib
 
-    graph_router = importlib.import_module("tenxgraph_api.src.app.routers.graph.router")
+    graph_router = importlib.import_module("tenxgraph_api.src.app.routers.graph.ws_frames")
 
     async def no_jti(user):
         raise TokenJtiMissingError("Token has no usable jti claim")

@@ -12,7 +12,7 @@ from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
 from tenxgraph_api.src.app.core.leases import LeaseManager
 from tenxgraph_api.src.app.routers.graph import thread_lock
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import GraphInputSchema
-from tenxgraph_api.src.app.routers.graph.services import graph_service
+from tenxgraph_api.src.app.routers.graph.services import naming
 
 from .test_run_limits import ALICE, _input, _service
 
@@ -85,7 +85,7 @@ async def test_a_naming_failure_does_not_turn_a_good_run_into_an_error(locks):
 
 @pytest.mark.asyncio
 async def test_naming_tasks_are_capped(locks, monkeypatch):
-    monkeypatch.setattr(graph_service, "MAX_PENDING_THREAD_NAMES", 2)
+    monkeypatch.setattr(naming, "MAX_PENDING_THREAD_NAMES", 2)
     gate = asyncio.Event()
 
     async def blocked(messages):

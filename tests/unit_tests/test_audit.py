@@ -45,6 +45,7 @@ from tenxgraph_api.src.app.core.threads import require_thread
 
 
 ROUTER = "tenxgraph_api.src.app.routers.graph.router"
+WS_FRAMES = "tenxgraph_api.src.app.routers.graph.ws_frames"
 WS_POLICY_VIOLATION = 1008
 CLAIMS: dict[str, dict[str, Any]] = {
     "alice": {"user_id": "alice", "org": "acme", "jti": "a-1"},
@@ -436,7 +437,7 @@ def test_log_sink_writes_one_json_line_without_secrets():
     ],
 )
 def test_ws_session_recheck_records_auth_failure(sink, monkeypatch, valid, revoked, reason):
-    router = importlib.import_module(ROUTER)
+    router = importlib.import_module(WS_FRAMES)
 
     async def token_revoked(identity):
         if revoked is None:
@@ -450,7 +451,7 @@ def test_ws_session_recheck_records_auth_failure(sink, monkeypatch, valid, revok
 
 
 def test_ws_session_recheck_passes_quietly(sink, monkeypatch):
-    router = importlib.import_module(ROUTER)
+    router = importlib.import_module(WS_FRAMES)
 
     async def token_revoked(identity):
         return False

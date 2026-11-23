@@ -48,7 +48,7 @@ from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.utils import (  # noqa: F401
     ResponseGranularity,
 )
-from tenxgraph.utils.interrupt import pending_interrupt  # noqa: F401  (patched by tests)
+from tenxgraph.utils.interrupt import pending_interrupt  # noqa: F401
 from tenxgraph.utils.validators import (  # noqa: F401
     ValidationError as InputValidationError,
 )
@@ -118,12 +118,19 @@ from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import
     preprocess_multimodal_messages,
     resolve_media_policy,
 )
-from tenxgraph_api.src.app.routers.graph.services.naming import ThreadNamingMixin
+from tenxgraph_api.src.app.routers.graph.services.naming import (  # noqa: F401
+    MAX_PENDING_THREAD_NAMES,
+    THREAD_NAME_TIMEOUT_SECONDS,
+    ThreadNamingMixin,
+)
 from tenxgraph_api.src.app.routers.graph.services.realtime import (  # noqa: F401
     REALTIME_INIT_FIELDS,
     RealtimeMixin,
 )
-from tenxgraph_api.src.app.routers.graph.services.run_checks import RunChecksMixin
+from tenxgraph_api.src.app.routers.graph.services.run_checks import (  # noqa: F401
+    MAX_THREAD_ID_ATTEMPTS,
+    RunChecksMixin,
+)
 from tenxgraph_api.src.app.routers.graph.services.run_models import (  # noqa: F401
     _UNREAD,
     RunChecks,
@@ -153,18 +160,6 @@ from tenxgraph_api.src.app.utils.run_trace import (  # noqa: F401
     telemetry_record,
 )
 from tenxgraph_api.src.app.utils.telemetry_store import TelemetryStore
-
-
-# Longest a background thread-naming call may run (it is a model call).
-THREAD_NAME_TIMEOUT_SECONDS = 60.0
-
-# Naming tasks kept by the service itself (no core task manager bound) are capped; over it the
-# thread simply stays unnamed, as the core manager does with its own limit.
-MAX_PENDING_THREAD_NAMES = 100
-
-# A taken generated id is retried with a fresh one; each retry is another prediction the
-# claimer would have had to get right.
-MAX_THREAD_ID_ATTEMPTS = 5
 
 
 @singleton

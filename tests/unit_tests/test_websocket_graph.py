@@ -328,7 +328,7 @@ class TestWebSocketFrameLimits:
     async def test_oversized_frame_closes_with_1009(self, monkeypatch):
         import importlib
 
-        mod = importlib.import_module("tenxgraph_api.src.app.routers.graph.router")
+        mod = importlib.import_module("tenxgraph_api.src.app.routers.graph.ws")
         monkeypatch.setattr(mod, "_ws_max_frame_chars", lambda: 100)
         ws = _make_websocket([])
         ws.receive_text = AsyncMock(side_effect=["x" * 101, WebSocketDisconnect()])
@@ -387,7 +387,7 @@ class TestIdleAndInvalidFrames:
         import importlib
         import time
 
-        router_module = importlib.import_module("tenxgraph_api.src.app.routers.graph.router")
+        router_module = importlib.import_module("tenxgraph_api.src.app.routers.graph.ws")
 
         monkeypatch.setattr(router_module, "ws_identity_still_valid", AsyncMock(return_value=False))
         ws = _make_websocket([])
@@ -421,7 +421,7 @@ class TestIdleAndInvalidFrames:
     async def test_invalid_frames_count_against_the_rate_limit(self, monkeypatch):
         import importlib
 
-        router_module = importlib.import_module("tenxgraph_api.src.app.routers.graph.router")
+        router_module = importlib.import_module("tenxgraph_api.src.app.routers.graph.ws")
 
         monkeypatch.setattr(router_module, "ws_run_allowed", AsyncMock(return_value=7))
         ws = _make_websocket([])

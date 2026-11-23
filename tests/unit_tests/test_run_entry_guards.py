@@ -44,9 +44,11 @@ def limiter(monkeypatch):
     monkeypatch.setattr(thread_lock, "lease_manager", lambda: shared)
     monkeypatch.setattr(run_limits, "lease_manager", lambda: shared)
     monkeypatch.setattr(thread_lock, "THREAD_BUSY_WAIT_SECONDS", 0.2)
-    router = _router()
-    monkeypatch.setattr(router, "ws_identity_still_valid", AsyncMock(return_value=True))
-    monkeypatch.setattr(router, "_ws_token_revoked", AsyncMock(return_value=False))
+    for name in ("ws", "ws_frames"):
+        module = sys.modules[f"tenxgraph_api.src.app.routers.graph.{name}"]
+        monkeypatch.setattr(module, "ws_identity_still_valid", AsyncMock(return_value=True))
+    frames = sys.modules["tenxgraph_api.src.app.routers.graph.ws_frames"]
+    monkeypatch.setattr(frames, "_ws_token_revoked", AsyncMock(return_value=False))
     return shared
 
 
@@ -222,7 +224,11 @@ def _frames_then(first, later):
 
 @pytest.mark.asyncio
 async def test_ws_slow_consumer_is_cut_off_and_frees_the_lock(limiter, monkeypatch):
-    monkeypatch.setattr(_router(), "WS_SEND_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        sys.modules["tenxgraph_api.src.app.routers.graph.ws_frames"],
+        "WS_SEND_TIMEOUT_SECONDS",
+        0.05,
+    )
 
     def stream(*args, **kwargs):
         async def gen():
