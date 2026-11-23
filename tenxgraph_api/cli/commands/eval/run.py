@@ -20,7 +20,7 @@ from tenxgraph_api.cli.core.steps import ProgressRun
 
 
 if TYPE_CHECKING:
-    pass
+    from tenxgraph_api.cli.core.output import OutputFormatter
 
 
 def _reset_inject_proxy(service_type: type) -> None:
@@ -48,6 +48,8 @@ def _reset_inject_proxy(service_type: type) -> None:
 
 class _EvalRunner:
     """Progress printing and the flat pool run."""
+
+    output: OutputFormatter
 
     # ------------------------------------------------------------------
     # Progress printing

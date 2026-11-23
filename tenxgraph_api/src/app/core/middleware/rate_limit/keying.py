@@ -100,7 +100,7 @@ async def verified_caller_key(connection: HTTPConnection) -> str | None:
 
     credential = _extract_credential(connection)
     try:
-        auth = lookup(BaseAuth)
+        auth = lookup(BaseAuth)  # type: ignore[type-abstract]
         if auth is None:
             return None
         # A throwaway Response: anything the auth class sets on it belongs to the real

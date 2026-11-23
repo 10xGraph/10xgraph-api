@@ -11,11 +11,13 @@ from tenxgraph_api.cli.commands.eval.collect import _PendingCase, _PendingSimula
 
 
 if TYPE_CHECKING:
-    pass
+    from tenxgraph_api.cli.core.output import OutputFormatter
 
 
 class _EvalDisplay:
     """Criteria display."""
+
+    output: OutputFormatter
 
     # ------------------------------------------------------------------
     # Criteria display

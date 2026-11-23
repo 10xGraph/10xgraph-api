@@ -89,7 +89,7 @@ class MediaService(_LinksMixin, _CachingMixin):
     @property
     def checkpointer(self) -> BaseCheckpointer | None:
         if self._checkpointer is None:
-            self._checkpointer = lookup(BaseCheckpointer)
+            self._checkpointer = lookup(BaseCheckpointer)  # type: ignore[type-abstract]
         return self._checkpointer
 
     @property

@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import inspect
+import logging
 import sys
 import typing
 from pathlib import Path
@@ -19,6 +20,8 @@ if TYPE_CHECKING:
 
 class _EvalDiscovery:
     """Finding, loading and default config of eval files."""
+
+    logger: logging.Logger
 
     # ------------------------------------------------------------------
     # Discovery

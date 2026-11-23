@@ -244,7 +244,9 @@ def _cancel_on_signal() -> Iterator[list[int]]:
             previous(signum, frame)
         loop.call_soon_threadsafe(cancel, signum)
 
-    saved = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
+    saved: dict[int, Any] = {
+        signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)
+    }
     for signum in saved:
         signal.signal(signum, handler)
     try:

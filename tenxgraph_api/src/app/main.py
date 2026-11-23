@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from collections.abc import Awaitable, Callable
 
 from fastapi import FastAPI
 from fastapi.concurrency import asynccontextmanager
@@ -192,7 +193,7 @@ async def lifespan(app: FastAPI):
     # Shutdown. The sweeper is already stopped, so nothing touches the media store while the
     # graph closes. Then the same order as the jobs worker: graph, task broker, leases and
     # cache store, auth, telemetry (``lifecycle.close_resources``).
-    stop_broker = None
+    stop_broker: Callable[[], Awaitable[None]] | None = None
     if graph_config.worker is not None:
         from tenxgraph_api.src.app.routers.tasks import stop_broker
 

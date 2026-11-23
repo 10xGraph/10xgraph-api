@@ -76,7 +76,7 @@ def client_state(state: Any, production: bool) -> Any:
         update["context"] = [client_message(m) for m in context]
     meta = getattr(state, "execution_meta", None)
     internal = getattr(meta, "internal_data", None)
-    if isinstance(internal, dict):
+    if meta is not None and isinstance(internal, dict):
         kept = _client_internal(internal, production)
         if kept != internal:
             update["execution_meta"] = meta.model_copy(update={"internal_data": kept})

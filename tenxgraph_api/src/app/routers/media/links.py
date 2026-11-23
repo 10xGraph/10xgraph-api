@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tenxgraph.core.authz import Identity
 
@@ -14,11 +14,33 @@ from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.routers.media.ownership import THREADS_KEY
 
 
+if TYPE_CHECKING:
+    from tenxgraph.storage.media.storage.base import BaseMediaStore
+
+
 logger = logging.getLogger("tenxgraph_api.media")
 
 
 class _LinksMixin:
     """Thread links and deletion of ``MediaService``."""
+
+    _links_notice_logged: bool
+
+    if TYPE_CHECKING:
+
+        @property
+        def store(self) -> BaseMediaStore: ...
+
+        def caller_tenant(self, user: Identity | None) -> dict[str, str | None]: ...
+
+        @staticmethod
+        def _owned_by(
+            metadata: dict[str, Any], user_id: Any, tenant: dict[str, str | None]
+        ) -> bool: ...
+
+        def _in_reach(self, metadata: dict[str, Any], user: Identity) -> bool: ...
+
+        async def delete_file(self, file_id: str) -> bool: ...
 
     @property
     def supports_links(self) -> bool:

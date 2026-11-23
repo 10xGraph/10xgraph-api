@@ -5,9 +5,15 @@ from __future__ import annotations
 import logging
 import time
 from collections import OrderedDict
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
+
+
+if TYPE_CHECKING:
+    from tenxgraph.storage.checkpointer import BaseCheckpointer
+
+    from tenxgraph_api.src.app.core.config.media_settings import MediaSettings
 
 
 logger = logging.getLogger("tenxgraph_api.media")
@@ -75,6 +81,15 @@ class _BoundedCache(OrderedDict):
 
 class _CachingMixin:
     """Extraction text and signed-URL caches of ``MediaService``."""
+
+    _settings: MediaSettings
+    _extraction_cache: _BoundedCache
+    _signed_url_cache: _BoundedCache
+
+    if TYPE_CHECKING:
+
+        @property
+        def checkpointer(self) -> BaseCheckpointer | None: ...
 
     async def _forget_cached(self, file_id: str, mime_type: str | None) -> None:
         """Drop the file's extracted text and signed URLs from the local and shared caches.

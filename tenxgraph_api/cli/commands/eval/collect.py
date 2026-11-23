@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -14,7 +15,9 @@ from tenxgraph.qa.evaluation.evaluator import AgentEvaluator
 
 
 if TYPE_CHECKING:
-    pass
+    import logging
+
+    from tenxgraph_api.cli.core.output import OutputFormatter
 
 
 @dataclass
@@ -41,13 +44,26 @@ class _PendingSimulation:
 class _EvalCollector:
     """Turn an eval file into pending cases and simulations."""
 
+    logger: logging.Logger
+    output: OutputFormatter
+
+    if TYPE_CHECKING:
+
+        def _load_module(self, path: Path) -> Any: ...
+
+        def _default_config(self) -> EvalConfig: ...
+
+        def _collect_eval_functions(self, mod: Any) -> tuple[list[tuple[str, Any]], Any]: ...
+
+        def _load_agent_from_config(self) -> Any: ...
+
     # ------------------------------------------------------------------
     # Flat pool: collect all pending cases from a file
     # ------------------------------------------------------------------
 
     def _collect_from_file(
         self, path: Path, global_config: EvalConfig | None
-    ) -> list[_PendingCase | _PendingSimulation]:
+    ) -> Sequence[_PendingCase | _PendingSimulation]:
         """Load a module and return pending work for every eval case or simulation scenario.
 
         Config priority chain (highest → lowest):
