@@ -1,15 +1,16 @@
-import importlib
 import inspect
 import logging
 import os
 import sys
 import weakref
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 
 from injectq import InjectQ
 from tenxgraph.core import CompiledGraph
 from tenxgraph.core.graph.remote_tool import RemoteToolConfig as CoreRemoteToolConfig
+from tenxgraph.core.graph.utils.tenant_check import check_tenant_columns
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.storage.store import BaseStore
 from tenxgraph.utils.id_generator import (
@@ -25,11 +26,13 @@ from tenxgraph.utils.id_generator import (
 )
 
 from tenxgraph_api import BaseAuth
+from tenxgraph_api.import_path import import_target, is_import_path
 from tenxgraph_api.src.app.core.auth.auth_config import AuthConfig
 from tenxgraph_api.src.app.core.auth.rbac import log_reach_all_roles
 from tenxgraph_api.src.app.core.cache_store.base import BaseCacheStore
 from tenxgraph_api.src.app.core.cache_store.loader import load_and_bind_cache_store
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
+from tenxgraph_api.src.app.core.config.settings import is_production
 from tenxgraph_api.src.app.utils.thread_name_generator import (
     FirstMessageThreadNameGenerator,
     RandomThreadNameGenerator,
@@ -40,15 +43,35 @@ from tenxgraph_api.src.app.utils.thread_name_generator import (
 logger = logging.getLogger("tenxgraph_api.loader")
 
 
-async def load_graph(path: str) -> CompiledGraph | None:
-    if ":" not in path:
-        raise ValueError(f"Invalid graph path format '{path}'. Expected 'module:attribute'.")
+def _check_format(path: str, kind: str) -> None:
+    if not is_import_path(path):
+        raise ValueError(f"Invalid {kind} path format '{path}'. Expected 'module:attribute'.")
 
-    module_name_importable, function_name = path.split(":")
 
+@contextmanager
+def _load_errors(path: str, kind: str, label: str):
+    """Log a failed ``module:attr`` load and re-raise it with one message per failure kind.
+
+    ``kind`` names the config value in the path errors, ``label`` the loaded class.
+    """
     try:
-        module = importlib.import_module(module_name_importable)
-        entry_point_obj = getattr(module, function_name)
+        yield
+        logger.info(f"Successfully loaded {label} '{path.split(':')[1]}' from {path}.")
+    except ModuleNotFoundError as e:
+        logger.error(f"Module not found when loading {label} from {path}: {e}")
+        raise ModuleNotFoundError(f"Module not found for {kind} path '{path}': {e}")
+    except AttributeError as e:
+        logger.error(f"Attribute not found when loading {label} from {path}: {e}")
+        raise AttributeError(f"Attribute not found for {kind} path '{path}': {e}")
+    except Exception as e:
+        logger.error(f"Error loading {label} from {path}: {e}")
+        raise Exception(f"Failed to load {label} from {path}: {e}")
+
+
+async def load_graph(path: str) -> CompiledGraph | None:
+    _check_format(path, "graph")
+    with _load_errors(path, "graph", "graph"):
+        entry_point_obj = import_target(path)
 
         if callable(entry_point_obj):
             if inspect.iscoroutinefunction(entry_point_obj):
@@ -60,166 +83,59 @@ async def load_graph(path: str) -> CompiledGraph | None:
 
         if app is None:
             raise RuntimeError(f"Failed to obtain a runnable graph from {path}.")
-
-        if isinstance(app, CompiledGraph):
-            logger.info(f"Successfully loaded graph '{function_name}' from {path}.")
-        else:
+        if not isinstance(app, CompiledGraph):
             raise TypeError("Loaded object is not a CompiledGraph.")
 
-    except ModuleNotFoundError as e:
-        logger.error(f"Module not found when loading graph from {path}: {e}")
-        raise ModuleNotFoundError(f"Module not found for graph path '{path}': {e}")
-    except AttributeError as e:
-        logger.error(f"Attribute not found when loading graph from {path}: {e}")
-        raise AttributeError(f"Attribute not found for graph path '{path}': {e}")
-    except Exception as e:
-        logger.error(f"Error loading graph from {path}: {e}")
-        raise Exception(f"Failed to load graph from {path}: {e}")
-
     return app
-
-
-def load_checkpointer(path: str | None) -> BaseCheckpointer | None:
-    if not path:
-        return None
-
-    if ":" not in path:
-        raise ValueError(f"Invalid checkpointer path format '{path}'. Expected 'module:attribute'.")
-
-    module_name_importable, function_name = path.split(":")
-
-    try:
-        module = importlib.import_module(module_name_importable)
-        entry_point_obj = getattr(module, function_name)
-        checkpointer = entry_point_obj
-
-        if checkpointer is None:
-            raise RuntimeError(f"Failed to obtain a BaseCheckpointer graph from {path}.")
-
-        if isinstance(checkpointer, BaseCheckpointer):
-            logger.info(f"Successfully loaded BaseCheckpointer '{function_name}' from {path}.")
-        else:
-            raise TypeError("Loaded object is not a BaseCheckpointer.")
-    except ModuleNotFoundError as e:
-        logger.error(f"Module not found when loading BaseCheckpointer from {path}: {e}")
-        raise ModuleNotFoundError(f"Module not found for checkpointer path '{path}': {e}")
-    except AttributeError as e:
-        logger.error(f"Attribute not found when loading BaseCheckpointer from {path}: {e}")
-        raise AttributeError(f"Attribute not found for checkpointer path '{path}': {e}")
-    except Exception as e:
-        logger.error(f"Error loading BaseCheckpointer from {path}: {e}")
-        raise Exception(f"Failed to load BaseCheckpointer from {path}: {e}")
-
-    return checkpointer
 
 
 def load_store(path: str | None) -> BaseStore | None:
     if not path:
         return None
-
-    if ":" not in path:
-        raise ValueError(f"Invalid store path format '{path}'. Expected 'module:attribute'.")
-
-    module_name_importable, function_name = path.split(":")
-
-    try:
-        module = importlib.import_module(module_name_importable)
-        entry_point_obj = getattr(module, function_name)
-        store = entry_point_obj
-
+    _check_format(path, "store")
+    with _load_errors(path, "store", "BaseStore"):
+        store = import_target(path)
         if store is None:
             raise RuntimeError(f"Failed to obtain a BaseStore from {path}.")
-
-        if isinstance(store, BaseStore):
-            logger.info(f"Successfully loaded graph '{function_name}' from {path}.")
-        else:
+        if not isinstance(store, BaseStore):
             raise TypeError("Loaded object is not a BaseStore.")
-    except ModuleNotFoundError as e:
-        logger.error(f"Module not found when loading BaseStore from {path}: {e}")
-        raise ModuleNotFoundError(f"Module not found for store path '{path}': {e}")
-    except AttributeError as e:
-        logger.error(f"Attribute not found when loading BaseStore from {path}: {e}")
-        raise AttributeError(f"Attribute not found for store path '{path}': {e}")
-    except Exception as e:
-        logger.error(f"Error loading BaseStore from {path}: {e}")
-        raise Exception(f"Failed to load BaseStore from {path}: {e}")
-
     return store
 
 
 def load_cache_store(path: str) -> BaseCacheStore:
     """Load the ``cache_store`` from ``"module:attr"``: an instance or a zero-arg factory."""
-    if ":" not in path:
-        raise ValueError(f"Invalid cache_store path format '{path}'. Expected 'module:attribute'.")
-
-    module_name_importable, function_name = path.split(":")
-
-    try:
-        module = importlib.import_module(module_name_importable)
-        entry_point_obj = getattr(module, function_name)
-        cache_store = entry_point_obj
+    _check_format(path, "cache_store")
+    with _load_errors(path, "cache_store", "BaseCacheStore"):
+        cache_store = import_target(path)
         if not isinstance(cache_store, BaseCacheStore) and callable(cache_store):
             cache_store = cache_store()
-
-        if isinstance(cache_store, BaseCacheStore):
-            logger.info(f"Successfully loaded BaseCacheStore '{function_name}' from {path}.")
-        else:
+        if not isinstance(cache_store, BaseCacheStore):
             raise TypeError("Loaded object is not a BaseCacheStore or a factory returning one.")
-    except ModuleNotFoundError as e:
-        logger.error(f"Module not found when loading BaseCacheStore from {path}: {e}")
-        raise ModuleNotFoundError(f"Module not found for cache_store path '{path}': {e}")
-    except AttributeError as e:
-        logger.error(f"Attribute not found when loading BaseCacheStore from {path}: {e}")
-        raise AttributeError(f"Attribute not found for cache_store path '{path}': {e}")
-    except Exception as e:
-        logger.error(f"Error loading BaseCacheStore from {path}: {e}")
-        raise Exception(f"Failed to load BaseCacheStore from {path}: {e}")
-
     return cache_store
 
 
 def load_container(path: str | None) -> InjectQ | None:
     if not path:
         return None
-
-    module_name_importable, function_name = path.split(":")
-
-    try:
-        module = importlib.import_module(module_name_importable)
-        entry_point_obj = getattr(module, function_name)
-        container = entry_point_obj
-
+    _check_format(path, "injectq")
+    with _load_errors(path, "injectq", "InjectQ"):
+        container = import_target(path)
         if container is None:
             raise RuntimeError(f"Failed to obtain a InjectQ from {path}.")
-
-        if isinstance(container, InjectQ):
-            logger.info(f"Successfully loaded InjectQ '{function_name}' from {path}.")
-        else:
+        if not isinstance(container, InjectQ):
             raise TypeError("Loaded object is not a InjectQ.")
-    except Exception as e:
-        logger.error(f"Error loading InjectQ from {path}: {e}")
-        raise Exception(f"Failed to load InjectQ from {path}: {e}")
 
     # if we have container, set it as the global instance
-    if container:
-        container.activate()
-
+    container.activate()
     return container
 
 
 def load_auth(path: str | None) -> BaseAuth | None:
     if not path:
         return None
-
-    if ":" not in path:
-        raise ValueError(f"Invalid auth path format '{path}'. Expected 'module:attribute'.")
-
-    module_name_importable, function_name = path.split(":")
-
-    try:
-        module = importlib.import_module(module_name_importable)
-        entry_point_obj = getattr(module, function_name)
-
+    _check_format(path, "auth")
+    with _load_errors(path, "auth", "BaseAuth"):
+        entry_point_obj = import_target(path)
         if inspect.isclass(entry_point_obj) and issubclass(entry_point_obj, BaseAuth):
             auth = entry_point_obj()
         elif isinstance(entry_point_obj, BaseAuth):
@@ -228,31 +144,15 @@ def load_auth(path: str | None) -> BaseAuth | None:
             raise TypeError(
                 f"[custom-class] auth.path {path!r} is not a BaseAuth subclass or instance."
             )
-
-        logger.info(f"Successfully loaded BaseAuth '{function_name}' from {path}.")
-    except ModuleNotFoundError as e:
-        logger.error(f"Module not found when loading BaseAuth from {path}: {e}")
-        raise ModuleNotFoundError(f"Module not found for auth path '{path}': {e}")
-    except AttributeError as e:
-        logger.error(f"Attribute not found when loading BaseAuth from {path}: {e}")
-        raise AttributeError(f"Attribute not found for auth path '{path}': {e}")
-    except Exception as e:
-        logger.error(f"Error loading BaseAuth from {path}: {e}")
-        raise Exception(f"Failed to load BaseAuth from {path}: {e}")
-
     return auth
 
 
 def load_thread_name_generator(path: str | None) -> ThreadNameGenerator | None:
     if not path:
         return None
-
-    module_name_importable, function_name = path.split(":")
-
-    try:
-        module = importlib.import_module(module_name_importable)
-        entry_point_obj = getattr(module, function_name)
-
+    _check_format(path, "thread_name_generator")
+    with _load_errors(path, "thread_name_generator", "ThreadNameGenerator"):
+        entry_point_obj = import_target(path)
         # If it's a class, instantiate it; if it's an instance, use as is
         if inspect.isclass(entry_point_obj) and issubclass(entry_point_obj, ThreadNameGenerator):
             thread_name_generator = entry_point_obj()
@@ -260,12 +160,6 @@ def load_thread_name_generator(path: str | None) -> ThreadNameGenerator | None:
             thread_name_generator = entry_point_obj
         else:
             raise TypeError("Loaded object is not a subclass or instance of ThreadNameGenerator.")
-
-        logger.info(f"Successfully loaded ThreadNameGenerator '{function_name}' from {path}.")
-    except Exception as e:
-        logger.error(f"Error loading ThreadNameGenerator from {path}: {e}")
-        raise Exception(f"Failed to load ThreadNameGenerator from {path}: {e}")
-
     return thread_name_generator
 
 
@@ -318,9 +212,8 @@ def load_id_generator(value: str) -> BaseIDGenerator:
             f"id_generator must be one of {', '.join(BUILTIN_ID_GENERATORS)} or "
             f'"module:attr"; got {value!r}'
         )
-    module_name, attr = value.split(":", 1)
     try:
-        target = getattr(importlib.import_module(module_name), attr)
+        target = import_target(value)
     except (ImportError, AttributeError) as exc:
         raise ValueError(f"id_generator {value!r} cannot be loaded: {exc}") from exc
     generator = target if isinstance(target, BaseIDGenerator) else None
@@ -463,9 +356,8 @@ def check_auth_at_boot(
         check_auth_config,
         check_tenant_claims,
     )
-    from tenxgraph_api.src.app.core.config.settings import get_settings
 
-    production = get_settings().MODE == "production"
+    production = is_production()
     issues: list[AuthIssue] = check_auth_config(config.data, production=production)
     auth = config.auth_config() if not any(i.level == "error" for i in issues) else None
     if auth is not None:
@@ -514,12 +406,6 @@ def _load_custom_auth(path: str | None) -> BaseAuth:
     return auth
 
 
-def _is_production() -> bool:
-    from tenxgraph_api.src.app.core.config.settings import get_settings
-
-    return get_settings().MODE == "production"
-
-
 def _enable_token_revocation(container: InjectQ, config: GraphConfig, auth_enabled: bool) -> None:
     """Bind the ``token_revocation`` settings from 10xgraph.json, if it is on.
 
@@ -540,7 +426,7 @@ def _enable_token_revocation(container: InjectQ, config: GraphConfig, auth_enabl
     store = container.try_get(BaseCacheStore)
     logger.info("Token revocation enabled (cache store: %s).", type(store).__name__)
     workers = _web_concurrency()
-    if is_in_memory(store) and (_is_production() or workers > 1):
+    if is_in_memory(store) and (is_production() or workers > 1):
         logger.warning(
             "token_revocation is on with an in-memory cache store (workers=%d): a revocation "
             "reaches only the process that recorded it, and `10xgraph revoke` cannot reach it "
@@ -569,7 +455,7 @@ def warn_per_process_state(container: InjectQ) -> None:
     so production always gets the line). The choice stays the developer's.
     """
     workers = _web_concurrency()
-    if not (_is_production() or workers > 1):
+    if not (is_production() or workers > 1):
         return
     from tenxgraph_api.src.app.core.cache_store.loader import is_in_memory
 
@@ -608,14 +494,10 @@ def check_store_tenant_columns(
     graph's checkpointer and with the checkpointer bound in the container (when different).
     Same rule as core: ``MODE=production`` refuses the boot (``GraphError``), any other mode
     logs a warning. ``allow_mismatch`` (``store_allow_tenant_mismatch`` in ``10xgraph.json``)
-    never refuses and logs the mismatch at INFO. Skipped on a core without the check, and when
+    never refuses and logs the mismatch at INFO. Skipped when
     the store is the one the graph was compiled with (``compile()`` already checked it).
     """
     if store is None:
-        return
-    try:
-        from tenxgraph.core.graph.utils.tenant_check import check_tenant_columns
-    except ImportError:  # core older than tenant columns: nothing to compare
         return
     if graph is not None and getattr(graph, "_store", None) is store:
         return
@@ -626,22 +508,8 @@ def check_store_tenant_columns(
     ):
         if candidate is not None and all(candidate is not seen for seen in checkpointers):
             checkpointers.append(candidate)
-    try:
-        takes_flag = "allow_mismatch" in inspect.signature(check_tenant_columns).parameters
-    except (TypeError, ValueError):  # pragma: no cover - defensive
-        takes_flag = False
     for checkpointer in checkpointers:
-        if takes_flag:
-            check_tenant_columns(checkpointer, store, allow_mismatch=allow_mismatch)
-        elif allow_mismatch:
-            logger.info(
-                "store_allow_tenant_mismatch is set: not comparing the tenant columns of %s "
-                "and %s.",
-                type(checkpointer).__name__,
-                type(store).__name__,
-            )
-        else:
-            check_tenant_columns(checkpointer, store)
+        check_tenant_columns(checkpointer, store, allow_mismatch=allow_mismatch)
 
 
 async def attach_all_modules(
@@ -673,11 +541,6 @@ async def attach_all_modules(
             "module instead."
         )
 
-    # This binding we have done already in the library
-    # # Bind checkpointer instance if configured
-    # checkpointer = load_checkpointer(config.checkpointer_path)
-    # container.bind_instance(BaseCheckpointer, checkpointer, allow_none=True)
-
     # Bind the store instance (if configured) so the /v1/store endpoints — which
     # inject BaseStore via StoreService — can serve it. Without this the store
     # router reports "Store is not configured" even when 10xgraph.json sets one.
@@ -700,10 +563,9 @@ async def attach_all_modules(
     # production (use OTEL / a publisher there instead). So we only bind it
     # outside production; in production the store stays unbound and the
     # /v1/observability endpoints return a clean, empty "disabled" response.
-    from tenxgraph_api.src.app.core.config.settings import get_settings
     from tenxgraph_api.src.app.utils.telemetry_store import TelemetryStore
 
-    if get_settings().MODE != "production":
+    if not is_production():
         container.bind_instance(TelemetryStore, TelemetryStore())
         logger.info("Local in-memory telemetry store bound (dev mode)")
     else:

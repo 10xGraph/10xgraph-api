@@ -32,7 +32,7 @@ SCRIPT = textwrap.dedent(
     assert not failed, failed
 
     from tenxgraph_api.src.app.routers.tasks import boot
-    assert boot.is_glob("tasks/*.py") and not boot.is_glob("myapp.tasks")
+    assert boot.split_tasks(["tasks/*.py", "myapp.tasks"]) == (["myapp.tasks"], ["tasks/*.py"])
     """
 )
 

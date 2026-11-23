@@ -52,7 +52,7 @@ Keep apps small. Follow these rules unless the user asks otherwise.
    - Stream emitter for tool progress updates: `references/stream-emitter.md`
    - Observability hooks, validators, and runtime jumps: `references/callbacks-and-command.md`
    - Prebuilt agents (ReactAgent, PlanActReflectAgent, StructuredOutputAgent, SupervisorTeamAgent, SwarmAgent, RAGAgent) and tools: `references/prebuilt-agents-and-tools.md`
-   - Event publishers and A2A/ACP runtime protocols: `references/publishers-and-runtime-protocols.md`
+   - Event publishers and runtime adapters: `references/publishers-and-runtime-protocols.md`
    - Context management, ID generation, and background tasks: `references/context-id-background.md`
    - Provider internals, adapters, provider-specific settings and Anthropic caching: `references/providers-and-adapters.md`
    - Prompt-injection and validation safety: `references/security-and-validators.md`

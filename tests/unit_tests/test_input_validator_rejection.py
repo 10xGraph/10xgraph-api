@@ -9,9 +9,10 @@ from __future__ import annotations
 import logging
 from unittest.mock import MagicMock
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from injectq import InjectQ
+from injectq.integrations.fastapi import setup_fastapi
 from tenxgraph.core.state import StreamEvent
 from tenxgraph.utils.validators import ValidationError as InputValidationError
 
@@ -45,6 +46,7 @@ def test_invoke_answers_422_not_500(caplog):
     service = _rejecting_service()
     app = FastAPI()
     init_errors_handler(app)
+    setup_fastapi(InjectQ(), app)  # the request context every real app has
 
     @app.post("/invoke")
     async def invoke():
@@ -58,11 +60,20 @@ def test_invoke_answers_422_not_500(caplog):
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
-@pytest.mark.asyncio
-async def test_stream_sends_a_validation_error_chunk_and_logs_a_warning(caplog):
+def test_stream_sends_a_validation_error_chunk_and_logs_a_warning(caplog):
     service = _rejecting_service()
-    with caplog.at_level(logging.WARNING):
-        chunks = [c async for c in service.stream_chunks(_graph_input(), ALICE)]
+    app = FastAPI()
+    init_errors_handler(app)
+    setup_fastapi(InjectQ(), app)
+    chunks = []
+
+    @app.post("/stream")
+    async def stream():
+        chunks.extend([c async for c in service.stream_chunks(_graph_input(), ALICE)])
+        return {"ok": True}
+
+    with caplog.at_level(logging.WARNING), TestClient(app, raise_server_exceptions=False) as c:
+        assert c.post("/stream").status_code == 200
 
     assert chunks[-1].event == StreamEvent.ERROR
     assert chunks[-1].data["code"] == "VALIDATION_ERROR"

@@ -39,9 +39,6 @@ INK_ON_DARK = "#eceff4"
 # continuously, so the two stops never band.
 BRAND_RAMP: tuple[str, ...] = (ACCENT, AMBER)
 
-# Used for rows that are done, running, and not started, respectively.
-STATE_RAMP: tuple[str, ...] = (SUCCESS, ACCENT, PENDING)
-
 TENXGRAPH_THEME = Theme(
     {
         "tenxgraph.success": f"bold {SUCCESS}",

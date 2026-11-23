@@ -50,6 +50,7 @@ async def worker_startup(state: TaskiqState) -> None:
 
     The ``taskiq worker`` CLI has imported the task modules before this event.
     """
+    from tenxgraph_api.src.app import loader
     from tenxgraph_api.src.app.core.config.metrics import setup_metrics
     from tenxgraph_api.src.app.core.config.settings import get_settings
     from tenxgraph_api.src.app.core.config.setup_middleware import (
@@ -57,13 +58,11 @@ async def worker_startup(state: TaskiqState) -> None:
         _setup_observability,
         setup_otel_provider,
     )
-    from tenxgraph_api.src.app.loader import attach_all_modules, load_container
-    from tenxgraph_api.src.app.routers.ping.startup_checks import check_backends_at_startup
+    from tenxgraph_api.src.app.core.lifecycle import build_container, check_backends
 
     if graph_config is None or worker_config is None:
         raise RuntimeError('The worker needs a "worker" key in 10xgraph.json')
-    container = load_container(graph_config.injectq_path) or InjectQ.get_instance()
-    container.bind_instance(GraphConfig, graph_config)
+    container = build_container(graph_config)
     settings = get_settings()
     metrics_cfg = graph_config.metrics
     state.meter_provider = (
@@ -75,40 +74,26 @@ async def worker_startup(state: TaskiqState) -> None:
         _attach_otel_publisher(container, settings, graph_config)
     _setup_observability(container, graph_config)
     state.container = container
-    state.graph = await attach_all_modules(graph_config, container)
-    if settings.STARTUP_CHECKS:
-        await check_backends_at_startup(container, timeout=settings.STARTUP_CHECK_TIMEOUT_SECONDS)
+    state.graph = await loader.attach_all_modules(graph_config, container)
+    await check_backends(container, settings)
     setup_taskiq(container, broker)
     wrap_tasks(broker)
 
 
 async def worker_shutdown(state: TaskiqState) -> None:
-    """Close the graph (and with it the checkpointer and store), then the cache store, then
-    send the last metrics and AI spans."""
-    from tenxgraph_api.src.app.core.cache_store import BaseCacheStore
-    from tenxgraph_api.src.app.core.config.metrics import flush_telemetry
+    """Close what startup opened, in the API's order (``lifecycle.close_resources``): the
+    graph (and with it the checkpointer and store), the leases, the cache store, the auth
+    class, then the last metrics and AI spans. Taskiq bounds this hook
+    (``--shutdown-timeout``); the telemetry flush is last so a slow collector cuts only it."""
     from tenxgraph_api.src.app.core.config.settings import get_settings
+    from tenxgraph_api.src.app.core.lifecycle import close_resources
 
-    container = getattr(state, "container", None) or InjectQ.get_instance()
-    graph = getattr(state, "graph", None)
-    if graph is not None:
-        settings = get_settings()
-        try:
-            await graph.aclose(
-                grace=settings.SHUTDOWN_GRACE_SECONDS,
-                stop_timeout=settings.SHUTDOWN_STOP_SECONDS,
-                timeout=settings.SHUTDOWN_TIMEOUT_SECONDS,
-            )
-        except Exception as exc:
-            logger.warning("Graph close did not finish cleanly: %s", exc)
-    try:
-        cache_store = container.try_get(BaseCacheStore)
-        if cache_store is not None:
-            await cache_store.aclose()
-    except Exception as exc:
-        logger.warning("Cache store close failed: %s", exc)
-    # Last: taskiq bounds this hook (--shutdown-timeout), so a slow collector cuts only this.
-    await flush_telemetry(getattr(state, "meter_provider", None))
+    await close_resources(
+        getattr(state, "container", None) or InjectQ.get_instance(),
+        getattr(state, "graph", None),
+        get_settings(),
+        meter_provider=getattr(state, "meter_provider", None),
+    )
 
 
 if worker_config is not None:

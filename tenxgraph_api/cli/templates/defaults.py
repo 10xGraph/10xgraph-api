@@ -488,10 +488,9 @@ def scheduler_command(tasks: list[str] | tuple[str, ...] = ()) -> list[str]:
 
 def _task_args(tasks: list[str] | tuple[str, ...]) -> list[str]:
     """Module names, then one ``--tasks-pattern`` per file path or glob (as ``10xgraph worker``)."""
-    from tenxgraph_api.jobs.config import is_glob
+    from tenxgraph_api.jobs.config import split_tasks
 
-    args = [t for t in tasks if not is_glob(t)]
-    patterns = [t for t in tasks if is_glob(t)]
+    args, patterns = split_tasks(tasks)
     if patterns:
         args.append("--fs-discover")
         for pattern in patterns:

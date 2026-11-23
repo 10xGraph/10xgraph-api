@@ -35,6 +35,7 @@ from rich.live import Live
 from rich.text import Text
 
 from tenxgraph_api.cli.constants import CLI_VERSION
+from tenxgraph_api.cli.core.screen import pad_to_width
 from tenxgraph_api.cli.core.theme import (
     ACCENT,
     AMBER,
@@ -163,13 +164,13 @@ def render_session_header(
     if version:
         identity.append(" " * max(width - identity.cell_len - len(version) - 1, 1))
         identity.append(version, style="tenxgraph.muted")
-    _pad_to_width(identity, width)
+    pad_to_width(identity, width)
     console.print(identity)
 
     if subtitle:
         caption = Text(" ")
         caption.append(subtitle, style="tenxgraph.muted")
-        _pad_to_width(caption, width)
+        pad_to_width(caption, width)
         console.print(caption)
 
     console.print(gradient_rule(width, glyphs=glyphs, thin=True, offset=0.35))
@@ -538,9 +539,3 @@ def _ease_out(value: float) -> float:
 
 def _usable_width(console: Console) -> int:
     return max(min(console.width, 100) - 1, 20)
-
-
-def _pad_to_width(text: Text, width: int) -> None:
-    padding = width - text.cell_len
-    if padding > 0:
-        text.append(" " * padding)

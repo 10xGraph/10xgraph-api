@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import sys
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -15,6 +14,7 @@ from tenxgraph.core.authz import Identity
 from tenxgraph.core.exceptions import ThreadNotFoundError
 from tenxgraph.core.state import Message
 from tenxgraph.core.state.message_block import ImageBlock, MediaRef, TextBlock
+from tenxgraph.storage.media import MediaFetchPolicy
 from tenxgraph.storage.media.storage.memory_store import InMemoryMediaStore
 from tenxgraph.utils.thread_info import ThreadInfo
 
@@ -187,19 +187,8 @@ def test_policy_comes_from_the_graph():
     assert resolve_media_policy(SimpleNamespace(media_policy=policy)) is policy
 
 
-def test_old_core_falls_back_to_the_default_policy(monkeypatch):
-    default = _Policy()
-    fake = SimpleNamespace(MediaFetchPolicy=lambda: default)
-    monkeypatch.setitem(sys.modules, "tenxgraph.storage.media", fake)
-    assert resolve_media_policy(SimpleNamespace()) is default
-
-
-def test_old_core_without_any_policy_skips(monkeypatch):
-    monkeypatch.setitem(sys.modules, "tenxgraph.storage.media", SimpleNamespace())
-    assert resolve_media_policy(SimpleNamespace()) is None
-    srv = _graph_service()
-    srv._graph = SimpleNamespace()
-    srv.check_media_urls([_img("http://169.254.169.254/x")])  # no raise
+def test_a_graph_without_a_policy_gets_the_default_policy():
+    assert isinstance(resolve_media_policy(SimpleNamespace()), MediaFetchPolicy)
 
 
 @pytest.mark.asyncio
@@ -227,12 +216,12 @@ async def test_stream_route_answers_400_before_the_response_starts():
 async def test_ws_sends_an_error_chunk_for_a_blocked_url():
     ws = MagicMock()
     ws.send_text = AsyncMock()
-    assert await _ws_media_urls_allowed(ws, _graph_service(), _bad_input()) is False
+    assert await _ws_media_urls_allowed(ws, _graph_service(), _bad_input()) is None
     sent = ws.send_text.await_args.args[0]
     assert '"error"' in sent
     assert "169.254.169.254" in sent
     ok = GraphInputSchema(messages=[_img("https://ok.example/a.png")])
-    assert await _ws_media_urls_allowed(ws, _graph_service(), ok) is True
+    assert await _ws_media_urls_allowed(ws, _graph_service(), ok) is not None
 
 
 @pytest.mark.asyncio
@@ -630,7 +619,7 @@ def test_config_editor_lists_the_setting():
 def test_log_safe_escapes_control_characters():
     from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 
-    assert log_safe("a\r\nb\x1b[31m\x00\tc") == "a\\r\\nb\\x1b[31m\\x00\tc"
+    assert log_safe("a\r\nb\x1b[31m\x00\tc") == "a\\r\\nb\\x1b[31m\\x00\\tc"
 
 
 def test_files_delete_permission_is_granted_to_wildcard_roles():

@@ -154,22 +154,6 @@ def requested_thread_id(config: dict[str, Any] | None) -> str | None:
     return normalize_thread_id((config or {}).get("thread_id"))
 
 
-async def lock_requested_thread(
-    config: dict[str, Any] | None,
-    on_busy: OnBusy,
-    stop: Callable[[str], Awaitable[Any]],
-) -> Lease:
-    """Lock the thread named in ``config`` before a run, or a no-op lease for a new thread.
-
-    A request without a thread id is creating a thread: nobody can be running on it, and
-    the service locks it as soon as the id exists (``GraphService``).
-    """
-    thread_id = requested_thread_id(config)
-    if thread_id is None:
-        return Lease(None)
-    return await acquire_thread_lock(thread_id, on_busy=on_busy, stop=lambda: stop(thread_id))
-
-
 def combine_leases(*leases: Lease) -> Lease:
     """One lease that releases all of ``leases`` (in the order given)."""
 

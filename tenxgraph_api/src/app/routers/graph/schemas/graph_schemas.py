@@ -343,13 +343,20 @@ class ObservabilitySchema(BaseModel):
     """Observability payload for a thread: available runs + the selected run."""
 
     thread_id: str
-    enabled: bool = Field(True, description="False when run tracing is off on this server")
+    enabled: bool = Field(default=True, description="False when run tracing is off on this server")
     reason: Literal["disabled_in_production", "store_unavailable", "no_runs"] | None = Field(
-        None, description="Why there is no run: tracing off, store missing, or none captured yet"
+        default=None,
+        description="Why there is no run: tracing off, store missing, or none captured yet",
     )
     run_count: int = 0
     run_ids: list[str] = Field(default_factory=list)
-    run: ObsRunSchema | None = Field(None, description="The requested/latest run, if any")
+    run: ObsRunSchema | None = Field(default=None, description="The requested/latest run, if any")
+
+
+def _strip_thread_id(value: str) -> str:
+    if not value.strip():
+        raise ValueError("thread_id cannot be empty or whitespace")
+    return value.strip()
 
 
 class GraphStopSchema(BaseModel):
@@ -360,9 +367,7 @@ class GraphStopSchema(BaseModel):
     @field_validator("thread_id")
     @classmethod
     def thread_id_not_blank(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("thread_id cannot be empty or whitespace")
-        return v.strip()
+        return _strip_thread_id(v)
 
     config: BoundedDict | None = Field(
         default=None, description="Optional configuration for the stop operation"
@@ -377,9 +382,7 @@ class FixGraphRequestSchema(BaseModel):
     @field_validator("thread_id")
     @classmethod
     def thread_id_not_blank(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("thread_id cannot be empty or whitespace")
-        return v.strip()
+        return _strip_thread_id(v)
 
     config: BoundedDict | None = Field(
         default=None, description="Optional configuration for the fix operation"

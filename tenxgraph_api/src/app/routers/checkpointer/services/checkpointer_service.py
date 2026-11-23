@@ -12,7 +12,8 @@ from tenxgraph.utils.thread_info import ThreadInfo
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.config.settings import get_settings
-from tenxgraph_api.src.app.core.threads import require_thread
+from tenxgraph_api.src.app.core.threads import require_thread, set_user
+from tenxgraph_api.src.app.core.utils.container import lookup
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.core.validation.client_filters import (
     check_thread_filters,
@@ -93,9 +94,7 @@ class CheckpointerService:
 
         # Client keys pass through; server-owned keys (user, internals) never do.
         cfg: dict[str, Any] = client_config(config)
-        if identity is not None:
-            cfg["user"] = identity
-        cfg["user_id"] = identity.user_id if identity is not None else "anonymous"
+        set_user(cfg, identity)
         return cfg
 
     async def _require(
@@ -206,38 +205,23 @@ class CheckpointerService:
 
     @staticmethod
     def _graph_service() -> Any:
-        try:
-            from injectq import InjectQ
+        from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
 
-            from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
-
-            return InjectQ.get_instance().try_get(GraphService)
-        except Exception:
-            return None
+        return lookup(GraphService)
 
     @staticmethod
     def _runs() -> Any:
         """``runs`` from 10xgraph.json (a ``RunsConfig``), or ``None`` when unavailable."""
-        try:
-            from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RunsConfig
-            from tenxgraph_api.src.app.core.utils.container import current_container
+        from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RunsConfig
 
-            graph_config = current_container().try_get(GraphConfig)
-            runs = getattr(graph_config, "runs", None)
-        except Exception:
-            return None
+        runs = getattr(lookup(GraphConfig), "runs", None)
         return runs if isinstance(runs, RunsConfig) else None
 
     @staticmethod
     def _media_service() -> Any:
-        try:
-            from injectq import InjectQ
+        from tenxgraph_api.src.app.routers.media import MediaService
 
-            from tenxgraph_api.src.app.routers.media import MediaService
-
-            return InjectQ.get_instance().try_get(MediaService)
-        except Exception:
-            return None
+        return lookup(MediaService)
 
     async def get_state(
         self, config: dict[str, Any], identity: Identity | None
@@ -600,13 +584,11 @@ class CheckpointerService:
         ):
             incomplete.append("files")
 
-        # Clean telemetry traces if TelemetryStore is bound in InjectQ
+        # Clean telemetry traces if a TelemetryStore is bound
         try:
-            from injectq import InjectQ
-
             from tenxgraph_api.src.app.utils.telemetry_store import TelemetryStore
 
-            telemetry_store = InjectQ.get_instance().try_get(TelemetryStore)
+            telemetry_store = lookup(TelemetryStore)
             if telemetry_store:
                 telemetry_store.delete_thread(str(thread_id))
         except Exception as exc:

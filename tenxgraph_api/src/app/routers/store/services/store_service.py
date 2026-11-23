@@ -9,6 +9,7 @@ from tenxgraph.core.state import Message
 from tenxgraph.storage.store import BaseStore
 
 from tenxgraph_api.src.app.core import logger
+from tenxgraph_api.src.app.core.threads import set_user
 from tenxgraph_api.src.app.core.validation.client_filters import (
     check_store_filters,
     filter_errors_as_client_errors,
@@ -120,9 +121,7 @@ class StoreService:
         # Client keys pass through; server-owned keys (user, collection, internals) never do.
         # The Identity in ``config["user"]`` is what the store scopes by.
         cfg: dict[str, Any] = client_config(config)
-        if identity is not None:
-            cfg["user"] = identity
-        cfg["user_id"] = identity.user_id if identity is not None else "anonymous"
+        set_user(cfg, identity)
         return cfg
 
     async def store_memory(

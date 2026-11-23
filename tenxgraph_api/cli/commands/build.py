@@ -1,6 +1,6 @@
 """Build command implementation."""
 
-import json
+import os
 import re
 import tomllib
 from pathlib import Path
@@ -11,14 +11,15 @@ from pydantic import ValidationError as PydanticValidationError
 from tenxgraph_api.cli.capabilities import truthy_env
 from tenxgraph_api.cli.commands import BaseCommand
 from tenxgraph_api.cli.commands.build_prompts import ask_questions
-from tenxgraph_api.cli.config_editor.validation import production_readiness_warnings
+from tenxgraph_api.cli.config_editor.validation import readiness_lines
 from tenxgraph_api.cli.constants import (
     DEFAULT_CONFIG_FILE,
     DEFAULT_PORT,
     DEFAULT_PYTHON_VERSION,
     DEFAULT_SERVICE_NAME,
+    REQUIREMENTS_PATHS,
 )
-from tenxgraph_api.cli.core.config import resolve_default_config
+from tenxgraph_api.cli.core.config import read_config_json, resolve_default_config
 from tenxgraph_api.cli.core.validation import Validator
 from tenxgraph_api.cli.exceptions import DockerError, FileOperationError, ValidationError
 from tenxgraph_api.cli.templates.defaults import (
@@ -31,7 +32,6 @@ from tenxgraph_api.cli.templates.defaults import (
     merge_ignore_patterns,
 )
 from tenxgraph_api.jobs.config import WorkerConfig
-from tenxgraph_api.src.app.core.auth.auth_config import check_auth_config
 
 
 # The pip extra of 10xgraph-api that installs each broker's TaskIQ packages.
@@ -44,11 +44,8 @@ class BuildCommand(BaseCommand):
     def _read_worker_config(self) -> WorkerConfig | None:
         """The ``worker`` key of the project config, or None when there is none to read."""
         config_path = resolve_default_config(DEFAULT_CONFIG_FILE)
-        try:
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        raw = config.get("worker") if isinstance(config, dict) else None
+        config = read_config_json(config_path)
+        raw = config.get("worker") if config else None
         if raw is None:
             return None
         try:
@@ -61,20 +58,12 @@ class BuildCommand(BaseCommand):
     def _warn_not_production_ready(self) -> None:
         """Warn about settings in the project config that are risky in production."""
         config_path = resolve_default_config(DEFAULT_CONFIG_FILE)
-        try:
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            self.logger.debug("Skipping the production-readiness check: %s", exc)
+        config = read_config_json(config_path)
+        if config is None:
+            self.logger.debug("Skipping the production-readiness check: no readable config")
             return
-        if not isinstance(config, dict):
-            return
-        # auth findings come from the shared auth rules below
-        for issue in production_readiness_warnings(config):
-            if issue["path"] not in ("auth", "authorization"):
-                self.output.warning(f"{issue['path']}: {issue['message']}")
-        for auth_issue in check_auth_config(config, production=True):
-            suffix = " (the image would not boot)" if auth_issue.level == "error" else ""
-            self.output.warning(f"{auth_issue}{suffix}")
+        for line in readiness_lines(config, error_suffix=" (the image would not boot)"):
+            self.output.warning(line)
 
     def execute(  # noqa: PLR0912, PLR0913, PLR0915
         self,
@@ -123,6 +112,11 @@ class BuildCommand(BaseCommand):
                 "Generate Dockerfile (and optional docker-compose.yml) for production image",
                 color="yellow",
             )
+
+            # Write next to the project config, wherever the command is run from.
+            project_config = resolve_default_config(DEFAULT_CONFIG_FILE)
+            if project_config.exists():
+                os.chdir(project_config.parent)
 
             worker_config = self._read_worker_config()
             can_run_worker = worker_config is not None and worker_config.broker.type != "memory"
@@ -334,14 +328,8 @@ class BuildCommand(BaseCommand):
             Tuple of (found_files_list, chosen_filename_str)
         """
         requirements_files = []
-        requirements_paths = [
-            current_dir / "requirements.txt",
-            current_dir / "requirements" / "requirements.txt",
-            current_dir / "requirements" / "base.txt",
-            current_dir / "requirements" / "production.txt",
-        ]
-
-        for req_path in requirements_paths:
+        for name in REQUIREMENTS_PATHS:
+            req_path = current_dir / name
             if req_path.exists():
                 requirements_files.append(req_path)
 

@@ -230,8 +230,8 @@ def _pg(id_type) -> PgCheckpointer:
 )
 def test_a_pg_checkpointer_that_cannot_hold_the_ids_refuses_boot(name, column, fix):
     container = InjectQ()
-    graph = _graph(container=container)
-    container.bind_instance(BaseCheckpointer, _pg(column))
+    # The checkpointer goes through compile(), as in a real app: each graph keeps its own.
+    graph = _graph(container=container, checkpointer=_pg(column))
     with pytest.raises(ValueError) as info:
         loader.apply_id_generator(graph, _config(name), container)
     message = str(info.value)
@@ -245,8 +245,8 @@ def test_a_pg_checkpointer_that_cannot_hold_the_ids_refuses_boot(name, column, f
 )
 def test_a_pg_checkpointer_that_holds_the_ids_boots(name, column):
     container = InjectQ()
-    graph = _graph(container=container)
-    container.bind_instance(BaseCheckpointer, _pg(column))
+    # The checkpointer goes through compile(), as in a real app: each graph keeps its own.
+    graph = _graph(container=container, checkpointer=_pg(column))
     assert loader.apply_id_generator(graph, _config(name), container) is not None
 
 

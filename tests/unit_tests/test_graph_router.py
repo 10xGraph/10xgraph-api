@@ -38,7 +38,7 @@ def mock_service():
     # but we can mock it as returning an async iterable or mock object
     service.stream_graph = MagicMock()
     service.runs_policy = MagicMock(return_value=RunsConfig())
-    service.check_media_urls = MagicMock()
+    service.check_run_input = MagicMock()
     return service
 
 
@@ -63,7 +63,12 @@ async def test_invoke_graph_endpoint(mock_request, mock_service, mock_user):
             identity=mock_user,
         )
         assert res == {"status": "success"}
-        mock_service.invoke_graph.assert_called_once_with(graph_input, mock_user, credential=None)
+        mock_service.invoke_graph.assert_called_once_with(
+            graph_input,
+            mock_user,
+            credential=None,
+            checks=mock_service.check_run_input.return_value,
+        )
         mock_success.assert_called_once()
 
 
@@ -86,7 +91,12 @@ async def test_stream_graph_endpoint(mock_service, mock_user):
             identity=mock_user,
         )
         assert res == "streaming_response_obj"
-        mock_service.stream_graph.assert_called_once_with(graph_input, mock_user, credential=None)
+        mock_service.stream_graph.assert_called_once_with(
+            graph_input,
+            mock_user,
+            credential=None,
+            checks=mock_service.check_run_input.return_value,
+        )
         mock_streaming_response.assert_called_once()
 
 
@@ -190,7 +200,7 @@ async def test_client_thread_id_is_escaped_in_development_logs(
 ):
     caplog.set_level("INFO")
     with (
-        patch(f"{ROUTER_MODULE}._is_production", return_value=False),
+        patch(f"{ROUTER_MODULE}.is_production", return_value=False),
         patch(f"{ROUTER_MODULE}.success_response"),
     ):
         await _call_thread_endpoints([endpoint], mock_request, mock_service, mock_user)
@@ -205,7 +215,7 @@ async def test_client_thread_id_lines_not_emitted_in_production(
 ):
     caplog.set_level("DEBUG")
     with (
-        patch(f"{ROUTER_MODULE}._is_production", return_value=True),
+        patch(f"{ROUTER_MODULE}.is_production", return_value=True),
         patch(f"{ROUTER_MODULE}.success_response"),
     ):
         await _call_thread_endpoints(

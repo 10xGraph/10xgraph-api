@@ -7,7 +7,15 @@ preventing tokens, passwords, and other credentials from appearing in logs.
 
 import logging
 import re
+import sys
 from typing import Any
+
+from tenxgraph.utils.log_safety import log_safe as _core_log_safe
+
+
+def log_safe(value: object) -> str:
+    """``value`` as one log line, escaped by core's rule. Not cut: API logs carry full errors."""
+    return _core_log_safe(value, limit=sys.maxsize)
 
 
 # Words that mark a field name as sensitive. A key is split into words (on ``_``, ``-``, ``.``,
@@ -76,23 +84,6 @@ _INLINE_SECRET_PATTERNS = (
         r"\1***REDACTED***",
     ),
 )
-
-
-_LOG_ESCAPES = {
-    **{code: f"\\x{code:02x}" for code in [*range(0x20), 0x7F] if code != ord("\t")},
-    ord("\r"): "\\r",
-    ord("\n"): "\\n",
-}
-
-
-def log_safe(value: Any) -> str:
-    """``value`` as a single log line, for client-influenced values such as ids and paths.
-
-    CR and LF are escaped so a value cannot end the entry and forge a new one. Other control
-    characters (ESC and the rest of C0, DEL) are written as ``\\xNN`` so a terminal that
-    tails the log does not act on them. Tab is kept.
-    """
-    return str(value).translate(_LOG_ESCAPES)
 
 
 def redact_text(text: str) -> str:

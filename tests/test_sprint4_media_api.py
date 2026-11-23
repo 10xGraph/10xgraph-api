@@ -109,7 +109,7 @@ class TestMediaService:
         with patch.object(
             svc.pipeline.extractor, "extract", new_callable=AsyncMock, return_value="Cached!"
         ):
-            result = await svc.upload_file(b"%PDF data", "report.pdf", "application/pdf")
+            result = await svc.upload_file(b"%PDF-1.4 data", "report.pdf", "application/pdf")
         assert svc.get_cached_extraction(result["file_id"]) == "Cached!"
         assert await svc.aget_cached_extraction(result["file_id"]) == "Cached!"
         assert svc.get_cached_extraction("missing") is None

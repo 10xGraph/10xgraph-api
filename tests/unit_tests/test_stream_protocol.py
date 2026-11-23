@@ -23,7 +23,9 @@ def _reset_shutdown():
 
 
 def _service(chunks) -> GraphService:
-    async def stream_chunks(self, graph_input, user, server_config=None, credential=None):
+    async def stream_chunks(
+        self, graph_input, user, server_config=None, credential=None, checks=None
+    ):
         for chunk in chunks:
             yield chunk
 
@@ -66,6 +68,7 @@ async def test_router_labels_the_stream_ndjson():
     )
     service = MagicMock()
     service.require_run_thread = AsyncMock()
+    service.check_inline_media = AsyncMock()
     guard = MagicMock()
     with (
         patch(

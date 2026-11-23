@@ -116,7 +116,7 @@ async def test_ws_unknown_name_is_error_chunk_before_run():
     websocket.send_text = AsyncMock()
     graph_input = MagicMock(messages=[], config={"model": "nope"})
 
-    assert await _ws_media_urls_allowed(websocket, svc, graph_input) is False
+    assert await _ws_media_urls_allowed(websocket, svc, graph_input) is None
     sent = json.loads(websocket.send_text.await_args.args[0])
     assert sent["event"] == "error"
     assert "not registered" in sent["data"]["reason"]
@@ -172,7 +172,7 @@ def test_production_keeps_model_message(monkeypatch):
 
 def test_error_handler_keeps_message_in_production(monkeypatch):
     settings = MagicMock(MODE="production")
-    monkeypatch.setattr(handle_errors, "get_settings", lambda: settings)
+    monkeypatch.setattr("tenxgraph_api.src.app.core.config.settings.get_settings", lambda: settings)
     app = FastAPI()
     app.add_middleware(RequestIDMiddleware)
     handle_errors.init_errors_handler(app)

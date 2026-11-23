@@ -17,7 +17,7 @@ class TestConfigManager:
     def temp_config_file(self):
         """Create a temporary config file for testing."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            config_data = {"agent": "test_agent", "env": ".env"}
+            config_data = {"agent": "test_agent:app", "env": ".env"}
             json.dump(config_data, f)
             temp_path = f.name
         yield temp_path
@@ -64,7 +64,7 @@ class TestConfigManager:
     def test_find_config_file_relative_path(self, temp_dir):
         """Test finding config file with relative path."""
         config_file = Path(temp_dir) / "config.json"
-        config_file.write_text(json.dumps({"agent": "test"}))
+        config_file.write_text(json.dumps({"agent": "test:app"}))
 
         manager = ConfigManager()
         # This should search in various locations
@@ -87,7 +87,7 @@ class TestConfigManager:
         """Test auto-discovering config file."""
         # Create a config file in temp directory
         config_path = Path(temp_dir) / "10xgraph.json"
-        config_path.write_text(json.dumps({"agent": "test"}))
+        config_path.write_text(json.dumps({"agent": "test:app"}))
 
         # Change to temp directory for discovery
         import os
@@ -130,14 +130,14 @@ class TestConfigManager:
         """Test loading config with explicit path."""
         manager = ConfigManager()
         config = manager.load_config(temp_config_file)
-        assert config["agent"] == "test_agent"
+        assert config["agent"] == "test_agent:app"
         assert config["env"] == ".env"
 
     def test_load_config_with_manager_path(self, temp_config_file):
         """Test loading config using manager's stored path."""
         manager = ConfigManager(config_path=temp_config_file)
         config = manager.load_config()
-        assert config["agent"] == "test_agent"
+        assert config["agent"] == "test_agent:app"
 
     def test_load_config_invalid_json(self, temp_dir):
         """Test loading config with invalid JSON."""
@@ -172,28 +172,14 @@ class TestConfigManager:
         with pytest.raises(ConfigurationError) as exc_info:
             config_data = json.loads(config_file.read_text())
             manager._validate_config(config_data)
-        assert "must be a string" in str(exc_info.value)
-
-    def test_get_config_without_loading(self):
-        """Test getting config without loading first."""
-        manager = ConfigManager()
-        with pytest.raises(ConfigurationError) as exc_info:
-            manager.get_config()
-        assert "No configuration loaded" in str(exc_info.value)
-
-    def test_get_config_after_loading(self, temp_config_file):
-        """Test getting config after loading."""
-        manager = ConfigManager()
-        manager.load_config(temp_config_file)
-        config = manager.get_config()
-        assert config["agent"] == "test_agent"
+        assert "must be 'module:attribute'" in str(exc_info.value)
 
     def test_get_config_value_simple_key(self, temp_config_file):
         """Test getting config value with simple key."""
         manager = ConfigManager()
         manager.load_config(temp_config_file)
         value = manager.get_config_value("agent")
-        assert value == "test_agent"
+        assert value == "test_agent:app"
 
     def test_get_config_value_with_default(self, temp_config_file):
         """Test getting config value with default."""
@@ -205,7 +191,10 @@ class TestConfigManager:
     def test_get_config_value_dot_notation(self, temp_dir):
         """Test getting config value using dot notation."""
         config_file = Path(temp_dir) / "config.json"
-        config_data = {"agent": "test", "settings": {"debug": True, "nested": {"value": "deep"}}}
+        config_data = {
+            "agent": "test:app",
+            "settings": {"debug": True, "nested": {"value": "deep"}},
+        }
         config_file.write_text(json.dumps(config_data))
 
         manager = ConfigManager()
@@ -231,7 +220,7 @@ class TestConfigManager:
         env_file = Path(temp_dir) / ".env"
         env_file.write_text("KEY=value")
 
-        config_data = {"agent": "test", "env": ".env"}
+        config_data = {"agent": "test:app", "env": ".env"}
         config_file.write_text(json.dumps(config_data))
 
         manager = ConfigManager()
@@ -244,7 +233,7 @@ class TestConfigManager:
     def test_resolve_env_file_not_exists(self, temp_dir):
         """Test resolving non-existent environment file."""
         config_file = Path(temp_dir) / "config.json"
-        config_data = {"agent": "test", "env": ".env"}
+        config_data = {"agent": "test:app", "env": ".env"}
         config_file.write_text(json.dumps(config_data))
 
         manager = ConfigManager()
@@ -259,7 +248,7 @@ class TestConfigManager:
         env_file.write_text("KEY=value")
 
         config_data = {
-            "agent": "test",
+            "agent": "test:app",
             "env": str(env_file),  # Absolute path
         }
         config_file.write_text(json.dumps(config_data))
@@ -274,7 +263,7 @@ class TestConfigManager:
         """Test resolving env file when none is configured."""
         config_file = Path(temp_dir) / "config.json"
         config_data = {
-            "agent": "test"
+            "agent": "test:app"
             # No 'env' field
         }
         config_file.write_text(json.dumps(config_data))
@@ -287,7 +276,7 @@ class TestConfigManager:
     def test_load_config_file_read_error(self, temp_dir):
         """Test handling file read errors."""
         config_file = Path(temp_dir) / "config.json"
-        config_file.write_text(json.dumps({"agent": "test"}))
+        config_file.write_text(json.dumps({"agent": "test:app"}))
 
         manager = ConfigManager()
         found_path = config_file
@@ -296,14 +285,14 @@ class TestConfigManager:
         try:
             with found_path.open("r", encoding="utf-8") as f:
                 config_data = json.load(f)
-            assert config_data["agent"] == "test"
+            assert config_data["agent"] == "test:app"
         except Exception as e:
             pytest.fail(f"Should not raise exception: {e}")
 
     def test_validate_config_valid_config(self):
         """Test validating a valid config."""
         manager = ConfigManager()
-        config_data = {"agent": "test_agent"}
+        config_data = {"agent": "test_agent:app"}
         # Should not raise exception
         manager._validate_config(config_data)
 
@@ -321,7 +310,7 @@ class TestConfigManager:
         config_data = {"agent": 123}
         with pytest.raises(ConfigurationError) as exc_info:
             manager._validate_config(config_data)
-        assert "must be a string" in str(exc_info.value)
+        assert "must be 'module:attribute'" in str(exc_info.value)
 
 
 class TestLegacyConfigName:

@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import Message
 from tenxgraph.core.state.message_block import DocumentBlock, TextBlock
+from tenxgraph.storage.media import MediaFetchPolicy
 from tenxgraph.utils.media_scheme import MEDIA_SCHEME, is_internal_media_url, strip_media_scheme
 
 from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
@@ -31,19 +32,9 @@ class MediaURLBlockedError(HTTPException, ClientInputError):
 
 
 def resolve_media_policy(graph: Any) -> Any:
-    """The graph's media fetch policy, or ``None`` when the installed core has none.
-
-    Core exposes ``compiled_graph.media_policy``. Without it (older core) the default
-    ``MediaFetchPolicy`` is used when importable; with neither, the URL check is skipped.
-    """
+    """The graph's media fetch policy (``compiled_graph.media_policy``), else the default."""
     policy = getattr(graph, "media_policy", None)
-    if policy is not None:
-        return policy
-    try:
-        from tenxgraph.storage.media import MediaFetchPolicy
-    except ImportError:
-        return None
-    return MediaFetchPolicy()
+    return policy if policy is not None else MediaFetchPolicy()
 
 
 def external_media_urls(message: Message | dict[str, Any]) -> list[str]:

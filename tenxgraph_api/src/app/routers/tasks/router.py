@@ -23,9 +23,9 @@ from tenxgraph_api.jobs.worker import broker
 from tenxgraph_api.src.app.core.audit import audit_event
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
 from tenxgraph_api.src.app.core.cache_store import BaseCacheStore
-from tenxgraph_api.src.app.core.config.settings import get_settings
+from tenxgraph_api.src.app.core.config.settings import is_production
+from tenxgraph_api.src.app.core.redis_client import identity_key
 from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
-from tenxgraph_api.src.app.routers.graph.run_limits import identity_key
 from tenxgraph_api.src.app.utils.response_helper import success_response
 
 from .schemas import Schedule, ScheduleChange, ScheduleRecord, TaskCall
@@ -115,7 +115,7 @@ def _error_text(error: Any) -> str | None:
         return None
     if not isinstance(error, BaseException):
         return str(error)
-    if get_settings().MODE == "production":
+    if is_production():
         return type(error).__name__  # task errors may carry internal details
     return f"{type(error).__name__}: {error}"
 

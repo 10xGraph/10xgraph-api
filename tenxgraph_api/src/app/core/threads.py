@@ -10,12 +10,24 @@ from __future__ import annotations
 
 from typing import Any
 
-from tenxgraph.core.authz import Identity, Reach
+from tenxgraph.core.authz import CREDENTIAL_KEY, Identity, Reach, UserCredential
 from tenxgraph.core.exceptions import ThreadNotFoundError
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.utils.thread_info import ThreadInfo
 
 from tenxgraph_api.src.app.core.audit import audit_not_found
+
+
+def set_user(
+    config: dict[str, Any], user: Identity | None, credential: UserCredential | None = None
+) -> None:
+    """Put the caller into a config: ``user_id`` ("anonymous" with auth off), identity and,
+    for runs that call tools, the caller's credential (``BaseAuth.downstream_credential``)."""
+    config["user_id"] = user.user_id if user is not None else "anonymous"
+    if user is not None:
+        config["user"] = user
+    if credential is not None:
+        config[CREDENTIAL_KEY] = credential
 
 
 async def require_thread(
@@ -38,12 +50,8 @@ async def require_thread(
     """
     if run and identity is not None and identity.reach is not Reach.OWN:
         identity = identity.model_copy(update={"reach": Reach.OWN})
-    config: dict[str, Any] = {
-        "thread_id": thread_id,
-        "user_id": identity.user_id if identity is not None else "anonymous",
-    }
-    if identity is not None:
-        config["user"] = identity
+    config: dict[str, Any] = {"thread_id": thread_id}
+    set_user(config, identity)
     thread = await checkpointer.aget_thread(config)
     if thread is not None:
         return thread

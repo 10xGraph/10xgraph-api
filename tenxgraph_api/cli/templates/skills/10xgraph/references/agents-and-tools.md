@@ -257,12 +257,12 @@ agent = Agent(model="o4-mini", api_style="responses")  # Responses API
 
 ## ToolNode
 
-`ToolNode` registers and executes callable tools. It supports local Python functions, MCP tools, Composio integrations, and dynamically added tools.
+`ToolNode` registers and executes callable tools. It supports local Python functions, MCP tools, and dynamically added tools.
 
 ```python
 from tenxgraph.core.graph import ToolNode
 
-tool_node = ToolNode([get_weather, safe_calculator])
+tool_node = ToolNode([get_weather, lookup_order])
 
 # Add a tool after creation
 tool_node.add_tool(search_db)

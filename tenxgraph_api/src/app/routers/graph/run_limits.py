@@ -26,7 +26,7 @@ from tenxgraph.core.authz import Identity
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
 from tenxgraph_api.src.app.core.leases import Lease, lease_manager
-from tenxgraph_api.src.app.core.redis_client import key_part
+from tenxgraph_api.src.app.core.redis_client import identity_key
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 
 
@@ -36,21 +36,6 @@ RUN_CAP_RETRY_AFTER_SECONDS = 5
 
 # A slot that was never counted (no identity, or no cap).
 RunSlot = Lease
-
-
-def identity_key(user: Identity | None) -> str:
-    """The cache-key part for a caller: ``user_id`` and then each tenant column and value.
-
-    The same ``user_id`` in two tenants is two callers, so their run caps and idempotency
-    records never mix. Each part is ``key_part``-encoded (no ``:`` inside), so the joined key
-    reads back one way. Without tenant values it is ``key_part(user_id)``, as before.
-    """
-    if user is None:
-        return "anonymous"
-    parts = [user.user_id]
-    for column, value in sorted(user.tenant.items()):
-        parts += [column, value]
-    return ":".join(key_part(part) for part in parts)
 
 
 def run_slot_key(user: Identity) -> str:

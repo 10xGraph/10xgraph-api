@@ -30,11 +30,16 @@ Standard tool-calling loop. The LLM calls tools in a loop until it has enough in
 
 ```python
 from tenxgraph.prebuilt.agent import ReactAgent
-from tenxgraph.prebuilt.tools import fetch_url, safe_calculator
+from tenxgraph.utils.decorators import tool
+
+@tool
+def word_count(text: str) -> int:
+    """Count the words in a text."""
+    return len(text.split())
 
 agent = ReactAgent(
     model="gpt-4o",
-    tools=[fetch_url, safe_calculator],
+    tools=[word_count],
     system_prompt=[{"role": "system", "content": "You are a research assistant."}],
 )
 app = agent.compile()
@@ -173,11 +178,16 @@ Breaks complex tasks into a Plan → Act → Reflect loop. The planner creates a
 
 ```python
 from tenxgraph.prebuilt.agent import PlanActReflectAgent
-from tenxgraph.prebuilt.tools import fetch_url, google_web_search
+from tenxgraph.utils.decorators import tool
+
+@tool
+def search_docs(query: str) -> str:
+    """Search the internal docs."""
+    ...
 
 agent = PlanActReflectAgent(
     model="gpt-4o",
-    tools=[fetch_url, google_web_search],
+    tools=[search_docs],
     system_prompt=[{"role": "system", "content": "You are a thorough research agent."}],
 )
 app = agent.compile()
@@ -220,6 +230,17 @@ A central supervisor LLM routes tasks to specialist worker agents. Each worker i
 
 ```python
 from tenxgraph.prebuilt.agent import SupervisorTeamAgent, WorkerConfig
+from tenxgraph.utils.decorators import tool
+
+@tool
+def search_docs(query: str) -> str:
+    """Search the internal docs."""
+    ...
+
+@tool
+def add(a: float, b: float) -> float:
+    """Add two numbers."""
+    return a + b
 
 agent = SupervisorTeamAgent(
     model="gpt-4o",
@@ -227,13 +248,13 @@ agent = SupervisorTeamAgent(
         WorkerConfig(
             name="researcher",
             model="gpt-4o-mini",
-            tools=[fetch_url, google_web_search],
-            description="Searches the web and fetches URLs.",
+            tools=[search_docs],
+            description="Searches the internal docs.",
         ),
         WorkerConfig(
             name="analyst",
             model="gpt-4o",
-            tools=[safe_calculator],
+            tools=[add],
             description="Performs calculations and data analysis.",
         ),
     ],
@@ -262,12 +283,18 @@ Agents hand off directly to each other — no central supervisor. Each member de
 
 ```python
 from tenxgraph.prebuilt.agent import SwarmAgent, SwarmMemberConfig
+from tenxgraph.utils.decorators import tool
+
+@tool
+def search_docs(query: str) -> str:
+    """Search the internal docs."""
+    ...
 
 agent = SwarmAgent(
     members=[
         SwarmMemberConfig(name="triage",   model="gpt-4o-mini", description="Classifies and routes requests."),
         SwarmMemberConfig(name="billing",  model="gpt-4o",      description="Handles billing questions."),
-        SwarmMemberConfig(name="technical",model="gpt-4o",      tools=[fetch_url], description="Handles tech support."),
+        SwarmMemberConfig(name="technical",model="gpt-4o",      tools=[search_docs], description="Handles tech support."),
     ],
     entry_member="triage",
 )
@@ -376,17 +403,17 @@ app = agent.compile(
 
 ## Prebuilt tools
 
-Import from `tenxgraph.prebuilt.tools`:
+Import from `tenxgraph.prebuilt.tools`. The calculator, fetch, search and file tools (and their `create_*` factories) are deprecated in 1.1.0 and removed in 2.0. They still work and emit a `DeprecationWarning`. Write your own `@tool` or use an MCP server. The examples below that use them still run, but prefer your own tools in new code.
 
 | Tool | Description | Tags |
 |---|---|---|
-| `fetch_url` | Fetch text content from any public HTTP/HTTPS URL. Blocks private IPs. | `["web", "fetch", "network"]` |
-| `safe_calculator` | Evaluate arithmetic expressions without exposing `__builtins__`. | `["math", "calculator"]` |
-| `file_read` | Read a file within the working directory. | `["file", "read"]` |
-| `file_write` | Write or append to a file within the working directory. | `["file", "write"]` |
-| `file_search` | Search files by glob pattern. | `["file", "search"]` |
-| `google_web_search` | Call Google Custom Search API. Needs `GOOGLE_API_KEY` + `GOOGLE_CSE_ID`. | `["search", "web", "google"]` |
-| `vertex_ai_search` | Call Google Vertex AI Search. Needs GCP credentials + `VERTEX_AI_DATA_STORE_ID`. | `["search", "vertex", "google"]` |
+| `fetch_url` (deprecated in 1.1.0) | Fetch text content from any public HTTP/HTTPS URL. Blocks private IPs. | `["web", "fetch", "network"]` |
+| `safe_calculator` (deprecated in 1.1.0) | Evaluate arithmetic expressions without exposing `__builtins__`. | `["math", "calculator"]` |
+| `file_read` (deprecated in 1.1.0) | Read a file within the working directory. | `["file", "read"]` |
+| `file_write` (deprecated in 1.1.0) | Write or append to a file within the working directory. | `["file", "write"]` |
+| `file_search` (deprecated in 1.1.0) | Search files by glob pattern. | `["file", "search"]` |
+| `google_web_search` (deprecated in 1.1.0) | Call Google Custom Search API. Needs `GOOGLE_API_KEY` + `GOOGLE_CSE_ID`. | `["search", "web", "google"]` |
+| `vertex_ai_search` (deprecated in 1.1.0) | Call Google Vertex AI Search. Needs GCP credentials + `VERTEX_AI_DATA_STORE_ID`. | `["search", "vertex", "google"]` |
 | `make_user_memory_tool` | Factory for per-user memory tools (used by `MemoryConfig`). | — |
 | `make_agent_memory_tool` | Factory for agent-scoped memory tools (used by `MemoryConfig`). | — |
 | `create_handoff_tool` | Creates a tool that transfers control to a named agent node. | — |
@@ -440,7 +467,7 @@ agent = Agent(model="gpt-4o", tool_node=tool_node, tools_tags={"search"})
 ### Compose prebuilt and custom tools
 
 ```python
-from tenxgraph.prebuilt.tools import fetch_url, safe_calculator
+from tenxgraph.prebuilt.tools import fetch_url, safe_calculator  # both deprecated in 1.1.0, removed in 2.0
 from tenxgraph.utils.decorators import tool
 
 @tool(tags=["finance"])

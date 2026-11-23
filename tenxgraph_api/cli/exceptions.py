@@ -73,20 +73,6 @@ class FileOperationError(CLIError):
         self.file_path = file_path
 
 
-class TemplateError(CLIError):
-    """Raised when template operations fail."""
-
-    def __init__(self, message: str, template_name: str | None = None) -> None:
-        """Initialize template error.
-
-        Args:
-            message: Error message
-            template_name: Name of the problematic template
-        """
-        super().__init__(message, exit_code=1, code="AF-TEMPLATE-001")
-        self.template_name = template_name
-
-
 class ServerError(CLIError):
     """Raised when server operations fail."""
 

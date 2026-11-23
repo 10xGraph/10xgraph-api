@@ -1,5 +1,7 @@
 import os
+from unittest.mock import patch
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.exceptions import HTTPException
@@ -15,6 +17,7 @@ from tenxgraph.core.exceptions import (
 )
 from tenxgraph.utils.validators import ValidationError
 
+from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.config.setup_middleware import setup_middleware
 from tenxgraph_api.src.app.core.exceptions.handle_errors import (
     _sanitize_error_message,
@@ -25,6 +28,19 @@ from tenxgraph_api.src.app.core.exceptions.user_exception import (
     UserAccountError,
     UserPermissionError,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_mode():
+    """Restore os.environ and the cached settings after each test.
+
+    ``setup_app`` sets MODE and caches settings; without this, a cached "production" survives
+    into later tests (``is_production()`` reads the cache).
+    """
+    with patch.dict(os.environ):
+        get_settings.cache_clear()
+        yield
+    get_settings.cache_clear()
 
 
 HTTP_NOT_FOUND = 404

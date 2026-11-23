@@ -7,7 +7,6 @@ from io import StringIO
 
 from tenxgraph_api.cli.logger import (
     CLILoggerMixin,
-    create_debug_logger,
     get_logger,
     setup_cli_logging,
 )
@@ -64,9 +63,3 @@ def test_custom_stream_is_isolated() -> None:
     assert "visible" in stream.getvalue()
     assert logger.propagate is False
     assert len(logger.handlers) == 1
-
-
-def test_debug_logger_enables_debug_globally() -> None:
-    logger = create_debug_logger("debug")
-    assert logger.getEffectiveLevel() == logging.DEBUG
-    assert logging.getLogger("tenxgraph_api.cli").handlers[0].level == logging.DEBUG

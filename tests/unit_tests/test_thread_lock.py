@@ -52,6 +52,7 @@ def _request():
 def _service(invoke):
     service = MagicMock()
     service.require_run_thread = AsyncMock()  # the caller's own thread
+    service.check_inline_media = AsyncMock()
     service.runs_policy.return_value = RunsConfig()
     service.invoke_graph = invoke
     service.check_resume_target = AsyncMock()
@@ -74,7 +75,7 @@ def _call(service, graph_input):
 async def test_second_invoke_on_a_thread_waits_for_the_first(fresh_locks):
     order, release_first = [], asyncio.Event()
 
-    async def invoke(graph_input, user, credential=None):
+    async def invoke(graph_input, user, credential=None, checks=None):
         order.append("start")
         if len(order) == 1:
             await release_first.wait()
@@ -97,7 +98,7 @@ async def test_second_invoke_on_a_thread_waits_for_the_first(fresh_locks):
 async def test_busy_thread_answers_409_after_the_wait_limit(fresh_locks):
     block = asyncio.Event()
 
-    async def invoke(graph_input, user, credential=None):
+    async def invoke(graph_input, user, credential=None, checks=None):
         await block.wait()
         return {"messages": []}
 
@@ -117,7 +118,7 @@ async def test_busy_thread_answers_409_after_the_wait_limit(fresh_locks):
 async def test_on_busy_cancel_stops_the_running_run_then_runs(fresh_locks):
     stopped, ran = asyncio.Event(), []
 
-    async def invoke(graph_input, user, credential=None):
+    async def invoke(graph_input, user, credential=None, checks=None):
         ran.append(graph_input.on_busy)
         if len(ran) == 1:
             await stopped.wait()
@@ -149,7 +150,7 @@ async def test_on_busy_cancel_on_an_idle_thread_just_runs(fresh_locks):
 async def test_different_threads_run_in_parallel(fresh_locks):
     both_running, running = asyncio.Event(), []
 
-    async def invoke(graph_input, user, credential=None):
+    async def invoke(graph_input, user, credential=None, checks=None):
         running.append(graph_input.config["thread_id"])
         if len(running) == 2:
             both_running.set()
@@ -173,7 +174,7 @@ async def test_lock_is_released_when_the_run_fails(fresh_locks):
 async def test_new_thread_request_takes_no_route_lock(fresh_locks):
     seen = []
 
-    async def invoke(graph_input, user, credential=None):
+    async def invoke(graph_input, user, credential=None, checks=None):
         seen.append(dict(fresh_locks._held))
         return {"messages": []}
 

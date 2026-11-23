@@ -8,11 +8,11 @@ from typing import Any
 
 from tenxgraph_api.cli.constants import (
     CONFIG_FILENAMES,
-    DEFAULT_CONFIG_FILE,
-    LEGACY_CONFIG_FILE,
     PROJECT_ROOT,
 )
 from tenxgraph_api.cli.exceptions import ConfigurationError
+from tenxgraph_api.config_names import CONFIG_FILE, LEGACY_CONFIG_FILE
+from tenxgraph_api.import_path import is_import_path
 
 
 def config_names(config_path: str | Path) -> tuple[str, ...]:
@@ -22,20 +22,35 @@ def config_names(config_path: str | Path) -> tuple[str, ...]:
     any other name is used as given.
     """
     name = str(config_path)
-    if name == DEFAULT_CONFIG_FILE:
-        return (DEFAULT_CONFIG_FILE, LEGACY_CONFIG_FILE)
+    if name == CONFIG_FILE:
+        return (CONFIG_FILE, LEGACY_CONFIG_FILE)
     return (name,)
 
 
 def resolve_default_config(config: str | Path, directory: Path | None = None) -> Path:
-    """Resolve ``config`` against ``directory`` (default: cwd), honoring the legacy name.
+    """Find ``config`` in ``directory`` (default: cwd) or any parent, honoring the legacy name.
 
-    Returns the first existing candidate, or the preferred name when none exists so
-    callers can report or create it.
+    Each directory is checked from the nearest upward; within one directory
+    ``10xgraph.json`` wins over ``agentflow.json``. An absolute ``config`` is used
+    as given. Returns the first existing candidate, or the preferred name in
+    ``directory`` when none exists so callers can report or create it.
     """
-    base = directory or Path.cwd()
-    candidates = [base / name for name in config_names(config)]
-    return next((path for path in candidates if path.exists()), candidates[0])
+    base = (directory or Path.cwd()).resolve()
+    names = config_names(config)
+    for folder in (base, *base.parents):
+        for name in names:
+            if (folder / name).exists():
+                return folder / name
+    return base / names[0]
+
+
+def read_config_json(path: Path) -> dict[str, Any] | None:
+    """The config file as a dict, or None when missing, unreadable, bad JSON or not an object."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 class ConfigManager:
@@ -73,9 +88,11 @@ class ConfigManager:
                 )
             return config_path_obj
 
-        # Search the working directory and its parents first so commands invoked
-        # from a nested package still resolve the nearest 10xGraph project. Within
-        # each directory 10xgraph.json wins over the legacy agentflow.json.
+        # The shared search: working directory and its parents, nearest first.
+        found = resolve_default_config(config_path)
+        if found.exists():
+            return found
+
         names = config_names(config_path)
         search_dirs = [*self._working_tree(), Path(__file__).parent.parent, PROJECT_ROOT]
         search_locations = [directory / name for directory in search_dirs for name in names]
@@ -195,24 +212,11 @@ class ConfigManager:
 
         # Validate agent field
         agent = config_data["agent"]
-        if not isinstance(agent, str):
+        if not is_import_path(agent):
             raise ConfigurationError(
-                "Field 'agent' must be a string",
+                f"Field 'agent' must be 'module:attribute', got {agent!r}",
                 config_path=self.config_path,
             )
-
-    def get_config(self) -> dict[str, Any]:
-        """Get loaded configuration data.
-
-        Returns:
-            Configuration dictionary
-
-        Raises:
-            ConfigurationError: If no config is loaded
-        """
-        if self._config_data is None:
-            raise ConfigurationError("No configuration loaded. Call load_config() first.")
-        return self._config_data
 
     def get_config_value(self, key: str, default: Any = None) -> Any:
         """Get a specific configuration value.
@@ -239,16 +243,17 @@ class ConfigManager:
 
         return value
 
+    def _section(self, key: str) -> dict[str, Any]:
+        raw = self.get_config_value(key, default={})
+        return raw if isinstance(raw, dict) else {}
+
     def get_test_config(self) -> dict[str, Any]:
         """Return the optional 'test' section from 10xgraph.json.
 
         Returns a dict with keys: path, coverage, coverage_threshold.
         All fields are optional; callers should use .get() with their own defaults.
         """
-        raw = self.get_config_value("test", default={})
-        if not isinstance(raw, dict):
-            return {}
-        return raw
+        return self._section("test")
 
     def get_evaluation_config(self) -> dict[str, Any]:
         """Return the optional 'evaluation' section from 10xgraph.json.
@@ -256,10 +261,7 @@ class ConfigManager:
         Returns a dict with keys: directory, output_dir, threshold, timestamp_files.
         All fields are optional; callers should use .get() with their own defaults.
         """
-        raw = self.get_config_value("evaluation", default={})
-        if not isinstance(raw, dict):
-            return {}
-        return raw
+        return self._section("evaluation")
 
     def resolve_env_file(self) -> Path | None:
         """Resolve environment file path from configuration.

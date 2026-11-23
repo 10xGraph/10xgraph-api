@@ -14,7 +14,6 @@ Key helpers:
 - `TestContext`: context manager for creating graphs, agents, stores, and mocks.
 - `MockToolRegistry`: register sync/async mock tools and assert calls.
 - `MockMCPClient`: mock MCP tool listing/calls.
-- `MockComposioAdapter` and `MockLangChainAdapter`: test third-party tool adapter behavior.
 - `InMemoryStore`: deterministic memory store for tests.
 
 Use these instead of real model/provider calls in unit tests.

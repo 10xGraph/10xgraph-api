@@ -1,16 +1,15 @@
 """Config command implementation: a browser editor for ``10xgraph.json``."""
 
-import json
 import webbrowser
 from pathlib import Path
 from typing import Any
 
 from tenxgraph_api.cli.commands import BaseCommand
 from tenxgraph_api.cli.config_editor import ConfigEditorServer
-from tenxgraph_api.cli.config_editor.validation import production_readiness_warnings
+from tenxgraph_api.cli.config_editor.validation import readiness_lines
 from tenxgraph_api.cli.constants import DEFAULT_CONFIG_FILE, LEGACY_CONFIG_FILE
+from tenxgraph_api.cli.core.config import read_config_json, resolve_default_config
 from tenxgraph_api.cli.exceptions import ServerError
-from tenxgraph_api.src.app.core.auth.auth_config import check_auth_config
 
 
 class ConfigCommand(BaseCommand):
@@ -26,11 +25,12 @@ class ConfigCommand(BaseCommand):
         # The editor always writes 10xgraph.json. When only the legacy agentflow.json exists,
         # it starts from that file's contents; the first save creates 10xgraph.json and
         # leaves agentflow.json untouched.
-        config_path = Path(config).expanduser().resolve()
+        found = resolve_default_config(Path(config).expanduser())
+        config_path = found.resolve()
         seed_path = None
-        if config == DEFAULT_CONFIG_FILE and not config_path.exists():
-            legacy = config_path.with_name(LEGACY_CONFIG_FILE)
-            seed_path = legacy if legacy.exists() else None
+        if config == DEFAULT_CONFIG_FILE and found.name == LEGACY_CONFIG_FILE:
+            seed_path = config_path
+            config_path = config_path.with_name(DEFAULT_CONFIG_FILE)
         try:
             server = ConfigEditorServer(config_path, port=port, seed_path=seed_path)
         except OSError as exc:
@@ -68,17 +68,11 @@ class ConfigCommand(BaseCommand):
 
     def _print_readiness_warnings(self, config_path: Path) -> None:
         # Skip silently when the file is missing or not valid JSON; the editor reports that.
-        try:
-            data = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        data = read_config_json(config_path)
+        if data is None:
             return
-        if not isinstance(data, dict):
-            return
-        for issue in production_readiness_warnings(data):
-            if issue["path"] not in ("auth", "authorization"):
-                self.output.warning(f"{issue['path']}: {issue['message']}")
-        for auth_issue in check_auth_config(data, production=True):
-            self.output.warning(str(auth_issue))
+        for line in readiness_lines(data):
+            self.output.warning(line)
 
 
 def _file_note(config_path: Path, seeded: bool, seed_path: Path | None) -> str:

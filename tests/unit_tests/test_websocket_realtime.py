@@ -20,7 +20,7 @@ from tenxgraph_api.src.app.routers.graph.router import realtime_graph_ws
 
 def _router_module():
     # ``routers.graph.router`` the attribute is the APIRouter; patch the module itself.
-    return sys.modules[realtime_graph_ws.__module__]
+    return sys.modules["tenxgraph_api.src.app.routers.graph.router"]
 
 
 @pytest.fixture(autouse=True)
@@ -314,29 +314,18 @@ class TestLiveThreadIds:
 
 
 class TestIsLiveAgent:
-    """GraphService.is_live_agent resolves live detection across core versions."""
+    """GraphService.is_live_agent reads the graph's is_realtime()."""
 
     def _service(self, graph):
         from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
 
         return GraphService(graph=graph, checkpointer=AsyncMock(), config=MagicMock())
 
-    def test_prefers_public_is_realtime(self):
+    def test_reads_is_realtime(self):
         graph = MagicMock()
         graph.is_realtime = MagicMock(return_value=True)
         assert self._service(graph).is_live_agent is True
         graph.is_realtime.return_value = False
-        assert self._service(graph).is_live_agent is False
-
-    def test_falls_back_to_find_live_nodes(self):
-        graph = MagicMock(spec=["_find_live_nodes"])
-        graph._find_live_nodes = MagicMock(return_value=[("audio", object())])
-        assert self._service(graph).is_live_agent is True
-        graph._find_live_nodes.return_value = []
-        assert self._service(graph).is_live_agent is False
-
-    def test_defaults_false_when_no_detection_api(self):
-        graph = MagicMock(spec=[])
         assert self._service(graph).is_live_agent is False
 
 

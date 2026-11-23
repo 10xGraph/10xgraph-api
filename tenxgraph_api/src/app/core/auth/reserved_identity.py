@@ -11,14 +11,10 @@ from __future__ import annotations
 from typing import Any
 
 from tenxgraph.core.authz import Identity
+from tenxgraph.storage.store import SYSTEM_USER_PREFIX
 
 from tenxgraph_api.src.app.core import logger
 
-
-try:
-    from tenxgraph.storage.store import SYSTEM_USER_PREFIX
-except ImportError:  # core older than the release that added the constant
-    SYSTEM_USER_PREFIX = "__system__"
 
 RESERVED_USER_ID_MESSAGE = "This user id is reserved"
 

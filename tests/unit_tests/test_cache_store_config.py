@@ -151,7 +151,13 @@ def test_redis_without_url_uses_the_redis_url_variable(monkeypatch):
     assert own.expanded_url() == "redis://own:6379/2"  # a set url wins over REDIS_URL
     assert own.url_source == "cache_store.url"
     monkeypatch.delenv("REDIS_URL")
-    with pytest.raises(ValueError, match="set cache_store.url in 10xgraph.json, or the REDIS_URL"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"cache_store\.url is required: set it in 10xgraph\.json, "
+            r"or the REDIS_URL environment variable"
+        ),
+    ):
         config.expanded_url()
 
 

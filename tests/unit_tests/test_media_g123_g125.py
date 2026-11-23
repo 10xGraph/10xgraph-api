@@ -27,12 +27,6 @@ class _SlowStore(InMemoryMediaStore):
         return meta
 
 
-class _OldCoreStore(_SlowStore):
-    """A store from a core without modify_metadata."""
-
-    modify_metadata = None
-
-
 class _IndexedStore(BaseMediaStore):
     """Like the cloud store: no list_keys, an owner index instead."""
 
@@ -101,23 +95,6 @@ async def test_concurrent_unlinks_keep_the_rest_and_delete_at_the_end(monkeypatc
     assert (await media.store.get_metadata(key))["threads"] == ["t5"]
     await media.unlink_threads([key], "t5")
     assert not await media.store.exists(key)
-
-
-@pytest.mark.asyncio
-async def test_store_without_modify_metadata_still_links():
-    media = _media(_OldCoreStore())
-    key = await _upload(media)
-    await media.link_threads([key], "t1", "alice")
-    assert (await media.store.get_metadata(key))["threads"] == ["t1"]
-
-
-@pytest.mark.asyncio
-async def test_without_an_atomic_store_concurrent_links_do_lose_updates():
-    # Documents the failure the store-side modify_metadata prevents
-    media = _media(_OldCoreStore())
-    key = await _upload(media)
-    await asyncio.gather(*(media.link_threads([key], f"t{i}", "alice") for i in range(5)))
-    assert len((await media.store.get_metadata(key))["threads"]) < 5
 
 
 @pytest.mark.asyncio

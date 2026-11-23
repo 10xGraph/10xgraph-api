@@ -58,7 +58,10 @@ def test_schema_serves_the_permission_registry() -> None:
     from tenxgraph_api.src.app.core.auth.permissions_registry import REGISTRY
 
     registry = {s["id"]: s for s in build_schema()["sections"]}["auth"]["registry"]
-    assert registry == {resource: list(actions) for resource, actions in REGISTRY.items()}
+    assert registry == {
+        **{resource: list(actions) for resource, actions in REGISTRY.items()},
+        "tools": [],
+    }
 
 
 def _fields() -> dict[str, dict]:
@@ -196,10 +199,7 @@ def test_cache_store_fields_sit_under_cache_store() -> None:
 
 def test_choice_sections_mirror_the_server_names() -> None:
     from tenxgraph_api.cli.config_editor.schema import ID_GENERATOR_NAMES, THREAD_NAME_CHOICES
-    from tenxgraph_api.src.app.core.config import graph_config
 
-    assert ID_GENERATOR_NAMES == graph_config.ID_GENERATOR_NAMES
-    assert THREAD_NAME_CHOICES == graph_config.THREAD_NAME_CHOICES
     assert [c[0] for c in _section("id_generator")["choices"]] == list(ID_GENERATOR_NAMES)
     assert [c[0] for c in _section("thread_name_generator")["choices"]] == list(THREAD_NAME_CHOICES)
 

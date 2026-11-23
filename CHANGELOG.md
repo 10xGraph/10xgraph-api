@@ -27,6 +27,46 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Tool permissions in roles and tokens, for core's `ToolGuard`.** A new `tools` resource
+  takes any tool name as its action: `tools:refund`, `tools:mcp.search-v2`, or `tools:*` for
+  every tool. A tool name is 1 to 128 of `A-Z a-z 0-9 _ - .`; an empty name, whitespace, `:`
+  or any other character refuses to boot in a role and is ignored in a token claim. They work
+  in `auth.roles`, in a `permissions_claim`, and token `scope`/`scopes` narrow them (a
+  `tools:refund` scope narrows a `tools:*` grant to that one tool). `*` now also grants
+  `tools:*`; what it grants for the route permissions is unchanged. The default permission
+  set (auth on, no roles and no permissions claim) has no tool permissions, so a tool behind
+  a `ToolGuard` rule is denied until a role or claim grants it. Tool permissions never grant
+  a route, and a route cannot require one. `10xgraph config` suggests `tools:*` in the role
+  editor.
+
+### Changed
+
+- Upload file names are cleaned by core's `sanitize_filename`: an empty or `..` name is stored as `unnamed` (it was `file`), and leading dots are removed (`.env` becomes `env`).
+- One rule checks every `"module:attr"` value in `10xgraph.json` (`agent`, `checkpointer`, `store`, `injectq`, `auth.path`, `cache_store.path`, `thread_name_generator`, `id_generator`, audit sinks), in the server and every CLI command. A value without a colon, with an empty part or with two colons (`"graph.react:"`, `"a:b:c"`) now fails when the config is read, with one message, instead of failing later at import; a dotted attribute (`"mod:obj.attr"`) now works for every key.
+- `10xgraph eval` loads the agent the same way the server does: a factory function is called, and the config folder is on the import path.
+- `10xgraph config` validates `audit`, `observability`, `test` and `evaluation` with the server's own rules, so it accepts what the server accepts (for example `observability.level: "FULL"`); its messages use the server's wording.
+- On invoke, an unknown model name answers 422 before the thread check, as stream already did.
+- The worker closes the same resources as the API server, in the same order (graph, lease manager, cache store, auth, telemetry); before, it did not close the lease manager or the auth class.
+
+### Fixed
+
+- Every command (`audit`, `build`, `worker`, `scheduler`, `revoke` and `config`, as `dev`, `test` and `eval` already did) now finds `10xgraph.json`, or `agentflow.json`, in the current folder or the nearest parent folder, as the docs say. `build` writes its files and `config` saves next to the config it found.
+- Invoke, stream, WebSocket and AG-UI now give the same error message for the same error. In production, an `UnsupportedMediaInputError` and other client input errors keep their message on every transport (before, stream, WebSocket and AG-UI replaced it with a generic one), and AG-UI no longer sends raw exception text. AG-UI keeps its documented codes (`INVALID_INPUT`, `GRAPH_ERROR`, `AG_UI_ERROR`).
+- On invoke, a database or provider error that the server recognises (no data, an outage, a provider rate limit) now answers 422, 503 with `Retry-After`, or 429, as stream already did, instead of a generic 500.
+- Invoke, fix, stream, WebSocket and AG-UI no longer return provider `raw` payloads or `internal_data` keys other than `error` in messages and state; the thread routes already removed them.
+- Log lines now escape U+2028 and U+2029, so a client value cannot start a new line in text logs. Values are not cut.
+- A WebSocket connection no longer replaces an app's own InjectQ container with the global one during the handshake, so an app built on its own container keeps it on `/v1/graph/ws` and `/v1/graph/live`.
+- A thread resume reads the thread state once before the run (a stream resume read it up to four times), and the media URL and model checks run once per request.
+
+### Security
+
+- Inline media in a run is now checked like an upload before it is stored: the per-user file and size quota, the file signature against the declared type, and the size and pixel limits. Before, a user over the quota could store files by sending them inline. A refused run answers 422 before it starts on invoke and stream, and ends with an error event with the same message on WebSocket and AG-UI; nothing is stored.
+- File signatures and file names are checked by core's `validate_magic_bytes` and `sanitize_filename`, so the API and core apply one rule.
+
 ## [1.0.0] - 2026-11-16
 
 The first stable release of `10xgraph-api`. It requires `10xgraph` 1.0 and is released with

@@ -17,21 +17,14 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
+from tenxgraph.storage.sql_filter import (
+    MAX_CONDITIONS,
+    FilterError,
+    FilterSchema,
+    validate_filters,
+)
+
 from tenxgraph_api.src.app.core.validation.request_config import ClientInputError, structure_error
-
-
-try:  # core >= 1.0.0 (safe filters); older cores have no column filters at all
-    from tenxgraph.storage.sql_filter import (
-        MAX_CONDITIONS,
-        FilterError,
-        FilterSchema,
-        validate_filters,
-    )
-except ImportError:  # pragma: no cover - exercised only against an older core
-    MAX_CONDITIONS = 10
-    FilterError = None  # type: ignore[assignment,misc]
-    FilterSchema = None  # type: ignore[assignment,misc]
-    validate_filters = None  # type: ignore[assignment]
 
 
 # Longest ``GET /v1/threads?filters=...`` value accepted. Ten conditions with long values and an

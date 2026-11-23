@@ -4,6 +4,7 @@ from hypothesis import strategies as st
 from pydantic import ValidationError
 from tenxgraph.core.authz import Reach
 
+from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
 from tenxgraph_api.src.app.core.auth.permissions_registry import (
     ALL_PERMISSIONS,
     DEFAULT_PERMISSIONS,
@@ -309,7 +310,7 @@ def test_narrowing_never_widens(scope, roles):
     base = resolve({**BASE, "org_id": "a", "roles": roles}, rbac())
     narrowed = resolve({**BASE, "org_id": "a", "roles": roles, "scope": scope}, rbac())
     assert narrowed.permissions <= base.permissions
-    assert narrowed.permissions <= ALL_PERMISSIONS
+    assert narrowed.permissions <= ALL_PERMISSIONS | {"tools:*"}
     assert narrowed.reach is base.reach
 
 
@@ -416,3 +417,132 @@ def test_unknown_permission_shaped_scope_narrows_to_nothing(scope):
 def test_unknown_scope_entry_does_not_add_to_known_one():
     identity = resolve({"user_id": "u1", "scope": "openid threads:read checkpointer:write"}, None)
     assert identity.permissions == frozenset({"threads:read"})
+
+
+# ---- tool permissions (core ToolGuard checks them with Identity.can)
+
+
+def tool_roles() -> RbacConfig:
+    return cfg(
+        roles={
+            "support": {
+                "permissions": ["graph:*", "tools:refund", "tools:mcp.search-v2"],
+                "reach": "own",
+            },
+            "agent": {"permissions": ["graph:read", "tools:*"], "reach": "own"},
+            "super": {"permissions": ["*"], "reach": "own"},
+            "plain": {"permissions": ["graph:*"], "reach": "own"},
+        }
+    )
+
+
+def test_role_tool_permissions_reach_identity():
+    ident = resolve({**BASE, "roles": ["support"]}, tool_roles())
+    assert {"tools:refund", "tools:mcp.search-v2"} <= ident.permissions
+    assert ident.can("tools:refund")
+    assert ident.can("tools:mcp.search-v2")
+    assert not ident.can("tools:delete_account")
+
+
+def test_role_tools_star_kept_literally():
+    ident = resolve({**BASE, "roles": ["agent"]}, tool_roles())
+    assert ident.permissions == {"graph:read", "tools:*"}
+    assert ident.can("tools:refund")
+    assert ident.can("tools:anything_else")
+
+
+def test_star_role_passes_any_tool():
+    ident = resolve({**BASE, "roles": ["super"]}, tool_roles())
+    assert ident.permissions == ALL_PERMISSIONS | {"tools:*"}
+    assert ident.can("tools:x")
+    assert ident.can("admin:write")
+
+
+def test_role_without_tools_denied():
+    ident = resolve({**BASE, "roles": ["plain"]}, tool_roles())
+    assert not ident.can("tools:refund")
+
+
+def test_inherited_tool_permissions():
+    c = cfg(
+        roles={
+            "base": {"permissions": ["tools:refund"], "reach": "own"},
+            "child": {"inherits": ["base"], "permissions": ["graph:read"], "reach": "own"},
+        }
+    )
+    assert c.role_permissions("child") == {"graph:read", "tools:refund"}
+
+
+@pytest.mark.parametrize("bad", ["tools:", "tools: refund", "tools:a b", "tools:a:b", "tools:a/b"])
+def test_malformed_tool_permission_refuses_boot(bad):
+    with pytest.raises(ValidationError, match="role 'r'"):
+        cfg(roles={"r": {"permissions": [bad], "reach": "own"}})
+
+
+def test_default_permissions_grant_no_tools():
+    ident = resolve(dict(BASE), None)
+    assert ident.permissions == DEFAULT_PERMISSIONS
+    assert not ident.can("tools:refund")
+    assert not ident.can("tools:*")
+
+
+def test_permissions_claim_keeps_tools():
+    c = cfg(permissions_claim="perms")
+    ident = resolve({**BASE, "perms": ["graph:read", "tools:refund", "tools:", "tools:a b"]}, c)
+    assert ident.permissions == {"graph:read", "tools:refund"}
+    assert ident.can("tools:refund")
+    assert not ident.can("tools:other")
+    star = resolve({**BASE, "perms": "tools:*"}, c)
+    assert star.permissions == {"tools:*"}
+    assert star.can("tools:other")
+    assert resolve({**BASE, "perms": ["*"]}, c).can("tools:other")
+
+
+def test_scope_narrows_tools_star_to_one_tool():
+    ident = resolve({**BASE, "roles": ["agent"], "scope": "graph:read tools:refund"}, tool_roles())
+    assert ident.permissions == {"graph:read", "tools:refund"}
+    assert ident.can("tools:refund")
+    assert not ident.can("tools:other")
+
+
+def test_scope_star_keeps_granted_tools():
+    ident = resolve({**BASE, "roles": ["support"], "scope": "tools:*"}, tool_roles())
+    assert ident.permissions == {"tools:refund", "tools:mcp.search-v2"}
+
+
+def test_scope_without_tools_drops_tools():
+    ident = resolve({**BASE, "roles": ["super"], "scope": "graph:read"}, tool_roles())
+    assert ident.permissions == {"graph:read"}
+    assert not ident.can("tools:x")
+
+
+def test_scope_cannot_add_tools():
+    ident = resolve(
+        {**BASE, "roles": ["plain"], "scope": "graph:read tools:refund tools:*"}, tool_roles()
+    )
+    assert ident.permissions == {"graph:read"}
+    assert resolve({**BASE, "scope": "tools:*"}, None).permissions == frozenset()
+
+
+@pytest.mark.parametrize("granted", [["tools:*"], ["tools:refund"], ["*"], ["tools:a", "tools:b"]])
+@pytest.mark.parametrize("scope", ["tools:*", "tools:refund", "tools:a", "*", "graph:read"])
+def test_tool_narrowing_never_widens(granted, scope):
+    c = cfg(permissions_claim="perms")
+    base = resolve({**BASE, "perms": granted}, c)
+    narrowed = resolve({**BASE, "perms": granted, "scope": scope}, c)
+    for tool in ("tools:refund", "tools:a", "tools:b", "tools:zzz"):
+        if narrowed.can(tool):
+            assert base.can(tool)
+
+
+def test_tools_never_grant_route_permissions():
+    c = cfg(roles={"t": {"permissions": ["tools:*", "tools:graph"], "reach": "own"}})
+    ident = resolve({**BASE, "roles": ["t"]}, c)
+    assert ident.permissions == {"tools:*", "tools:graph"}
+    assert not any(ident.can(permission) for permission in ALL_PERMISSIONS)
+
+
+@pytest.mark.parametrize("action", ["refund", "*"])
+def test_route_cannot_require_tool_permission(action):
+    with pytest.raises(ValueError, match="Unknown permission"):
+        RequirePermission("tools", action)

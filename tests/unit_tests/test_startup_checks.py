@@ -5,7 +5,10 @@
 import asyncio
 import json
 import logging
+import os
+import signal
 import socket
+import time
 from unittest.mock import AsyncMock
 
 import httpx
@@ -325,6 +328,45 @@ async def test_redis_cache_store_at_a_closed_port_names_the_endpoint_not_the_pas
     assert "required by rate_limit.fail_open=false" in message
     assert "s3cret" not in message
     assert "s3cret" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_sigint_stops_the_gate_and_restores_the_handlers(caplog):
+    """Ctrl+C during the retry window ends the gate at once; the previous handler still runs."""
+    calls = []
+
+    def previous(signum, _frame):
+        calls.append(signum)
+
+    original = signal.signal(signal.SIGINT, previous)
+    term_before = signal.getsignal(signal.SIGTERM)
+    try:
+        container = _container(checkpointer=_Pinged(ConnectionError("db down")))
+        asyncio.get_running_loop().call_later(0.2, os.kill, os.getpid(), signal.SIGINT)
+        started = time.monotonic()
+        with caplog.at_level(logging.WARNING, logger="tenxgraph_api.startup"):
+            with pytest.raises(StartupCheckError, match="interrupted by signal"):
+                await check_backends_at_startup(container, timeout=60)
+        assert time.monotonic() - started < 2
+        assert calls == [signal.SIGINT]
+        assert signal.getsignal(signal.SIGINT) is previous
+        assert signal.getsignal(signal.SIGTERM) is term_before
+        assert "Startup check interrupted by signal; not starting" in caplog.text
+        assert asyncio.current_task().cancelling() == 0
+    finally:
+        signal.signal(signal.SIGINT, original)
+
+
+@pytest.mark.asyncio
+async def test_cancellation_without_a_signal_still_propagates():
+    before = signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)
+    container = _container(checkpointer=_Pinged(ConnectionError("db down")))
+    task = asyncio.ensure_future(check_backends_at_startup(container, timeout=60))
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)) == before
 
 
 # ---------------------------------------------------------------- lifespan

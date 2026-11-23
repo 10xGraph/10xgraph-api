@@ -21,7 +21,7 @@ from typing import Any
 from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from tenxgraph_api.src.app.core.config.settings import get_settings
+from tenxgraph_api.src.app.core.config.settings import is_production
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.utils import error_response
 
@@ -118,7 +118,7 @@ def unexpected_error_response(request: Request, exc: BaseException):
         message = kind.message
     else:
         message = kind.message
-    if get_settings().MODE != "production" and kind.status_code == 500:  # noqa: PLR2004
+    if not is_production() and kind.status_code == 500:  # noqa: PLR2004
         message = f"{type(exc).__name__}: {log_safe(exc)}"
     response = error_response(
         request, error_code=kind.error_code, message=message, status_code=kind.status_code

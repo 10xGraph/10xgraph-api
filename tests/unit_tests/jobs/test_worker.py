@@ -267,3 +267,54 @@ async def test_worker_without_metrics_block_sets_no_provider(monkeypatch, tmp_pa
     assert state.meter_provider is None
     await worker.worker_shutdown(state)
     get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_worker_closes_leases_before_the_cache_store_like_the_api(monkeypatch, tmp_path):
+    """Same order as the API lifespan: graph, leases, cache store, auth, telemetry."""
+    from injectq import InjectQ
+
+    from tenxgraph_api.src.app.core.auth.base_auth import BaseAuth
+    from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
+    from tenxgraph_api.src.app.core.cache_store.loader import bind_cache_store
+    from tenxgraph_api.src.app.core.config import metrics as metrics_module
+    from tenxgraph_api.src.app.core.leases import LeaseManager
+
+    data = {"agent": "a:b", "worker": {"broker": {"type": "memory"}}}
+    worker = load_worker(monkeypatch, tmp_path, data)
+    mine = InjectQ()
+    order = []
+
+    class Store(InMemoryCacheStore):
+        async def aclose(self):
+            order.append("cache store")
+
+    bind_cache_store(mine, Store())
+    leases = mine.get(LeaseManager)
+    leases_close = leases.aclose
+
+    async def close_leases():
+        order.append("leases")
+        await leases_close()
+
+    leases.aclose = close_leases
+
+    class Auth(BaseAuth):
+        async def authenticate(self, request, response, credential):
+            return {}
+
+        async def aclose(self):
+            order.append("auth")
+
+    mine.bind_instance(BaseAuth, Auth())
+
+    class Graph:
+        async def aclose(self, **kwargs):
+            order.append("graph")
+
+    async def fake_flush(provider):
+        order.append("telemetry")
+
+    monkeypatch.setattr(metrics_module, "flush_telemetry", fake_flush)
+    await worker.worker_shutdown(SimpleNamespace(container=mine, graph=Graph()))
+    assert order == ["graph", "leases", "cache store", "auth", "telemetry"]

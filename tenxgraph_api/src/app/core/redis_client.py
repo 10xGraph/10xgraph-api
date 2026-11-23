@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from tenxgraph.core.authz import Identity
+
 
 def key_part(value: Any) -> str:
     """An id made safe to sit between ``:`` separators in a Redis key.
@@ -18,6 +20,21 @@ def key_part(value: Any) -> str:
     either (UUIDs, snowflake ids, most user ids) are unchanged, so existing keys stay valid.
     """
     return str(value).replace("%", "%25").replace(":", "%3A")
+
+
+def identity_key(user: Identity | None) -> str:
+    """The cache-key part for a caller: ``user_id`` and then each tenant column and value.
+
+    The same ``user_id`` in two tenants is two callers, so their run caps and idempotency
+    records never mix. Each part is ``key_part``-encoded (no ``:`` inside), so the joined key
+    reads back one way. Without tenant values it is ``key_part(user_id)``, as before.
+    """
+    if user is None:
+        return "anonymous"
+    parts = [user.user_id]
+    for column, value in sorted(user.tenant.items()):
+        parts += [column, value]
+    return ":".join(key_part(part) for part in parts)
 
 
 def prefixed(namespace: str) -> str:

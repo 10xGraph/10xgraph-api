@@ -1,10 +1,8 @@
 """Built-in audit sinks and the sink list built from ``audit.sinks`` at boot."""
 
-import importlib
 import inspect
 import logging
 import sys
-from typing import Any
 
 from injectq import InjectQ
 from tenxgraph.runtime.publisher.base_publisher import BasePublisher
@@ -13,6 +11,7 @@ from tenxgraph.runtime.publisher.publish import _select, publish_event
 from tenxgraph.utils.background_task_manager import BackgroundTaskManager
 
 from tenxgraph_api.src.app.core.audit import AuditEvent, BaseAuditSink
+from tenxgraph_api.src.app.core.utils.import_path import import_target
 
 
 AUDIT_LOGGER_NAME = "tenxgraph_api.audit"
@@ -91,11 +90,8 @@ def _build_publisher_sink() -> BaseAuditSink | None:
 def _load_custom_sink(path: str) -> BaseAuditSink:
     """Import ``module:attr`` (an instance, a ``BaseAuditSink`` subclass or a zero-argument
     factory) and return the sink. Anything else raises, which stops the boot."""
-    module_name, _, attr = path.partition(":")
     try:
-        target: Any = importlib.import_module(module_name)
-        for part in attr.split("."):
-            target = getattr(target, part)
+        target = import_target(path)
         if isinstance(target, BaseAuditSink):
             return target
         if inspect.isclass(target) and not issubclass(target, BaseAuditSink):

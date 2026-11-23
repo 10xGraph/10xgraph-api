@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from tenxgraph_api.src.app.core.auth.auth_config import AuthConfig
+from tenxgraph_api.src.app.core.auth.auth_config import AuthConfig, check_auth_config
+from tenxgraph_api.src.app.core.auth.rbac import resolve
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 
 
@@ -62,3 +63,34 @@ def test_parsed_value_follows_a_changed_config(make_config):
     assert config.auth_config().method == "jwt"
     config.data["auth"] = None
     assert config.auth_config() is None
+
+
+# ---- tool permissions in roles (core ToolGuard)
+
+TOOL_AUTH = {
+    "method": "jwt",
+    "roles": {
+        "support": {"permissions": ["graph:*", "tools:refund"], "reach": "own"},
+        "agent": {"permissions": ["tools:*"], "reach": "own"},
+        "admin": {"permissions": ["*"], "reach": "own"},
+    },
+}
+
+
+def test_tool_permissions_boot_and_reach_identity(make_config):
+    issues = check_auth_config({"agent": "a.py:app", "auth": TOOL_AUTH}, production=True)
+    assert not [i for i in issues if i.level == "error"]
+    rbac = make_config(TOOL_AUTH).auth_config().rbac_config()
+
+    support = resolve({"user_id": "u1", "roles": ["support"]}, rbac)
+    assert "tools:refund" in support.permissions
+    assert support.can("tools:refund") and not support.can("tools:delete")
+    assert resolve({"user_id": "u1", "roles": ["agent"]}, rbac).can("tools:delete")
+    assert resolve({"user_id": "u1", "roles": ["admin"]}, rbac).can("tools:delete")
+
+
+@pytest.mark.parametrize("bad", ["tools:", "tools: refund", "tools:a:b"])
+def test_malformed_tool_permission_is_a_boot_error(bad):
+    auth = {"method": "jwt", "roles": {"r": {"permissions": [bad], "reach": "own"}}}
+    issues = check_auth_config({"agent": "a.py:app", "auth": auth}, production=False)
+    assert any(i.level == "error" for i in issues)

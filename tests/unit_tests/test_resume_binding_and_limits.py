@@ -11,7 +11,6 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 import time
 from types import SimpleNamespace
@@ -25,6 +24,7 @@ from tenxgraph.core import exceptions as core_exceptions
 from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import StreamEvent
 
+import tenxgraph_api.src.app.routers.graph.services.graph_service as graph_service_module
 from tenxgraph_api.src.app.core.validation.request_config import (
     MAX_BLOCKS_PER_MESSAGE,
     MAX_MESSAGES,
@@ -101,11 +101,8 @@ def _no_telemetry(monkeypatch):
 
 
 def _paused_at(monkeypatch, interrupt_id: str | None) -> None:
-    # ``tenxgraph.utils.interrupt`` the attribute is the interrupt() function, not the module.
-    interrupt_module = importlib.import_module("tenxgraph.utils.interrupt")
-
     pending = None if interrupt_id is None else SimpleNamespace(id=interrupt_id)
-    monkeypatch.setattr(interrupt_module, "pending_interrupt", lambda state: pending)
+    monkeypatch.setattr(graph_service_module, "pending_interrupt", lambda state: pending)
 
 
 def _resume(**kwargs: Any) -> GraphInputSchema:
