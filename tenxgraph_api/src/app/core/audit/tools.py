@@ -76,7 +76,11 @@ def _outcome(item: Any) -> Outcome | None:
     if item.event == StreamEvent.MESSAGE and item.message is not None:
         return _from_message(item.message)
     data = item.data or {}
-    result = _CHUNK_RESULTS.get(data.get("status")) if item.event == StreamEvent.ERROR else None
+    result = (
+        _CHUNK_RESULTS.get(str(data.get("status")), None)
+        if item.event == StreamEvent.ERROR
+        else None
+    )
     if result is None:
         return None
     name = str(data.get("tool_name") or "")
