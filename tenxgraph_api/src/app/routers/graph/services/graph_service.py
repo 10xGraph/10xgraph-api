@@ -57,6 +57,7 @@ from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.audit import (  # noqa: F401
     audit_event,
 )
+from tenxgraph_api.src.app.core.audit.tools import audit_tool_approval, audit_tool_result
 from tenxgraph_api.src.app.core.config.graph_config import (  # noqa: F401
     GraphConfig,
     RunsConfig,
@@ -370,6 +371,11 @@ class GraphService(
 
             # Extract messages and state from result
             messages: list[Message] = result.get("messages", [])
+            seen = set(tool_result_ids(input_data["messages"]))
+            for msg in messages:
+                await audit_tool_result(
+                    msg, identity=user, thread_id=inv_thread_id, run_id=inv_run_id, seen=seen
+                )
 
             # Record final messages into telemetry, then close the run.
             if self.telemetry:
@@ -456,6 +462,14 @@ class GraphService(
         run.started = datetime.now().timestamp()
         if self.telemetry:
             self.telemetry.start_run(run.thread_id, run.run_id, run.started)
+        if "resume" in run.input_data:
+            await audit_tool_approval(
+                await self._run_state(run.config, checks),
+                run.input_data["resume"],
+                identity=user,
+                thread_id=run.thread_id,
+                run_id=run.run_id,
+            )
 
     def _end_run(self, run: _Run) -> None:
         """Close the run's trace if nothing else did, then free the lock on a new thread."""

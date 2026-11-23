@@ -1,7 +1,8 @@
 """Audit events: who accessed or changed what, when, and whether it was allowed.
 
 One emit function, :func:`audit_event`, called from the few places every request passes
-through (the auth dependency, the thread lookup, the 404 handler; changes from the routers).
+through (the auth dependency, the thread lookup, the 404 handler; changes from the routers;
+tool calls and approvals from the run, in ``tools.py``).
 Metadata only: never prompts, answers, message text, file contents, tokens or claims beyond
 ids. Request id, transport and client address come from the request context; callers pass only
 what they know.
@@ -94,7 +95,7 @@ def configure_audit(config: AuditConfig, *, auth_enabled: bool) -> None:
     set_sinks(build_sinks(config.sinks), include_reads=config.include_reads)
 
 
-async def audit_event(
+async def audit_event(  # noqa: PLR0913
     event: EventType,
     result: Result,
     *,

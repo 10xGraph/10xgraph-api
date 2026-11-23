@@ -14,6 +14,7 @@ from tenxgraph.utils.validators import ValidationError as InputValidationError
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.audit import audit_event
+from tenxgraph_api.src.app.core.audit.tools import audit_tool_result
 from tenxgraph_api.src.app.core.config.settings import is_production
 from tenxgraph_api.src.app.core.exceptions.client_errors import (
     RunTimeoutError,
@@ -23,6 +24,7 @@ from tenxgraph_api.src.app.core.shutdown import (
     end_on_shutdown,
 )
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
+from tenxgraph_api.src.app.core.validation.request_config import tool_result_ids
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     GraphInputSchema,
 )
@@ -118,7 +120,7 @@ class StreamingMixin:
         async for line in end_on_shutdown(lines(), keepalive_seconds=KEEPALIVE_SECONDS):
             yield line
 
-    async def stream_chunks(  # noqa: PLR0912
+    async def stream_chunks(  # noqa: PLR0912, PLR0915
         self,
         graph_input: GraphInputSchema,
         user: Identity | None,
@@ -148,6 +150,8 @@ class StreamingMixin:
             thread_id, run_id = run.thread_id, run.run_id
             messages_str = []
             run_status = "done"
+            # Tool calls already audited, and the client's own tool results (never audited).
+            audited = set(tool_result_ids(input_data["messages"]))
 
             # Stream the graph execution
             saw_pause = False
@@ -166,6 +170,16 @@ class StreamingMixin:
                     StreamEvent.ERROR,
                 ):
                     run_status = "error"
+                if chunk.event in (StreamEvent.MESSAGE, StreamEvent.ERROR):
+                    # The raw chunk: production sanitizing replaces a denial's reason. Before
+                    # the yield, so a client that disconnects here still leaves the record.
+                    await audit_tool_result(
+                        raw_chunk,
+                        identity=user,
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        seen=audited,
+                    )
                 yield chunk
                 if (
                     self.names_threads
