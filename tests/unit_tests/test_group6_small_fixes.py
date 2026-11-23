@@ -1,10 +1,10 @@
-"""G-161 (checkpointer key warning), G-169 (stale graph:setup scope)."""
+"""G-161 (removed checkpointer key), G-169 (stale graph:setup scope)."""
 
 # ruff: noqa: S101
 
 import logging
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -12,23 +12,13 @@ from tenxgraph_api.src.app import loader
 from tenxgraph_api.src.app.core.auth.permissions_registry import ALL_PERMISSIONS
 
 
-@pytest.mark.asyncio
-async def test_checkpointer_key_logs_a_warning(caplog):
-    config = MagicMock()
-    config.remote_tools = []
-    config.graph_path = "graph:app"
-    config.checkpointer_path = "graph.deps:cp"
-    with (
-        patch.object(loader, "load_graph", AsyncMock(return_value=None)),
-        patch.object(loader, "load_store", return_value=None),
-        patch.object(loader, "load_container", return_value=None),
-        caplog.at_level(logging.WARNING, logger="tenxgraph_api"),
-    ):
-        try:
-            await loader.attach_all_modules(config, MagicMock())
-        except Exception:  # - only the warning matters here
-            pass
-    assert any('"checkpointer" key' in r.getMessage() for r in caplog.records)
+def test_the_removed_checkpointer_key_refuses_to_load(tmp_path):
+    from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
+
+    path = tmp_path / "10xgraph.json"
+    path.write_text('{"agent": "graph:app", "checkpointer": "graph.deps:cp"}')
+    with pytest.raises(ValueError, match=r"graph.compile\(checkpointer=\.\.\.\)"):
+        GraphConfig(str(path))
 
 
 def test_skill_templates_do_not_tell_developers_to_set_the_checkpointer_key():

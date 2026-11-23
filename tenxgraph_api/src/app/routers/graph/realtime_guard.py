@@ -26,7 +26,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import WebSocket, WebSocketException
-from injectq.integrations import InjectAPI
+from injectq.integrations.fastapi import InjectFastAPI
 from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.core import logger
@@ -45,7 +45,7 @@ WS_TRY_AGAIN_LATER = 1013
 
 async def realtime_connection_guard(
     websocket: WebSocket,
-    config: GraphConfig = InjectAPI(GraphConfig),
+    config: GraphConfig = InjectFastAPI(GraphConfig),
 ) -> AsyncIterator[None]:
     """Gate a WebSocket handshake on the global rate limit and the concurrent-connection cap."""
     # 1) Shared global rate limit (same cache store and bucket as the REST middleware).

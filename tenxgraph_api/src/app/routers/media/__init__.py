@@ -1,4 +1,4 @@
-"""Media service: provides the configured MediaStore and DocumentPipeline."""
+"""Media service: provides the configured MediaStore and document extractor."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from tenxgraph_api.src.app.routers.media.caching import (
 )
 from tenxgraph_api.src.app.routers.media.factory import (
     _build_config_instance,
-    _create_document_pipeline,
+    _create_document_extractor,
     _create_media_store,
 )
 from tenxgraph_api.src.app.routers.media.ownership import (
@@ -34,7 +34,7 @@ __all__ = [
     "_BoundedCache",
     "_OwnedStore",
     "_build_config_instance",
-    "_create_document_pipeline",
+    "_create_document_extractor",
     "_create_media_store",
     "tenant_matches",
 ]

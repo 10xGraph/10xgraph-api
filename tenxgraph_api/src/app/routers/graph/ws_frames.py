@@ -13,7 +13,6 @@ from typing import Any
 
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.logger import logger
-from injectq import InjectQ
 from pydantic import ValidationError
 from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import StreamChunk, StreamEvent
@@ -248,24 +247,6 @@ async def _close_too_big(websocket: WebSocket, exc: WsFrameTooLarge) -> None:
         await _send_ws_error(websocket, str(exc))
     with contextlib.suppress(Exception):
         await websocket.close(code=WS_MESSAGE_TOO_BIG)
-
-
-async def _bind_ws_container() -> None:
-    """Make sure a WebSocket handshake has an active InjectQ container.
-
-    The InjectQ middleware ``setup_fastapi`` installs sets the app's container for HTTP and
-    WebSocket scopes alike; that one is kept (an embedded app may run on its own container).
-    Only when none is active (an older InjectQ whose middleware skipped WebSocket scopes) is
-    the global container set, so the ``InjectAPI`` dependencies that FastAPI resolves after
-    this one find a container.
-    """
-    try:
-        from injectq.integrations.fastapi import _request_container
-
-        if _request_container.get() is None:
-            _request_container.set(InjectQ.get_instance())
-    except Exception:  # pragma: no cover - defensive: never block the handshake here
-        logger.exception("Failed to bind InjectQ container for WebSocket scope")
 
 
 def _resolve_ws_thread(frame: dict[str, Any]) -> str | None:

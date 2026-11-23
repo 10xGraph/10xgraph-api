@@ -196,15 +196,7 @@ def test_top_level_store_settings_are_refused_at_load(tmp_path, key, value, expe
         _graph_config(tmp_path, {key: None})
 
 
-def test_a_top_level_key_added_after_load_is_refused_too(tmp_path):
-    config = _graph_config(tmp_path, {"cache_store": {"rate_limit": {}}})
-    assert config.rate_limit is not None
-    config.data["rate_limit"] = {"requests": 1}
-    with pytest.raises(ValueError, match="`rate_limit` goes inside `cache_store`"):
-        _ = config.rate_limit
-
-
-def test_parsed_once_per_raw_value(tmp_path, caplog, monkeypatch):
+def test_parsed_once(tmp_path, caplog, monkeypatch):
     """The trusted_proxy_headers warning is not repeated by every caller."""
     monkeypatch.setattr(logging.getLogger("tenxgraph_api"), "propagate", True)
     config = _graph_config(
@@ -216,5 +208,3 @@ def test_parsed_once_per_raw_value(tmp_path, caplog, monkeypatch):
     warned = {id(r) for r in caplog.records if "trusted_proxy_headers" in r.getMessage()}
     assert len(warned) == 1
     assert config.cache_store is config.cache_store
-    config.data["cache_store"] = {"rate_limit": {"requests": 3}}
-    assert config.rate_limit is not None and config.rate_limit.requests == 3

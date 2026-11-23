@@ -17,7 +17,6 @@ from tenxgraph_api.src.app.routers.graph import run_limits
 from tenxgraph_api.src.app.routers.graph.run_limits import (
     acquire_run_slot,
     release_when_done,
-    run_slot,
 )
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import GraphInputSchema
 from tenxgraph_api.src.app.routers.graph.services.graph_service import (
@@ -76,16 +75,6 @@ async def test_anonymous_or_unlimited_runs_are_not_counted(fresh_slots, user, li
     for _ in range(5):
         await acquire_run_slot(user, runs)
     assert fresh_slots._held == {}
-
-
-@pytest.mark.asyncio
-async def test_run_slot_context_releases_on_error(fresh_slots):
-    runs = RunsConfig(max_concurrent_per_user=1)
-    with pytest.raises(RuntimeError):
-        async with run_slot(ALICE, runs):
-            assert fresh_slots.held("alice") == 1
-            raise RuntimeError("boom")
-    assert fresh_slots.held("alice") == 0
 
 
 async def _items(*values, fail=None):

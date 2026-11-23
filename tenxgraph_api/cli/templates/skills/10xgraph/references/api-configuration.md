@@ -42,9 +42,9 @@ Common full shape:
 ## Fields
 
 - `agent`: required import path to a compiled graph variable, in `module.path:attribute` format.
-- `checkpointer`: not applied by the server (a warning is logged when it is set). Pass the checkpointer to `graph.compile(checkpointer=...)` in your agent module.
+- `checkpointer`: removed; the server refuses to start when it is set. Pass the checkpointer to `graph.compile(checkpointer=...)` in your agent module.
 - `store`: optional import path to a `BaseStore` instance; required for store endpoints.
-- `injectq`: optional import path to an `InjectQ` container.
+- `injectq`: optional import path to an `InjectQ` container. It must be the container passed to `StateGraph(container=...)`; set both or neither (the server refuses to start when they differ).
 - `thread_name_generator`: unset, `null`, `""` or `"none"` (the default): threads are saved without a name. `"random"`: a random two-word name such as `thoughtful-dialogue`. `"first_message"`: the user's first message, whitespace collapsed, cut to at most 60 characters on a word boundary. Or a `module:attr` import path to a `ThreadNameGenerator` class/instance. Any other value is a config error. Every generated name is saved on the thread. See `references/id-and-thread-name-generators.md`.
 - `id_generator`: unset keeps the graph's own generator. A built-in name (`uuid`, `hex`, `short`, `int`, `bigint`, `timestamp`, `snowflake`) or a `module:attr` import path to a `BaseIDGenerator` instance, subclass or zero-argument factory. New thread, message and memory ids all come from it. Set it here or in `StateGraph(id_generator=...)`, not both (the server refuses to start).
 

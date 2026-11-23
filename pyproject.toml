@@ -63,6 +63,7 @@ dependencies = [
     # Pre-1.0 and major-version-risky deps are capped; floors are the versions
     # the suite is verified against.
     "fastapi>=0.116,<1.0",
+    "injectq>=0.6.1,<0.7",
     "python-multipart>=0.0.31,<0.1",
     "starlette>=1.3.1",
     "pydantic>=2.13,<3",

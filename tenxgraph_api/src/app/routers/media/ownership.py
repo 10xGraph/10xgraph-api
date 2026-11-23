@@ -50,12 +50,10 @@ class _OwnedStore:
         self,
         store: BaseMediaStore,
         user_id: str | None,
-        track_threads: bool,
         tenant: dict[str, str | None] | None = None,
     ):
         self._store = store
         self._user_id = user_id
-        self._track_threads = track_threads
         self._tenant = tenant or {}
 
     async def store(self, data: bytes, mime_type: str, metadata: dict[str, Any] | None = None):
@@ -67,8 +65,7 @@ class _OwnedStore:
             meta["owner_id"] = str(self._user_id)
             if self._tenant:
                 meta[TENANT_KEY] = dict(self._tenant)
-            if self._track_threads:
-                meta[THREADS_KEY] = []
+            meta[THREADS_KEY] = []
         return await self._store.store(data, mime_type, metadata=meta)
 
     def to_media_ref(self, *args: Any, **kwargs: Any):

@@ -117,10 +117,6 @@ class TelemetryStore:
             runs = self._threads.get(str(thread_id))
             return list(runs.values()) if runs else []
 
-    def get_latest_run(self, thread_id: str) -> RunTrace | None:
-        runs = self.get_runs(thread_id)
-        return runs[-1] if runs else None
-
     def get_run(self, thread_id: str, run_id: str) -> RunTrace | None:
         with self._lock:
             runs = self._threads.get(str(thread_id))

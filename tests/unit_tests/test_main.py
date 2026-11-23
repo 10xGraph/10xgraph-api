@@ -2,95 +2,12 @@
 
 import logging
 import os
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI
 
-from tenxgraph_api.src.app.main import _cleanup_temp_media_cache, app, container, graph_config
-
-
-@pytest.mark.asyncio
-class TestCleanupTempMediaCache:
-    """Tests for _cleanup_temp_media_cache function."""
-
-    async def test_cleanup_success(self):
-        """Test successful cleanup of temp media cache."""
-        mock_cache = AsyncMock()
-        mock_cache.cleanup.return_value = 5
-
-        mock_checkpointer = Mock()
-        mock_media_store = Mock()
-
-        with patch("tenxgraph_api.src.app.main.container") as mock_container:
-            mock_container.try_get.side_effect = lambda x: {
-                "checkpointer": mock_checkpointer,
-                "BaseCheckpointer": None,
-                "media_store": mock_media_store,
-                "BaseMediaStore": None,
-            }.get(x)
-
-            with patch("tenxgraph_api.src.app.main.logger"):
-                with patch(
-                    "tenxgraph.storage.media.temp_cache.TemporaryMediaCache",
-                    return_value=mock_cache,
-                ):
-                    await _cleanup_temp_media_cache()
-                    mock_cache.cleanup.assert_called_once()
-
-    async def test_cleanup_no_checkpointer(self):
-        """Test cleanup when no checkpointer is available."""
-        with patch("tenxgraph_api.src.app.main.container") as mock_container:
-            mock_container.try_get.return_value = None
-
-            with patch("tenxgraph_api.src.app.main.logger"):
-                await _cleanup_temp_media_cache()
-                # Should complete without error
-
-    async def test_cleanup_no_cleanup_needed(self):
-        """Test cleanup when no expired entries exist."""
-        mock_cache = AsyncMock()
-        mock_cache.cleanup.return_value = 0
-
-        mock_checkpointer = Mock()
-
-        with patch("tenxgraph_api.src.app.main.container") as mock_container:
-            mock_container.try_get.side_effect = lambda x: {
-                "checkpointer": mock_checkpointer,
-                "BaseCheckpointer": None,
-                "media_store": None,
-                "BaseMediaStore": None,
-            }.get(x)
-
-            with patch("tenxgraph_api.src.app.main.logger"):
-                with patch(
-                    "tenxgraph.storage.media.temp_cache.TemporaryMediaCache",
-                    return_value=mock_cache,
-                ):
-                    await _cleanup_temp_media_cache()
-                    mock_cache.cleanup.assert_called_once()
-
-    async def test_cleanup_exception_handling(self):
-        """Test that cleanup handles exceptions gracefully."""
-        with patch("tenxgraph_api.src.app.main.container") as mock_container:
-            mock_container.try_get.side_effect = Exception("Test error")
-
-            with patch("tenxgraph_api.src.app.main.logger"):
-                await _cleanup_temp_media_cache()
-                # Should complete without raising
-
-    async def test_cleanup_import_error(self):
-        """Test that cleanup handles import errors gracefully."""
-        with patch("tenxgraph_api.src.app.main.container") as mock_container:
-            mock_container.try_get.return_value = Mock()
-
-            with patch("tenxgraph_api.src.app.main.logger"):
-                with patch(
-                    "tenxgraph.storage.media.temp_cache.TemporaryMediaCache",
-                    side_effect=ImportError("Module not found"),
-                ):
-                    await _cleanup_temp_media_cache()
-                    # Should complete without raising
+from tenxgraph_api.src.app.main import app, container, graph_config
 
 
 class TestAppInitialization:
@@ -176,13 +93,10 @@ class TestLifespanContext:
         ) as mock_attach:
             mock_attach.return_value = AsyncMock()
 
-            with patch(
-                "tenxgraph_api.src.app.main._cleanup_temp_media_cache", new_callable=AsyncMock
-            ):
-                app_test = FastAPI()
-                async with lifespan_cm(app_test):
-                    # Inside startup
-                    mock_attach.assert_called_once()
+            app_test = FastAPI()
+            async with lifespan_cm(app_test):
+                # Inside startup
+                mock_attach.assert_called_once()
 
     async def test_lifespan_cleanup(self):
         """Test lifespan cleanup/shutdown execution."""
@@ -196,15 +110,12 @@ class TestLifespanContext:
         ) as mock_attach:
             mock_attach.return_value = mock_graph
 
-            with patch(
-                "tenxgraph_api.src.app.main._cleanup_temp_media_cache", new_callable=AsyncMock
-            ):
-                app_test = FastAPI()
-                async with lifespan_cm(app_test):
-                    pass
+            app_test = FastAPI()
+            async with lifespan_cm(app_test):
+                pass
 
-                # After exiting context, aclose should be called
-                mock_graph.aclose.assert_called_once()
+            # After exiting context, aclose should be called
+            mock_graph.aclose.assert_called_once()
 
     async def test_lifespan_none_graph(self):
         """Test lifespan when attach_all_modules returns None."""
@@ -215,13 +126,10 @@ class TestLifespanContext:
         ) as mock_attach:
             mock_attach.return_value = None
 
-            with patch(
-                "tenxgraph_api.src.app.main._cleanup_temp_media_cache", new_callable=AsyncMock
-            ):
-                app_test = FastAPI()
-                async with lifespan_cm(app_test):
-                    pass
-                # Should complete without error
+            app_test = FastAPI()
+            async with lifespan_cm(app_test):
+                pass
+            # Should complete without error
 
 
 class TestEnvironmentVariables:

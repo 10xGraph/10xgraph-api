@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
-from injectq.integrations import InjectAPI
+from injectq.integrations.fastapi import InjectFastAPI
 from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.core.audit import audit_event
@@ -41,7 +41,7 @@ router = APIRouter(tags=["store"])
 async def create_memory(
     request: Request,
     payload: StoreMemorySchema,
-    service: StoreService = InjectAPI(StoreService),
+    service: StoreService = InjectFastAPI(StoreService),
     identity: Identity | None = Depends(RequirePermission("store", "write")),
 ):
     """Store a memory item using the configured store."""
@@ -67,7 +67,7 @@ async def create_memory(
 async def search_memories(
     request: Request,
     payload: SearchMemorySchema,
-    service: StoreService = InjectAPI(StoreService),
+    service: StoreService = InjectFastAPI(StoreService),
     identity: Identity | None = Depends(RequirePermission("store", "read")),
 ):
     """Search stored memories."""
@@ -94,7 +94,7 @@ async def list_memories(
         default=None,
         description="Optional configuration, limit, and options for listing memories.",
     ),
-    service: StoreService = InjectAPI(StoreService),
+    service: StoreService = InjectFastAPI(StoreService),
     identity: Identity | None = Depends(RequirePermission("store", "read")),
 ):
     """List stored memories."""
@@ -128,7 +128,7 @@ async def update_memory(
     request: Request,
     memory_id: str,
     payload: UpdateMemorySchema,
-    service: StoreService = InjectAPI(StoreService),
+    service: StoreService = InjectFastAPI(StoreService),
     identity: Identity | None = Depends(RequirePermission("store", "write")),
 ):
     """Update a stored memory."""
@@ -160,7 +160,7 @@ async def delete_memory(
         default=None,
         description="Optional configuration overrides forwarded to the store backend.",
     ),
-    service: StoreService = InjectAPI(StoreService),
+    service: StoreService = InjectFastAPI(StoreService),
     identity: Identity | None = Depends(RequirePermission("store", "delete")),
 ):
     """Delete a stored memory."""
@@ -192,7 +192,7 @@ async def delete_memory(
 async def forget_memory(
     request: Request,
     payload: ForgetMemorySchema,
-    service: StoreService = InjectAPI(StoreService),
+    service: StoreService = InjectFastAPI(StoreService),
     identity: Identity | None = Depends(RequirePermission("store", "delete")),
 ):
     """Forget memories based on filters."""
@@ -220,7 +220,7 @@ async def get_memory(
         default=None,
         description="Optional configuration and options for retrieving the memory.",
     ),
-    service: StoreService = InjectAPI(StoreService),
+    service: StoreService = InjectFastAPI(StoreService),
     identity: Identity | None = Depends(RequirePermission("store", "read")),
 ):
     """Get a memory by ID."""

@@ -32,8 +32,8 @@ from tenxgraph_api.src.app.routers import init_routes
 
 logger = logging.getLogger("tenxgraph_api")
 
-# Boot-time temp media cleanup is best effort. It must not hold the app (and so the first
-# readiness probe) behind a slow or wedged checkpointer or media store.
+# Boot-time checkpointer setup is best effort. It must not hold the app (and so the first
+# readiness probe) behind a slow or wedged checkpointer.
 BOOT_CLEANUP_TIMEOUT_SECONDS = 15.0
 
 # GraphConfig loads the ``env`` file named in 10xgraph.json, so it must run before Settings
@@ -70,7 +70,7 @@ async def _sweep_media_loop(interval: float) -> None:
     """Delete files a crash left in the media store, every ``interval`` seconds, forever.
 
     Runs once straight away (the crash that left them was probably the last shutdown). A store
-    without ``sweep_orphans`` (memory, cloud, older core) makes this return at once.
+    without ``sweep_orphans`` (memory, cloud) makes this return at once.
     """
     while True:
         store = _media_store()
@@ -118,32 +118,6 @@ async def _check_backends(app: FastAPI) -> None:
     await check_backends(container, settings)
 
 
-async def _cleanup_temp_media_cache() -> None:
-    """Run best-effort cleanup of expired temporary media cache entries."""
-    try:
-        from tenxgraph.storage.media.temp_cache import TemporaryMediaCache
-
-        checkpointer = container.try_get("checkpointer") or container.try_get("BaseCheckpointer")
-        media_store = (
-            container.try_get("media_store")
-            or container.try_get("BaseMediaStore")
-            or _media_store()
-        )
-
-        if checkpointer is None:
-            logger.debug("No checkpointer available, skipping temp media cache cleanup")
-            return
-
-        cache = TemporaryMediaCache()
-        cleaned = await cache.cleanup(checkpointer, media_store)
-        if cleaned:
-            logger.info("Cleaned up %d expired temporary media cache entries on startup", cleaned)
-        else:
-            logger.debug("No expired temporary media cache entries to clean up")
-    except Exception as e:
-        logger.warning("Failed to clean up temporary media cache on startup: %s", e)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     graph: CompiledGraph | None = await attach_all_modules(
@@ -166,15 +140,6 @@ async def lifespan(app: FastAPI):
         from tenxgraph_api.src.app.routers.tasks import start_broker
 
         await start_broker(graph_path, graph_config.worker.tasks, container)
-
-    # Clean up expired temporary media cache on startup
-    try:
-        await asyncio.wait_for(_cleanup_temp_media_cache(), BOOT_CLEANUP_TIMEOUT_SECONDS)
-    except TimeoutError:
-        logger.warning(
-            "Temporary media cache cleanup timed out after %ss; continuing startup",
-            BOOT_CLEANUP_TIMEOUT_SECONDS,
-        )
 
     sweeper: asyncio.Task | None = None
     from tenxgraph_api.src.app.core.config.media_settings import get_media_settings

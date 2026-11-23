@@ -60,7 +60,7 @@ class TestMediaService:
     async def test_upload_file_extracts_text_for_documents(self):
         svc = self._make_service()
         with patch.object(
-            svc.pipeline.extractor,
+            svc.extractor,
             "extract",
             new_callable=AsyncMock,
             return_value="Extracted text!",
@@ -106,9 +106,7 @@ class TestMediaService:
     @pytest.mark.asyncio
     async def test_cached_extraction_lookup(self):
         svc = self._make_service()
-        with patch.object(
-            svc.pipeline.extractor, "extract", new_callable=AsyncMock, return_value="Cached!"
-        ):
+        with patch.object(svc.extractor, "extract", new_callable=AsyncMock, return_value="Cached!"):
             result = await svc.upload_file(b"%PDF-1.4 data", "report.pdf", "application/pdf")
         assert svc.get_cached_extraction(result["file_id"]) == "Cached!"
         assert await svc.aget_cached_extraction(result["file_id"]) == "Cached!"

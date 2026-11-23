@@ -76,52 +76,6 @@ class FeedbackSchema(BaseModel):
         return v
 
 
-class GetMessageSchema(ConfigSchema):
-    """Schema for getting a single message."""
-
-    message_id: str = Field(..., description="Message ID to retrieve")
-
-
-class ListMessagesSchema(ConfigSchema):
-    """Schema for listing messages."""
-
-    search: str | None = Field(default=None, description="Search query")
-    offset: int | None = Field(default=None, description="Number of messages to skip")
-    limit: int | None = Field(default=None, description="Maximum number of messages to return")
-
-
-class DeleteMessageSchema(ConfigSchema):
-    """Schema for deleting a message."""
-
-    message_id: str = Field(..., description="Message ID to delete")
-
-
-class PutThreadSchema(ConfigSchema):
-    """Schema for putting thread info."""
-
-    thread_info: BoundedDict = Field(..., description="Thread information to store")
-
-
-class GetThreadSchema(ConfigSchema):
-    """Schema for getting a thread."""
-
-    thread_id: str = Field(..., description="Thread ID to retrieve")
-
-
-class ListThreadsSchema(ConfigSchema):
-    """Schema for listing threads."""
-
-    search: str | None = Field(default=None, description="Search query")
-    offset: int | None = Field(default=None, description="Number of threads to skip")
-    limit: int | None = Field(default=None, description="Maximum number of threads to return")
-
-
-class DeleteThreadSchema(ConfigSchema):
-    """Schema for deleting a thread."""
-
-    thread_id: str = Field(..., description="Thread ID to delete")
-
-
 # Response schemas
 class ResponseSchema(BaseModel):
     """Base response schema for checkpointer operations."""
@@ -129,12 +83,6 @@ class ResponseSchema(BaseModel):
     success: bool = Field(..., description="Whether the operation was successful")
     message: str = Field(..., description="Response message")
     data: Any | None = Field(default=None, description="Response data")
-
-
-class MessageResponseSchema(BaseModel):
-    """Response schema for message operations."""
-
-    message: Message | None = Field(default=None, description="Message data")
 
 
 class MessagesListResponseSchema(BaseModel):

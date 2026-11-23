@@ -430,19 +430,6 @@ def test_completion_screen_reveals_rows_progressively() -> None:
     assert "Open the docs" in full.renderable.plain
 
 
-def test_structured_activity_emits_lifecycle_events() -> None:
-    rendered, stream = formatter(output_format=OutputFormat.JSONL)
-    with rendered.activity("Loading graph", done="Graph loaded"):
-        pass
-    payloads = [json.loads(line) for line in stream.getvalue().splitlines()]
-    assert [payload["type"] for payload in payloads] == [
-        "progress_start",
-        "progress_end",
-        "success",
-    ]
-    assert payloads[1]["status"] == "completed"
-
-
 def test_structured_completion_screen_is_one_event() -> None:
     rendered, stream = formatter(output_format=OutputFormat.JSONL)
     rendered.completion_screen(

@@ -1,7 +1,7 @@
 from ag_ui.encoder import EventEncoder
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from injectq.integrations import InjectAPI
+from injectq.integrations.fastapi import InjectFastAPI
 from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.core import logger
@@ -61,9 +61,9 @@ router = APIRouter(
 )
 async def run_ag_ui(
     request: Request,
-    service: GraphService = InjectAPI(GraphService),
+    service: GraphService = InjectFastAPI(GraphService),
     identity: Identity | None = Depends(RequirePermission("graph", "stream")),
-    config: GraphConfig = InjectAPI(GraphConfig),
+    config: GraphConfig = InjectFastAPI(GraphConfig),
 ):
     """
     Stream one AG-UI run.

@@ -23,29 +23,6 @@ if TYPE_CHECKING:
     from tenxgraph_api.cli.core.output import OutputFormatter
 
 
-def _reset_inject_proxy(service_type: type) -> None:
-    """Reset the lazy Inject[T] proxy cached on Node.execute's default parameters.
-
-    Inject[T] proxies cache their resolved value in _injected_value on first use.
-    container.override() clears the singleton scope, but the proxy's own cache is
-    independent — it must be cleared so the proxy re-resolves from the container
-    on next invocation instead of returning the stale value.
-    """
-    try:
-        from tenxgraph.core.graph.node import Node as _GraphNode
-
-        defaults = getattr(_GraphNode.execute, "__defaults__", None) or ()
-        for d in defaults:
-            if (
-                hasattr(d, "_injected_value")
-                and hasattr(d, "service_type")
-                and d.service_type is service_type
-            ):
-                d._injected_value = None
-    except Exception:  # nosec B110  # noqa: S110
-        pass
-
-
 class _EvalRunner:
     """Progress printing and the flat pool run."""
 
@@ -138,10 +115,6 @@ class _EvalRunner:
             )
             _, local_mgr = make_trajectory_callback(local_collector)
             container = pc.evaluator.graph._state_graph._container
-            # The Inject[CallbackManager] proxy on Node.execute caches its resolved
-            # value independently of the container — reset it so it re-resolves
-            # inside the override context instead of returning the stale instance.
-            _reset_inject_proxy(CallbackManager)
             with override_dependency(CallbackManager, local_mgr, container=container):
                 try:
                     result = await pc.evaluator._evaluate_case(

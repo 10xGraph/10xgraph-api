@@ -1,11 +1,9 @@
-import asyncio
 from typing import Any
 
 import pytest
 from pydantic import BaseModel
 
 from tenxgraph_api.src.app.core.config.settings import Settings
-from tenxgraph_api.src.app.utils.callable_helper import call_sync_or_async
 from tenxgraph_api.src.app.utils.parse_output import (
     parse_message_output,
     parse_state_output,
@@ -43,31 +41,3 @@ def test_parse_message_output(mode: str):
     out = parse_message_output(settings, model)
     assert "raw" not in out
     assert out["content"] == "hello"
-
-
-def test_call_sync_or_async_sync_function():
-    def sync_fn(x: int, y: int) -> int:
-        return x + y
-
-    result = asyncio.run(call_sync_or_async(sync_fn, 2, 3))
-    assert result == 5
-
-
-def test_call_sync_or_async_async_function():
-    async def async_fn(x: int) -> int:
-        await asyncio.sleep(0)
-        return x * 2
-
-    result = asyncio.run(call_sync_or_async(async_fn, 4))
-    assert result == 8
-
-
-def test_call_sync_or_async_sync_returns_awaitable():
-    async def inner() -> str:
-        return "done"
-
-    def sync_returns_coroutine():
-        return inner()
-
-    result = asyncio.run(call_sync_or_async(sync_returns_coroutine))
-    assert result == "done"

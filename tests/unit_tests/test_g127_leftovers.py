@@ -13,7 +13,7 @@ from tenxgraph_api.src.app.core.validation.request_config import (
     structure_error,
 )
 from tenxgraph_api.src.app.routers.checkpointer.schemas.checkpointer_schemas import (
-    PutThreadSchema,
+    StateSchema,
 )
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     GraphInputSchema,
@@ -51,7 +51,7 @@ def test_store_and_checkpointer_schemas_are_bounded():
     with pytest.raises(ValidationError, match="keys"):
         SearchMemorySchema(query="q", filters=wide)
     with pytest.raises(ValidationError, match="keys"):
-        PutThreadSchema(thread_info=wide)
+        StateSchema(state=wide)
 
 
 @pytest.mark.asyncio

@@ -131,8 +131,8 @@ class RunChecksMixin:
         if not isinstance(node_name, str):
             raise ClientInputError("current_node must be a node name")
         nodes = self._nodes()
-        # START and END are nodes too; core also maps the legacy "start" / "end" spellings.
-        if nodes and node_name not in nodes and node_name not in ("start", "end"):
+        # START and END ("__start__", "__end__") are nodes too.
+        if nodes and node_name not in nodes:
             raise ClientInputError(f"unknown node '{node_name}'")
         node = nodes.get(node_name)
         if node is not None and isinstance(getattr(node, "func", None), ToolNode):

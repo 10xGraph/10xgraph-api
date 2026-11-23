@@ -71,7 +71,9 @@ async def test_startup_and_shutdown(monkeypatch, tmp_path):
     await worker.worker_startup(state)
     assert isinstance(state.graph, FakeGraph)
     assert "wrapped" in closed
-    assert worker.broker.state.injectq_container is not None
+    from injectq.integrations.taskiq import InjectQTaskiqMiddleware
+
+    assert any(isinstance(m, InjectQTaskiqMiddleware) for m in worker.broker.middlewares)
 
     await worker.worker_shutdown(state)
     assert any(isinstance(c, dict) and "grace" in c for c in closed)

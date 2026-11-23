@@ -66,7 +66,7 @@ async def test_a_cancelled_stream_closes_its_run():
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    run = service._telemetry.get_latest_run("t1")
+    run = service._telemetry.get_runs("t1")[-1]
     assert run.status == "stopped"
     assert run.finished_at is not None
 
@@ -78,7 +78,7 @@ async def test_a_stream_the_client_closes_closes_its_run():
     stream = service.stream_chunks(_graph_input(), ALICE)
     await anext(stream)
     await stream.aclose()
-    assert service._telemetry.get_latest_run("t1").status == "stopped"
+    assert service._telemetry.get_runs("t1")[-1].status == "stopped"
 
 
 @pytest.mark.asyncio
@@ -90,4 +90,4 @@ async def test_a_cancelled_invoke_closes_its_run():
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert service._telemetry.get_latest_run("t1").status == "stopped"
+    assert service._telemetry.get_runs("t1")[-1].status == "stopped"

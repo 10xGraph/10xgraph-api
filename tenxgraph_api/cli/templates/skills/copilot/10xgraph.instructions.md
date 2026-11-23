@@ -85,7 +85,6 @@ Agent(
   "agent": "graph.agent:app",
   "env": ".env",
   "auth": null,
-  "checkpointer": null,
   "injectq": null,
   "store": null,
   "cache_store": {"type": "memory"},

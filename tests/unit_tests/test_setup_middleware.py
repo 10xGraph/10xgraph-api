@@ -253,7 +253,7 @@ def test_attach_otel_publisher_value_error():
             raise ValueError("invalid level")
 
     class FakeOtelPublisher:
-        def __init__(self, level):
+        def __init__(self, level, user_id_mode="raw"):
             self.level = level
 
     class FakeBasePublisher:
@@ -286,7 +286,7 @@ def test_attach_otel_publisher_no_existing():
             self.val = val
 
     class FakeOtelPublisher:
-        def __init__(self, level):
+        def __init__(self, level, user_id_mode="raw"):
             self.level = level
 
     class FakeBasePublisher:
@@ -319,7 +319,7 @@ def test_attach_otel_publisher_existing_composite():
             self.val = val
 
     class FakeOtelPublisher:
-        def __init__(self, level):
+        def __init__(self, level, user_id_mode="raw"):
             self.level = level
 
     class FakeBasePublisher:
@@ -364,7 +364,7 @@ def test_attach_otel_publisher_existing_single():
             self.val = val
 
     class FakeOtelPublisher:
-        def __init__(self, level):
+        def __init__(self, level, user_id_mode="raw"):
             self.level = level
 
     class FakeBasePublisher:
@@ -488,7 +488,7 @@ def _obs_modules(*, setup_side_effect=None, existing=None, composite_cls=None):
             return f"level:{self.val}"
 
     class FakeOtelPublisher:
-        def __init__(self, level=None):
+        def __init__(self, level=None, user_id_mode="raw"):
             self.level = level
 
     setup_observability = MagicMock(side_effect=setup_side_effect)
@@ -682,43 +682,6 @@ def test_user_id_mode_reads_the_observability_block():
     cfg.observability = None
     assert setup_middleware_module._user_id_mode(cfg) == "raw"
     assert setup_middleware_module._user_id_mode(None) == "raw"
-
-
-def test_make_otel_publisher_passes_the_mode_only_when_set():
-    calls = []
-
-    class NewCorePublisher:
-        def __init__(self, level, user_id_mode="raw"):
-            calls.append((level, user_id_mode))
-
-    setup_middleware_module._make_otel_publisher(NewCorePublisher, "standard", "raw")
-    setup_middleware_module._make_otel_publisher(NewCorePublisher, "standard", "mask")
-    assert calls == [("standard", "raw"), ("standard", "mask")]
-
-
-def test_make_otel_publisher_falls_back_on_an_older_core():
-    class OldCorePublisher:
-        def __init__(self, level):
-            self.level = level
-
-    publisher = setup_middleware_module._make_otel_publisher(OldCorePublisher, "standard", "hash")
-    assert publisher.level == "standard"
-
-
-def test_bind_publisher_replaces_one_already_resolved():
-    """InjectQ serves the first resolved instance unless the cache is cleared."""
-    from injectq import InjectQ
-    from tenxgraph.runtime.publisher.base_publisher import BasePublisher
-    from tenxgraph.runtime.publisher.console_publisher import ConsolePublisher
-
-    from tenxgraph_api.src.app.core.config.setup_middleware import _bind_publisher
-
-    container = InjectQ()
-    container.bind_instance(BasePublisher, ConsolePublisher({}))
-    assert container.try_get(BasePublisher) is not None
-    replacement = ConsolePublisher({})
-    _bind_publisher(container, replacement)
-    assert container.try_get(BasePublisher) is replacement
 
 
 def _otel_modules(**extra):

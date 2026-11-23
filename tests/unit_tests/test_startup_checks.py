@@ -376,7 +376,6 @@ def _lifespan_patches(monkeypatch, container, attach=None):
     monkeypatch.setattr(app_main, "container", container)
     monkeypatch.setattr(app_main, "attach_all_modules", attach or AsyncMock(return_value=None))
     monkeypatch.setattr(app_main, "_prepare_checkpointer", AsyncMock())
-    monkeypatch.setattr(app_main, "_cleanup_temp_media_cache", AsyncMock())
     monkeypatch.setattr(app_main.settings, "STARTUP_CHECK_TIMEOUT_SECONDS", 0.0)
     monkeypatch.setattr(app_main.settings, "STARTUP_CHECKS", True)
 

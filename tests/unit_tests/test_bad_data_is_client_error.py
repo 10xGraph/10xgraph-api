@@ -25,7 +25,7 @@ def test_missing_media_extra_is_422(monkeypatch):
     import pytest
 
     from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
-    from tenxgraph_api.src.app.routers.media import _create_document_pipeline
+    from tenxgraph_api.src.app.routers.media import _create_document_extractor
     from tenxgraph_api.src.app.utils.media import extractor
 
     monkeypatch.setattr(extractor, "AsyncTextExtractor", None)
@@ -35,4 +35,4 @@ def test_missing_media_extra_is_422(monkeypatch):
         {"DOCUMENT_HANDLING": "extract_text", "MEDIA_MAX_PDF_MB": 1, "MEDIA_MAX_PDF_PAGES": 1},
     )()
     with pytest.raises(ClientInputError, match="media extra"):
-        _create_document_pipeline(settings)
+        _create_document_extractor(settings)

@@ -395,19 +395,6 @@ class FixGraphRequestSchema(BaseModel):
     )
 
 
-class FixGraphResponseSchema(BaseModel):
-    """Schema for the fix graph operation response."""
-
-    success: bool = Field(..., description="Whether the fix operation was successful")
-    message: str = Field(..., description="Status message from the fix operation")
-    removed_count: int = Field(
-        default=0, description="Number of messages with empty tool calls that were removed"
-    )
-    state: dict[str, Any] | None = Field(
-        default=None, description="Updated state after fixing the graph"
-    )
-
-
 class WsGraphInputSchema(BaseModel):
     """
     WebSocket graph input schema.

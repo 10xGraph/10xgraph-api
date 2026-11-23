@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import weakref
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import HTTPException
@@ -33,9 +32,6 @@ from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 HTTP_TOO_MANY_REQUESTS = 429
 # Seconds a client is told to wait before it starts another run.
 RUN_CAP_RETRY_AFTER_SECONDS = 5
-
-# A slot that was never counted (no identity, or no cap).
-RunSlot = Lease
 
 
 def run_slot_key(user: Identity) -> str:
@@ -65,16 +61,6 @@ async def acquire_run_slot(user: Identity | None, runs: RunsConfig) -> Lease:
             headers={"Retry-After": str(RUN_CAP_RETRY_AFTER_SECONDS)},
         )
     return lease
-
-
-@asynccontextmanager
-async def run_slot(user: Identity | None, runs: RunsConfig) -> AsyncIterator[None]:
-    """Hold a run slot for the duration of the block (used by invoke)."""
-    slot = await acquire_run_slot(user, runs)
-    try:
-        yield
-    finally:
-        slot.release()
 
 
 def release_when_done(stream: AsyncIterator[Any], slot: Lease) -> AsyncIterator[Any]:

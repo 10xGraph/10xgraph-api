@@ -1,4 +1,4 @@
-"""Media service — provides the configured MediaStore and DocumentPipeline."""
+"""Media service: provides the configured MediaStore and document extractor."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import base64
 import binascii
 import logging
 import time
+from functools import cached_property
 from pathlib import Path
 from typing import Any, cast
 
@@ -13,7 +14,6 @@ from injectq import inject, singleton
 from tenxgraph.core.authz import Identity, Reach, can_reach
 from tenxgraph.core.state.message_block import AudioBlock, DocumentBlock, ImageBlock, VideoBlock
 from tenxgraph.storage.checkpointer import BaseCheckpointer
-from tenxgraph.storage.media.config import DocumentHandling
 from tenxgraph.storage.media.offload import MediaOffloadPolicy, ensure_media_offloaded
 from tenxgraph.storage.media.security import check_image_pixels, validate_magic_bytes
 from tenxgraph.storage.media.storage.base import BaseMediaStore
@@ -31,7 +31,7 @@ from tenxgraph_api.src.app.routers.media.caching import (
     _CachingMixin,
 )
 from tenxgraph_api.src.app.routers.media.factory import (
-    _create_document_pipeline,
+    _create_document_extractor,
     _create_media_store,
 )
 from tenxgraph_api.src.app.routers.media.links import _LinksMixin
@@ -42,8 +42,7 @@ from tenxgraph_api.src.app.routers.media.ownership import (
     _OwnedStore,
     tenant_matches,
 )
-from tenxgraph_api.src.app.utils.media.extractor import DocumentTooLargeError
-from tenxgraph_api.src.app.utils.media.pipeline import DocumentPipeline
+from tenxgraph_api.src.app.utils.media.extractor import DocumentExtractor, DocumentTooLargeError
 
 
 logger = logging.getLogger("tenxgraph_api.media")
@@ -67,8 +66,6 @@ class MediaService(_LinksMixin, _CachingMixin):
         self._settings = settings or get_media_settings()
         self._checkpointer = checkpointer
         self._store: BaseMediaStore | None = None
-        self._pipeline: DocumentPipeline | None = None
-        self._links_notice_logged = False
         # file_id -> extracted text
         self._extraction_cache = _BoundedCache(MAX_EXTRACTION_ENTRIES, MAX_EXTRACTION_CHARS)
         # file_id -> signed URL payload
@@ -80,11 +77,11 @@ class MediaService(_LinksMixin, _CachingMixin):
             self._store = _create_media_store(self._settings)
         return self._store
 
-    @property
-    def pipeline(self) -> DocumentPipeline:
-        if self._pipeline is None:
-            self._pipeline = _create_document_pipeline(self._settings)
-        return self._pipeline
+    @cached_property
+    def extractor(self) -> DocumentExtractor | None:
+        """Text extractor for uploaded documents; None with ``DOCUMENT_HANDLING`` pass_raw
+        or skip. Built on first use, so a missing ``media`` extra is a 422 on upload."""
+        return _create_document_extractor(self._settings)
 
     @property
     def checkpointer(self) -> BaseCheckpointer | None:
@@ -238,15 +235,11 @@ class MediaService(_LinksMixin, _CachingMixin):
         """
         self._check_content(data, mime_type)
 
-        extracting = self.pipeline.handling == DocumentHandling.EXTRACT_TEXT and (
-            self._is_extractable(mime_type)
-        )
-        check_limits = (
-            getattr(self.pipeline.extractor, "check_limits", None) if extracting else None
-        )
-        if callable(check_limits):
+        extractor = self.extractor
+        extracting = extractor is not None and self._is_extractable(mime_type)
+        if extracting:
             try:
-                check_limits(data, mime_type)
+                extractor.check_limits(data, mime_type)
             except DocumentTooLargeError as exc:
                 raise ClientInputError(str(exc)) from exc
 
@@ -261,8 +254,7 @@ class MediaService(_LinksMixin, _CachingMixin):
             file_metadata["owner_id"] = str(user_id)
             if tenant:
                 file_metadata[TENANT_KEY] = tenant
-            if self.supports_links:
-                file_metadata[THREADS_KEY] = []
+            file_metadata[THREADS_KEY] = []
 
         storage_key = await self.store.store(
             data,
@@ -284,7 +276,7 @@ class MediaService(_LinksMixin, _CachingMixin):
         # If it's a document, try extraction
         if extracting:
             try:
-                text = await self.pipeline.extractor.extract(data, filename, mime_type)
+                text = await extractor.extract(data, filename, mime_type)
                 if text:
                     result["extracted_text"] = text
                     await self._cache_extraction(storage_key, text)
@@ -453,7 +445,7 @@ class MediaService(_LinksMixin, _CachingMixin):
             return
         await self.check_inline(messages, user_id, user)
         tenant = self.caller_tenant(user) if user_id else {}
-        store = _OwnedStore(self.store, user_id, self.supports_links, tenant)
+        store = _OwnedStore(self.store, user_id, tenant)
         try:
             for message in messages:
                 await ensure_media_offloaded(

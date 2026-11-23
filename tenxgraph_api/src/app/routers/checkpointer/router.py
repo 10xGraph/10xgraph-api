@@ -3,7 +3,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from injectq.integrations import InjectAPI
+from injectq.integrations.fastapi import InjectFastAPI
 from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import Message
 
@@ -65,7 +65,7 @@ def validate_thread_id(thread_id: int | str) -> None:
 async def get_state(
     request: Request,
     thread_id: int | str,
-    service: CheckpointerService = InjectAPI(CheckpointerService),
+    service: CheckpointerService = InjectFastAPI(CheckpointerService),
     identity: Identity | None = Depends(RequirePermission("threads", "read")),
 ):
     """Get state from checkpointer.
@@ -103,7 +103,7 @@ async def put_state(
     request: Request,
     thread_id: str | int,
     payload: StateSchema,
-    service: CheckpointerService = InjectAPI(CheckpointerService),
+    service: CheckpointerService = InjectFastAPI(CheckpointerService),
     identity: Identity | None = Depends(RequirePermission("threads", "write")),
 ):
     """Put state to checkpointer.
@@ -151,7 +151,7 @@ async def put_state(
 async def clear_state(
     request: Request,
     thread_id: int | str,
-    service: CheckpointerService = InjectAPI(CheckpointerService),
+    service: CheckpointerService = InjectFastAPI(CheckpointerService),
     identity: Identity | None = Depends(RequirePermission("threads", "delete")),
 ):
     """Clear state from checkpointer.
@@ -202,7 +202,7 @@ async def get_message(
     request: Request,
     thread_id: str | int,
     message_id: str | int,
-    service: CheckpointerService = InjectAPI(CheckpointerService),
+    service: CheckpointerService = InjectFastAPI(CheckpointerService),
     identity: Identity | None = Depends(RequirePermission("threads", "read")),
 ):
     """Get message from checkpointer.
@@ -250,7 +250,7 @@ async def put_message_feedback(
     thread_id: str | int,
     message_id: str | int,
     payload: FeedbackSchema,
-    service: CheckpointerService = InjectAPI(CheckpointerService),
+    service: CheckpointerService = InjectFastAPI(CheckpointerService),
     identity: Identity | None = Depends(RequirePermission("threads", "write")),
 ):
     """Set feedback on a message.
@@ -302,7 +302,7 @@ async def list_messages(
     search: str | None = None,
     offset: int | None = None,
     limit: int | None = None,
-    service: CheckpointerService = InjectAPI(CheckpointerService),
+    service: CheckpointerService = InjectFastAPI(CheckpointerService),
     identity: Identity | None = Depends(RequirePermission("threads", "read")),
 ):
     """List messages from checkpointer.
@@ -350,7 +350,7 @@ async def delete_message(
     message_id: str | int,
     thread_id: str | int,
     payload: ConfigSchema,
-    service: CheckpointerService = InjectAPI(CheckpointerService),
+    service: CheckpointerService = InjectFastAPI(CheckpointerService),
     identity: Identity | None = Depends(RequirePermission("threads", "delete")),
 ):
     """Delete message from checkpointer.
@@ -404,7 +404,7 @@ async def delete_message(
 async def get_thread(
     request: Request,
     thread_id: str | int,
-    service: CheckpointerService = InjectAPI(CheckpointerService),
+    service: CheckpointerService = InjectFastAPI(CheckpointerService),
     identity: Identity | None = Depends(RequirePermission("threads", "read")),
 ):
     """Get thread from checkpointer.
@@ -454,7 +454,7 @@ async def list_threads(
             ),
         ),
     ] = None,
-    service: CheckpointerService = InjectAPI(CheckpointerService),
+    service: CheckpointerService = InjectFastAPI(CheckpointerService),
     identity: Identity | None = Depends(RequirePermission("threads", "read")),
 ):
     """List threads from checkpointer.
@@ -498,7 +498,7 @@ async def delete_thread(
     request: Request,
     thread_id: str | int,
     payload: ConfigSchema,
-    service: CheckpointerService = InjectAPI(CheckpointerService),
+    service: CheckpointerService = InjectFastAPI(CheckpointerService),
     identity: Identity | None = Depends(RequirePermission("threads", "delete")),
 ):
     """Delete thread from checkpointer.

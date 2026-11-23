@@ -6,14 +6,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import Depends, FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
 from injectq import InjectQ
 from injectq.integrations.fastapi import setup_fastapi
 from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.core.utils.container import lookup
-from tenxgraph_api.src.app.routers.graph.router import _bind_ws_container
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import GraphInputSchema
 from tenxgraph_api.src.app.routers.graph.services import run_checks
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService, RunChecks
@@ -128,7 +127,7 @@ def test_an_embedded_app_on_its_own_container_finds_its_services():
         return {"own": lookup(TelemetryStore) is store}
 
     @app.websocket("/ws")
-    async def ws(websocket: WebSocket, _bind: None = Depends(_bind_ws_container)) -> None:
+    async def ws(websocket: WebSocket) -> None:
         await websocket.accept()
         await websocket.send_json({"own": lookup(TelemetryStore) is store})
         await websocket.close()

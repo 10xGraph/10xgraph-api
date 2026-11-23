@@ -4,7 +4,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from injectq import InjectQ
+from injectq.core.context import ContainerContext
 from tenxgraph.core import CompiledGraph
+from tenxgraph.core.graph import StateGraph
+from tenxgraph.storage.checkpointer import BaseCheckpointer, InMemoryCheckpointer
 from tenxgraph.storage.store import BaseStore
 
 from tenxgraph_api import BaseAuth
@@ -13,6 +16,7 @@ from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, RemoteTo
 from tenxgraph_api.src.app.loader import (
     attach_all_modules,
     check_auth_at_boot,
+    check_graph_container,
     load_and_bind_auth,
     load_auth,
     load_container,
@@ -276,6 +280,8 @@ async def test_attach_all_modules():
     container = MagicMock(spec=InjectQ)
 
     mock_graph = MagicMock(spec=CompiledGraph)
+    mock_graph._container = container
+    mock_graph._checkpointer = None
     mock_generator = MagicMock(spec=ThreadNameGenerator)
 
     with (
@@ -311,6 +317,52 @@ async def test_attach_all_modules():
         await attach_all_modules(config, container)
         container.bind_instance.assert_any_call(ThreadNameGenerator, None, allow_none=True)
         container.bind_instance.assert_any_call(BaseAuth, None, allow_none=True)
+
+
+# ---------------------------------------------------------------------------
+# Boot check: the graph's container is the server's
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _keep_current_container():
+    """StateGraph(container=...) activates its container; restore the current one after."""
+    token = ContainerContext.set_current(ContainerContext.get_current())
+    yield
+    ContainerContext.reset_current(token)
+
+
+def _graph_in(container: InjectQ | None) -> CompiledGraph:
+    graph = StateGraph(container=container)
+    graph.add_node("a", lambda state, config: state)
+    graph.set_entry_point("a")
+    return graph.compile(checkpointer=InMemoryCheckpointer())
+
+
+def test_no_container_anywhere_boots():
+    """Neither StateGraph(container=...) nor `injectq`: both use the global container."""
+    server = InjectQ.get_instance()  # build_container's pick with `injectq` unset
+    check_graph_container(_graph_in(None), server)
+
+
+def test_the_same_container_in_both_places_boots():
+    container = InjectQ()  # the one `injectq` names
+    check_graph_container(_graph_in(container), container)
+
+
+def test_a_different_container_refuses_boot():
+    server, own = InjectQ(), InjectQ()
+    graph = _graph_in(own)
+    assert BaseCheckpointer not in server  # the lookups a request makes would miss
+    with pytest.raises(ValueError, match="different InjectQ container than the one named by"):
+        check_graph_container(graph, server)
+
+
+def test_a_graph_container_without_injectq_refuses_boot():
+    server = InjectQ.get_instance()  # build_container's pick with `injectq` unset
+    graph = _graph_in(InjectQ())
+    with pytest.raises(ValueError, match="or set neither"):
+        check_graph_container(graph, server)
 
 
 # ---------------------------------------------------------------------------

@@ -79,10 +79,8 @@ def check_external_media_urls(messages: list[Message] | list[dict[str, Any]], po
     """Run the graph's ``check_url`` on every external media URL a client sent.
 
     No network is touched. A blocked URL raises :class:`MediaURLBlockedError` (400) with the
-    policy's message. ``policy=None`` (core without a fetch policy) skips the check.
+    policy's message.
     """
-    if policy is None:
-        return
     for message in messages:
         for url in dict.fromkeys(external_media_urls(message)):
             try:

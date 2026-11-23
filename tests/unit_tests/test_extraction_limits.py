@@ -12,12 +12,9 @@ import zipfile
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from tenxgraph.core.state.message_block import DocumentBlock, MediaRef
-from tenxgraph.storage.media.config import DocumentHandling
 
 from tenxgraph_api.src.app.utils.media import extractor as extractor_module
 from tenxgraph_api.src.app.utils.media.extractor import DocumentExtractor
-from tenxgraph_api.src.app.utils.media.pipeline import DocumentPipeline
 
 
 DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -129,22 +126,6 @@ async def test_list_results_become_text():
 
 
 @pytest.mark.asyncio
-async def test_inline_document_uses_its_declared_type():
-    fake = RecordingExtractor()
-    pipeline = DocumentPipeline(
-        document_extractor=DocumentExtractor(extractor=fake),
-        handling=DocumentHandling.EXTRACT_TEXT,
-    )
-    block = DocumentBlock(
-        media=MediaRef(
-            kind="data", data_base64="aGVsbG8=", filename="a.zip", mime_type="text/plain"
-        )
-    )
-    await pipeline.process_document(block)
-    assert fake.filenames == ["upload.txt"]
-
-
-@pytest.mark.asyncio
 async def test_upload_uses_its_declared_type():
     from tenxgraph_api.src.app.routers.media import MediaService
 
@@ -157,9 +138,7 @@ async def test_upload_uses_its_declared_type():
         MEDIA_MAX_IMAGE_PIXELS=0,
     )
     service._store = MagicMock(store=AsyncMock(return_value="k1"))
-    service._pipeline = MagicMock(
-        handling=DocumentHandling.EXTRACT_TEXT, extractor=DocumentExtractor(extractor=fake)
-    )
+    service.extractor = DocumentExtractor(extractor=fake)
     service._cache_extraction = AsyncMock()
     service.get_direct_url_info = AsyncMock(return_value=None)
 
