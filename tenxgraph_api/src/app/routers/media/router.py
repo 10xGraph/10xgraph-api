@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import mimetypes
-import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
@@ -12,6 +11,7 @@ from fastapi.responses import FileResponse, Response
 from injectq.integrations import InjectAPI
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from tenxgraph.core.authz import Identity
+from tenxgraph.storage.media.security import sanitize_filename, validate_magic_bytes
 
 from tenxgraph_api.src.app.core.audit import audit_event
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
@@ -29,7 +29,6 @@ from tenxgraph_api.src.app.routers.media.schemas import (
     MultimodalConfigResponse,
 )
 from tenxgraph_api.src.app.utils import success_response
-from tenxgraph_api.src.app.utils.media.signatures import content_matches_mime
 
 
 router = APIRouter(tags=["Files"])
@@ -53,12 +52,6 @@ _INLINE_TYPES = frozenset(
     }
 )
 MAX_FILE_LIST_LIMIT = 200
-_MAX_FILENAME_CHARS = 255
-# C0 and C1 controls (NUL, CR, LF included), the bidi embedding, override and isolate
-# controls, the left-to-right and right-to-left marks, and the line and paragraph separators.
-_FILENAME_UNSAFE = re.compile(
-    "[\x00-\x1f\x7f-\x9f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]"
-)
 _INLINE_PREFIXES = ("audio/", "video/")
 
 
@@ -75,13 +68,6 @@ def _is_active_type(mime: str) -> bool:
         or "javascript" in subtype
         or "ecmascript" in subtype
     )
-
-
-def _clean_filename(filename: str) -> str:
-    """The uploaded name as stored: base name only, no control or bidi characters, capped."""
-    name = _FILENAME_UNSAFE.sub("", re.split(r"[/\\]", filename)[-1]).strip()
-    name = name[:_MAX_FILENAME_CHARS].strip()
-    return "file" if name in {"", ".", ".."} else name
 
 
 async def _read_upload(file: UploadFile, max_bytes: int, max_mb: float) -> bytes:
@@ -206,7 +192,7 @@ async def upload_file(
     if file.filename is None:
         raise HTTPException(status_code=400, detail="filename is required")
 
-    filename = _clean_filename(file.filename)
+    filename = sanitize_filename(file.filename)
     media_settings = get_media_settings()
     mime = file.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
@@ -222,7 +208,7 @@ async def upload_file(
     if not data:
         raise HTTPException(status_code=400, detail="Empty file")
 
-    if not content_matches_mime(data, mime):
+    if not validate_magic_bytes(data, mime):
         logger.warning(
             "Rejected upload %s: content does not match %s", log_safe(filename), log_safe(mime)
         )

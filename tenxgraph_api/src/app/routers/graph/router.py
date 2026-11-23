@@ -29,6 +29,11 @@ from tenxgraph_api.src.app.core.auth.revocation import (
     TokenRevocationUnavailableError,
     token_revoked,
 )
+from tenxgraph_api.src.app.core.config.settings import is_production
+from tenxgraph_api.src.app.core.exceptions.client_errors import (
+    _sanitize_error_message,
+    client_error,
+)
 from tenxgraph_api.src.app.core.leases import Lease
 from tenxgraph_api.src.app.core.threads import require_thread
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe, summarize_validation_error
@@ -213,30 +218,20 @@ def _ws_max_frame_chars() -> int:
     return get_settings().MAX_REQUEST_SIZE
 
 
-def _is_production() -> bool:
-    """True in production, where request log lines that carry client thread ids are not emitted."""
-    from tenxgraph_api.src.app.core.config.settings import get_settings
-
-    return get_settings().MODE == "production"
-
-
 # Returned by _next_ws_input for a bad frame the socket survives (an error was sent).
 _WS_SKIP: Any = object()
 
 
-async def _send_ws_error(websocket: WebSocket, reason: str) -> None:
+async def _send_ws_error(websocket: WebSocket, reason: str, **data: Any) -> None:
+    """Send an ERROR chunk: ``reason`` plus any extra ``data`` fields (``code``, ...)."""
     await websocket.send_text(
-        StreamChunk(event=StreamEvent.ERROR, data={"reason": reason}).model_dump_json()
+        StreamChunk(event=StreamEvent.ERROR, data={"reason": reason, **data}).model_dump_json()
     )
 
 
 async def _send_thread_not_found(websocket: WebSocket) -> None:
     code, message = _thread_not_found()
-    await websocket.send_text(
-        StreamChunk(
-            event=StreamEvent.ERROR, data={"reason": message, "code": code}
-        ).model_dump_json()
-    )
+    await _send_ws_error(websocket, message, code=code)
 
 
 def _thread_not_found() -> tuple[str, str]:
@@ -279,14 +274,8 @@ async def _next_frame(frames: _WsFrames, websocket: WebSocket, identity: Identit
 
 
 async def _close_expired(websocket: WebSocket) -> None:
-    logger.info("WebSocket credential expired while idle; closing")
     with contextlib.suppress(Exception):
-        await websocket.send_text(
-            StreamChunk(
-                event=StreamEvent.ERROR,
-                data={"reason": "Session expired. Reconnect with a valid token."},
-            ).model_dump_json()
-        )
+        await _send_ws_error(websocket, "Session expired. Reconnect with a valid token.")
     with contextlib.suppress(Exception):
         await websocket.close(code=1008)
 
@@ -307,6 +296,7 @@ async def _next_ws_input(
         text = await _next_frame(frames, websocket, identity)
         data = _parse_json_frame(text, max_frame)
     except _SessionExpired:
+        logger.info("WebSocket credential expired while idle; closing")
         await _close_expired(websocket)
         return None
     except WebSocketDisconnect:
@@ -334,9 +324,7 @@ async def _next_ws_input(
 async def _close_too_big(websocket: WebSocket, exc: WsFrameTooLarge) -> None:
     logger.warning("WebSocket frame refused: %s", exc)
     with contextlib.suppress(Exception):
-        await websocket.send_text(
-            StreamChunk(event=StreamEvent.ERROR, data={"reason": str(exc)}).model_dump_json()
-        )
+        await _send_ws_error(websocket, str(exc))
     with contextlib.suppress(Exception):
         await websocket.close(code=WS_MESSAGE_TOO_BIG)
 
@@ -415,6 +403,8 @@ async def invoke_graph(
     service.check_media_urls(graph_input.messages)
     # A thread the caller cannot run on is a 404 before anything is held.
     await service.require_run_thread(requested_thread_id(graph_input.config), identity)
+    # Inline media the run would store gets the upload checks (signature, quota): 422.
+    await service.check_inline_media(graph_input.messages, identity)
 
     # Opt-in Idempotency-Key: a finished run's stored result is returned, a running one is 409.
     idem, replay = await _idempotency(request, identity, "invoke")
@@ -475,6 +465,8 @@ async def stream_graph(
     service.check_media_urls(graph_input.messages)
     service.check_model_choice(graph_input.config)
     await service.require_run_thread(requested_thread_id(graph_input.config), identity)
+    # Inline media the run would store gets the upload checks (signature, quota): a real 422.
+    await service.check_inline_media(graph_input.messages, identity)
 
     # Opt-in Idempotency-Key: a finished run's final state is replayed, a running one is 409.
     idem, replay = await _idempotency(request, identity, "stream")
@@ -594,7 +586,7 @@ async def observability(
     identity: Identity | None = Depends(RequirePermission("graph", "read")),
 ):
     """Return the reconstructed observability trace for a thread."""
-    if not _is_production():
+    if not is_production():
         logger.info("Observability requested for thread %s", log_safe(thread_id))
 
     result: ObservabilitySchema = await service.get_observability(thread_id, identity, run_id)
@@ -658,7 +650,7 @@ async def stop_graph(
     Returns:
         Status information about the stop operation
     """
-    if not _is_production():
+    if not is_production():
         logger.info("Graph stop request received for thread: %s", log_safe(stop_request.thread_id))
 
     await require_thread(service.checkpointer, identity, stop_request.thread_id)
@@ -671,7 +663,7 @@ async def stop_graph(
         identity=identity,
     )
 
-    if not _is_production():
+    if not is_production():
         logger.info("Graph stop completed for thread %s", log_safe(stop_request.thread_id))
 
     return success_response(
@@ -721,7 +713,7 @@ async def fix_graph(
         HTTPException: If the fix operation fails or if no state is found
             for the given thread_id
     """
-    if not _is_production():
+    if not is_production():
         logger.info("Graph fix request received for thread: %s", log_safe(fix_request.thread_id))
 
     # Fix writes state, so it stays in the caller's own threads whatever their reach.
@@ -740,7 +732,7 @@ async def fix_graph(
         identity=identity,
     )
 
-    if not _is_production():
+    if not is_production():
         logger.info("Graph fix completed for thread %s", log_safe(fix_request.thread_id))
 
     return success_response(
@@ -795,25 +787,15 @@ async def _ws_run_gate(websocket: WebSocket, identity: Identity | None) -> str:
     """
     if await _ws_credential_error(websocket, identity):
         logger.info("WebSocket credential no longer valid; closing")
-        await websocket.send_text(
-            StreamChunk(
-                event=StreamEvent.ERROR,
-                data={"reason": "Session expired. Reconnect with a valid token."},
-            ).model_dump_json()
-        )
-        await websocket.close(code=1008)
+        await _close_expired(websocket)
         return "close"
 
     retry_after = await ws_run_allowed(websocket)
     if retry_after is not None:
-        await websocket.send_text(
-            StreamChunk(
-                event=StreamEvent.ERROR,
-                data={
-                    "reason": f"Rate limit exceeded. Retry after {retry_after}s.",
-                    "retry_after_seconds": retry_after,
-                },
-            ).model_dump_json()
+        await _send_ws_error(
+            websocket,
+            f"Rate limit exceeded. Retry after {retry_after}s.",
+            retry_after_seconds=retry_after,
         )
         return "skip"
     return "run"
@@ -861,9 +843,7 @@ async def _ws_media_urls_allowed(
         reason = str(exc)
     else:
         return True
-    await websocket.send_text(
-        StreamChunk(event=StreamEvent.ERROR, data={"reason": reason}).model_dump_json()
-    )
+    await _send_ws_error(websocket, reason)
     return False
 
 
@@ -987,14 +967,10 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
     if service.is_live_agent:
         logger.warning("Rejected /v1/graph/ws connection: graph is a live agent")
         with contextlib.suppress(Exception):
-            await websocket.send_text(
-                StreamChunk(
-                    event=StreamEvent.ERROR,
-                    data={
-                        "reason": "This graph is a live (realtime) agent; connect to "
-                        "/v1/graph/live instead of /v1/graph/ws.",
-                    },
-                ).model_dump_json()
+            await _send_ws_error(
+                websocket,
+                "This graph is a live (realtime) agent; connect to "
+                "/v1/graph/live instead of /v1/graph/ws.",
             )
         with contextlib.suppress(Exception):
             await websocket.close(code=1008)
@@ -1030,7 +1006,7 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
                 continue
 
             thread_id = _ws_run_thread_id(ws_input)
-            if not _is_production():
+            if not is_production():
                 logger.info(
                     "WebSocket graph run: invoke_type=%s, thread_id=%s",
                     ws_input.invoke_type,
@@ -1082,11 +1058,7 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
             except HTTPException as exc:
                 if idem:
                     idem.release()
-                await websocket.send_text(
-                    StreamChunk(
-                        event=StreamEvent.ERROR, data={"reason": _guard_refusal(exc)}
-                    ).model_dump_json()
-                )
+                await _send_ws_error(websocket, _guard_refusal(exc))
                 continue
             except ThreadNotFoundError:
                 if idem:
@@ -1130,16 +1102,22 @@ async def websocket_graph(  # noqa: PLR0912, PLR0915
 
 
 def _client_error(exc: Exception) -> str:
-    """The error text a client may see: the exception in development, generic in production.
+    """The error text a client may see, by the same rule as the HTTP answer for ``exc``.
 
     A ValueError here can come from anywhere under the session (storage, provider SDK), not
-    only from the init frame, and its text may name internal hosts, paths or queries.
+    only from the init frame, and its text may name internal hosts, paths or queries. A
+    pydantic error is summarized without the values it quotes; in production it is the generic
+    validation text unless it wraps a ``ClientInputError`` (as the HTTP 422 handler does).
     """
-    from tenxgraph_api.src.app.core.config.settings import get_settings
-    from tenxgraph_api.src.app.core.exceptions.handle_errors import _sanitize_error_message
-
-    is_production = get_settings().MODE == "production"
-    return _sanitize_error_message(_error_summary(exc), "VALIDATION_ERROR", is_production)
+    if not isinstance(exc, ValidationError):
+        return client_error(exc).message
+    if not is_production():
+        return summarize_validation_error(exc)
+    for error in exc.errors():
+        wrapped = (error.get("ctx") or {}).get("error")
+        if isinstance(wrapped, ClientInputError):
+            return str(wrapped)
+    return _sanitize_error_message(str(exc), "VALIDATION_ERROR", True)
 
 
 def _error_summary(exc: Exception) -> str:

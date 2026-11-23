@@ -129,9 +129,9 @@ def client_error_detail(exc: Exception) -> str:
     """The 422 detail for ``exc``: its message, unless production and not a client message error."""
     if isinstance(exc, CLIENT_MESSAGE_ERRORS):
         return str(exc)
-    from tenxgraph_api.src.app.core.config.settings import get_settings
+    from tenxgraph_api.src.app.core.config.settings import is_production
 
-    if get_settings().MODE == "production":
+    if is_production():
         return "Invalid input provided."
     return str(exc)
 

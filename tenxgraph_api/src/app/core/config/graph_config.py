@@ -2,7 +2,6 @@ import ipaddress
 import json
 import logging
 import os
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -12,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError,
 from tenxgraph.core.graph.remote_tool import RemoteToolConfig
 
 from tenxgraph_api.config_names import CONFIG_FILE, LEGACY_CONFIG_FILE
+from tenxgraph_api.import_path import is_import_path
 
 
 if TYPE_CHECKING:
@@ -401,20 +401,26 @@ class CacheStoreConfig:
         """
         if self.type != "redis":
             return None
-        if self.url is None:
-            env_url = os.environ.get("REDIS_URL", "").strip()
-            if not env_url:
-                raise ValueError(
-                    'cache_store "type": "redis" needs a Redis URL: set cache_store.url in '
-                    "10xgraph.json, or the REDIS_URL environment variable."
-                )
-            return env_url
-        try:
-            return _expand_env(self.url)
-        except ValueError:
+        return redis_url_or_env(self.url, "cache_store.url")
+
+
+def redis_url_or_env(raw: str | None, key: str) -> str:
+    """``raw`` with ``$VAR`` / ``${VAR}`` expanded, else the ``REDIS_URL`` variable.
+
+    ``key`` names the config value in the errors. Raises ValueError for an unset variable,
+    or when neither ``raw`` nor ``REDIS_URL`` is set.
+    """
+    if raw is None:
+        env_url = os.environ.get("REDIS_URL", "").strip()
+        if not env_url:
             raise ValueError(
-                f"cache_store.url: {self.url} uses an environment variable that is not set"
-            ) from None
+                f"{key} is required: set it in 10xgraph.json, or the REDIS_URL environment variable"
+            )
+        return env_url
+    try:
+        return _expand_env(raw) or raw
+    except ValueError:
+        raise ValueError(f"{key}: {raw} uses an environment variable that is not set") from None
 
 
 # ``id_generator`` names: the concrete generators in core ``tenxgraph.utils.id_generator`` plus
@@ -431,7 +437,6 @@ ID_GENERATOR_NAMES: tuple[str, ...] = (
 
 # Built-in ``thread_name_generator`` choices; anything else must be ``"module:attr"``.
 THREAD_NAME_CHOICES: tuple[str, ...] = ("none", "random", "first_message")
-_IMPORT_PATH = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_][\w.]*$")
 
 
 # Finite defaults so an unconfigured server cannot be held open by one client.
@@ -834,7 +839,7 @@ class GraphConfig:
         if value is None or value == "":
             return "none"
         if not isinstance(value, str) or (
-            value not in THREAD_NAME_CHOICES and not _IMPORT_PATH.match(value)
+            value not in THREAD_NAME_CHOICES and not is_import_path(value)
         ):
             raise ValueError(
                 f"thread_name_generator must be one of {', '.join(THREAD_NAME_CHOICES)} or "
@@ -851,7 +856,7 @@ class GraphConfig:
         if value is None or value == "":
             return None
         if not isinstance(value, str) or (
-            value not in ID_GENERATOR_NAMES and not _IMPORT_PATH.match(value)
+            value not in ID_GENERATOR_NAMES and not is_import_path(value)
         ):
             raise ValueError(
                 f"id_generator must be one of {', '.join(ID_GENERATOR_NAMES)} or "

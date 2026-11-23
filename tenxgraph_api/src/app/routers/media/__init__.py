@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import inspect
 import json
 import logging
@@ -13,10 +15,11 @@ from typing import Any, cast
 
 from injectq import InjectQ, inject, singleton
 from tenxgraph.core.authz import Identity, Reach, can_reach
+from tenxgraph.core.state.message_block import AudioBlock, DocumentBlock, ImageBlock, VideoBlock
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.storage.media.config import DocumentHandling
 from tenxgraph.storage.media.offload import MediaOffloadPolicy, ensure_media_offloaded
-from tenxgraph.storage.media.security import check_image_pixels
+from tenxgraph.storage.media.security import check_image_pixels, validate_magic_bytes
 from tenxgraph.storage.media.storage.base import BaseMediaStore
 
 from tenxgraph_api.src.app.core.config.graph_config import MediaConfig
@@ -28,6 +31,9 @@ from tenxgraph_api.src.app.utils.media.pipeline import DocumentPipeline
 
 
 logger = logging.getLogger("tenxgraph_api.media")
+
+# The blocks core ``ensure_media_offloaded`` moves into the store.
+_OFFLOADED_BLOCKS = (ImageBlock, AudioBlock, VideoBlock, DocumentBlock)
 
 
 _SIGNED_URL_NAMESPACE = "media:signed-url"
@@ -448,16 +454,7 @@ class MediaService:
         Returns a dict with file_id, mime_type, size_bytes, filename,
         extracted_text (nullable), and url.
         """
-        if len(data) > self.max_size_bytes:
-            raise ClientInputError(
-                f"File size {len(data)} exceeds maximum {self._settings.MEDIA_MAX_SIZE_MB}MB"
-            )
-
-        if mime_type.lower().startswith("image/"):
-            try:
-                check_image_pixels(data, self._settings.MEDIA_MAX_IMAGE_PIXELS or None)
-            except ValueError as exc:
-                raise ClientInputError(str(exc)) from exc
+        self._check_content(data, mime_type)
 
         extracting = self.pipeline.handling == DocumentHandling.EXTRACT_TEXT and (
             self._is_extractable(mime_type)
@@ -522,6 +519,27 @@ class MediaService:
 
         return result
 
+    def _check_content(self, data: bytes, mime_type: str) -> None:
+        """Refuse a file over ``MEDIA_MAX_SIZE_MB``, an image over the pixel limit, or bytes
+        that do not start like ``mime_type`` (for types with a known signature).
+
+        Raises:
+            ClientInputError: One of the checks failed.
+        """
+        if len(data) > self.max_size_bytes:
+            raise ClientInputError(
+                f"File size {len(data)} exceeds maximum {self._settings.MEDIA_MAX_SIZE_MB}MB"
+            )
+        if mime_type.lower().startswith("image/"):
+            try:
+                check_image_pixels(data, self._settings.MEDIA_MAX_IMAGE_PIXELS or None)
+            except ValueError as exc:
+                raise ClientInputError(str(exc)) from exc
+        if not validate_magic_bytes(data, mime_type):
+            raise ClientInputError(
+                f"file content does not match {mime_type.split(';', 1)[0].strip()}"
+            )
+
     def _upload_tenant(self, user_id: str | None, user: Identity | None) -> dict[str, str | None]:
         """The tenant values an upload records (empty without a user or tenant columns).
 
@@ -538,8 +556,10 @@ class MediaService:
         user_id: str | None,
         incoming_bytes: int,
         tenant: dict[str, str | None] | None = None,
+        incoming_files: int = 1,
     ) -> None:
-        """Refuse an upload that would take ``user_id`` past the per-user file or byte quota.
+        """Refuse ``incoming_files`` new files that would take ``user_id`` past the per-user
+        file or byte quota.
 
         Does nothing without a user, with both quotas off, or when the store cannot list its
         files (a warning is logged once). Counts only files that record this user as owner
@@ -572,13 +592,58 @@ class MediaService:
             if meta and self._owned_by(meta, user_id, tenant or {}):
                 count += 1
                 used += int(meta.get("size_bytes") or 0)
-        if max_files and count >= max_files:
+        if max_files and count + incoming_files > max_files:
             raise ClientInputError(f"Upload limit reached: at most {max_files} files per user")
         if max_bytes and used + incoming_bytes > max_bytes:
             raise ClientInputError(
                 f"Storage limit reached: at most {self._settings.MEDIA_MAX_USER_STORAGE_MB}MB "
                 "of files per user"
             )
+
+    async def check_inline(
+        self,
+        messages: list[Any],
+        user_id: str | None = None,
+        user: Identity | None = None,
+    ) -> None:
+        """Apply the upload checks to the inline blobs :meth:`offload_inline` would store.
+
+        Each blob over ``MEDIA_INLINE_MAX_BYTES`` gets the size, pixel and signature checks,
+        and all of them together the per-user quota, before anything is stored. Stores
+        nothing, so a route can call it before its response starts.
+
+        Raises:
+            ClientInputError: A blob is not valid base64 or fails a check, or the blobs would
+                take the user past the quota.
+        """
+        threshold = self._settings.MEDIA_INLINE_MAX_BYTES
+        if threshold <= 0:
+            return
+        total = 0
+        count = 0
+        for message in messages:
+            for block in getattr(message, "content", None) or []:
+                media = getattr(block, "media", None)
+                if not isinstance(block, _OFFLOADED_BLOCKS) or media is None:
+                    continue
+                if media.kind != "data" or not media.data_base64:
+                    continue
+                # The same size estimate core's offload uses to pick the blobs it stores.
+                if len(media.data_base64) * 3 // 4 <= threshold:
+                    continue
+                try:
+                    data = base64.b64decode(media.data_base64)
+                except (binascii.Error, ValueError) as exc:
+                    raise ClientInputError(f"Inline media rejected: {exc}") from exc
+                try:
+                    self._check_content(data, media.mime_type or "application/octet-stream")
+                except ClientInputError as exc:
+                    raise ClientInputError(f"Inline media rejected: {exc}") from exc
+                total += len(data)
+                count += 1
+        if count:
+            tenant = self.caller_tenant(user) if user_id else {}
+            await self._check_quota(user_id, total, tenant, incoming_files=count)
 
     async def offload_inline(
         self,
@@ -593,14 +658,18 @@ class MediaService:
         as an upload (tenant values included), so the caller can link them to the thread and
         they are deleted with it.
 
+        The blobs first pass the same checks as an upload (:meth:`check_inline`): size,
+        pixels, signature and the per-user quota.
+
         Raises:
-            ClientInputError: The blob is not valid base64 or exceeds ``MEDIA_MAX_SIZE_MB``,
-                or a blob must be stored while tenant columns are declared and ``user``
-                lacks a value (nothing to scope the offloaded file to).
+            ClientInputError: A blob is not valid base64, fails an upload check or would take
+                the user past the quota, or a blob must be stored while tenant columns are
+                declared and ``user`` lacks a value (nothing to scope the offloaded file to).
         """
         threshold = self._settings.MEDIA_INLINE_MAX_BYTES
         if threshold <= 0:
             return
+        await self.check_inline(messages, user_id, user)
         tenant = self.caller_tenant(user) if user_id else {}
         store = _OwnedStore(self.store, user_id, self.supports_links, tenant)
         try:
@@ -623,11 +692,6 @@ class MediaService:
         """Whether the media store can update metadata in place (core with ``update_metadata``)."""
         return callable(getattr(self.store, "update_metadata", None))
 
-    async def _update_metadata(self, key: str, updates: dict[str, Any]) -> bool:
-        """``store.update_metadata`` (newer core only; callers check ``supports_links``)."""
-        store: Any = self.store
-        return bool(await store.update_metadata(key, updates))
-
     def delete_with_thread(self) -> bool:
         """``media.delete_with_thread`` from 10xgraph.json (default true)."""
         try:
@@ -649,31 +713,18 @@ class MediaService:
             NotImplementedError: The store cannot enumerate the files.
         """
         if user_id:
-            for_owner = getattr(self.store, "list_keys_for_owner", None)  # core before 1.0: none
-            if callable(for_owner):
-                return list(await for_owner(str(user_id)))
-        list_keys = getattr(self.store, "list_keys", None)  # absent in core older than 1.0
-        if not callable(list_keys):
-            raise NotImplementedError(f"{type(self.store).__name__} cannot list files")
-        return list(await list_keys())
+            return list(await self.store.list_keys_for_owner(str(user_id)))
+        return list(await self.store.list_keys())
 
     async def _modify_metadata(
         self, key: str, fn: Callable[[dict[str, Any]], dict[str, Any] | None]
     ) -> bool:
         """Change one file's metadata from its current value as a single step.
 
-        Uses the store's ``modify_metadata`` (atomic in the bundled stores). A store from an
-        older core falls back to read then ``update_metadata``, which can lose a concurrent
-        update. ``fn`` may run more than once, so it must only compute.
+        Uses the store's ``modify_metadata`` (atomic in the bundled stores). ``fn`` may run
+        more than once, so it must only compute.
         """
-        modify = getattr(self.store, "modify_metadata", None)
-        if callable(modify):
-            return bool(await modify(key, fn))
-        metadata = await self.store.get_metadata(key)
-        if metadata is None:
-            return False
-        updates = fn(dict(metadata))
-        return await self._update_metadata(key, updates) if updates else True
+        return bool(await self.store.modify_metadata(key, fn))
 
     async def link_threads(
         self, keys: list[str], thread_id: str, user_id: str, user: Identity | None = None

@@ -37,6 +37,7 @@ from tenxgraph_api.cli.commands import BaseCommand
 from tenxgraph_api.cli.config_editor.validation import thread_name_generator_issues
 from tenxgraph_api.cli.constants import DEFAULT_CONFIG_FILE, DEFAULT_PORT
 from tenxgraph_api.cli.core.config import read_config_json, resolve_default_config
+from tenxgraph_api.import_path import is_import_path
 from tenxgraph_api.src.app.core.auth.auth_config import check_auth_config
 from tenxgraph_api.src.app.core.config.graph_config import validate_remote_tools
 
@@ -201,7 +202,7 @@ class AuditCommand(BaseCommand):
         if not isinstance(data, dict):
             return Diagnostic("Project config", "fail", f"{config_path.name} must be an object")
         agent = data.get("agent")
-        if not isinstance(agent, str) or ":" not in agent:
+        if not is_import_path(agent):
             return Diagnostic("Project config", "fail", "'agent' must be a module:attribute string")
         try:
             tools = validate_remote_tools(data.get("remote_tools", []))

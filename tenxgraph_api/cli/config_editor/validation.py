@@ -14,6 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, ValidationError
 from tenxgraph.runtime.publisher.identity import validate_user_id_mode
 from tenxgraph.runtime.publisher.otel_publisher import ObservabilityLevel
 
@@ -23,6 +24,7 @@ from tenxgraph_api.cli.config_editor.schema import (
     THREAD_NAME_CHOICES,
     section_for_key,
 )
+from tenxgraph_api.cli.core.config_sections import EvaluationConfig, TestConfig
 from tenxgraph_api.import_path import is_import_path
 from tenxgraph_api.src.app.core.audit.config import AuditConfig
 from tenxgraph_api.src.app.core.auth.auth_config import check_auth_config
@@ -34,7 +36,6 @@ Issue = dict[str, str]
 # RbacConfig reports a bad role as "role 'name': ..." on the whole auth object.
 _ROLE_IN_MESSAGE = re.compile(r"role '([^']+)'")
 _TRACE_DESTINATIONS = ("logfire", "langsmith", "phoenix", "otlp")
-_MAX_PERCENT = 100
 # Settings that live inside cache_store; at the top level the server refuses them.
 _CACHE_STORE_SETTINGS = ("redis", "rate_limit", "token_revocation")
 
@@ -87,8 +88,8 @@ def validate_config(config: Any, base_dir: Path | None = None) -> list[Issue]:
     _check_audit(config, out)
     _check_wiring(config, out, base_dir)
     _check_remote_tools(config, out)
-    _check_test(config, out)
-    _check_evaluation(config, out)
+    _check_section(config, "test", TestConfig, out)
+    _check_section(config, "evaluation", EvaluationConfig, out)
     _check_worker(config, out)
     out.issues.extend(production_readiness_warnings(config))
 
@@ -393,8 +394,6 @@ def _check_metrics(config: dict, out: _Collector) -> None:
     if not isinstance(data, dict):
         out.error("metrics", "metrics must be an object.")
         return
-    from pydantic import ValidationError
-
     from tenxgraph_api.src.app.core.config.metrics import MetricsConfig
 
     try:
@@ -416,8 +415,8 @@ def _check_audit(config: dict, out: _Collector) -> None:
         AuditConfig.model_validate(data)
     except ValidationError as exc:
         for err in exc.errors():
-            path = ".".join(["audit", *(str(part) for part in err["loc"])])
-            out.error(path, err["msg"].removeprefix("Value error, "))
+            field = ".".join(["audit", *(str(part) for part in err["loc"][:1])])  # not sinks.1
+            out.error(field, err["msg"].removeprefix("Value error, "))
 
 
 def _check_wiring(config: dict, out: _Collector, base_dir: Path | None) -> None:
@@ -469,50 +468,22 @@ def _check_remote_tools(config: dict, out: _Collector) -> None:
     _quietly(lambda: validate_remote_tools(config["remote_tools"]), out, "remote_tools")
 
 
-def _check_test(config: dict, out: _Collector) -> None:
-    data = config.get("test")
+def _check_section(config: dict, key: str, model: type[BaseModel], out: _Collector) -> None:
+    data = config.get(key)
     if data is None:
         return
-    if not isinstance(data, dict):
-        out.error("test", "test must be an object.")
-        return
-    if "path" in data and not isinstance(data["path"], str):
-        out.error("test.path", "path must be a string.")
-    if "coverage" in data and not isinstance(data["coverage"], bool):
-        out.error("test.coverage", "coverage must be true or false.")
-    threshold = data.get("coverage_threshold")
-    if threshold is not None and not (_is_int(threshold) and 0 <= threshold <= _MAX_PERCENT):
-        out.error("test.coverage_threshold", "coverage_threshold must be a whole number 0-100.")
-
-
-def _check_evaluation(config: dict, out: _Collector) -> None:
-    data = config.get("evaluation")
-    if data is None:
-        return
-    if not isinstance(data, dict):
-        out.error("evaluation", "evaluation must be an object.")
-        return
-    for key in ("directory", "output_dir"):
-        if key in data and not isinstance(data[key], str):
-            out.error(f"evaluation.{key}", f"{key} must be a string.")
-    threshold = data.get("threshold")
-    if threshold is not None and not (_is_number(threshold) and 0 <= threshold <= 1):
-        out.error("evaluation.threshold", "threshold must be a number between 0 and 1.")
-    if "parallel" in data and not isinstance(data["parallel"], bool):
-        out.error("evaluation.parallel", "parallel must be true or false.")
-    if "open_report" in data and not isinstance(data["open_report"], bool):
-        out.error("evaluation.open_report", "open_report must be true or false.")
-    concurrency = data.get("max_concurrency")
-    if concurrency is not None and not (_is_int(concurrency) and concurrency >= 1):
-        out.error("evaluation.max_concurrency", "max_concurrency must be a whole number >= 1.")
+    try:
+        model.model_validate(data)
+    except ValidationError as exc:
+        for err in exc.errors():
+            path = ".".join([key, *(str(part) for part in err["loc"])])
+            out.error(path, err["msg"])
 
 
 def _check_worker(config: dict, out: _Collector) -> None:
     data = config.get("worker")
     if data is None:
         return
-    from pydantic import ValidationError
-
     from tenxgraph_api.jobs.config import BROKER_TYPES, RESULT_BACKEND_TYPES, WorkerConfig
 
     refused: set[str] = set()
@@ -575,11 +546,3 @@ def _has_unresolved_env(value: str) -> bool:
     except ValueError:
         return True
     return False
-
-
-def _is_int(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
-def _is_number(value: Any) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool)

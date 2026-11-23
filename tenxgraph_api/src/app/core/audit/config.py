@@ -1,12 +1,11 @@
 """The ``audit`` block of 10xgraph.json."""
 
-import re
-
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
+
+from tenxgraph_api.import_path import is_import_path
 
 
 # "module:Class" (a BaseAuditSink subclass, instance or zero-argument factory).
-_IMPORT_PATH = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_][\w.]*$")
 BUILTIN_SINKS = ("log", "publisher")
 
 
@@ -29,7 +28,7 @@ class AuditConfig(BaseModel):
     @classmethod
     def _check_sinks(cls, sinks: list[str]) -> list[str]:
         for sink in sinks:
-            if sink not in BUILTIN_SINKS and not _IMPORT_PATH.match(sink):
+            if sink not in BUILTIN_SINKS and not is_import_path(sink):
                 raise ValueError(
                     f'audit.sinks: unknown sink {sink!r}; use "log", "publisher" or "module:Class"'
                 )

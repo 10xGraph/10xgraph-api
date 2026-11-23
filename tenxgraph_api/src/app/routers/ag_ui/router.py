@@ -11,7 +11,7 @@ from tenxgraph_api.src.app.core.auth.permissions import (
     run_credential,
 )
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
-from tenxgraph_api.src.app.core.config.settings import get_settings
+from tenxgraph_api.src.app.core.config.settings import is_production
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.core.validation.request_config import (
     ClientInputError,
@@ -125,7 +125,7 @@ async def _run_ag_ui(request, run_input, service, identity, config, idem, named)
     except ValueError:
         pass
 
-    if get_settings().MODE != "production":
+    if not is_production():
         logger.info(
             "AG-UI run %s received for thread %s", log_safe(run_input.run_id), log_safe(thread_id)
         )

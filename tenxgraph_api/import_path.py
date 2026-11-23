@@ -1,11 +1,13 @@
-"""The ``"module:attr"`` config value: one format rule and one resolver, shared by the CLI and the server."""
+"""The ``module:attr`` config value: one format rule and one resolver for the CLI and server."""
 
 import importlib
 import re
 from typing import Any
 
 
-IMPORT_PATH = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_][\w.]*$")
+# The module part allows ``-``: importlib loads a folder such as ``my-pkg`` and the server
+# always accepted it. The attribute part is dotted identifiers.
+IMPORT_PATH = re.compile(r"^[\w-]+(?:\.[\w-]+)*:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$")
 
 
 def is_import_path(value: object) -> bool:

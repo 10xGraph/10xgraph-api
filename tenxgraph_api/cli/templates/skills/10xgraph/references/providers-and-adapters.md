@@ -90,14 +90,9 @@ Runtime converter exports:
 
 Converters normalize provider-native responses into 10xGraph `Message`, content blocks, usage, reasoning, and tool call structures.
 
-## Tool Adapters
+## Tools
 
-Third-party adapters:
-
-- `LangChainAdapter`: registers LangChain tools and exposes LLM-compatible schemas.
-- `ComposioAdapter`: integrates Composio tools where dependency is installed.
-
-Tool execution precedence in `ToolNode` is MCP, Composio, LangChain, then local tools, with remote tool checks before local execution where configured.
+`ToolNode` runs local Python functions and MCP tools. There are no LangChain or Composio adapter classes in `tenxgraph`; wrap third-party tools in a local `@tool` function or expose them through an MCP server.
 
 ## Rules
 

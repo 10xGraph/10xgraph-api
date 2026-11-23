@@ -12,6 +12,7 @@ from tenxgraph_api.cli.constants import (
 )
 from tenxgraph_api.cli.exceptions import ConfigurationError
 from tenxgraph_api.config_names import CONFIG_FILE, LEGACY_CONFIG_FILE
+from tenxgraph_api.import_path import is_import_path
 
 
 def config_names(config_path: str | Path) -> tuple[str, ...]:
@@ -211,9 +212,9 @@ class ConfigManager:
 
         # Validate agent field
         agent = config_data["agent"]
-        if not isinstance(agent, str):
+        if not is_import_path(agent):
             raise ConfigurationError(
-                "Field 'agent' must be a string",
+                f"Field 'agent' must be 'module:attribute', got {agent!r}",
                 config_path=self.config_path,
             )
 

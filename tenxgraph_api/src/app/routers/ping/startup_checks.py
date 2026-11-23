@@ -16,13 +16,18 @@ WARNING: the run locks and caps fall back to this process, and the server starts
 
 Unlike readiness, a required backend's outage is not tolerated here: a backend that is wrong at
 boot is a deployment mistake, not a transient outage.
+
+Ctrl+C or SIGTERM during the gate stops it at once with :class:`StartupCheckError`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from collections.abc import Awaitable, Callable
+import signal
+import threading
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -209,6 +214,47 @@ async def _check_optional(target: Target, attempt_timeout: float) -> bool:
     return False
 
 
+@contextlib.contextmanager
+def _cancel_on_signal() -> Iterator[list[int]]:
+    """Cancel the current task on SIGINT or SIGTERM; yields the signals that cancelled it.
+
+    uvicorn's own handlers only set a flag that nothing reads while the lifespan starts, so
+    without this a failing gate ignores Ctrl+C until its window runs out. The previous Python
+    handler still runs first, so uvicorn knows it should exit. Only on the main thread, where
+    ``signal.signal`` works.
+    """
+    received: list[int] = []
+    if threading.current_thread() is not threading.main_thread():
+        yield received
+        return
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    active = True
+
+    def cancel(signum: int) -> None:
+        # Runs on the loop: a signal that lands as the gate ends must not cancel what follows.
+        if active and task is not None:
+            received.append(signum)
+            task.cancel()
+
+    def handler(signum: int, frame: Any) -> None:
+        previous = saved[signum]
+        # default_int_handler would raise KeyboardInterrupt in whatever frame is running.
+        if callable(previous) and previous is not signal.default_int_handler:
+            previous(signum, frame)
+        loop.call_soon_threadsafe(cancel, signum)
+
+    saved = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
+    for signum in saved:
+        signal.signal(signum, handler)
+    try:
+        yield received
+    finally:
+        active = False
+        for signum, previous in saved.items():
+            signal.signal(signum, previous)
+
+
 async def check_backends_at_startup(
     container: Any, *, timeout: float, attempt_timeout: float = CHECK_TIMEOUT_SECONDS
 ) -> None:
@@ -217,6 +263,22 @@ async def check_backends_at_startup(
     if not targets:
         logger.debug("Startup check: no backends configured")
         return
+    with _cancel_on_signal() as received:
+        try:
+            await _run_gate(targets, timeout, attempt_timeout)
+        except asyncio.CancelledError:
+            if not received:
+                raise
+            task = asyncio.current_task()
+            if task is not None:
+                task.uncancel()  # this cancellation is ours and ends here
+            logger.warning("Startup check interrupted by signal; not starting")
+            raise StartupCheckError(
+                "Startup interrupted by signal before backends were reachable"
+            ) from None
+
+
+async def _run_gate(targets: list[Target], timeout: float, attempt_timeout: float) -> None:
     required = [target for target in targets if target.required]
     reachable = list(required)
     for target in targets:

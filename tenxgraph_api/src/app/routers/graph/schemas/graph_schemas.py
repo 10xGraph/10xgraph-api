@@ -352,6 +352,12 @@ class ObservabilitySchema(BaseModel):
     run: ObsRunSchema | None = Field(None, description="The requested/latest run, if any")
 
 
+def _strip_thread_id(value: str) -> str:
+    if not value.strip():
+        raise ValueError("thread_id cannot be empty or whitespace")
+    return value.strip()
+
+
 class GraphStopSchema(BaseModel):
     """Schema for stopping graph execution."""
 
@@ -360,9 +366,7 @@ class GraphStopSchema(BaseModel):
     @field_validator("thread_id")
     @classmethod
     def thread_id_not_blank(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("thread_id cannot be empty or whitespace")
-        return v.strip()
+        return _strip_thread_id(v)
 
     config: BoundedDict | None = Field(
         default=None, description="Optional configuration for the stop operation"
@@ -377,9 +381,7 @@ class FixGraphRequestSchema(BaseModel):
     @field_validator("thread_id")
     @classmethod
     def thread_id_not_blank(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("thread_id cannot be empty or whitespace")
-        return v.strip()
+        return _strip_thread_id(v)
 
     config: BoundedDict | None = Field(
         default=None, description="Optional configuration for the fix operation"

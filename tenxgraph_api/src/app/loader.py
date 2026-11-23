@@ -26,13 +26,13 @@ from tenxgraph.utils.id_generator import (
 )
 
 from tenxgraph_api import BaseAuth
+from tenxgraph_api.import_path import import_target, is_import_path
 from tenxgraph_api.src.app.core.auth.auth_config import AuthConfig
 from tenxgraph_api.src.app.core.auth.rbac import log_reach_all_roles
 from tenxgraph_api.src.app.core.cache_store.base import BaseCacheStore
 from tenxgraph_api.src.app.core.cache_store.loader import load_and_bind_cache_store
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
 from tenxgraph_api.src.app.core.config.settings import is_production
-from tenxgraph_api.src.app.core.utils.import_path import import_target
 from tenxgraph_api.src.app.utils.thread_name_generator import (
     FirstMessageThreadNameGenerator,
     RandomThreadNameGenerator,
@@ -44,7 +44,7 @@ logger = logging.getLogger("tenxgraph_api.loader")
 
 
 def _check_format(path: str, kind: str) -> None:
-    if ":" not in path:
+    if not is_import_path(path):
         raise ValueError(f"Invalid {kind} path format '{path}'. Expected 'module:attribute'.")
 
 

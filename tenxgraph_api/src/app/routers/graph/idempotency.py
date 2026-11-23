@@ -13,7 +13,7 @@ instead, per caller (user and tenant values) and key:
 - a run that failed stores nothing, so the same key may be retried.
 
 No header, no change. Records live in the cache store (``idempotency:<caller>:<key>``, the
-caller being ``run_limits.identity_key``, with a ttl of ``IDEMPOTENCY_TTL_SECONDS``): shared
+caller being ``identity_key``, with a ttl of ``IDEMPOTENCY_TTL_SECONDS``): shared
 between workers with Redis, else in this process. The running state is the same kind of lease
 the thread lock uses (``runs:idem:<caller>:<key>``),
 so a crashed worker's key frees itself. A cache store error is logged and the request runs
@@ -36,9 +36,8 @@ from tenxgraph.core.authz import Identity
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.leases import Lease, lease_manager
-from tenxgraph_api.src.app.core.redis_client import key_part
+from tenxgraph_api.src.app.core.redis_client import identity_key, key_part
 from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
-from tenxgraph_api.src.app.routers.graph.run_limits import identity_key
 
 
 IDEMPOTENCY_HEADER = "Idempotency-Key"

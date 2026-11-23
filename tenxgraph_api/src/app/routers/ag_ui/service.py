@@ -9,9 +9,13 @@ from ag_ui.core import RunAgentInput
 from ag_ui.encoder import EventEncoder
 from tenxgraph.core.authz import Identity, UserCredential
 from tenxgraph.utils import ResponseGranularity
+from tenxgraph.utils.interrupt import pending_interrupt
 
 from tenxgraph_api.src.app.core import logger
-from tenxgraph_api.src.app.core.validation.request_config import tool_result_ids
+from tenxgraph_api.src.app.core.exceptions.client_errors import client_error
+from tenxgraph_api.src.app.core.threads import set_user
+from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
+from tenxgraph_api.src.app.core.validation.request_config import ClientInputError, tool_result_ids
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     KEEP_MESSAGE_IDS,
     GraphInputSchema,
@@ -33,12 +37,8 @@ async def server_tool_names(service: GraphService) -> set[str]:
     yet is listed here through ``all_tools()`` (the node's cached list, so no network call once
     listed). A failed listing is skipped: the run reports it as before.
     """
-    from tenxgraph.core.graph import ToolNode
-
-    state_graph = getattr(service._graph, "_state_graph", None)
-    for node in (getattr(state_graph, "nodes", None) or {}).values():
-        tool_node = getattr(node, "func", None)
-        if isinstance(tool_node, ToolNode) and tool_node._client and not tool_node.mcp_tools:
+    for _, tool_node in service.tool_nodes():
+        if tool_node._client and not tool_node.mcp_tools:
             try:
                 await tool_node.all_tools()
             except Exception as exc:
@@ -75,13 +75,16 @@ async def stream_ag_ui(
         ):
             yield encoder.encode(event)
     except ValueError as exc:
-        logger.warning("AG-UI run rejected: %s", exc)
-        for event in mapper.fail(str(exc), "INVALID_INPUT"):
+        # A resume that does not fit the open interrupt, or other input the run refused.
+        # The message follows the HTTP rule: kept when written for the client, else generic.
+        logger.warning("AG-UI run rejected: %s", log_safe(exc))
+        for event in mapper.fail(client_error(exc).message, "INVALID_INPUT"):
             yield encoder.encode(event)
     except Exception as exc:
-        # The response has already started, so the failure has to travel in the stream.
-        logger.error("AG-UI run failed: %s", exc)
-        for event in mapper.fail("AG-UI run failed", "AG_UI_ERROR"):
+        # The response has already started, so the failure has to travel in the stream. The
+        # message is the HTTP routes' text for the same error (generic in production).
+        logger.error("AG-UI run failed: %s", log_safe(exc))
+        for event in mapper.fail(client_error(exc, "AG-UI run failed").message, "AG_UI_ERROR"):
             yield encoder.encode(event)
 
     for event in mapper.finish():
@@ -106,7 +109,7 @@ async def _run_events(
         answered_call_ids=set(tool_result_ids(context)),
     )
     messages = to_tenxgraph_messages(new_messages)
-    paused_at = _pending_interrupt(checkpoint_state)
+    paused_at = pending_interrupt(checkpoint_state) if checkpoint_state is not None else None
     resume = _resume_value(paused_at, run_input.resume or [])
 
     if paused_at is not None and resume is _NO_RESUME:
@@ -138,9 +141,8 @@ def _client_state(state: Any) -> dict[str, Any] | None:
 async def _checkpoint_state(service: GraphService, thread_id: str, user: Identity | None) -> Any:
     if service.checkpointer is None:
         return None
-    config: dict[str, Any] = {"thread_id": thread_id, "user_id": "anonymous"}
-    if user is not None:
-        config.update(user=user, user_id=user.user_id)
+    config: dict[str, Any] = {"thread_id": thread_id}
+    set_user(config, user)
     return await service.checkpointer.aget_state(config)
 
 
@@ -151,17 +153,6 @@ _NO_RESUME: Any = object()
 RUN_REMOTE_TOOLS_KEY = "remote_tools"
 
 
-def _pending_interrupt(state: Any) -> Any:
-    """The interrupt() the thread is paused at, or ``None`` (and on cores without interrupts)."""
-    if state is None:
-        return None
-    try:
-        from tenxgraph.utils.interrupt import pending_interrupt
-    except ImportError:  # tenxgraph core older than interrupt()
-        return None
-    return pending_interrupt(state)
-
-
 def _resume_value(paused_at: Any, entries: list[Any]) -> Any:
     """The graph resume value for the AG-UI ``resume`` entries.
 
@@ -169,16 +160,16 @@ def _resume_value(paused_at: Any, entries: list[Any]) -> Any:
     with ``None``.
 
     Raises:
-        ValueError: ``resume`` was sent but the thread is not paused at that interrupt.
+        ClientInputError: ``resume`` was sent but the thread is not paused at that interrupt.
     """
     if not entries:
         return _NO_RESUME
     if paused_at is None:
-        raise ValueError("Nothing to resume: this thread is not paused at an interrupt")
+        raise ClientInputError("Nothing to resume: this thread is not paused at an interrupt")
     for entry in entries:
         if entry.interrupt_id == paused_at.id:
             return entry.payload if entry.status == "resolved" else None
-    raise ValueError(f"resume does not answer the open interrupt '{paused_at.id}'")
+    raise ClientInputError(f"resume does not answer the open interrupt '{paused_at.id}'")
 
 
 def _graph_request(

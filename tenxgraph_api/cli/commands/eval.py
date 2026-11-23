@@ -32,6 +32,7 @@ from tenxgraph_api.cli.capabilities import OutputFormat
 from tenxgraph_api.cli.commands import BaseCommand
 from tenxgraph_api.cli.core.config import ConfigManager
 from tenxgraph_api.cli.core.steps import ProgressRun
+from tenxgraph_api.import_path import is_import_path
 
 
 if TYPE_CHECKING:
@@ -122,17 +123,22 @@ class EvalCommand(BaseCommand):
     # ------------------------------------------------------------------
 
     def _load_agent_from_config(self) -> Any:
+        """Load the ``agent`` the way the server does: factories are called, the config folder is
+        importable."""
+        from tenxgraph_api.src.app.loader import load_graph
+
         config_manager = ConfigManager()
         discovered = config_manager.auto_discover_config()
         if not discovered:
             raise RuntimeError("No 10xgraph.json found — cannot auto-load agent.")
         config_manager.load_config(str(discovered))
         agent_spec: str = config_manager.get_config_value("agent", default="")
-        if not agent_spec or ":" not in agent_spec:
+        if not is_import_path(agent_spec):
             raise RuntimeError(f"Invalid 'agent' field in 10xgraph.json: {agent_spec!r}")
-        module_path, attr = agent_spec.rsplit(":", 1)
-        mod = importlib.import_module(module_path)
-        return getattr(mod, attr)
+        project_root = str(Path(discovered).resolve().parent)
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        return asyncio.run(load_graph(agent_spec))
 
     # ------------------------------------------------------------------
     # Default config

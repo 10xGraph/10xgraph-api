@@ -12,7 +12,7 @@ from tenxgraph.utils.thread_info import ThreadInfo
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.config.settings import get_settings
-from tenxgraph_api.src.app.core.threads import require_thread
+from tenxgraph_api.src.app.core.threads import require_thread, set_user
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.core.validation.client_filters import (
     check_thread_filters,
@@ -93,9 +93,7 @@ class CheckpointerService:
 
         # Client keys pass through; server-owned keys (user, internals) never do.
         cfg: dict[str, Any] = client_config(config)
-        if identity is not None:
-            cfg["user"] = identity
-        cfg["user_id"] = identity.user_id if identity is not None else "anonymous"
+        set_user(cfg, identity)
         return cfg
 
     async def _require(

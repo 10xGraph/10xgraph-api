@@ -1,13 +1,12 @@
 """The ``worker`` key of 10xgraph.json and the factories that turn it into TaskIQ objects."""
 
 import importlib
-import os
 from collections.abc import Sequence
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from tenxgraph_api.src.app.core.config.graph_config import _expand_env
+from tenxgraph_api.src.app.core.config.graph_config import _expand_env, redis_url_or_env
 
 
 BROKER_TYPES = ("redis_stream", "rabbitmq", "kafka", "memory")
@@ -96,23 +95,13 @@ def _url(raw: str | None, key: str) -> str:
     return _expand(raw, key)
 
 
-def _redis_url(raw: str | None, key: str) -> str:
-    """``raw`` with ``${VAR}`` expanded, else the ``REDIS_URL`` variable."""
-    if raw is not None:
-        return _expand(raw, key)
-    env_url = os.environ.get("REDIS_URL", "").strip()
-    if not env_url:
-        raise ValueError(f"{key} is required: set it in 10xgraph.json or set REDIS_URL")
-    return env_url
-
-
 def _results_url(cfg: "WorkerConfig") -> str:
     """The Redis URL for results and schedules: ``result_backend.url``, else the broker URL
     for a Redis broker, else ``REDIS_URL``."""
     raw = cfg.result_backend.url if cfg.result_backend else None
     if raw is None and cfg.broker.type == "redis_stream":
         raw = cfg.broker.url
-    return _redis_url(raw, RESULT_KEY)
+    return redis_url_or_env(raw, RESULT_KEY)
 
 
 def _redis_results(cfg: "WorkerConfig") -> bool:
@@ -144,7 +133,7 @@ def build_broker(cfg: WorkerConfig) -> Any:
         from tenxgraph_api.jobs.redis_broker import ReclaimingRedisStreamBroker
 
         options.setdefault("unacknowledged_lock_timeout", 60)
-        broker = ReclaimingRedisStreamBroker(_redis_url(cfg.broker.url, KEY), **options)
+        broker = ReclaimingRedisStreamBroker(redis_url_or_env(cfg.broker.url, KEY), **options)
     elif kind == "rabbitmq":
         _require("taskiq_aio_pika")
         from taskiq_aio_pika import AioPikaBroker

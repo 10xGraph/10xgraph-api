@@ -35,8 +35,8 @@ from tenxgraph_api.src.app.core.leases import Lease, LeaseManager, lease_manager
 from tenxgraph_api.src.app.core.middleware.rate_limit import keying
 from tenxgraph_api.src.app.core.middleware.rate_limit.keying import client_key_for
 from tenxgraph_api.src.app.core.middleware.rate_limit.limiter import bound_cache_store, check
+from tenxgraph_api.src.app.core.redis_client import identity_key
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
-from tenxgraph_api.src.app.routers.graph.run_limits import identity_key
 
 
 # RFC 6455 close code 1013 "Try Again Later" -- the right signal for shed-load rejections.
