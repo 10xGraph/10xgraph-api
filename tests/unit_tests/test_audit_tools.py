@@ -16,6 +16,7 @@ from tenxgraph.utils.constants import END
 
 from tenxgraph_api import AuditEvent, BaseAuditSink
 from tenxgraph_api.src.app.core.audit import set_sinks
+from tenxgraph_api.src.app.core.audit.tools import ToolAudit
 from tenxgraph_api.src.app.core.cache_store import InMemoryCacheStore
 from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
 from tenxgraph_api.src.app.core.leases import LeaseManager
@@ -115,6 +116,10 @@ def explode(card: str) -> str:
 
 def refund(card: str) -> str:
     return f"refunded {card}"
+
+
+def wire(card: str) -> str:
+    return f"wired {card}"
 
 
 async def _run(service: GraphService, mode: str, graph_input: GraphInputSchema) -> None:
@@ -239,14 +244,12 @@ async def test_no_arguments_or_results_in_any_event(sink, mode):
     await _run(service, mode, _input(f"leak-{mode}"))
     await _run(service, mode, _input(f"leak-{mode}", resume=True))
 
-    # c1 and c2 finished before the pause; a stream sends them in the paused run and again
-    # when the resumed run replays them from the tool ledger, so a stream records them twice.
-    assert {(e.action, e.tool_call_id) for e in sink.tools()} == {
+    assert sorted((e.action, e.tool_call_id) for e in sink.tools()) == [
+        ("tool:approve", "c3"),
         ("tool:call", "c1"),
         ("tool:call", "c2"),
-        ("tool:approve", "c3"),
         ("tool:call", "c3"),
-    }
+    ]
     dumped = json.dumps([e.model_dump() for e in sink.events])
     assert SECRET not in dumped
     assert "charged" not in dumped and "refunded" not in dumped and "db down" not in dumped
@@ -270,23 +273,49 @@ async def test_broken_sink_does_not_fail_the_run(mode, caplog):
 
 @pytest.mark.asyncio
 async def test_stream_chunks_skip_the_clients_own_tool_results(sink):
-    service = _service([charge], [("c1", "charge")])
     remote_result = Message.tool_message(
         content=[{"type": "tool_result", "call_id": "client-1", "output": "ok"}]
     )
-    from tenxgraph_api.src.app.core.audit.tools import audit_tool_result
-
-    seen = {"client-1"}
-    await audit_tool_result(remote_result, identity=ALICE, thread_id="t", run_id="r", seen=seen)
+    tools = ToolAudit(ALICE, "t", "r")
+    tools.skip.add("client-1")
+    await tools.record(remote_result)
     assert sink.tools() == []
     # And a real stream records the server tool through stream_chunks (WebSocket and AG-UI).
-    chunks = [
+    service = _service([charge], [("c1", "charge")])
+    errors = [
         c
         async for c in service.stream_chunks(_input("chunks"), ALICE)
         if c.event == StreamEvent.ERROR
     ]
-    assert chunks == []
+    assert errors == []
     assert _summary(sink.tools()) == [("tool:call", "tool/charge", "success", None, "c1")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first", MODES)
+@pytest.mark.parametrize("then", MODES)
+async def test_each_call_is_recorded_once_across_pauses_and_resumes(sink, first, then):
+    """Two approvals in one turn: three runs, the finished siblings replayed twice."""
+    service = _service(
+        [charge, explode, refund, wire],
+        [("c1", "charge"), ("c2", "explode"), ("c3", "refund"), ("c4", "wire")],
+        approval={"refund", "wire"},
+    )
+    thread_id = f"once-{first}-{then}"
+    await _run(service, first, _input(thread_id))
+    assert sorted(e.tool_call_id for e in sink.tools()) == ["c1", "c2"]
+    await _run(service, then, _input(thread_id, resume=True))
+    await _run(service, then, _input(thread_id, resume=False))
+
+    calls = [e for e in sink.tools() if e.action == "tool:call"]
+    assert sorted((e.tool_call_id, e.result) for e in calls) == [
+        ("c1", "success"),
+        ("c2", "failed"),
+        ("c3", "success"),
+        ("c4", "denied"),
+    ]
+    approvals = [(e.result, e.reason) for e in sink.tools() if e.action == "tool:approve"]
+    assert approvals == [("allowed", None), ("denied", "rejected")]
 
 
 @pytest.mark.asyncio

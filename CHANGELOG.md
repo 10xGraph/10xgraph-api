@@ -47,8 +47,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   result `success`, `failed` or `denied` (a `ToolGuard` denial, with the policy's reason).
   A resume that answers a `ToolGuard` approval records `tool:approve`, `allowed` or `denied`
   (reason `rejected` or `cancelled`), with the identity of the caller who answered. Invoke,
-  stream, WebSocket and AG-UI runs are covered. `AuditEvent` gains `thread_id`, `run_id` and
-  `tool_call_id` (null on other events). Tool arguments and results are never recorded.
+  stream, WebSocket, AG-UI and `/v1/graph/live` sessions are covered, and each call is
+  recorded once: a call that finished before a pause is not recorded again when the resumed
+  run replays it from the tool ledger. `AuditEvent` gains `thread_id`, `run_id` and
+  `tool_call_id` (null on other events; `run_id` is null in a live session). Tool arguments
+  and results are never recorded.
 
 ### Changed
 

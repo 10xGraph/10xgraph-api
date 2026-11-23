@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import Any
 
+from tenxgraph_api.src.app.core.audit.tools import ToolAudit
 from tenxgraph_api.src.app.core.exceptions.client_errors import (
     as_http_error,
 )
@@ -55,3 +56,5 @@ class _Run:
     thread_id: str | None = None
     run_id: str | None = None
     started: float = 0.0
+    # The run's tool audit, set by ``_start_run``.
+    tools: ToolAudit = dataclass_field(default_factory=lambda: ToolAudit(None, None, None))

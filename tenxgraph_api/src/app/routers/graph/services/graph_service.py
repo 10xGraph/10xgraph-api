@@ -57,7 +57,7 @@ from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.audit import (  # noqa: F401
     audit_event,
 )
-from tenxgraph_api.src.app.core.audit.tools import audit_tool_approval, audit_tool_result
+from tenxgraph_api.src.app.core.audit.tools import ToolAudit
 from tenxgraph_api.src.app.core.config.graph_config import (  # noqa: F401
     GraphConfig,
     RunsConfig,
@@ -371,11 +371,9 @@ class GraphService(
 
             # Extract messages and state from result
             messages: list[Message] = result.get("messages", [])
-            seen = set(tool_result_ids(input_data["messages"]))
             for msg in messages:
-                await audit_tool_result(
-                    msg, identity=user, thread_id=inv_thread_id, run_id=inv_run_id, seen=seen
-                )
+                await run.tools.record(msg)
+            await run.tools.after_run(self.checkpointer, config)
 
             # Record final messages into telemetry, then close the run.
             if self.telemetry:
@@ -462,14 +460,13 @@ class GraphService(
         run.started = datetime.now().timestamp()
         if self.telemetry:
             self.telemetry.start_run(run.thread_id, run.run_id, run.started)
+        run.tools = ToolAudit(user, run.thread_id, run.run_id)
+        # The client's results for its own tools: those tools ran in the frontend.
+        run.tools.skip.update(tool_result_ids(run.input_data["messages"]))
         if "resume" in run.input_data:
-            await audit_tool_approval(
-                await self._run_state(run.config, checks),
-                run.input_data["resume"],
-                identity=user,
-                thread_id=run.thread_id,
-                run_id=run.run_id,
-            )
+            state = await self._run_state(run.config, checks)
+            await run.tools.approval(state, run.input_data["resume"])
+            await run.tools.before_resume(self.checkpointer, run.config, state)
 
     def _end_run(self, run: _Run) -> None:
         """Close the run's trace if nothing else did, then free the lock on a new thread."""

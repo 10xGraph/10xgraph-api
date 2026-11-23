@@ -14,7 +14,6 @@ from tenxgraph.utils.validators import ValidationError as InputValidationError
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.audit import audit_event
-from tenxgraph_api.src.app.core.audit.tools import audit_tool_result
 from tenxgraph_api.src.app.core.config.settings import is_production
 from tenxgraph_api.src.app.core.exceptions.client_errors import (
     RunTimeoutError,
@@ -24,7 +23,6 @@ from tenxgraph_api.src.app.core.shutdown import (
     end_on_shutdown,
 )
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
-from tenxgraph_api.src.app.core.validation.request_config import tool_result_ids
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     GraphInputSchema,
 )
@@ -150,8 +148,6 @@ class StreamingMixin:
             thread_id, run_id = run.thread_id, run.run_id
             messages_str = []
             run_status = "done"
-            # Tool calls already audited, and the client's own tool results (never audited).
-            audited = set(tool_result_ids(input_data["messages"]))
 
             # Stream the graph execution
             saw_pause = False
@@ -173,13 +169,7 @@ class StreamingMixin:
                 if chunk.event in (StreamEvent.MESSAGE, StreamEvent.ERROR):
                     # The raw chunk: production sanitizing replaces a denial's reason. Before
                     # the yield, so a client that disconnects here still leaves the record.
-                    await audit_tool_result(
-                        raw_chunk,
-                        identity=user,
-                        thread_id=thread_id,
-                        run_id=run_id,
-                        seen=audited,
-                    )
+                    await run.tools.record(raw_chunk)
                 yield chunk
                 if (
                     self.names_threads
@@ -196,6 +186,7 @@ class StreamingMixin:
                     self._record_chunk(thread_id, run_id, pause, datetime.now().timestamp())
                     yield pause
 
+            await run.tools.after_run(self.checkpointer, config)
             logger.info("Graph streaming completed successfully")
 
             if self.telemetry:

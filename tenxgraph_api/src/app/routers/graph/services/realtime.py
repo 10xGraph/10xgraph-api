@@ -5,6 +5,7 @@ from typing import Any
 from tenxgraph.core.authz import Identity, UserCredential
 
 from tenxgraph_api.src.app.core import logger
+from tenxgraph_api.src.app.core.audit.tools import ToolAudit
 from tenxgraph_api.src.app.core.threads import set_user
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.core.validation.request_config import (
@@ -52,7 +53,9 @@ class RealtimeMixin:
         await self._save_thread(config, thread_id)
         logger.info("Realtime graph session starting: thread_id=%s", log_safe(thread_id))
 
+        tools = ToolAudit(user, str(thread_id), None)
         async for event in self._graph.arealtime(input_queue, config):
+            await tools.record_live(event)
             yield event
 
         logger.info("Realtime graph session completed: thread_id=%s", log_safe(thread_id))
