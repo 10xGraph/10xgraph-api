@@ -20,7 +20,7 @@ from tenxgraph_api.src.app.routers.graph.router import realtime_graph_ws
 
 def _router_module():
     # ``routers.graph.router`` the attribute is the APIRouter; patch the module itself.
-    return sys.modules[realtime_graph_ws.__module__]
+    return sys.modules["tenxgraph_api.src.app.routers.graph.router"]
 
 
 @pytest.fixture(autouse=True)

@@ -145,9 +145,9 @@ def test_case_gets_running_step_and_duration() -> None:
         case=case, evaluator=evaluator, file_name="a_eval.py", eval_set_id="s", eval_set_name="S"
     )
     with (
-        patch("tenxgraph_api.cli.commands.eval._PendingCase", types.SimpleNamespace),
-        patch("tenxgraph_api.cli.commands.eval.override_dependency", MagicMock()),
-        patch("tenxgraph_api.cli.commands.eval.make_trajectory_callback") as mk,
+        patch("tenxgraph_api.cli.commands.eval.collect._PendingCase", types.SimpleNamespace),
+        patch("tenxgraph_api.cli.commands.eval.run.override_dependency", MagicMock()),
+        patch("tenxgraph_api.cli.commands.eval.run.make_trajectory_callback") as mk,
     ):
         mk.return_value = (None, None)
         quads = asyncio.run(cmd._run_flat_pool([pc], 1, False))

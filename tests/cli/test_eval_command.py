@@ -133,8 +133,8 @@ async def test_run_flat_pool_cases(cmd):
     )
 
     with (
-        patch("tenxgraph_api.cli.commands.eval._reset_inject_proxy"),
-        patch("tenxgraph_api.cli.commands.eval.override_dependency"),
+        patch("tenxgraph_api.cli.commands.eval.run._reset_inject_proxy"),
+        patch("tenxgraph_api.cli.commands.eval.run.override_dependency"),
     ):
         results = await cmd._run_flat_pool([pc], max_concurrency=4, parallel=False)
         assert len(results) == 1
@@ -167,8 +167,8 @@ async def test_run_flat_pool_case_error(cmd):
     )
 
     with (
-        patch("tenxgraph_api.cli.commands.eval._reset_inject_proxy"),
-        patch("tenxgraph_api.cli.commands.eval.override_dependency"),
+        patch("tenxgraph_api.cli.commands.eval.run._reset_inject_proxy"),
+        patch("tenxgraph_api.cli.commands.eval.run.override_dependency"),
     ):
         results = await cmd._run_flat_pool([pc], max_concurrency=4, parallel=False)
         assert len(results) == 1
@@ -592,8 +592,8 @@ async def test_run_flat_pool_parallel(cmd):
     )
 
     with (
-        patch("tenxgraph_api.cli.commands.eval._reset_inject_proxy"),
-        patch("tenxgraph_api.cli.commands.eval.override_dependency"),
+        patch("tenxgraph_api.cli.commands.eval.run._reset_inject_proxy"),
+        patch("tenxgraph_api.cli.commands.eval.run.override_dependency"),
     ):
         results = await cmd._run_flat_pool([pc], max_concurrency=2, parallel=True)
         assert len(results) == 1

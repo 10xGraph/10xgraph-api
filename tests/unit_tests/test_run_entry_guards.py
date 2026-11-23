@@ -34,7 +34,7 @@ SLOT_KEY = "runs:user:alice"
 
 
 def _router():
-    return sys.modules[websocket_graph.__module__]
+    return sys.modules["tenxgraph_api.src.app.routers.graph.router"]
 
 
 @pytest.fixture(autouse=True)

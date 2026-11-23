@@ -91,7 +91,7 @@ class _World:
         self.media = MediaService(settings=settings, checkpointer=self.cp)
         self.store = TenantStore()
         self.telemetry = TelemetryStore()
-        # The checkpointer service finds media and telemetry through the global container.
+        # Requests resolve media and telemetry from the app's container (``extra_bindings``).
         InjectQ.get_instance().bind_instance(MediaService, self.media)
         InjectQ.get_instance().bind_instance(TelemetryStore, self.telemetry)
         app = build_app(
@@ -100,6 +100,7 @@ class _World:
             checkpointer=self.cp,
             extra_bindings={
                 MediaService: self.media,
+                TelemetryStore: self.telemetry,
                 BaseStore: self.store,
                 GraphConfig: ClientThreadIdsConfig(),
             },
