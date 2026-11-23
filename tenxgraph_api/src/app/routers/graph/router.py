@@ -33,11 +33,6 @@ from tenxgraph_api.src.app.core.auth.permissions import (
     run_credential,
     ws_bearer_subprotocol,  # noqa: F401
 )
-from tenxgraph_api.src.app.core.auth.revocation import (
-    TokenJtiMissingError,
-    TokenRevocationUnavailableError,
-    token_revoked,
-)
 from tenxgraph_api.src.app.core.config.settings import is_production
 from tenxgraph_api.src.app.core.exceptions.client_errors import (  # noqa: F401
     _sanitize_error_message,
@@ -57,8 +52,6 @@ from tenxgraph_api.src.app.core.validation.request_config import (  # noqa: F401
 from tenxgraph_api.src.app.routers.graph import idempotency
 from tenxgraph_api.src.app.routers.graph.realtime_guard import (
     realtime_connection_guard,  # noqa: F401
-    ws_identity_still_valid,
-    ws_run_allowed,
 )
 from tenxgraph_api.src.app.routers.graph.run_guard import acquire_run_guard
 from tenxgraph_api.src.app.routers.graph.run_limits import release_when_done
@@ -113,9 +106,12 @@ from tenxgraph_api.src.app.routers.graph.ws_frames import (  # noqa: F401
     _send_ws_error,
     _SessionExpired,
     _thread_not_found,
+    _ws_credential_error,
     _ws_max_frame_chars,
+    _ws_run_gate,
     _ws_send,
     _ws_send_bytes,
+    _ws_token_revoked,
     _WsFrames,
 )
 from tenxgraph_api.src.app.utils import success_response
@@ -515,61 +511,6 @@ async def fix_graph(
         result,
         request,
     )
-
-
-async def _ws_token_revoked(identity: Identity | None) -> bool:
-    """Whether the socket's token was revoked since the handshake (an outage counts as yes).
-
-    Never revoked when auth is off (``identity`` is ``None``). A refusal is an ``auth`` audit
-    event.
-    """
-    if identity is None:
-        return False
-    try:
-        revoked = await token_revoked(identity)
-        reason = "revoked"
-    except TokenRevocationUnavailableError:
-        revoked, reason = True, "revocation_unavailable"
-    except TokenJtiMissingError:
-        revoked, reason = True, "missing_jti"
-    if revoked:
-        await audit_event("auth", "failed", reason=reason, user_id=identity.user_id)
-    return revoked
-
-
-async def _ws_credential_error(websocket: WebSocket, identity: Identity | None) -> bool:
-    """Whether the socket's credential no longer holds (expired, revoked or backend down).
-
-    Checked before each ``/v1/graph/ws`` run and on a timer during a ``/v1/graph/live``
-    session: the token is re-verified (catches expiry) and the revocation backend is asked.
-    """
-    if not await ws_identity_still_valid(websocket, identity):
-        user_id = identity.user_id if identity is not None else None
-        await audit_event("auth", "failed", reason="invalid_token", user_id=user_id)
-        return True
-    return await _ws_token_revoked(identity)
-
-
-async def _ws_run_gate(websocket: WebSocket, identity: Identity | None) -> str:
-    """Per-run checks for a WebSocket: ``"run"``, ``"skip"`` (rate limited) or ``"close"``.
-
-    The handshake guard runs once, so a socket that stays open must be re-checked before each
-    run: the token may have expired or been revoked, and every run counts against the limit.
-    """
-    if await _ws_credential_error(websocket, identity):
-        logger.info("WebSocket credential no longer valid; closing")
-        await _close_expired(websocket)
-        return "close"
-
-    retry_after = await ws_run_allowed(websocket)
-    if retry_after is not None:
-        await _send_ws_error(
-            websocket,
-            f"Rate limit exceeded. Retry after {retry_after}s.",
-            retry_after_seconds=retry_after,
-        )
-        return "skip"
-    return "run"
 
 
 # The socket endpoints register on ``router`` after the HTTP routes (the route order is part of

@@ -18,6 +18,12 @@ from pydantic import ValidationError
 from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import StreamChunk, StreamEvent
 
+from tenxgraph_api.src.app.core.audit import audit_event
+from tenxgraph_api.src.app.core.auth.revocation import (
+    TokenJtiMissingError,
+    TokenRevocationUnavailableError,
+    token_revoked,
+)
 from tenxgraph_api.src.app.core.config.settings import is_production
 from tenxgraph_api.src.app.core.exceptions.client_errors import (
     _sanitize_error_message,
@@ -28,13 +34,11 @@ from tenxgraph_api.src.app.core.validation.request_config import (
     ClientInputError,
     normalize_thread_id,
 )
-from tenxgraph_api.src.app.routers.graph.late_module import LateModule
+from tenxgraph_api.src.app.routers.graph.realtime_guard import (
+    ws_identity_still_valid,
+    ws_run_allowed,
+)
 from tenxgraph_api.src.app.routers.graph.thread_lock import THREAD_BUSY_DETAIL
-
-
-# The socket code reads the names tests patch on ``router.py`` (``ws_run_allowed``,
-# ``ws_identity_still_valid``, ``_ws_max_frame_chars``, ...) through this, at call time.
-router_module = LateModule("tenxgraph_api.src.app.routers.graph.router")
 
 
 # Grace period (seconds) to let the model's final response drain to the client after the
@@ -116,14 +120,14 @@ class WsSendTimeout(Exception):
 async def _ws_send(websocket: WebSocket, text: str) -> None:
     """``send_text`` that gives up on a client that is not reading (``WsSendTimeout``)."""
     try:
-        await asyncio.wait_for(websocket.send_text(text), router_module.WS_SEND_TIMEOUT_SECONDS)
+        await asyncio.wait_for(websocket.send_text(text), WS_SEND_TIMEOUT_SECONDS)
     except TimeoutError:
         raise WsSendTimeout from None
 
 
 async def _ws_send_bytes(websocket: WebSocket, data: bytes) -> None:
     try:
-        await asyncio.wait_for(websocket.send_bytes(data), router_module.WS_SEND_TIMEOUT_SECONDS)
+        await asyncio.wait_for(websocket.send_bytes(data), WS_SEND_TIMEOUT_SECONDS)
     except TimeoutError:
         raise WsSendTimeout from None
 
@@ -305,3 +309,58 @@ def _error_summary(exc: Exception) -> str:
     if isinstance(exc, ValidationError):
         return summarize_validation_error(exc)
     return str(exc)
+
+
+async def _ws_token_revoked(identity: Identity | None) -> bool:
+    """Whether the socket's token was revoked since the handshake (an outage counts as yes).
+
+    Never revoked when auth is off (``identity`` is ``None``). A refusal is an ``auth`` audit
+    event.
+    """
+    if identity is None:
+        return False
+    try:
+        revoked = await token_revoked(identity)
+        reason = "revoked"
+    except TokenRevocationUnavailableError:
+        revoked, reason = True, "revocation_unavailable"
+    except TokenJtiMissingError:
+        revoked, reason = True, "missing_jti"
+    if revoked:
+        await audit_event("auth", "failed", reason=reason, user_id=identity.user_id)
+    return revoked
+
+
+async def _ws_credential_error(websocket: WebSocket, identity: Identity | None) -> bool:
+    """Whether the socket's credential no longer holds (expired, revoked or backend down).
+
+    Checked before each ``/v1/graph/ws`` run and on a timer during a ``/v1/graph/live``
+    session: the token is re-verified (catches expiry) and the revocation backend is asked.
+    """
+    if not await ws_identity_still_valid(websocket, identity):
+        user_id = identity.user_id if identity is not None else None
+        await audit_event("auth", "failed", reason="invalid_token", user_id=user_id)
+        return True
+    return await _ws_token_revoked(identity)
+
+
+async def _ws_run_gate(websocket: WebSocket, identity: Identity | None) -> str:
+    """Per-run checks for a WebSocket: ``"run"``, ``"skip"`` (rate limited) or ``"close"``.
+
+    The handshake guard runs once, so a socket that stays open must be re-checked before each
+    run: the token may have expired or been revoked, and every run counts against the limit.
+    """
+    if await _ws_credential_error(websocket, identity):
+        logger.info("WebSocket credential no longer valid; closing")
+        await _close_expired(websocket)
+        return "close"
+
+    retry_after = await ws_run_allowed(websocket)
+    if retry_after is not None:
+        await _send_ws_error(
+            websocket,
+            f"Rate limit exceeded. Retry after {retry_after}s.",
+            retry_after_seconds=retry_after,
+        )
+        return "skip"
+    return "run"

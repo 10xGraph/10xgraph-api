@@ -44,6 +44,11 @@ repos:
         args: [--fix, --exit-non-zero-on-fix]
         exclude: ^(tests|docs|examples|tenxgraph_api/cli/templates)/
 
+      - id: ruff
+        name: "ruff (tests: unused imports)"
+        args: [--select, F401]
+        files: ^tests/
+
   - repo: https://github.com/PyCQA/bandit
     rev: 1.7.9
     hooks:

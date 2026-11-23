@@ -24,7 +24,7 @@ class ConfigSchema(BaseModel):
 class StateResponseSchema(BaseModel):
     """Schema for state response."""
 
-    state: dict[str, Any] | None = Field(None, description="State data")
+    state: dict[str, Any] | None = Field(default=None, description="State data")
 
 
 class StateSchema(ConfigSchema):
@@ -85,9 +85,9 @@ class GetMessageSchema(ConfigSchema):
 class ListMessagesSchema(ConfigSchema):
     """Schema for listing messages."""
 
-    search: str | None = Field(None, description="Search query")
-    offset: int | None = Field(None, description="Number of messages to skip")
-    limit: int | None = Field(None, description="Maximum number of messages to return")
+    search: str | None = Field(default=None, description="Search query")
+    offset: int | None = Field(default=None, description="Number of messages to skip")
+    limit: int | None = Field(default=None, description="Maximum number of messages to return")
 
 
 class DeleteMessageSchema(ConfigSchema):
@@ -111,9 +111,9 @@ class GetThreadSchema(ConfigSchema):
 class ListThreadsSchema(ConfigSchema):
     """Schema for listing threads."""
 
-    search: str | None = Field(None, description="Search query")
-    offset: int | None = Field(None, description="Number of threads to skip")
-    limit: int | None = Field(None, description="Maximum number of threads to return")
+    search: str | None = Field(default=None, description="Search query")
+    offset: int | None = Field(default=None, description="Number of threads to skip")
+    limit: int | None = Field(default=None, description="Maximum number of threads to return")
 
 
 class DeleteThreadSchema(ConfigSchema):
@@ -128,34 +128,34 @@ class ResponseSchema(BaseModel):
 
     success: bool = Field(..., description="Whether the operation was successful")
     message: str = Field(..., description="Response message")
-    data: Any | None = Field(None, description="Response data")
+    data: Any | None = Field(default=None, description="Response data")
 
 
 class MessageResponseSchema(BaseModel):
     """Response schema for message operations."""
 
-    message: Message | None = Field(None, description="Message data")
+    message: Message | None = Field(default=None, description="Message data")
 
 
 class MessagesListResponseSchema(BaseModel):
     """Response schema for message list operations."""
 
-    messages: list[Message] | None = Field(None, description="List of messages")
-    has_more: bool | None = Field(None, description="Whether another page follows")
-    offset: int | None = Field(None, description="Offset applied to this page")
-    limit: int | None = Field(None, description="Page size applied to this page")
+    messages: list[Message] | None = Field(default=None, description="List of messages")
+    has_more: bool | None = Field(default=None, description="Whether another page follows")
+    offset: int | None = Field(default=None, description="Offset applied to this page")
+    limit: int | None = Field(default=None, description="Page size applied to this page")
 
 
 class ThreadResponseSchema(BaseModel):
     """Response schema for thread operations."""
 
-    thread: dict[str, Any] | None = Field(None, description="Thread data")
+    thread: dict[str, Any] | None = Field(default=None, description="Thread data")
 
 
 class ThreadsListResponseSchema(BaseModel):
     """Response schema for thread list operations."""
 
-    threads: list[dict[str, Any]] | None = Field(None, description="List of threads")
-    has_more: bool | None = Field(None, description="Whether another page follows")
-    offset: int | None = Field(None, description="Offset applied to this page")
-    limit: int | None = Field(None, description="Page size applied to this page")
+    threads: list[dict[str, Any]] | None = Field(default=None, description="List of threads")
+    has_more: bool | None = Field(default=None, description="Whether another page follows")
+    offset: int | None = Field(default=None, description="Offset applied to this page")
+    limit: int | None = Field(default=None, description="Page size applied to this page")

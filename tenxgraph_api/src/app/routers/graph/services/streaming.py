@@ -9,6 +9,7 @@ from tenxgraph.core.authz import Identity, UserCredential, public_config
 from tenxgraph.core.graph.utils.stream_handler import is_pause_chunk
 from tenxgraph.core.state import StreamChunk, StreamEvent
 from tenxgraph.utils import ResponseGranularity
+from tenxgraph.utils.interrupt import pending_interrupt
 from tenxgraph.utils.validators import ValidationError as InputValidationError
 
 from tenxgraph_api.src.app.core import logger
@@ -22,7 +23,6 @@ from tenxgraph_api.src.app.core.shutdown import (
     end_on_shutdown,
 )
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
-from tenxgraph_api.src.app.routers.graph.late_module import LateModule
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     GraphInputSchema,
 )
@@ -35,11 +35,6 @@ from tenxgraph_api.src.app.routers.graph.services.stream_utils import (
 from tenxgraph_api.src.app.utils.parse_output import (
     client_chunk,
 )
-
-
-# The names tests patch on ``graph_service`` (``pending_interrupt``, the limits) are read
-# through this, at call time.
-service_module = LateModule("tenxgraph_api.src.app.routers.graph.services.graph_service")
 
 
 class StreamingMixin:
@@ -123,7 +118,7 @@ class StreamingMixin:
         async for line in end_on_shutdown(lines(), keepalive_seconds=KEEPALIVE_SECONDS):
             yield line
 
-    async def stream_chunks(  # noqa: PLR0912
+    async def stream_chunks(  # noqa: PLR0912, PLR0915
         self,
         graph_input: GraphInputSchema,
         user: Identity | None,
@@ -171,6 +166,10 @@ class StreamingMixin:
                     StreamEvent.ERROR,
                 ):
                     run_status = "error"
+                if chunk.event in (StreamEvent.MESSAGE, StreamEvent.ERROR):
+                    # The raw chunk: production sanitizing replaces a denial's reason. Before
+                    # the yield, so a client that disconnects here still leaves the record.
+                    await run.tools.record(raw_chunk)
                 yield chunk
                 if (
                     self.names_threads
@@ -187,6 +186,7 @@ class StreamingMixin:
                     self._record_chunk(thread_id, run_id, pause, datetime.now().timestamp())
                     yield pause
 
+            await run.tools.after_run(self.checkpointer, config)
             logger.info("Graph streaming completed successfully")
 
             if self.telemetry:
@@ -248,7 +248,7 @@ class StreamingMixin:
             return None
         if state is None:
             return None
-        pending = service_module.pending_interrupt(state)
+        pending = pending_interrupt(state)
         step = getattr(getattr(state, "execution_meta", None), "step", None)
         if pending is not None:
             data: dict[str, Any] = {

@@ -51,7 +51,8 @@ class FileListItem(BaseModel):
     size_bytes: int | None = None
     url: str = Field(..., description="Relative retrieval URL")
     created_at: int | None = Field(
-        None, description="Upload time, unix seconds; null for files uploaded before it was kept"
+        default=None,
+        description="Upload time, unix seconds; null for files uploaded before it was kept",
     )
 
 

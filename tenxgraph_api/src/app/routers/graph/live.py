@@ -30,6 +30,7 @@ from tenxgraph_api.src.app.routers.graph.ws_frames import (
     REALTIME_INPUT_QUEUE_MAX_BYTES,
     REALTIME_INPUT_QUEUE_MAXSIZE,
     REALTIME_MAX_FRAME_BYTES,
+    REALTIME_RECHECK_INTERVAL,
     WS_MESSAGE_TOO_BIG,
     WS_TRY_AGAIN_LATER,
     WsFrameTooLarge,
@@ -41,9 +42,9 @@ from tenxgraph_api.src.app.routers.graph.ws_frames import (
     _receive_json_frame,
     _resolve_ws_thread,
     _thread_not_found,
+    _ws_credential_error,
     _ws_send,
     _ws_send_bytes,
-    router_module,
 )
 
 
@@ -262,7 +263,7 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
 
     # The handshake guard ran before the init frame; re-check before the session (the run)
     # starts, then on a timer for as long as it lasts.
-    if await router_module._ws_credential_error(websocket, identity):
+    if await _ws_credential_error(websocket, identity):
         await close_session_expired()
         return
 
@@ -382,8 +383,8 @@ async def realtime_graph_ws(  # noqa: PLR0911, PLR0912, PLR0915
     async def credential_watchdog() -> None:
         """End the session once its token expires or is revoked."""
         while True:
-            await asyncio.sleep(router_module.REALTIME_RECHECK_INTERVAL)
-            if await router_module._ws_credential_error(websocket, identity):
+            await asyncio.sleep(REALTIME_RECHECK_INTERVAL)
+            if await _ws_credential_error(websocket, identity):
                 await close_session_expired()
                 return
 

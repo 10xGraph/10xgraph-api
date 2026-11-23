@@ -10,12 +10,14 @@ from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.core.validation.request_config import (
     owned_thread_info,
 )
-from tenxgraph_api.src.app.routers.graph.late_module import LateModule
 
 
-# The names tests patch on ``graph_service`` (``pending_interrupt``, the limits) are read
-# through this, at call time.
-service_module = LateModule("tenxgraph_api.src.app.routers.graph.services.graph_service")
+# Longest a background thread-naming call may run (it is a model call).
+THREAD_NAME_TIMEOUT_SECONDS = 60.0
+
+# Naming tasks kept by the service itself (no core task manager bound) are capped; over it the
+# thread simply stays unnamed, as the core manager does with its own limit.
+MAX_PENDING_THREAD_NAMES = 100
 
 
 class ThreadNamingMixin:
@@ -86,11 +88,11 @@ class ThreadNamingMixin:
             manager.create_task(
                 name_thread(),
                 name="thread_name",
-                timeout=service_module.THREAD_NAME_TIMEOUT_SECONDS,
+                timeout=THREAD_NAME_TIMEOUT_SECONDS,
             )
             return
         tasks: set[asyncio.Task[None]] = self.__dict__.setdefault("_naming_tasks", set())
-        if len(tasks) >= service_module.MAX_PENDING_THREAD_NAMES:
+        if len(tasks) >= MAX_PENDING_THREAD_NAMES:
             logger.warning(
                 "Too many thread names pending (%d); leaving thread %s unnamed",
                 len(tasks),

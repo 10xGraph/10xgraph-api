@@ -172,8 +172,10 @@ class RealtimeOptionsSchema(BaseModel):
     models: list[str] = Field(
         default_factory=list, description="Models a client may request; empty means none"
     )
-    model_selectable: bool = Field(False, description="Whether the init `model` is honored")
-    tools_tags: bool = Field(True, description="Whether the client may narrow the tool tags")
+    model_selectable: bool = Field(default=False, description="Whether the init `model` is honored")
+    tools_tags: bool = Field(
+        default=True, description="Whether the client may narrow the tool tags"
+    )
 
 
 class ModelChoiceSchema(BaseModel):
@@ -190,24 +192,28 @@ class GraphInfoSchema(BaseModel):
     node_count: int = Field(..., description="Number of nodes in the graph")
     edge_count: int = Field(..., description="Number of edges in the graph")
     is_realtime: bool = Field(
-        False,
+        default=False,
         description="Whether the graph is a realtime/live agent (driven over /v1/graph/live)",
     )
     realtime_options: RealtimeOptionsSchema | None = Field(
-        None,
+        default=None,
         description="Live init options the server honors; null when the graph is not realtime",
     )
     checkpointer: bool = Field(..., description="Whether checkpointer is enabled")
-    checkpointer_type: str | None = Field(None, description="Type of checkpointer if enabled")
+    checkpointer_type: str | None = Field(
+        default=None, description="Type of checkpointer if enabled"
+    )
     publisher: bool = Field(..., description="Whether publisher is enabled")
     store: bool = Field(..., description="Whether store is enabled")
-    interrupt_before: list[str] | None = Field(None, description="Nodes to interrupt before")
-    interrupt_after: list[str] | None = Field(None, description="Nodes to interrupt after")
-    context_type: str | None = Field(None, description="Type of context for the graph")
-    id_generator: str | None = Field(None, description="ID generator type for the graph")
-    id_type: str | None = Field(None, description="ID type for the graph")
-    state_type: str | None = Field(None, description="State type for the graph")
-    state_fields: list[str] | None = Field(None, description="State fields for the graph")
+    interrupt_before: list[str] | None = Field(
+        default=None, description="Nodes to interrupt before"
+    )
+    interrupt_after: list[str] | None = Field(default=None, description="Nodes to interrupt after")
+    context_type: str | None = Field(default=None, description="Type of context for the graph")
+    id_generator: str | None = Field(default=None, description="ID generator type for the graph")
+    id_type: str | None = Field(default=None, description="ID type for the graph")
+    state_type: str | None = Field(default=None, description="State type for the graph")
+    state_fields: list[str] | None = Field(default=None, description="State fields for the graph")
     models: dict[str, ModelChoiceSchema] = Field(
         default_factory=dict,
         description="Per agent node, the model names a run may pick with `config[config_key]`",
@@ -226,7 +232,7 @@ class ToolSchema(BaseModel):
     """Schema for a single tool exposed by a tool node."""
 
     name: str = Field(..., description="Name of the tool")
-    description: str = Field("", description="Human-readable description of the tool")
+    description: str = Field(default="", description="Human-readable description of the tool")
     source: Literal["local", "mcp", "remote"] = Field(
         ...,
         description=(
@@ -265,36 +271,36 @@ class ObsSpanSchema(BaseModel):
     id: str = Field(..., description="Span id (stable within the run)")
     name: str = Field(..., description="Display name, e.g. 'node: agent' or 'tool: get_weather'")
     kind: Literal["root", "node", "llm", "tool"] = Field(..., description="Span kind")
-    parent: str | None = Field(None, description="Parent span id")
+    parent: str | None = Field(default=None, description="Parent span id")
     start_ms: float = Field(..., description="Start offset from run start, in ms")
     duration_ms: float = Field(..., description="Duration in ms")
-    status: Literal["ok", "error", "running"] = Field("ok", description="Span outcome")
-    error: str | None = Field(None, description="Error text when status is 'error'")
+    status: Literal["ok", "error", "running"] = Field(default="ok", description="Span outcome")
+    error: str | None = Field(default=None, description="Error text when status is 'error'")
     inputs: dict[str, Any] | None = Field(
-        None,
+        default=None,
         description=(
             "What went in. root: user_message. node: incoming_message (approximate). "
             "tool: args. llm: always null (the prompt is not recorded)."
         ),
     )
     outputs: dict[str, Any] | None = Field(
-        None,
+        default=None,
         description=(
             "What came out. root: assistant_message. node: messages emitted in the visit. "
             "llm: text and tool_calls. tool: result."
         ),
     )
-    step: int | None = Field(None, description="Graph step of the visit (node spans)")
+    step: int | None = Field(default=None, description="Graph step of the visit (node spans)")
     visit: int | None = Field(
-        None, description="1-based visit count of this node name (node spans)"
+        default=None, description="1-based visit count of this node name (node spans)"
     )
-    model: str | None = Field(None, description="LLM model (llm spans)")
-    input_tokens: int | None = Field(None, description="Prompt tokens (llm spans)")
-    output_tokens: int | None = Field(None, description="Completion tokens (llm spans)")
-    total_tokens: int | None = Field(None, description="Total tokens (llm spans)")
-    reasoning_tokens: int | None = Field(None, description="Reasoning tokens (llm spans)")
-    tool_name: str | None = Field(None, description="Tool name (tool spans)")
-    tool_call_id: str | None = Field(None, description="Tool call id (tool spans)")
+    model: str | None = Field(default=None, description="LLM model (llm spans)")
+    input_tokens: int | None = Field(default=None, description="Prompt tokens (llm spans)")
+    output_tokens: int | None = Field(default=None, description="Completion tokens (llm spans)")
+    total_tokens: int | None = Field(default=None, description="Total tokens (llm spans)")
+    reasoning_tokens: int | None = Field(default=None, description="Reasoning tokens (llm spans)")
+    tool_name: str | None = Field(default=None, description="Tool name (tool spans)")
+    tool_call_id: str | None = Field(default=None, description="Tool call id (tool spans)")
 
 
 class ObsEventSchema(BaseModel):
@@ -302,9 +308,9 @@ class ObsEventSchema(BaseModel):
 
     id: str = Field(..., description="Event id")
     type: str = Field(..., description="Event type: message | updates | state | error | result")
-    node: str = Field("", description="Node the event is attributed to")
+    node: str = Field(default="", description="Node the event is attributed to")
     offset_ms: float = Field(..., description="Offset from run start, in ms")
-    summary: str = Field("", description="Human-readable one-line summary")
+    summary: str = Field(default="", description="Human-readable one-line summary")
 
 
 class ObsTokenUsageSchema(BaseModel):
@@ -330,9 +336,9 @@ class ObsRunSchema(BaseModel):
     usage: ObsTokenUsageSchema = Field(default_factory=ObsTokenUsageSchema)
     llm_calls: int = 0
     tool_calls: int = 0
-    iterations: int = Field(0, description="Number of node visits")
-    error: str | None = Field(None, description="First error text seen in the run")
-    model: str | None = Field(None, description="First model seen in the run")
+    iterations: int = Field(default=0, description="Number of node visits")
+    error: str | None = Field(default=None, description="First error text seen in the run")
+    model: str | None = Field(default=None, description="First model seen in the run")
     models: list[str] = Field(default_factory=list, description="Distinct models seen")
     notes: list[str] = Field(
         default_factory=list, description="Honest limits of this reconstruction"

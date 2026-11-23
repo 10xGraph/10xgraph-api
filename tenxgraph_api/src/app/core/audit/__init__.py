@@ -1,7 +1,8 @@
 """Audit events: who accessed or changed what, when, and whether it was allowed.
 
 One emit function, :func:`audit_event`, called from the few places every request passes
-through (the auth dependency, the thread lookup, the 404 handler; changes from the routers).
+through (the auth dependency, the thread lookup, the 404 handler; changes from the routers;
+tool calls and approvals from the run, in ``tools.py``).
 Metadata only: never prompts, answers, message text, file contents, tokens or claims beyond
 ids. Request id, transport and client address come from the request context; callers pass only
 what they know.
@@ -24,7 +25,7 @@ from tenxgraph_api.src.app.core.request_context import get_request_context
 
 logger = logging.getLogger("tenxgraph_api")
 
-EventType = Literal["access", "auth", "change", "input", "rate_limit"]
+EventType = Literal["access", "auth", "change", "input", "rate_limit", "tool"]
 Result = Literal["allowed", "denied", "not_found", "failed", "success"]
 
 
@@ -49,6 +50,10 @@ class AuditEvent(BaseModel):
     reason: str | None = None
     client_ip: str | None = None
     count: int | None = None
+    # Tool events only: the run and the tool call the event is about.
+    thread_id: str | None = None
+    run_id: str | None = None
+    tool_call_id: str | None = None
 
 
 class BaseAuditSink:
@@ -90,7 +95,7 @@ def configure_audit(config: AuditConfig, *, auth_enabled: bool) -> None:
     set_sinks(build_sinks(config.sinks), include_reads=config.include_reads)
 
 
-async def audit_event(
+async def audit_event(  # noqa: PLR0913
     event: EventType,
     result: Result,
     *,
@@ -100,6 +105,9 @@ async def audit_event(
     identity: Identity | None = None,
     user_id: str | None = None,
     count: int | None = None,
+    thread_id: str | None = None,
+    run_id: str | None = None,
+    tool_call_id: str | None = None,
 ) -> None:
     """Send one event to every sink. ``identity`` (when known) gives user, tenant and roles."""
     if not _Active.sinks:
@@ -124,6 +132,9 @@ async def audit_event(
         reason=reason,
         client_ip=ctx.client_ip if ctx else None,
         count=count,
+        thread_id=thread_id,
+        run_id=run_id,
+        tool_call_id=tool_call_id,
     )
     for sink in _Active.sinks:
         try:

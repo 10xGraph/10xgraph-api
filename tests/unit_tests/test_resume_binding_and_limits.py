@@ -24,7 +24,6 @@ from tenxgraph.core import exceptions as core_exceptions
 from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import StreamEvent
 
-import tenxgraph_api.src.app.routers.graph.services.graph_service as graph_service_module
 from tenxgraph_api.src.app.core.validation.request_config import (
     MAX_BLOCKS_PER_MESSAGE,
     MAX_MESSAGES,
@@ -41,6 +40,7 @@ from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     GraphInputSchema,
     WsGraphInputSchema,
 )
+from tenxgraph_api.src.app.routers.graph.services import run_checks, streaming
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
 
 
@@ -102,7 +102,8 @@ def _no_telemetry(monkeypatch):
 
 def _paused_at(monkeypatch, interrupt_id: str | None) -> None:
     pending = None if interrupt_id is None else SimpleNamespace(id=interrupt_id)
-    monkeypatch.setattr(graph_service_module, "pending_interrupt", lambda state: pending)
+    monkeypatch.setattr(run_checks, "pending_interrupt", lambda state: pending)
+    monkeypatch.setattr(streaming, "pending_interrupt", lambda state: pending)
 
 
 def _resume(**kwargs: Any) -> GraphInputSchema:

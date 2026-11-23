@@ -1,6 +1,5 @@
 """One run setup for every transport: each check once, at most one state read before the run."""
 
-
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -13,10 +12,10 @@ from injectq import InjectQ
 from injectq.integrations.fastapi import setup_fastapi
 from tenxgraph.core.authz import Identity
 
-import tenxgraph_api.src.app.routers.graph.services.graph_service as graph_service_module
 from tenxgraph_api.src.app.core.utils.container import lookup
 from tenxgraph_api.src.app.routers.graph.router import _bind_ws_container
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import GraphInputSchema
+from tenxgraph_api.src.app.routers.graph.services import run_checks
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService, RunChecks
 from tenxgraph_api.src.app.utils.telemetry_store import TelemetryStore
 
@@ -32,9 +31,7 @@ def _no_telemetry(monkeypatch):
 @pytest.fixture
 def paused(monkeypatch):
     """The thread is paused at interrupt ``i-1`` (an ``interrupt()`` pause, not a static one)."""
-    monkeypatch.setattr(
-        graph_service_module, "pending_interrupt", lambda state: SimpleNamespace(id="i-1")
-    )
+    monkeypatch.setattr(run_checks, "pending_interrupt", lambda state: SimpleNamespace(id="i-1"))
 
 
 def _service() -> tuple[GraphService, list[int]]:

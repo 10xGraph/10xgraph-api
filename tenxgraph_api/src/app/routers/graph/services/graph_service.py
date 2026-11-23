@@ -48,7 +48,7 @@ from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.utils import (  # noqa: F401
     ResponseGranularity,
 )
-from tenxgraph.utils.interrupt import pending_interrupt  # noqa: F401  (patched by tests)
+from tenxgraph.utils.interrupt import pending_interrupt  # noqa: F401
 from tenxgraph.utils.validators import (  # noqa: F401
     ValidationError as InputValidationError,
 )
@@ -57,6 +57,7 @@ from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.audit import (  # noqa: F401
     audit_event,
 )
+from tenxgraph_api.src.app.core.audit.tools import ToolAudit
 from tenxgraph_api.src.app.core.config.graph_config import (  # noqa: F401
     GraphConfig,
     RunsConfig,
@@ -118,12 +119,19 @@ from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import
     preprocess_multimodal_messages,
     resolve_media_policy,
 )
-from tenxgraph_api.src.app.routers.graph.services.naming import ThreadNamingMixin
+from tenxgraph_api.src.app.routers.graph.services.naming import (  # noqa: F401
+    MAX_PENDING_THREAD_NAMES,
+    THREAD_NAME_TIMEOUT_SECONDS,
+    ThreadNamingMixin,
+)
 from tenxgraph_api.src.app.routers.graph.services.realtime import (  # noqa: F401
     REALTIME_INIT_FIELDS,
     RealtimeMixin,
 )
-from tenxgraph_api.src.app.routers.graph.services.run_checks import RunChecksMixin
+from tenxgraph_api.src.app.routers.graph.services.run_checks import (  # noqa: F401
+    MAX_THREAD_ID_ATTEMPTS,
+    RunChecksMixin,
+)
 from tenxgraph_api.src.app.routers.graph.services.run_models import (  # noqa: F401
     _UNREAD,
     RunChecks,
@@ -153,18 +161,6 @@ from tenxgraph_api.src.app.utils.run_trace import (  # noqa: F401
     telemetry_record,
 )
 from tenxgraph_api.src.app.utils.telemetry_store import TelemetryStore
-
-
-# Longest a background thread-naming call may run (it is a model call).
-THREAD_NAME_TIMEOUT_SECONDS = 60.0
-
-# Naming tasks kept by the service itself (no core task manager bound) are capped; over it the
-# thread simply stays unnamed, as the core manager does with its own limit.
-MAX_PENDING_THREAD_NAMES = 100
-
-# A taken generated id is retried with a fresh one; each retry is another prediction the
-# claimer would have had to get right.
-MAX_THREAD_ID_ATTEMPTS = 5
 
 
 @singleton
@@ -375,6 +371,9 @@ class GraphService(
 
             # Extract messages and state from result
             messages: list[Message] = result.get("messages", [])
+            for msg in messages:
+                await run.tools.record(msg)
+            await run.tools.after_run(self.checkpointer, config)
 
             # Record final messages into telemetry, then close the run.
             if self.telemetry:
@@ -461,6 +460,13 @@ class GraphService(
         run.started = datetime.now().timestamp()
         if self.telemetry:
             self.telemetry.start_run(run.thread_id, run.run_id, run.started)
+        run.tools = ToolAudit(user, run.thread_id, run.run_id)
+        # The client's results for its own tools: those tools ran in the frontend.
+        run.tools.skip.update(tool_result_ids(run.input_data["messages"]))
+        if "resume" in run.input_data:
+            state = await self._run_state(run.config, checks)
+            await run.tools.approval(state, run.input_data["resume"])
+            await run.tools.before_resume(self.checkpointer, run.config, state)
 
     def _end_run(self, run: _Run) -> None:
         """Close the run's trace if nothing else did, then free the lock on a new thread."""

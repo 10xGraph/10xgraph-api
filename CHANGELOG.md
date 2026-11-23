@@ -42,6 +42,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a `ToolGuard` rule is denied until a role or claim grants it. Tool permissions never grant
   a route, and a route cannot require one. `10xgraph config` suggests `tools:*` in the role
   editor.
+- **Tool calls in the audit log.** With `audit.enabled`, every server tool call (local or MCP)
+  in a run records a `tool` event with action `tool:call`, `resource` `tool/<name>` and
+  result `success`, `failed` or `denied` (a `ToolGuard` denial, with the policy's reason).
+  A resume that answers a `ToolGuard` approval records `tool:approve`, `allowed` or `denied`
+  (reason `rejected` or `cancelled`), with the identity of the caller who answered. Invoke,
+  stream, WebSocket, AG-UI and `/v1/graph/live` sessions are covered, and each call is
+  recorded once: a call that finished before a pause is not recorded again when the resumed
+  run replays it from the tool ledger. `AuditEvent` gains `thread_id`, `run_id` and
+  `tool_call_id` (null on other events; `run_id` is null in a live session). Tool arguments
+  and results are never recorded.
 
 ### Changed
 

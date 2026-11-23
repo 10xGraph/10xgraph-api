@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from injectq import InjectQ
 
-from tenxgraph_api.src.app.routers.graph.services import graph_service as graph_service_module
+from tenxgraph_api.src.app.routers.graph.services import run_checks
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
 
 
@@ -54,7 +54,7 @@ async def test_a_claimed_generated_id_is_skipped(generated_ids):
 
 @pytest.mark.asyncio
 async def test_gives_up_when_every_id_is_taken(generated_ids, monkeypatch):
-    monkeypatch.setattr(graph_service_module, "MAX_THREAD_ID_ATTEMPTS", 2)
+    monkeypatch.setattr(run_checks, "MAX_THREAD_ID_ATTEMPTS", 2)
     generated_ids("101", "102")
     with pytest.raises(RuntimeError, match="unused thread id"):
         await _service({"101": "m", "102": "m"})._new_thread_id()

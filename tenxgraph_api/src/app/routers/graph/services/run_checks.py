@@ -10,6 +10,7 @@ from pydantic import TypeAdapter, ValidationError
 from tenxgraph.core.authz import Identity, UserCredential
 from tenxgraph.core.exceptions import ModelNotFoundError
 from tenxgraph.core.graph import ToolNode
+from tenxgraph.utils.interrupt import pending_interrupt
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
@@ -32,7 +33,6 @@ from tenxgraph_api.src.app.core.validation.request_config import (
     tool_result_ids,
     unanswered_tool_calls,
 )
-from tenxgraph_api.src.app.routers.graph.late_module import LateModule
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     GraphInputSchema,
 )
@@ -50,9 +50,9 @@ from tenxgraph_api.src.app.routers.graph.services.run_models import (
 )
 
 
-# The names tests patch on ``graph_service`` (``pending_interrupt``, the limits) are read
-# through this, at call time.
-service_module = LateModule("tenxgraph_api.src.app.routers.graph.services.graph_service")
+# A taken generated id is retried with a fresh one; each retry is another prediction the
+# claimer would have had to get right.
+MAX_THREAD_ID_ATTEMPTS = 5
 
 
 class RunChecksMixin:
@@ -255,7 +255,7 @@ class RunChecksMixin:
         have claimed the next id first. Storage would refuse the run on it (404); picking an
         unused id avoids that.
         """
-        for _ in range(service_module.MAX_THREAD_ID_ATTEMPTS):
+        for _ in range(MAX_THREAD_ID_ATTEMPTS):
             thread_id = str(await InjectQ.get_instance().atry_get("generated_id") or uuid4())
             try:
                 owner = await self.checkpointer.aget_thread_owner(thread_id)
@@ -283,7 +283,7 @@ class RunChecksMixin:
         if not graph_input.is_resume or graph_input.interrupt_id is None:
             return
         state = await self._run_state(config, checks)
-        pending = service_module.pending_interrupt(state) if state is not None else None
+        pending = pending_interrupt(state) if state is not None else None
         if pending is None:
             raise InterruptConflictError(
                 "Nothing to resume: this thread is not paused at an interrupt"
@@ -334,7 +334,7 @@ class RunChecksMixin:
         state = await self._run_state(config, checks)
         if state is None or not state.is_interrupted():
             return False
-        pending = service_module.pending_interrupt(state)
+        pending = pending_interrupt(state)
         reason = getattr(state.execution_meta, "interrupt_reason", None)
         return pending is None and reason != "remote_tool_call"
 
