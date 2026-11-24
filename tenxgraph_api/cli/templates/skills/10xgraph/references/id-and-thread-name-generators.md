@@ -8,14 +8,12 @@ Core graph ID generators live in `tenxgraph.utils`.
 
 Built-ins:
 
-- `DefaultIDGenerator`
-- `UUIDGenerator`
+- `DefaultIDGenerator` (uuid4, the default)
 - `BigIntIDGenerator`
 - `TimestampIDGenerator`
 - `IntIDGenerator`
 - `HexIDGenerator`
 - `ShortIDGenerator`
-- `AsyncIDGenerator`
 
 Pass to `StateGraph(id_generator=...)`, or name one in `10xgraph.json` (not both: the server
 refuses to start when the graph is compiled with its own generator and the config sets one):

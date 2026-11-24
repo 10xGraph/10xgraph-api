@@ -80,7 +80,7 @@ def test_static_templates_load_through_graph_config(monkeypatch) -> None:
     assert prod.cache_store.type == "redis"
     assert prod.cache_store.expanded_url() == "redis://localhost:6379/0"
     assert prod.rate_limit is not None and prod.rate_limit.fail_open is False
-    assert prod.id_generator == "uuid"
+    assert prod.id_generator is None
     assert prod.token_revocation is not None
     assert prod.thread_name_generator == "first_message"
 

@@ -31,6 +31,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`"id_generator": "uuid"` maps to core's `DefaultIDGenerator`**, not the deprecated
+  `UUIDGenerator`, so the value stays valid and no longer warns. uuid is the default, so
+  `10xgraph init` Production no longer writes `id_generator` and the summary no longer lists it.
 - **Public data classes are pydantic models.** `AgUiConfig`, `MediaConfig`, `RateLimitConfig`,
   `TokenRevocationConfig`, `CacheStoreConfig`, `WebSocketConfig`, `RunsConfig`, `SlotResult` and
   `RateLimitDecision` were dataclasses; they keep their names, import paths, fields and
@@ -53,6 +56,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Live tool audit uses the result event's `status`.** The `/v1/graph/live` audit reads core's `ToolResultEvent.status` (`error`) to record a failed tool call, instead of guessing from the result text. A ToolGuard denial is still recorded as `denied` with its reason. Needs a core that sets `status` on realtime tool results.
 - **New `runs.max_recursion_limit` in 10xgraph.json** (positive integer, default 100, editable in
   `10xgraph config`). A request's `recursion_limit` (steps per run) is no longer capped at 100 by
   the schema: the operator sets the cap, and a larger value gets 422 naming the key. Raise it

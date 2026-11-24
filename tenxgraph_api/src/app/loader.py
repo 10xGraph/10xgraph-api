@@ -21,7 +21,6 @@ from tenxgraph.utils.id_generator import (
     IntIDGenerator,
     ShortIDGenerator,
     TimestampIDGenerator,
-    UUIDGenerator,
 )
 
 from tenxgraph_api import BaseAuth
@@ -187,7 +186,7 @@ def _snowflake_id_generator() -> BaseIDGenerator:
 # ``id_generator`` names in 10xgraph.json (graph_config.ID_GENERATOR_NAMES): the concrete core
 # generators, plus the API's Snowflake one (reads the SNOWFLAKE_* environment variables).
 BUILTIN_ID_GENERATORS: dict[str, Callable[[], BaseIDGenerator]] = {
-    "uuid": UUIDGenerator,
+    "uuid": DefaultIDGenerator,
     "hex": HexIDGenerator,
     "short": ShortIDGenerator,
     "int": IntIDGenerator,

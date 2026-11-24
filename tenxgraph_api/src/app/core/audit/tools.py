@@ -5,7 +5,8 @@ human approvals are recorded without a hook in core:
 
 - invoke: the result messages; stream, WebSocket and AG-UI: a message chunk for a result and
   an ``ERROR`` chunk with status ``tool_failed`` or ``tool_denied`` for a failure;
-- ``/v1/graph/live``: the ``tool_call`` and ``tool_result`` realtime events;
+- ``/v1/graph/live``: the ``tool_call`` and ``tool_result`` realtime events (a failure is the
+  result event's ``status``);
 - the interrupt a resume answers, for approvals.
 
 Each call is recorded once. A run that pauses in a tool turn (an approval, ``interrupt()``)
@@ -35,10 +36,6 @@ MAX_REASON_CHARS = 200
 
 # ``data["status"]`` of the stream's error chunk for a failed or denied tool call.
 _CHUNK_RESULTS = {"tool_failed": "failed", "tool_denied": "denied"}
-
-# The result texts core gives a tool call that failed, as a live session's result carries
-# them (core's realtime ``tool_result`` event has no error flag).
-_LIVE_FAILURE_PREFIXES = ("Tool '{name}' failed", "Internal execution error:")
 
 Outcome = tuple[str, str, str, str | None]  # call id, tool name, result, reason
 
@@ -88,17 +85,16 @@ def _outcome(item: Any) -> Outcome | None:
     return str(data.get("tool_call_id") or ""), name, result, reason
 
 
-def _live_outcome(call_id: str, name: str, result: Any) -> Outcome:
-    """The outcome of a live session's tool result (``{"result": ...}`` or ``{"error": ...}``)."""
-    if not isinstance(result, dict) or "error" in result:
-        return call_id, name, "failed", None
-    output = result.get("result")
-    if isinstance(output, str):
-        if output.startswith(f"Denied by policy: {name}."):
-            return call_id, name, "denied", _denial_reason(output, name)
-        if output.startswith(tuple(p.format(name=name) for p in _LIVE_FAILURE_PREFIXES)):
-            return call_id, name, "failed", None
-    return call_id, name, "success", None
+def _live_outcome(call_id: str, name: str, result: Any, status: str) -> Outcome:
+    """The outcome of a live session's tool result.
+
+    A ToolGuard denial is told by its text first (core marks it ``error`` too); any other
+    ``error`` status is a failure.
+    """
+    output = result.get("result") if isinstance(result, dict) else None
+    if isinstance(output, str) and output.startswith(f"Denied by policy: {name}."):
+        return call_id, name, "denied", _denial_reason(output, name)
+    return call_id, name, "failed" if status == "error" else "success", None
 
 
 def _ledger_message(entry: Any) -> Message | None:
@@ -194,7 +190,7 @@ class ToolAudit:
                 self._live_names[str(event.id)] = str(event.name)
             elif kind == "tool_result" and str(event.id) not in self.recorded:
                 name = self._live_names.pop(str(event.id), "")
-                await self._emit(_live_outcome(str(event.id), name, event.result))
+                await self._emit(_live_outcome(str(event.id), name, event.result, event.status))
         except Exception as exc:
             logger.error("Tool audit event failed: %s: %s", type(exc).__name__, exc)
 

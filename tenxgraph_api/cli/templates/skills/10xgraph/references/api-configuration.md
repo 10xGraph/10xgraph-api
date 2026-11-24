@@ -22,7 +22,6 @@ Common full shape:
   "thread_name_generator": "first_message",
   "env": ".env",
   "auth": { "method": "jwt", "roles": { "admin": { "permissions": ["*"], "reach": "tenant" } } },
-  "id_generator": "uuid",
   "remote_tools": [],
   "cache_store": {
     "type": "redis",
@@ -46,7 +45,7 @@ Common full shape:
 - `store`: optional import path to a `BaseStore` instance; required for store endpoints.
 - `injectq`: optional import path to an `InjectQ` container. It must be the container passed to `StateGraph(container=...)`; set both or neither (the server refuses to start when they differ).
 - `thread_name_generator`: unset, `null`, `""` or `"none"` (the default): threads are saved without a name. `"random"`: a random two-word name such as `thoughtful-dialogue`. `"first_message"`: the user's first message, whitespace collapsed, cut to at most 60 characters on a word boundary. Or a `module:attr` import path to a `ThreadNameGenerator` class/instance. Any other value is a config error. Every generated name is saved on the thread. See `references/id-and-thread-name-generators.md`.
-- `id_generator`: unset keeps the graph's own generator. A built-in name (`uuid`, `hex`, `short`, `int`, `bigint`, `timestamp`, `snowflake`) or a `module:attr` import path to a `BaseIDGenerator` instance, subclass or zero-argument factory. New thread, message and memory ids all come from it. Set it here or in `StateGraph(id_generator=...)`, not both (the server refuses to start).
+- `id_generator`: unset keeps the graph's own generator, which is uuid4 (`DefaultIDGenerator`) unless `StateGraph(id_generator=...)` sets another, so uuid ids need no key. A built-in name (`uuid`, `hex`, `short`, `int`, `bigint`, `timestamp`, `snowflake`) or a `module:attr` import path to a `BaseIDGenerator` instance, subclass or zero-argument factory. New thread, message and memory ids all come from it. Set it here or in `StateGraph(id_generator=...)`, not both (the server refuses to start).
 
 - `env`: optional `.env` path loaded before graph import.
 - `auth`: `null`, `"jwt"`, or an object: `method` (`none` | `jwt` | `custom`), `path` (custom only, a `BaseAuth` subclass), and the RBAC keys `roles`, `roles_claim`, `permissions_claim`, `tenant_claims`, `default_role`, `system_identities` (refused when auth is off). The top-level `authorization` and `graph_introspection` keys are removed and stop the server at boot. See `references/auth-and-authorization.md`.
