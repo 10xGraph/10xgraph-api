@@ -20,8 +20,6 @@ def test_default_excludes_admin_only():
     assert ALL_PERMISSIONS - {"admin:read", "admin:write"} == DEFAULT_PERMISSIONS
 
 
-
-
 def test_expand_star_resource_and_concrete():
     assert expand(["*"]) == ALL_PERMISSIONS | {"tools:*"}
     assert expand(["config:*"]) == {"config:read"}

@@ -28,9 +28,12 @@ refuses to start when the graph is compiled with its own generator and the confi
 
 Names: `uuid`, `hex`, `short`, `int`, `bigint`, `timestamp`, `snowflake`, or a `module:attr`
 import path to a `BaseIDGenerator` instance, subclass or zero-argument factory. Unset keeps the
-graph's own generator. The server uses it for new thread ids, message ids and memory ids. With a
-`PgCheckpointer`, its `id_type` must hold the ids (`id_type="bigint"` for integer generators,
-`"string"` for the others); a mismatch refuses to start.
+graph's own generator. The server uses it for new thread ids, message ids and memory ids. The API never
+makes ids itself. With a `PgCheckpointer`, the id type of its columns follows the generator
+(text for `uuid`, `hex` and `short`, integers for the rest); its `id_type=` argument is
+deprecated, and one that does not hold the generator's ids refuses to start. Thread and message
+ids from a path or body are converted to the generator's type (integer generators: a
+non-numeric id is a 422).
 
 ## API Snowflake ID Generator
 

@@ -15,6 +15,8 @@ logger = logging.getLogger("tenxgraph_api")
 
 # Finite default so one account cannot hold an unbounded number of HTTP graph runs open.
 DEFAULT_MAX_CONCURRENT_RUNS_PER_USER = 10
+# Highest ``recursion_limit`` a request may ask for when ``runs.max_recursion_limit`` is not set.
+DEFAULT_MAX_RECURSION_LIMIT = 100
 THREAD_ID_MODES = ("client", "server")
 
 # Longest a graph run may take when MODE=production and ``runs.timeout`` is not set.
@@ -48,7 +50,8 @@ class RunsConfig:
             "state_keys": ["preferences"],
             "max_concurrent_per_user": 10,
             "timeout": 600,
-            "max_parallel_tool_calls": 10
+            "max_parallel_tool_calls": 10,
+            "max_recursion_limit": 500
         }
 
     ``thread_ids`` decides who may name a new thread, with auth on or off. ``"server"`` (the
@@ -86,6 +89,10 @@ class RunsConfig:
     ``max_parallel_tool_calls`` caps the tool calls one model turn may run at once. The API
     puts it into every run's config (clients cannot set it). Default ``null``: core decides,
     from the ``TENXGRAPH_MAX_PARALLEL_TOOL_CALLS`` environment variable, else 10.
+
+    ``max_recursion_limit`` is the highest ``recursion_limit`` (steps per run) a request may ask
+    for; a larger value is rejected with 422. Positive integer, default 100. Raise it for agents
+    that need hundreds of steps. A request that sends no ``recursion_limit`` gets 25.
     """
 
     thread_ids: str = "server"
@@ -94,6 +101,7 @@ class RunsConfig:
     max_concurrent_per_user: int | None = DEFAULT_MAX_CONCURRENT_RUNS_PER_USER
     timeout: float | None = field(default_factory=default_run_timeout)
     max_parallel_tool_calls: int | None = None
+    max_recursion_limit: int = DEFAULT_MAX_RECURSION_LIMIT
 
     @property
     def server_thread_ids(self) -> bool:
@@ -113,6 +121,7 @@ class RunsConfig:
             max_concurrent_per_user=_runs_limit(data),
             timeout=_runs_timeout(data),
             max_parallel_tool_calls=_runs_max_parallel_tool_calls(data),
+            max_recursion_limit=_runs_max_recursion_limit(data),
         )
 
 
@@ -154,4 +163,13 @@ def _runs_max_parallel_tool_calls(data: dict) -> int | None:
         return None
     if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
         raise ValueError("runs.max_parallel_tool_calls must be a positive integer or null")
+    return raw
+
+
+def _runs_max_recursion_limit(data: dict) -> int:
+    raw = data.get("max_recursion_limit")
+    if raw is None:
+        return DEFAULT_MAX_RECURSION_LIMIT
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise ValueError("runs.max_recursion_limit must be a positive integer or null")
     return raw

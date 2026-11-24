@@ -128,15 +128,80 @@ def test_with_fresh_message_ids_handles_dicts_and_models():
     assert out[1].message_id
 
 
-def test_ag_ui_keeps_client_message_ids():
-    msg = Message(
-        message_id="copilot-1", role="user", content=[TextBlock(text="hi")]
-    )  # the converter's output
+def _ag_ui_messages(client_id: str, role: str = "user") -> list[Message]:
+    from ag_ui.core import RunAgentInput
+
+    from tenxgraph_api.src.app.routers.ag_ui.converter import to_tenxgraph_messages
+
+    run_input = RunAgentInput.model_validate(
+        {
+            "threadId": "t1",
+            "runId": "r1",
+            "state": {},
+            "messages": [{"id": client_id, "role": role, "content": "hi"}],
+            "tools": [],
+            "context": [],
+            "forwardedProps": {},
+        }
+    )
+    return to_tenxgraph_messages(run_input.messages)
+
+
+def _bind_generator(monkeypatch, id_type: str, factory) -> None:
+    from injectq import InjectQ
+
+    container = InjectQ()
+    container.bind("generated_id_type", id_type)
+    container.bind_factory("generated_id", factory)
+    monkeypatch.setattr(InjectQ, "get_instance", classmethod(lambda cls: container))
+
+
+@pytest.mark.parametrize(
+    ("id_type", "factory", "expected"),
+    [("string", lambda: "srv-1", str), ("integer", lambda: 1234567890123456789, int)],
+)
+def test_ag_ui_uses_server_message_ids(monkeypatch, id_type, factory, expected):
+    _bind_generator(monkeypatch, id_type, factory)
+    client_id = "3f2b8c1e-9d4a-4c1b-8f6e-0a1b2c3d4e5f"
     run_input = SimpleNamespace(
         thread_id="t1", run_id="r1", context=[], tools=[], forwarded_props={}
     )
-    graph_input, _ = _graph_request(run_input, [msg], None, object.__new__(object), False)
-    assert graph_input.messages[0].message_id == "copilot-1"
+    graph_input, _ = _graph_request(
+        run_input, _ag_ui_messages(client_id), None, object.__new__(object), False
+    )
+    stored = graph_input.messages[0]
+    assert type(stored.message_id) is expected
+    assert stored.message_id != client_id
+    assert stored.metadata["client_message_id"] == client_id
+
+
+def test_ag_ui_retry_with_the_same_client_id_is_not_stored_twice():
+    from ag_ui.core import RunAgentInput
+
+    from tenxgraph_api.src.app.routers.ag_ui.converter import (
+        known_message_ids,
+        select_new_messages,
+    )
+
+    stored = Message(
+        message_id=42,
+        role="user",
+        content=[TextBlock(text="hi")],
+        metadata={"client_message_id": "uuid-1"},
+    )
+    run_input = RunAgentInput.model_validate(
+        {
+            "threadId": "t1",
+            "runId": "r2",
+            "state": {},
+            "messages": [{"id": "uuid-1", "role": "user", "content": "hi"}],
+            "tools": [],
+            "context": [],
+            "forwardedProps": {},
+        }
+    )
+    assert select_new_messages(run_input.messages, known_ids=known_message_ids([stored])) == []
+    assert len(select_new_messages(run_input.messages, known_ids=known_message_ids([]))) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -3,13 +3,13 @@
 import inspect
 from collections.abc import Iterator
 from typing import Any
-from uuid import uuid4
 
 from injectq import InjectQ
 from pydantic import TypeAdapter, ValidationError
 from tenxgraph.core.authz import Identity, UserCredential
 from tenxgraph.core.exceptions import ModelNotFoundError
 from tenxgraph.core.graph import ToolNode
+from tenxgraph.core.state.message import generate_id
 from tenxgraph.utils.interrupt import pending_interrupt
 
 from tenxgraph_api.src.app.core import logger
@@ -33,6 +33,7 @@ from tenxgraph_api.src.app.core.validation.request_config import (
     tool_result_ids,
     unanswered_tool_calls,
 )
+from tenxgraph_api.src.app.core.validation.resource_ids import to_core_id
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
     GraphInputSchema,
 )
@@ -242,11 +243,16 @@ class RunChecksMixin:
             server_thread_ids=self.runs_policy().server_thread_ids,
         )
 
-    async def new_thread_id(self) -> str:
+    async def new_thread_id(self) -> str | int:
         """A fresh server-made thread id (public name of :meth:`_new_thread_id`)."""
         return await self._new_thread_id()
 
-    async def _new_thread_id(self) -> str:
+    async def _generated_id(self) -> str | int:
+        """A new id from the id generator bound in the shared container (core's default if none)."""
+        generated = await InjectQ.get_instance().atry_get("generated_id")
+        return generated if generated not in (None, "") else generate_id(None)
+
+    async def _new_thread_id(self) -> str | int:
         """Generate a thread id that nobody owns yet.
 
         The request asked for a new thread, so the id handed out here must really be new.
@@ -256,7 +262,7 @@ class RunChecksMixin:
         unused id avoids that.
         """
         for _ in range(MAX_THREAD_ID_ATTEMPTS):
-            thread_id = str(await InjectQ.get_instance().atry_get("generated_id") or uuid4())
+            thread_id = await self._generated_id()
             try:
                 owner = await self.checkpointer.aget_thread_owner(thread_id)
             except NotImplementedError:
@@ -313,7 +319,7 @@ class RunChecksMixin:
         if not graph_input.is_resume or graph_input.interrupt_id is None:
             return
         thread_id = normalize_thread_id((graph_input.config or {}).get("thread_id"))
-        config: dict[str, Any] = {"thread_id": thread_id}
+        config: dict[str, Any] = {"thread_id": to_core_id(thread_id)}
         set_user(config, user)
         try:
             if thread_id is None:  # a new thread has nothing to resume
@@ -371,15 +377,21 @@ class RunChecksMixin:
             is_new_thread = True
 
         # update thread id
-        config["thread_id"] = str(thread_id)
+        config["thread_id"] = to_core_id(thread_id)
 
         # The authenticated user, before any checkpointer read below: PgCheckpointer refuses a
         # config without ``user_id``. Never taken from the request (``client_config`` strips it).
         # Storage reads the identity (tenant values, reach) from ``config["user"]``.
         set_user(config, user, credential)
 
-        # check recursion limit set or not
-        config["recursion_limit"] = graph_input.recursion_limit or 25
+        # Step cap for the run, bounded by the operator's runs.max_recursion_limit
+        recursion_limit = graph_input.recursion_limit or 25
+        if recursion_limit > runs.max_recursion_limit:
+            raise ClientInputError(
+                f"recursion_limit {recursion_limit} is above the server cap of "
+                f"{runs.max_recursion_limit} (runs.max_recursion_limit)"
+            )
+        config["recursion_limit"] = recursion_limit
 
         # Server-owned cap on parallel tool calls per model turn (clients cannot set it)
         if runs.max_parallel_tool_calls is not None:

@@ -45,12 +45,6 @@ class TestSnowFlakeIdGeneratorImportError:
                 SnowFlakeIdGenerator()
 
 
-
-
-
-
-
-
 class TestSnowFlakeIdGeneratorConfigEnvValues:
     """Test different environment variable configurations."""
 

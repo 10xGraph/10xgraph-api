@@ -56,7 +56,6 @@ def mock_user():
 class TestGetStateLogic:
     """Test GET state endpoint logic."""
 
-
     @pytest.mark.asyncio
     async def test_get_state_validates_thread_id(self, mock_request, mock_service, mock_user):
         """Test that get_state validates thread_id."""
@@ -73,7 +72,6 @@ class TestGetStateLogic:
 
 class TestPutStateLogic:
     """Test PUT state endpoint logic."""
-
 
     @pytest.mark.asyncio
     async def test_put_state_validates_thread_id(self, mock_request, mock_service, mock_user):
@@ -95,8 +93,6 @@ class TestPutStateLogic:
             )
 
 
-
-
 class TestGetMessageLogic:
     """Test GET message endpoint logic."""
 
@@ -116,9 +112,6 @@ class TestGetMessageLogic:
                 identity=mock_user,
             )
         assert exc_info.value.status_code == 422
-
-
-
 
 
 class TestDeleteMessageLogic:
@@ -146,14 +139,8 @@ class TestDeleteMessageLogic:
         assert exc_info.value.status_code == 422
 
 
-
-
-
-
-
 class TestDeleteThreadLogic:
     """Test DELETE thread endpoint logic."""
-
 
     @pytest.mark.asyncio
     async def test_delete_thread_validates_thread_id(self, mock_request, mock_service, mock_user):

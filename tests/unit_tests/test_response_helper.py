@@ -30,10 +30,6 @@ def _make_request() -> Request:
     return req
 
 
-
-
-
-
 def test_error_response_without_request_id_middleware():
     scope = {"type": "http", "method": "GET", "path": "/", "headers": []}
     req: Request = StarletteRequest(scope, DummyReceive())  # type: ignore[call-arg]

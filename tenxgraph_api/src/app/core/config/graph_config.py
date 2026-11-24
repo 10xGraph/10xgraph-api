@@ -46,6 +46,7 @@ from tenxgraph_api.src.app.core.config.sections.runs import (
     _key_allow_list,
     _runs_limit,
     _runs_max_parallel_tool_calls,
+    _runs_max_recursion_limit,
     _runs_timeout,
     default_run_timeout,
 )
@@ -311,6 +312,7 @@ __all__ = [
     "_realtime_client_overrides",
     "_runs_limit",
     "_runs_max_parallel_tool_calls",
+    "_runs_max_recursion_limit",
     "_runs_timeout",
     "_string_list",
     "check_cache_store_settings",

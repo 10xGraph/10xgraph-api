@@ -21,11 +21,6 @@ class TestRandomThreadNameGeneratorSimpleName:
         assert len(name.split("-")) == 2
 
 
-
-
-
-
-
 class TestRandomThreadNameGeneratorActionName:
     """Tests for RandomThreadNameGenerator.generate_action_name method."""
 
@@ -38,10 +33,6 @@ class TestRandomThreadNameGeneratorActionName:
         assert "-" in name
         # Should have action and target
         assert len(name.split("-")) == 2
-
-
-
-
 
 
 class TestRandomThreadNameGeneratorCompoundName:
@@ -58,10 +49,6 @@ class TestRandomThreadNameGeneratorCompoundName:
         assert len(name.split("-")) == 2
 
 
-
-
-
-
 class TestRandomThreadNameGeneratorGenerateName:
     """Tests for RandomThreadNameGenerator.generate_name method."""
 
@@ -70,11 +57,6 @@ class TestRandomThreadNameGeneratorGenerateName:
         generator = RandomThreadNameGenerator()
         name = generator.random_name()
         assert isinstance(name, str)
-
-
-
-
-
 
 
 class TestRandomThreadNameGenerator:
@@ -86,8 +68,3 @@ class TestRandomThreadNameGenerator:
         generator = RandomThreadNameGenerator()
         name = await generator.generate_name([])
         assert isinstance(name, str)
-
-
-
-
-

@@ -19,6 +19,7 @@ from tenxgraph_api.src.app.core.validation.request_config import (
     tool_result_ids,
     unanswered_tool_calls,
 )
+from tenxgraph_api.src.app.core.validation.resource_ids import to_core_id
 from tenxgraph_api.src.app.routers.graph.services.stream_utils import _log_run_error
 from tenxgraph_api.src.app.utils.parse_output import (
     parse_state_output,
@@ -108,7 +109,7 @@ class FixMixin:
 
             # Start with client config if provided, then overlay trusted attributes
             fix_config = client_config(config)
-            fix_config["thread_id"] = thread_id
+            fix_config["thread_id"] = to_core_id(thread_id)
             set_user(fix_config, user)
 
             logger.debug("Fetching current state from checkpointer")

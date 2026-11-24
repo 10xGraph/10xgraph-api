@@ -421,7 +421,7 @@ ENVIRONMENT = "pytest"
 
 [tool.uv]
 # Core main still pins injectq<0.7; 0.7.0 fixes the optional-default bug (cleanup-review
-# INJECTQ_BUGS.md, bug 5). Remove once core main requires injectq>=0.7.0.
+# INJECTQ_BUGS.md, bug 5). Can go once core with injectq>=0.7 is released.
 override-dependencies = ["injectq>=0.7.0,<0.8"]
 
 [dependency-groups]

@@ -40,9 +40,6 @@ class TestInitSentry:
             # Should warn about invalid environment
             mock_logger.warning.assert_called()
 
-
-
-
     def test_init_sentry_import_error(self):
         """Test Sentry init handles ImportError gracefully."""
         mock_settings = Mock()
@@ -54,11 +51,6 @@ class TestInitSentry:
                 init_sentry(mock_settings)
                 # Should log warning about missing sentry_sdk
                 mock_logger.warning.assert_called()
-
-
-
-
-
 
     def test_init_sentry_none_mode(self):
         """Test Sentry init when MODE is None."""

@@ -9,16 +9,15 @@ from pathlib import Path
 from injectq import InjectQ
 from tenxgraph.core import CompiledGraph
 from tenxgraph.core.graph.remote_tool import RemoteToolConfig as CoreRemoteToolConfig
+from tenxgraph.core.graph.utils.id_type_check import check_id_type
 from tenxgraph.core.graph.utils.tenant_check import check_tenant_columns
 from tenxgraph.storage.checkpointer import BaseCheckpointer
-from tenxgraph.storage.checkpointer.pg_checkpointer import PgCheckpointer
 from tenxgraph.storage.store import BaseStore
 from tenxgraph.utils.id_generator import (
     BaseIDGenerator,
     BigIntIDGenerator,
     DefaultIDGenerator,
     HexIDGenerator,
-    IDType,
     IntIDGenerator,
     ShortIDGenerator,
     TimestampIDGenerator,
@@ -227,38 +226,6 @@ def load_id_generator(value: str) -> BaseIDGenerator:
     return generator
 
 
-# PgCheckpointer ``id_type`` -> what its thread and message id columns hold.
-_PG_INTEGER_ID_TYPES = {"int": "integer", "bigint": "bigint"}
-
-
-def _check_checkpointer_id_type(
-    generator: BaseIDGenerator, name: str, checkpointer: object
-) -> None:
-    """Refuse a generator whose ids the checkpointer's id columns cannot store.
-
-    Only ``PgCheckpointer`` declares its column type (``id_type``: ``string`` makes VARCHAR
-    columns, ``int`` INTEGER, ``bigint`` BIGINT); other checkpointers store any id.
-    """
-    if not isinstance(checkpointer, PgCheckpointer):
-        return
-    raw = getattr(checkpointer, "id_type", "string")
-    column = _PG_INTEGER_ID_TYPES.get(str(getattr(raw, "value", raw)), "string")
-    makes = generator.id_type
-    if makes == IDType.STRING and column != "string":
-        fix = 'id_type="string"'
-    elif (makes != IDType.STRING and column == "string") or (
-        makes == IDType.BIGINT and column == "integer"
-    ):
-        fix = 'id_type="bigint"'
-    else:
-        return
-    raise ValueError(
-        f"id_generator {name!r} makes {makes.value} ids but the PgCheckpointer stores "
-        f"{column} ids (its id_type is {str(getattr(raw, 'value', raw))!r}). Pass {fix} to "
-        "PgCheckpointer(...), or pick an id_generator whose ids its columns hold."
-    )
-
-
 def apply_id_generator(
     graph: CompiledGraph, config: GraphConfig, container: InjectQ
 ) -> BaseIDGenerator | None:
@@ -268,9 +235,9 @@ def apply_id_generator(
     ``"generated_id_type"`` and the ``"generated_id"`` factory, and reads them back from
     ``InjectQ.get_instance()`` for thread, message and memory ids; the API reads
     ``"generated_id"`` for new thread ids. All three are rebound in ``container``, which is the
-    graph's container (:func:`check_graph_container`). A ``PgCheckpointer`` whose ``id_type``
-    cannot hold the generator's ids refuses the boot. A graph compiled with its own
-    (non-default) generator refuses the setting, so the generator lives in one place.
+    graph's container (:func:`check_graph_container`). A checkpointer whose id columns cannot
+    hold the generator's ids (core's ``check_id_type``) refuses the boot. A graph compiled with
+    its own (non-default) generator refuses the setting, so the generator lives in one place.
     """
     name = config.id_generator
     if name is None:
@@ -284,11 +251,13 @@ def apply_id_generator(
             "Set the generator in one place: remove one of them."
         )
     generator = load_id_generator(name)
-    _check_checkpointer_id_type(generator, name, getattr(graph, "_checkpointer", None))
 
     container.bind_instance(BaseIDGenerator, generator)
     container.bind("generated_id_type", generator.id_type)
     container.bind_factory("generated_id", generator.generate)
+    # After the binding: the id type of a PgCheckpointer follows the bound generator, so only a
+    # deprecated explicit ``id_type=`` (or tables made with another generator) can still clash.
+    check_id_type(getattr(graph, "_checkpointer", None), generator)
     if state_graph is not None:
         state_graph._id_generator = generator  # GET /v1/graph reports the generator from here
     logger.info("ID generator: %s (id_generator %s)", type(generator).__name__, name)

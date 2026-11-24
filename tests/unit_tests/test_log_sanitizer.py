@@ -285,7 +285,6 @@ class TestSanitizeLogMessage:
 class TestSanitizingFormatter:
     """Tests for SanitizingFormatter class."""
 
-
     def test_sanitizing_formatter_format(self):
         """Test SanitizingFormatter.format method."""
         base_formatter = logging.Formatter("%(message)s")

@@ -333,10 +333,11 @@ class TestConverter:
         )
         assert [m.id for m in select_new_messages(run_input.messages)] == ["u1"]
 
-    def test_user_text_keeps_its_id(self):
+    def test_user_text_keeps_the_client_id_in_metadata(self):
         run_input = _input([{"id": "u1", "role": "user", "content": "hi"}])
         [message] = to_tenxgraph_messages(run_input.messages)
-        assert message.message_id == "u1"
+        assert message.message_id != "u1"
+        assert message.metadata == {"client_message_id": "u1"}
         assert message.role == "user"
         assert message.text() == "hi"
 

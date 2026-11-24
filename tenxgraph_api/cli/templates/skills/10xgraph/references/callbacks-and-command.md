@@ -276,8 +276,8 @@ def router_node(state, config):
 - Graph compile callback argument: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/core/graph/state_graph.py
 - Command API: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/utils/command.py
 - Command execution paths: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/core/graph/compiled_graph.py
-- Lifecycle hook fire points — invoke path: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/core/graph/utils/invoke_handler.py
-- Lifecycle hook fire points — stream path: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/core/graph/utils/stream_handler.py
+- Lifecycle hook fire points — run loop: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/core/graph/utils/engine.py
+- Lifecycle hook fire points — node execution: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/core/graph/utils/node_runner.py
 - Lifecycle hook fire points — interrupt/resume: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/core/graph/utils/heandler_utils.py
 - Lifecycle hook fire points — checkpoint: https://github.com/10xGraph/10xGraph/blob/main/tenxgraph/core/graph/utils/utils.py
 - Docs: https://10xgraph.com/docs/concepts/callbacks-and-command

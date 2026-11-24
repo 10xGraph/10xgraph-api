@@ -176,6 +176,34 @@ class TestGraphServiceMethods:
         assert config["max_parallel_tool_calls"] == 3
 
     @pytest.mark.asyncio
+    async def test_prepare_input_caps_recursion_limit(self, service):
+        from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
+        from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
+
+        def make(limit):
+            return GraphInputSchema(
+                messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                recursion_limit=limit,
+                config={"thread_id": "t1"},
+            )
+
+        # Default cap is 100: at the cap is set, above it is refused naming the key
+        service.config.runs = RunsConfig()
+        _, config, _ = await service._prepare_input(make(100))
+        assert config["recursion_limit"] == 100
+        with pytest.raises(ClientInputError, match=r"runs\.max_recursion_limit"):
+            await service._prepare_input(make(101))
+
+        # The operator raises the cap; a client config value cannot override it
+        service.config.runs = RunsConfig(max_recursion_limit=500)
+        gi = make(500)
+        gi.config = {"thread_id": "t1", "recursion_limit": 9999}
+        _, config, _ = await service._prepare_input(gi)
+        assert config["recursion_limit"] == 500
+        with pytest.raises(ClientInputError, match="500"):
+            await service._prepare_input(make(501))
+
+    @pytest.mark.asyncio
     async def test_prepare_input(self, service):
         gi = GraphInputSchema(
             messages=[{"role": "user", "content": [{"type": "text", "text": "hi"}]}],

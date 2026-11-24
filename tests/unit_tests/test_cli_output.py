@@ -26,8 +26,6 @@ def formatter(**kwargs) -> tuple[OutputFormatter, io.StringIO]:
     return OutputFormatter(stream=stream, **kwargs), stream
 
 
-
-
 def test_plain_banner_contains_title_and_subtitle() -> None:
     rendered, stream = formatter(output_format=OutputFormat.PLAIN)
     rendered.print_banner("Test Title", "Test Subtitle", width=100)
@@ -465,8 +463,6 @@ def test_global_convenience_functions_delegate(monkeypatch) -> None:
         ("warning", "e"),
         ("emphasize", "f"),
     ]
-
-
 
 
 def test_ctrl_c_releases_the_fullscreen_frame_without_waiting(monkeypatch) -> None:

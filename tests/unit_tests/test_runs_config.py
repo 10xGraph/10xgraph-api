@@ -28,6 +28,7 @@ def test_defaults(monkeypatch):
     assert runs.max_concurrent_per_user == DEFAULT_MAX_CONCURRENT_RUNS_PER_USER
     assert runs.timeout is None
     assert runs.max_parallel_tool_calls is None
+    assert runs.max_recursion_limit == 100
 
 
 def test_timeout_defaults_to_300_seconds_in_production(monkeypatch):
@@ -104,6 +105,11 @@ def test_zero_or_null_concurrency_means_unlimited(value):
         ({"max_parallel_tool_calls": 2.5}, "max_parallel_tool_calls"),
         ({"max_parallel_tool_calls": "5"}, "max_parallel_tool_calls"),
         ({"max_parallel_tool_calls": True}, "max_parallel_tool_calls"),
+        ({"max_recursion_limit": 0}, "max_recursion_limit"),
+        ({"max_recursion_limit": -1}, "max_recursion_limit"),
+        ({"max_recursion_limit": 2.5}, "max_recursion_limit"),
+        ({"max_recursion_limit": "500"}, "max_recursion_limit"),
+        ({"max_recursion_limit": True}, "max_recursion_limit"),
     ],
 )
 def test_invalid_values_are_rejected(data, match):
@@ -146,4 +152,17 @@ def test_config_editor_validates_max_parallel_tool_calls():
     issues = validate({**base, "runs": {"max_parallel_tool_calls": 5}})
     assert not [i for i in issues if i["path"].startswith("runs")]
     issues = validate({**base, "runs": {"max_parallel_tool_calls": 0}})
+    assert [i["path"] for i in issues if i["level"] == "error"] == ["runs"]
+
+
+def test_max_recursion_limit_default_null_and_custom():
+    assert RunsConfig.from_dict({"max_recursion_limit": None}).max_recursion_limit == 100
+    assert RunsConfig.from_dict({"max_recursion_limit": 500}).max_recursion_limit == 500
+
+
+def test_config_editor_validates_max_recursion_limit():
+    base = {"agent": "graph:app"}
+    issues = validate({**base, "runs": {"max_recursion_limit": 500}})
+    assert not [i for i in issues if i["path"].startswith("runs")]
+    issues = validate({**base, "runs": {"max_recursion_limit": 0}})
     assert [i["path"] for i in issues if i["level"] == "error"] == ["runs"]

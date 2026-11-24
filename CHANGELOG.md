@@ -29,8 +29,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Ids follow the id generator.** The API makes no ids of its own for core storage: new thread
+  ids and run ids come from the generator bound in the shared container. A thread or message id
+  from a path, body, WebSocket frame or AG-UI message is converted to the generator's type
+  before it reaches core (`int` for Snowflake and the other integer generators, with a 422 on a
+  non-numeric value; `str` otherwise), as core no longer converts numeric strings.
+- **Boot check for the checkpointer id type** now calls core's `check_id_type`, so the API keeps
+  no copy of it. `PgCheckpointer`'s id type follows the generator and its `id_type=` argument is
+  deprecated; the config editor, the bundled skill and the docs say so.
+- **AG-UI message ids are server ids, like REST.** `POST /v1/ag-ui` no longer keeps the client's
+  message ids (CopilotKit sends uuids, which got 422 under an integer generator such as
+  Snowflake). User and tool messages get an id from the bound generator and the client's id is
+  stored in `metadata["client_message_id"]`; a retry that resends it is not stored twice.
+
 ### Added
 
+- **New `runs.max_recursion_limit` in 10xgraph.json** (positive integer, default 100, editable in
+  `10xgraph config`). A request's `recursion_limit` (steps per run) is no longer capped at 100 by
+  the schema: the operator sets the cap, and a larger value gets 422 naming the key. Raise it
+  for agents that need hundreds of steps. With the key unset, behaviour is unchanged.
 - **Tool permissions in roles and tokens, for core's `ToolGuard`.** A new `tools` resource
   takes any tool name as its action: `tools:refund`, `tools:mcp.search-v2`, or `tools:*` for
   every tool. A tool name is 1 to 128 of `A-Z a-z 0-9 _ - .`; an empty name, whitespace, `:`

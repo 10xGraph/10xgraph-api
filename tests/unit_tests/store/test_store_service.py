@@ -18,7 +18,6 @@ from tenxgraph_api.src.app.routers.store.schemas.store_schemas import (
 class TestStoreMemory:
     """Tests for store_memory method."""
 
-
     async def test_store_memory_with_message_content(
         self, store_service, mock_store, mock_user, sample_message
     ):
@@ -41,8 +40,6 @@ class TestStoreMemory:
         call_args = mock_store.astore.call_args
         assert call_args[0][1] == sample_message
         assert call_args[1]["memory_type"] == MemoryType.SEMANTIC
-
-
 
     async def test_store_memory_no_store_raises_error(self, mock_user):
         """Test storing memory when store is not configured."""
@@ -162,8 +159,6 @@ class TestGetMemory:
             {"user": mock_user, "user_id": "test-user-123"}, sample_memory_id
         )
 
-
-
     async def test_get_memory_not_found(
         self, store_service, mock_store, mock_user, sample_memory_id
     ):
@@ -211,7 +206,6 @@ class TestListMemories:
         call_args = mock_store.aget_all.call_args
         assert call_args[1]["limit"] == 2  # one extra row tells has_more
 
-
     async def test_list_memories_empty(self, store_service, mock_store, mock_user):
         """Test listing memories when none exist."""
         # Arrange
@@ -228,7 +222,6 @@ class TestListMemories:
 class TestUpdateMemory:
     """Tests for update_memory method."""
 
-
     async def test_update_memory_with_message(
         self, store_service, mock_store, mock_user, sample_memory_id, sample_message
     ):
@@ -244,7 +237,6 @@ class TestUpdateMemory:
         assert result.success is True
         call_args = mock_store.aupdate.call_args
         assert call_args[0][2] == sample_message
-
 
 
 @pytest.mark.asyncio
@@ -267,8 +259,6 @@ class TestDeleteMemory:
         mock_store.adelete.assert_called_once_with(
             {"user": mock_user, "user_id": "test-user-123"}, sample_memory_id
         )
-
-
 
     async def test_delete_outside_reach_is_404_and_deletes_nothing(
         self, store_service, mock_store, mock_user, sample_memory_id
@@ -361,7 +351,6 @@ class TestForgetMemory:
         assert call_args[1]["memory_type"] == MemoryType.SEMANTIC
         assert call_args[1]["category"] == "personal"
         assert call_args[1]["filters"] == {"tag": "old"}
-
 
     async def test_forget_memory_excludes_none_values(self, store_service, mock_store, mock_user):
         """Test that None values are excluded from forget call."""

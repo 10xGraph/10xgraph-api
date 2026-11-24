@@ -16,6 +16,7 @@ from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.utils.thread_info import ThreadInfo
 
 from tenxgraph_api.src.app.core.audit import audit_not_found
+from tenxgraph_api.src.app.core.validation.resource_ids import to_core_id
 
 
 def set_user(
@@ -50,6 +51,7 @@ async def require_thread(
     """
     if run and identity is not None and identity.reach is not Reach.OWN:
         identity = identity.model_copy(update={"reach": Reach.OWN})
+    thread_id = to_core_id(thread_id)
     config: dict[str, Any] = {"thread_id": thread_id}
     set_user(config, identity)
     thread = await checkpointer.aget_thread(config)
