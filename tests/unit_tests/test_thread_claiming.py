@@ -32,7 +32,7 @@ def generated_ids(monkeypatch):
 
     def _set(*ids):
         sequence = iter(ids)
-        monkeypatch.setattr(run_checks, "generate_id", lambda default: next(sequence))
+        monkeypatch.setattr(run_checks, "generate_id", lambda explicit_id=None: next(sequence))
 
     return _set
 
