@@ -27,7 +27,7 @@ def tool(query: str, service: MyService = Inject[MyService]) -> str:
     return service.search(query)
 ```
 
-You can bind singleton instances, string keys, or factories. Pass a container to `StateGraph(container=container)` when using a non-default container.
+You can bind singleton instances, string keys, or factories. Pass a container to `StateGraph(container=container)` when using a non-default container, and name the same container in `injectq` in `10xgraph.json` (the server refuses to start when they differ).
 
 ## API Configuration
 
@@ -41,7 +41,7 @@ In `10xgraph.json`, use import paths to wire dependencies into the server runtim
 }
 ```
 
-The API loader imports these and binds them for graph execution. The checkpointer is not set here: pass it to `graph.compile(checkpointer=...)` in your agent module (a `checkpointer` key in `10xgraph.json` is ignored and logs a warning).
+The API loader imports these and binds them for graph execution. The checkpointer is not set here: pass it to `graph.compile(checkpointer=...)` in your agent module (a `checkpointer` key in `10xgraph.json` refuses to start).
 
 ## Rules
 

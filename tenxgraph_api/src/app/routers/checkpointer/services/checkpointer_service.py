@@ -147,15 +147,6 @@ class CheckpointerService:
         if keys:
             await media.link_threads(keys, str(thread_id), str(identity.user_id), identity)
 
-    def _link_tracking_media(self) -> Any:
-        """The media service when it can track thread links, else ``None``. Never raises."""
-        media = self._media_service()
-        try:
-            return media if media is not None and media.supports_links else None
-        except Exception as exc:
-            logger.debug("Media store unavailable for file cleanup: %s", exc)
-            return None
-
     async def _thread_media_keys(
         self, cfg: dict[str, Any], skip_message_id: Any = None
     ) -> list[str]:
@@ -442,7 +433,7 @@ class CheckpointerService:
         except Exception as exc:
             logger.debug("File cleanup skipped for message %s: %s", log_safe(message_id), exc)
         released: list[str] = []
-        media = self._link_tracking_media()
+        media = self._media_service()
         if media is not None and message is not None:
             try:
                 gone = internal_media_keys(message)
@@ -539,7 +530,7 @@ class CheckpointerService:
         self, cfg: dict[str, Any], identity: Identity | None, thread_id: Any
     ) -> None:
         """Release the caller's own files linked to ``thread_id`` (reach ``own``, never others')."""
-        media = self._link_tracking_media()
+        media = self._media_service()
         if media is None:
             return
         if identity is not None and identity.reach is not Reach.OWN:
@@ -558,7 +549,7 @@ class CheckpointerService:
         incomplete: list[str] = []
         # Collect the files the thread's messages reference before they are gone.
         thread_keys: list[str] = []
-        media = self._link_tracking_media()
+        media = self._media_service()
         if media is not None:
             try:
                 thread_keys = list(dict.fromkeys(await self._thread_media_keys(cfg)))

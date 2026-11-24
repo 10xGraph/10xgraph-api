@@ -204,10 +204,7 @@ def summarize_validation_error(exc: Any) -> str:
     ``str(exc)`` quotes the offending input (``input_value=...``), which can be a message, a
     file or a secret; this is safe for logs and for text sent back to a client.
     """
-    try:
-        errors = exc.errors(include_input=False, include_url=False, include_context=False)
-    except TypeError:  # an older pydantic
-        errors = exc.errors()
+    errors = exc.errors(include_input=False, include_url=False, include_context=False)
     parts = [
         f"{'.'.join(str(item) for item in error.get('loc', ())) or 'input'}: "
         f"{error.get('msg', 'invalid')}"

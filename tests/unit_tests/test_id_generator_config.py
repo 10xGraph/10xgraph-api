@@ -192,28 +192,21 @@ def test_a_generator_in_code_and_in_config_refuses_boot():
     assert "one place" in message
 
 
-def test_applying_twice_to_the_same_graph_is_not_a_conflict():
-    graph = _graph()
-    first = loader.apply_id_generator(graph, _config("hex"), InjectQ())
-    second = loader.apply_id_generator(graph, _config("hex"), InjectQ())
-    assert type(first) is type(second) is HexIDGenerator
-
-
-def test_every_container_gets_the_generator():
-    graph_container, api_container = InjectQ(), InjectQ()
-    graph = _graph(container=graph_container)
-    generator = loader.apply_id_generator(graph, _config(f"{THIS}:counting_factory"), api_container)
+def test_the_container_gets_the_generator():
+    container = InjectQ()
+    graph = _graph(container=container)
+    generator = loader.apply_id_generator(graph, _config(f"{THIS}:counting_factory"), container)
     assert isinstance(generator, CountingGenerator)
-    for container in (graph_container, api_container, InjectQ.get_instance()):
-        assert container.get(BaseIDGenerator) is generator
-        assert container.get("generated_id_type") == IDType.STRING
-        assert container.get("generated_id").startswith("cfg-")
+    assert container.get(BaseIDGenerator) is generator
+    assert container.get("generated_id_type") == IDType.STRING
+    assert container.get("generated_id").startswith("cfg-")
     assert graph._state_graph._id_generator is generator  # GET /v1/graph names it
 
 
 def _pg(id_type) -> PgCheckpointer:
     checkpointer = PgCheckpointer.__new__(PgCheckpointer)  # no database needed
-    checkpointer.id_type = id_type
+    # The deprecated id_type= pin: core stores it here, and id_type reads it back.
+    checkpointer._set_declared_id_type(id_type)
     return checkpointer
 
 

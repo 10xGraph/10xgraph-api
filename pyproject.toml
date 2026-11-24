@@ -63,6 +63,7 @@ dependencies = [
     # Pre-1.0 and major-version-risky deps are capped; floors are the versions
     # the suite is verified against.
     "fastapi>=0.116,<1.0",
+    "injectq>=0.7.0,<0.8",
     "python-multipart>=0.0.31,<0.1",
     "starlette>=1.3.1",
     "pydantic>=2.13,<3",
@@ -288,6 +289,8 @@ no_implicit_optional = true
 check_untyped_defs = false
 disallow_untyped_defs = false
 show_error_codes = true
+# injectq types get/try_get as type[T]; mypy rejects abstract base classes there.
+disable_error_code = ["type-abstract"]
 pretty = true
 
 [[tool.mypy.overrides]]
@@ -415,6 +418,11 @@ ENVIRONMENT = "pytest"
 # Before an API release that uses something only on core main, release core first and raise
 # the core floor in [project.dependencies] (and the dev group) to that version.
 10xgraph = { git = "https://github.com/10xGraph/10xGraph", branch = "main" }
+
+[tool.uv]
+# Core main still pins injectq<0.7; 0.7.0 fixes the optional-default bug (cleanup-review
+# INJECTQ_BUGS.md, bug 5). Remove once core main requires injectq>=0.7.0.
+override-dependencies = ["injectq>=0.7.0,<0.8"]
 
 [dependency-groups]
 dev = [

@@ -28,7 +28,10 @@ from tenxgraph_api.cli.core.config_sections import EvaluationConfig, TestConfig
 from tenxgraph_api.import_path import is_import_path
 from tenxgraph_api.src.app.core.audit.config import AuditConfig
 from tenxgraph_api.src.app.core.auth.auth_config import check_auth_config
-from tenxgraph_api.src.app.core.config.graph_config import _expand_env
+from tenxgraph_api.src.app.core.config.graph_config import (
+    CHECKPOINTER_KEY_REMOVED,
+    _expand_env,
+)
 
 
 Issue = dict[str, str]
@@ -94,7 +97,7 @@ def validate_config(config: Any, base_dir: Path | None = None) -> list[Issue]:
     out.issues.extend(production_readiness_warnings(config))
 
     for key in config:
-        if key not in KNOWN_TOP_LEVEL_KEYS and key not in _CACHE_STORE_SETTINGS:
+        if key not in KNOWN_TOP_LEVEL_KEYS and key not in (*_CACHE_STORE_SETTINGS, "checkpointer"):
             out.warning(key, f"'{key}' is not read by 10xGraph. It is kept as-is.")
     return out.issues
 
@@ -420,7 +423,7 @@ def _check_audit(config: dict, out: _Collector) -> None:
 
 
 def _check_wiring(config: dict, out: _Collector, base_dir: Path | None) -> None:
-    for key in ("injectq", "store", "checkpointer"):
+    for key in ("injectq", "store"):
         value = config.get(key)
         if value is None or value == "":
             continue
@@ -430,12 +433,8 @@ def _check_wiring(config: dict, out: _Collector, base_dir: Path | None) -> None:
         out.error(
             "store_allow_tenant_mismatch", "store_allow_tenant_mismatch must be true or false."
         )
-    if config.get("checkpointer"):
-        out.warning(
-            "checkpointer",
-            "The server uses the checkpointer passed to graph.compile(); this key is "
-            "informational.",
-        )
+    if "checkpointer" in config:
+        out.error("checkpointer", CHECKPOINTER_KEY_REMOVED)
     _check_choice("id_generator", config, ID_GENERATOR_NAMES, out, base_dir)
     _check_choice("thread_name_generator", config, THREAD_NAME_CHOICES, out, base_dir)
 

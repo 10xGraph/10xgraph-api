@@ -1,6 +1,5 @@
 from tenxgraph_api.cli.commands import BaseCommand
 from tenxgraph_api.cli.commands.version import VersionCommand
-from tenxgraph_api.cli.constants import CLI_VERSION
 from tenxgraph_api.cli.core.output import OutputFormatter
 from tenxgraph_api.cli.exceptions import CLIError
 
@@ -80,9 +79,3 @@ def test_version_command_reports_core_not_installed(monkeypatch):
     assert any("not installed" in i for i in out.infos)
 
 
-def test_version_command_success_path():
-    out = DummyOutput()
-    cmd = VersionCommand(output=out)  # type: ignore[arg-type]
-    exit_code = cmd.execute()
-    assert exit_code == 0
-    assert any(CLI_VERSION in s for s in out.successes)

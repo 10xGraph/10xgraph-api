@@ -1,6 +1,3 @@
-import asyncio
-
-
 """Unit tests for GraphService."""
 
 import json
@@ -78,10 +75,7 @@ class TestGraphServiceMethods:
         return srv
 
     def test_media_service_property(self, service):
-        # By default InjectQ is not active or try_get fails, so media_service is None
-        assert service.media_service is None
-
-        # Mock InjectQ
+        # The property returns whatever the container resolves for MediaService.
         mock_container = MagicMock()
         mock_media = MagicMock()
         mock_container.try_get.return_value = mock_media
@@ -228,14 +222,18 @@ class TestGraphServiceMethods:
         mock_checkpointer.aput_thread.return_value = True
 
         from injectq import InjectQ
+        from tenxgraph.utils.background_task_manager import BackgroundTaskManager
 
-        with patch("injectq.InjectQ.get_instance", return_value=InjectQ()):  # no task manager
+        manager = BackgroundTaskManager()
+        container = InjectQ()
+        container.bind_instance(BackgroundTaskManager, manager)
+        with patch("injectq.InjectQ.get_instance", return_value=container):
             result = await service.invoke_graph(gi, user)
         assert result.messages == [mock_msg]
         assert result.summary == "summary"
         # The name is generated in the background, not on the response path.
         assert "thread_name" not in result.meta
-        await asyncio.gather(*service._naming_tasks)
+        await manager.wait_for_all(timeout=5)
         saved = [c.args[1] for c in mock_checkpointer.aput_thread.await_args_list]
         assert any(info.thread_name == "custom_thread_name" for info in saved)
 
@@ -291,7 +289,6 @@ class TestGraphServiceMethods:
         data0 = json.loads(chunks[0])
         assert data0["event"] == "message"
         assert json.loads(chunks[1])["data"] == {"status": "done"}
-        await service.drain_naming_tasks()
 
     @pytest.mark.asyncio
     async def test_stream_graph_exception_handling(self, service, mock_graph, monkeypatch):
@@ -418,14 +415,19 @@ async def test_thread_naming_runs_on_the_background_task_manager():
 @pytest.mark.asyncio
 async def test_thread_naming_failure_is_logged_not_raised(caplog):
     from injectq import InjectQ
+    from tenxgraph.utils.background_task_manager import BackgroundTaskManager
+
+    manager = BackgroundTaskManager()
+    container = InjectQ()
+    container.bind_instance(BackgroundTaskManager, manager)
 
     srv = GraphService.__new__(GraphService)
     srv.checkpointer = MagicMock()
     srv.thread_name_generator = MagicMock()
     srv.thread_name_generator.generate_name = AsyncMock(side_effect=RuntimeError("llm down"))
-    with patch("injectq.InjectQ.get_instance", return_value=InjectQ()):
+    with patch("injectq.InjectQ.get_instance", return_value=container):
         srv._name_thread_in_background({"thread_id": "t1"}, "t1", ["hi"])
-    await asyncio.gather(*srv._naming_tasks)
+    await manager.wait_for_all(timeout=5)
     assert "Thread naming failed for thread t1" in caplog.text
 
 

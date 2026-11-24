@@ -98,31 +98,6 @@ def test_cache_outage_alone_stays_ready_unless_a_feature_fails_closed():
     )
 
 
-# ---------------------------------------------------------------- boot cleanup
-
-
-@pytest.mark.asyncio
-async def test_boot_cleanup_is_bounded(monkeypatch):
-    from tenxgraph_api.src.app import main
-
-    monkeypatch.setattr(main, "BOOT_CLEANUP_TIMEOUT_SECONDS", 0.05)
-
-    async def hang():
-        await asyncio.sleep(30)
-
-    monkeypatch.setattr(main, "_cleanup_temp_media_cache", hang)
-    monkeypatch.setattr(main, "attach_all_modules", lambda *a, **k: _none())
-    app = FastAPI()
-    async with asyncio.timeout(5):
-        async with main.lifespan(app):
-            assert not getattr(app.state, "draining", False)
-    assert app.state.draining is True
-
-
-async def _none():
-    return None
-
-
 # ---------------------------------------------------------------- final chunk
 
 

@@ -45,7 +45,6 @@ async def readiness_probe(request: Request):
     from injectq import InjectQ
 
     from tenxgraph_api.src.app.core.config.graph_config import GraphConfig
-    from tenxgraph_api.src.app.core.utils.container import current_container
 
     from .readiness import cache_required, cached_readiness, is_ready, readiness_targets
 
@@ -53,7 +52,7 @@ async def readiness_probe(request: Request):
         # Shutting down: leave the load balancer's rotation before the sockets close.
         return JSONResponse(status_code=503, content={"status": "draining", "checks": {}})
 
-    container: InjectQ = current_container()
+    container = InjectQ.get_instance()
     graph_config = container.try_get(GraphConfig) if GraphConfig in container else None
     checks = await cached_readiness(*readiness_targets(container))
     ready = is_ready(checks, cache_is_required=cache_required(graph_config))

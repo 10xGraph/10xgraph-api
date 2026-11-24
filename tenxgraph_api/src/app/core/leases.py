@@ -322,10 +322,7 @@ def process_lease_manager() -> LeaseManager:
 
 def lease_manager() -> LeaseManager:
     """The lease manager bound in the app's container, else this process's own."""
-    try:
-        from tenxgraph_api.src.app.core.utils.container import current_container
+    from tenxgraph_api.src.app.core.utils.container import lookup
 
-        bound = current_container().try_get(LeaseManager)
-    except Exception:
-        bound = None
+    bound = lookup(LeaseManager)
     return bound if isinstance(bound, LeaseManager) else process_lease_manager()

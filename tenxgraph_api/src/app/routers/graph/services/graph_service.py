@@ -120,7 +120,6 @@ from tenxgraph_api.src.app.routers.graph.services.multimodal_preprocessor import
     resolve_media_policy,
 )
 from tenxgraph_api.src.app.routers.graph.services.naming import (  # noqa: F401
-    MAX_PENDING_THREAD_NAMES,
     THREAD_NAME_TIMEOUT_SECONDS,
     ThreadNamingMixin,
 )

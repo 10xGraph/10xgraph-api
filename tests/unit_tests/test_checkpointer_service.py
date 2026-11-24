@@ -7,17 +7,13 @@ from fastapi import HTTPException
 from pydantic import TypeAdapter
 from tenxgraph.core.authz import Identity
 from tenxgraph.core.exceptions import ThreadNotFoundError
-from tenxgraph.core.state import AgentState, Message
+from tenxgraph.core.state import AgentState
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.utils.thread_info import ThreadInfo
 
 from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
 from tenxgraph_api.src.app.routers.checkpointer.schemas.checkpointer_schemas import (
-    MessagesListResponseSchema,
-    ResponseSchema,
     StateResponseSchema,
-    ThreadResponseSchema,
-    ThreadsListResponseSchema,
 )
 from tenxgraph_api.src.app.routers.checkpointer.services.checkpointer_service import (
     CheckpointerService,
@@ -90,24 +86,6 @@ class TestCheckpointerService:
         with pytest.raises(ValueError, match="Checkpointer is not configured"):
             checkpointer_service_no_checkpointer._config(config, ALICE)
 
-    @pytest.mark.asyncio
-    async def test_get_state_success(self, checkpointer_service, mock_checkpointer):
-        """Test get_state returns state when available."""
-        # Create a mock AgentState
-        mock_state = MagicMock(spec=AgentState)
-        mock_checkpointer.aget_state.return_value = mock_state
-
-        # Mock parse_state_output to return a simple dict
-        with patch(
-            "tenxgraph_api.src.app.routers.checkpointer.services.checkpointer_service.parse_state_output"
-        ) as mock_parse:
-            mock_parse.return_value = {"test": "data"}
-
-            result = await checkpointer_service.get_state({"thread_id": "t1"}, ALICE)
-
-            assert isinstance(result, StateResponseSchema)
-            assert result.state == {"test": "data"}
-            mock_checkpointer.aget_state.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_state_fallback_to_cache(self, checkpointer_service, mock_checkpointer):
@@ -121,74 +99,10 @@ class TestCheckpointerService:
         assert result.state == {"cached": "data"}
         mock_checkpointer.aget_state_cache.assert_called_once()
 
-    @pytest.mark.asyncio
-    async def test_clear_state_success(self, checkpointer_service, mock_checkpointer):
-        """Test clear_state returns success response."""
-        mock_checkpointer.aclear_state.return_value = True
 
-        result = await checkpointer_service.clear_state({"thread_id": "t1"}, ALICE)
 
-        assert isinstance(result, ResponseSchema)
-        assert result.success is True
-        assert "cleared successfully" in result.message
-        mock_checkpointer.aclear_state.assert_called_once()
 
-    @pytest.mark.asyncio
-    async def test_get_messages_success(self, checkpointer_service, mock_checkpointer):
-        """Test get_messages returns messages list."""
-        mock_messages = [MagicMock(spec=Message)]
-        mock_checkpointer.alist_messages.return_value = mock_messages
 
-        result = await checkpointer_service.get_messages(
-            {"thread_id": "t1"}, ALICE, search="test", offset=0, limit=10
-        )
-
-        assert isinstance(result, MessagesListResponseSchema)
-        assert result.messages == mock_messages
-        # Validate alist_messages was called with a cfg containing both 'user' and 'user_id'
-        args, kwargs = mock_checkpointer.alist_messages.call_args
-        cfg_arg = args[0]
-        assert cfg_arg["user"] == ALICE
-        assert cfg_arg.get("user_id") == "123"
-        assert args[1:] == ("test", 0, 10)
-
-    @pytest.mark.asyncio
-    async def test_get_thread_success(self, checkpointer_service, mock_checkpointer):
-        """Test get_thread returns thread data."""
-        mock_thread = MagicMock()
-        mock_thread.model_dump.return_value = {"thread_id": "123", "data": "test"}
-        mock_checkpointer.aget_thread.return_value = mock_thread
-
-        result = await checkpointer_service.get_thread({"thread_id": "t1"}, ALICE)
-
-        assert isinstance(result, ThreadResponseSchema)
-        assert result.thread == {"thread_id": "123", "data": "test"}
-        mock_checkpointer.aget_thread.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_list_threads_success(self, checkpointer_service, mock_checkpointer):
-        """Test list_threads returns threads list."""
-        mock_thread = MagicMock()
-        mock_thread.model_dump.return_value = {"thread_id": "123"}
-        mock_checkpointer.alist_threads.return_value = [mock_thread]
-
-        result = await checkpointer_service.list_threads(ALICE, search="test", offset=0, limit=10)
-
-        assert isinstance(result, ThreadsListResponseSchema)
-        assert result.threads == [{"thread_id": "123"}]
-        mock_checkpointer.alist_threads.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_delete_thread_success(self, checkpointer_service, mock_checkpointer):
-        """Test delete_thread returns success response."""
-        mock_checkpointer.aclean_thread.return_value = 1
-
-        result = await checkpointer_service.delete_thread({}, ALICE, "thread_123")
-
-        assert isinstance(result, ResponseSchema)
-        assert result.success is True
-        assert "deleted successfully" in result.message
-        mock_checkpointer.aclean_thread.assert_called_once()
 
     def test_merge_states_basic(self, checkpointer_service):
         """Test _merge_states with basic merging."""

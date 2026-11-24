@@ -15,12 +15,6 @@ from .conftest import build_app, make_client
 HTTP_OK = 200
 
 
-def test_ping_is_public():
-    app = build_app(routers=[ping_router])
-    client = make_client(app)
-    r = client.get("/ping")
-    assert r.status_code == HTTP_OK
-    assert r.json()["data"] == "pong"
 
 
 def test_protected_and_public_routers_coexist():

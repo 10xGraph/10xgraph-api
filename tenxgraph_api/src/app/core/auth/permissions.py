@@ -18,7 +18,8 @@ from typing import Any, Literal, NoReturn
 
 from fastapi import HTTPException, Response, WebSocket, WebSocketException
 from fastapi.security import HTTPAuthorizationCredentials
-from injectq.integrations import InjectAPI
+from injectq import InjectQ
+from injectq.integrations.fastapi import InjectFastAPI
 from starlette.requests import HTTPConnection, Request
 from tenxgraph.core.authz import Identity, UserCredential
 
@@ -40,7 +41,6 @@ from tenxgraph_api.src.app.core.auth.revocation import (
 from tenxgraph_api.src.app.core.exceptions.general_exception import GeneralException
 from tenxgraph_api.src.app.core.exceptions.user_exception import UserAccountError
 from tenxgraph_api.src.app.core.request_context import get_request_context, set_request_user
-from tenxgraph_api.src.app.core.utils.container import current_container
 from tenxgraph_api.src.app.core.validation.request_config import (
     ClientInputError,
     normalize_thread_id,
@@ -321,7 +321,7 @@ class RequireIdentity:
         self,
         connection: HTTPConnection,
         response: Response,
-        auth: BaseAuth | None = InjectAPI(BaseAuth),
+        auth: BaseAuth | None = InjectFastAPI(BaseAuth),
     ) -> Identity | None:
         if auth is None:
             if self.permission is not None:
@@ -406,7 +406,7 @@ async def authorize_resource(
     """
     if identity is None:
         return
-    auth = current_container().try_get(BaseAuth)
+    auth = InjectQ.get_instance().try_get(BaseAuth)
     if auth is not None:
         label = f"thread/{resource}" if resource is not None else None
         await _authorize(auth, identity, permission, resource, label)

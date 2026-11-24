@@ -1,46 +1,20 @@
 import os
 import re
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI
 from injectq import InjectQ
+from tenxgraph.runtime.publisher.identity import UserIdMode
 
 from .graph_config import GraphConfig
 from .metrics import resolve_use_metrics_endpoint
 from .settings import logger
 
 
-def _user_id_mode(graph_config: GraphConfig | None) -> str:
+def _user_id_mode(graph_config: GraphConfig | None) -> UserIdMode:
     """``observability.user_id_mode`` from ``10xgraph.json``: how traces carry the user id."""
     obs_cfg = graph_config.observability if graph_config is not None else None
-    return str((obs_cfg or {}).get("user_id_mode") or "raw")
-
-
-def _make_otel_publisher(publisher_cls: Any, level: Any, user_id_mode: str) -> Any:
-    """Build an ``OtelPublisher``, passing ``user_id_mode`` only when it is not the default.
-
-    Cores older than the release that added ``user_id_mode`` do not accept it; they keep the raw
-    id, which is logged so the operator knows the setting had no effect.
-    """
-    if user_id_mode == "raw":
-        return publisher_cls(level=level)
-    try:
-        return publisher_cls(level=level, user_id_mode=user_id_mode)
-    except TypeError:
-        logger.warning(
-            "observability.user_id_mode=%r needs a newer 10xgraph core; traces keep the raw id.",
-            user_id_mode,
-        )
-        return publisher_cls(level=level)
-
-
-def _bind_publisher(container: InjectQ, publisher) -> None:
-    """Bind ``publisher`` as the ``BasePublisher``. InjectQ keeps serving the instance it
-    resolved first (``try_get`` above), so the cache is cleared or the old publisher stays."""
-    from tenxgraph.runtime.publisher.base_publisher import BasePublisher
-
-    container.bind_instance(BasePublisher, publisher)
-    container.clear_all_scopes()
+    return cast("UserIdMode", str((obs_cfg or {}).get("user_id_mode") or "raw"))
 
 
 def _attach_otel_publisher(
@@ -73,17 +47,17 @@ def _attach_otel_publisher(
         )
         level = ObservabilityLevel.FULL
 
-    otel_publisher = _make_otel_publisher(OtelPublisher, level, _user_id_mode(graph_config))
+    otel_publisher = OtelPublisher(level=level, user_id_mode=_user_id_mode(graph_config))
     existing = container.try_get(BasePublisher)
 
     if existing is None:
-        _bind_publisher(container, otel_publisher)
+        container.bind_instance(BasePublisher, otel_publisher)
         logger.info("OTEL: OtelPublisher bound (level=%s)", level)
     elif isinstance(existing, CompositePublisher):
         existing.add_publisher(otel_publisher)
         logger.info("OTEL: OtelPublisher added to existing CompositePublisher (level=%s)", level)
     else:
-        _bind_publisher(container, CompositePublisher([existing, otel_publisher]))
+        container.bind_instance(BasePublisher, CompositePublisher([existing, otel_publisher]))
         logger.info(
             "OTEL: wrapped %s + OtelPublisher in CompositePublisher (level=%s)",
             type(existing).__name__,
@@ -176,15 +150,15 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
         )
         level = ObservabilityLevel.FULL
 
-    otel_publisher = _make_otel_publisher(OtelPublisher, level, _user_id_mode(graph_config))
+    otel_publisher = OtelPublisher(level=level, user_id_mode=_user_id_mode(graph_config))
     existing = container.try_get(BasePublisher)
 
     if existing is None:
-        _bind_publisher(container, otel_publisher)
+        container.bind_instance(BasePublisher, otel_publisher)
     elif isinstance(existing, CompositePublisher):
         existing.add_publisher(otel_publisher)
     else:
-        _bind_publisher(container, CompositePublisher([existing, otel_publisher]))
+        container.bind_instance(BasePublisher, CompositePublisher([existing, otel_publisher]))
 
     logger.info(
         "Observability enabled (logfire=%s, langsmith=%s, phoenix=%s, otlp=%s, level=%s)",

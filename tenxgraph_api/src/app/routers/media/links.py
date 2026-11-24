@@ -24,8 +24,6 @@ logger = logging.getLogger("tenxgraph_api.media")
 class _LinksMixin:
     """Thread links and deletion of ``MediaService``."""
 
-    _links_notice_logged: bool
-
     if TYPE_CHECKING:
 
         @property
@@ -41,11 +39,6 @@ class _LinksMixin:
         def _in_reach(self, metadata: dict[str, Any], user: Identity) -> bool: ...
 
         async def delete_file(self, file_id: str) -> bool: ...
-
-    @property
-    def supports_links(self) -> bool:
-        """Whether the media store can update metadata in place (core with ``update_metadata``)."""
-        return callable(getattr(self.store, "update_metadata", None))
 
     def delete_with_thread(self) -> bool:
         """``media.delete_with_thread`` from 10xgraph.json (default true)."""
@@ -87,14 +80,6 @@ class _LinksMixin:
         """
         if not keys:
             return
-        if not self.supports_links:
-            if not self._links_notice_logged:
-                self._links_notice_logged = True
-                logger.info(
-                    "The installed core has no BaseMediaStore.update_metadata; uploaded files "
-                    "are not linked to threads and never deleted automatically."
-                )
-            return
         tenant = self.caller_tenant(user)
         for key in dict.fromkeys(keys):
             try:
@@ -121,7 +106,7 @@ class _LinksMixin:
         cleanup.
         """
         failed: list[str] = []
-        if not keys or not self.supports_links:
+        if not keys:
             return failed
         delete = self.delete_with_thread()
         for key in dict.fromkeys(keys):
@@ -169,7 +154,7 @@ class _LinksMixin:
         deleted only with ``media.delete_with_thread`` on. Never raises; returns the keys that
         could not be released.
         """
-        if not self.supports_links or owner_id is None:
+        if owner_id is None:
             return []
         try:
             all_keys = await self._keys_of(owner_id)

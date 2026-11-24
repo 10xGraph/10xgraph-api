@@ -19,7 +19,7 @@ from tenxgraph_api.cli.commands import BaseCommand
 from tenxgraph_api.cli.commands.eval.collect import _EvalCollector, _PendingCase, _PendingSimulation
 from tenxgraph_api.cli.commands.eval.discovery import _EvalDiscovery
 from tenxgraph_api.cli.commands.eval.display import _EvalDisplay
-from tenxgraph_api.cli.commands.eval.run import _EvalRunner, _reset_inject_proxy
+from tenxgraph_api.cli.commands.eval.run import _EvalRunner
 from tenxgraph_api.cli.core.config import ConfigManager
 from tenxgraph_api.import_path import is_import_path
 
@@ -313,5 +313,4 @@ __all__ = [
     "EvalCommand",
     "_PendingCase",
     "_PendingSimulation",
-    "_reset_inject_proxy",
 ]

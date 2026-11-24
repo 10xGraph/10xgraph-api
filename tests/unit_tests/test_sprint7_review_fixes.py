@@ -15,7 +15,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 from injectq import InjectQ
 from tenxgraph.core.exceptions import GraphError
-from tenxgraph.storage.checkpointer import BaseCheckpointer, InMemoryCheckpointer
 from tenxgraph.storage.columns import parse_columns
 
 
@@ -64,38 +63,27 @@ def test_store_key_mismatch_refuses_in_production(production):
     from tenxgraph_api.src.app.loader import check_store_tenant_columns
 
     with pytest.raises(GraphError):
-        check_store_tenant_columns(_graph(_TenantCheckpointer()), InjectQ(), _Store())
+        check_store_tenant_columns(_graph(_TenantCheckpointer()), _Store())
 
 
 def test_store_key_mismatch_warns_in_development(development, caplog):
     from tenxgraph_api.src.app.loader import check_store_tenant_columns
 
     with caplog.at_level(logging.WARNING, logger="tenxgraph.graph"):
-        check_store_tenant_columns(_graph(_TenantCheckpointer()), InjectQ(), _Store())
+        check_store_tenant_columns(_graph(_TenantCheckpointer()), _Store())
     assert "declares tenant columns" in caplog.text
 
 
 def test_store_key_matching_columns_pass(production):
     from tenxgraph_api.src.app.loader import check_store_tenant_columns
 
-    check_store_tenant_columns(_graph(_TenantCheckpointer()), InjectQ(), _Store({"org_id": "text"}))
+    check_store_tenant_columns(_graph(_TenantCheckpointer()), _Store({"org_id": "text"}))
 
 
 def test_store_key_opt_out(production):
     from tenxgraph_api.src.app.loader import check_store_tenant_columns
 
-    check_store_tenant_columns(
-        _graph(_TenantCheckpointer()), InjectQ(), _Store(), allow_mismatch=True
-    )
-
-
-def test_store_key_checked_against_the_container_checkpointer(production):
-    from tenxgraph_api.src.app.loader import check_store_tenant_columns
-
-    container = InjectQ()
-    container.bind_instance(BaseCheckpointer, _TenantCheckpointer(), allow_concrete=True)
-    with pytest.raises(GraphError):
-        check_store_tenant_columns(_graph(InMemoryCheckpointer()), container, _Store())
+    check_store_tenant_columns(_graph(_TenantCheckpointer()), _Store(), allow_mismatch=True)
 
 
 def test_store_compiled_into_the_graph_is_not_checked_twice(production):
@@ -103,7 +91,7 @@ def test_store_compiled_into_the_graph_is_not_checked_twice(production):
     from tenxgraph_api.src.app.loader import check_store_tenant_columns
 
     store = _Store()
-    check_store_tenant_columns(_graph(_TenantCheckpointer(), store), InjectQ(), store)
+    check_store_tenant_columns(_graph(_TenantCheckpointer(), store), store)
 
 
 def _config(store_path, mismatch=False):
@@ -118,7 +106,6 @@ def _config(store_path, mismatch=False):
     config.store_path = store_path
     config.store_allow_tenant_mismatch = mismatch
     config.cache_store = None
-    config.checkpointer_path = None
     config.remote_tools = []
     config.runs = RunsConfig()
     return config
@@ -132,14 +119,16 @@ async def _attach(config, mode, monkeypatch):
     # object is created here and cached for other tests.
     monkeypatch.setattr(settings_mod.get_settings(), "MODE", mode)
     monkeypatch.setenv("MODE", mode)  # core's tenant check reads the environment
+    container = InjectQ()
     graph = _graph(_TenantCheckpointer())
+    graph._container = container
     with (
         patch("tenxgraph_api.src.app.loader.load_graph", return_value=graph),
         patch("tenxgraph_api.src.app.loader.apply_id_generator"),
         patch("tenxgraph_api.src.app.loader.load_store", return_value=_Store()),
         patch("tenxgraph_api.src.app.core.config.media_settings.get_media_settings"),
     ):
-        return await attach_all_modules(config, InjectQ())
+        return await attach_all_modules(config, container)
 
 
 @pytest.mark.asyncio

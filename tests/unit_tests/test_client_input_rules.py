@@ -238,10 +238,17 @@ async def test_state_keys_allow_list_still_applies():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("node", ["MAIN", "__start__", "__end__", "start", "end"])
+@pytest.mark.parametrize("node", ["MAIN", "__start__", "__end__"])
 async def test_real_nodes_are_accepted(node):
     input_data, _, _ = await _graph_service()._prepare_input(_input({"current_node": node}))
     assert input_data["state"]["current_node"] == node
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("node", ["start", "end"])
+async def test_legacy_start_and_end_spellings_are_unknown_nodes(node):
+    with pytest.raises(ClientInputError, match=f"unknown node '{node}'"):
+        await _graph_service()._prepare_input(_input({"current_node": node}))
 
 
 @pytest.mark.asyncio

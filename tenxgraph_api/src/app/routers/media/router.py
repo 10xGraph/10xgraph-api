@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
 from fastapi.logger import logger
 from fastapi.responses import FileResponse, Response
-from injectq.integrations import InjectAPI
+from injectq.integrations.fastapi import InjectFastAPI
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from tenxgraph.core.authz import Identity
 from tenxgraph.storage.media.security import sanitize_filename, validate_magic_bytes
@@ -186,7 +186,7 @@ async def _uploaded_file(
 async def upload_file(
     request: Request,
     file: UploadFile = Depends(_uploaded_file),
-    service: MediaService = InjectAPI(MediaService),
+    service: MediaService = InjectFastAPI(MediaService),
     identity: Identity | None = Depends(_UPLOAD_PERMISSION),
 ):
     if file.filename is None:
@@ -262,7 +262,7 @@ async def list_files(
     request: Request,
     limit: int = Query(50, ge=1, le=MAX_FILE_LIST_LIMIT),
     offset: int = Query(0, ge=0),
-    service: MediaService = InjectAPI(MediaService),
+    service: MediaService = InjectFastAPI(MediaService),
     identity: Identity | None = Depends(RequirePermission("files", "read")),
 ):
     try:
@@ -288,7 +288,7 @@ async def list_files(
 )
 async def get_file(
     file_id: str,
-    service: MediaService = InjectAPI(MediaService),
+    service: MediaService = InjectFastAPI(MediaService),
     identity: Identity | None = Depends(RequirePermission("files", "read")),
 ):
     try:
@@ -320,7 +320,7 @@ async def get_file(
 async def get_file_info(
     request: Request,
     file_id: str,
-    service: MediaService = InjectAPI(MediaService),
+    service: MediaService = InjectFastAPI(MediaService),
     identity: Identity | None = Depends(RequirePermission("files", "read")),
 ):
     try:
@@ -342,7 +342,7 @@ async def get_file_info(
 async def get_file_access_url(
     request: Request,
     file_id: str,
-    service: MediaService = InjectAPI(MediaService),
+    service: MediaService = InjectFastAPI(MediaService),
     identity: Identity | None = Depends(RequirePermission("files", "read")),
 ):
     try:
@@ -381,7 +381,7 @@ async def get_file_access_url(
 async def delete_file(
     request: Request,
     file_id: str,
-    service: MediaService = InjectAPI(MediaService),
+    service: MediaService = InjectFastAPI(MediaService),
     identity: Identity | None = Depends(RequirePermission("files", "delete")),
 ):
     try:

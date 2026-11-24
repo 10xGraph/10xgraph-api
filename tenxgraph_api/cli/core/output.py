@@ -479,27 +479,6 @@ class OutputFormatter:
         ) as status:
             yield status
 
-    @contextmanager
-    def activity(
-        self,
-        message: str,
-        *,
-        done: str | None = None,
-        spinner: str = "dots12",
-    ) -> Iterator[Status | None]:
-        """Animate a bounded task and persist a timed completion state."""
-        started = time.monotonic()
-        try:
-            with self.status(message, spinner=spinner) as status:
-                yield status
-        except Exception:
-            elapsed = time.monotonic() - started
-            self.error(f"{message} failed after {elapsed:.1f}s")
-            raise
-        else:
-            elapsed = time.monotonic() - started
-            self.success(f"{done or message} ({elapsed:.1f}s)")
-
     def completion_screen(
         self,
         title: str,

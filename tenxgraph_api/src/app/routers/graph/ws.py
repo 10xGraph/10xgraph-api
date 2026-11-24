@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.logger import logger
-from injectq.integrations import InjectAPI
+from injectq.integrations.fastapi import InjectFastAPI
 from tenxgraph.core.authz import Identity
 from tenxgraph.core.exceptions import ModelNotFoundError, ThreadNotFoundError
 from tenxgraph.core.state import StreamChunk, StreamEvent
@@ -48,7 +48,6 @@ from tenxgraph_api.src.app.routers.graph.ws_frames import (
     WS_TRY_AGAIN_LATER,
     WsFrameTooLarge,
     WsSendTimeout,
-    _bind_ws_container,
     _cancel_tasks,
     _client_error,
     _close_expired,
@@ -217,9 +216,8 @@ async def _ws_run(
 @router.websocket("/v1/graph/ws")
 async def websocket_graph(  # noqa: PLR0912, PLR0915
     websocket: WebSocket,
-    _bind: None = Depends(_bind_ws_container),
     _guard: None = Depends(realtime_connection_guard),
-    service: GraphService = InjectAPI(GraphService),
+    service: GraphService = InjectFastAPI(GraphService),
     identity: Identity | None = Depends(RequirePermission("graph", "stream")),
 ):
     """

@@ -49,8 +49,7 @@ def _media(**settings: Any) -> MediaService:
     svc._store = ListStore()
     svc._extraction_cache = _BoundedCache(8)
     svc._signed_url_cache = _BoundedCache(8)
-    svc._links_notice_logged = False
-    svc._pipeline = SimpleNamespace(handling="skip")
+    svc.extractor = None
     return svc
 
 

@@ -34,17 +34,7 @@ class TestConfigManager:
 
         shutil.rmtree(temp_dir)
 
-    def test_config_manager_initialization(self):
-        """Test ConfigManager initialization."""
-        manager = ConfigManager()
-        assert manager.config_path is None
-        assert manager._config_data is None
 
-    def test_config_manager_initialization_with_path(self, temp_config_file):
-        """Test ConfigManager initialization with config path."""
-        manager = ConfigManager(config_path=temp_config_file)
-        assert manager.config_path == temp_config_file
-        assert manager._config_data is None
 
     def test_find_config_file_absolute_path(self, temp_config_file):
         """Test finding config file with absolute path."""

@@ -1,4 +1,4 @@
-"""Media store and document pipeline factories."""
+"""Media store and document extractor factories."""
 
 from __future__ import annotations
 
@@ -6,13 +6,11 @@ import inspect
 import json
 from typing import Any
 
-from tenxgraph.storage.media.config import DocumentHandling
 from tenxgraph.storage.media.storage.base import BaseMediaStore
 
 from tenxgraph_api.src.app.core.config.media_settings import MediaSettings, MediaStorageType
 from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
 from tenxgraph_api.src.app.utils.media.extractor import DocumentExtractor
-from tenxgraph_api.src.app.utils.media.pipeline import DocumentPipeline
 
 
 def _build_config_instance(config_cls: type[Any], values: dict[str, Any]) -> Any:
@@ -97,26 +95,20 @@ def _create_media_store(settings: MediaSettings) -> BaseMediaStore:
     raise ValueError(f"Unknown MEDIA_STORAGE_TYPE: {stype}")
 
 
-def _create_document_pipeline(settings: MediaSettings) -> DocumentPipeline:
-    handling_map = {
-        "extract_text": DocumentHandling.EXTRACT_TEXT,
-        "pass_raw": DocumentHandling.FORWARD_RAW,
-        "skip": DocumentHandling.SKIP,
-    }
-    handling = handling_map.get(settings.DOCUMENT_HANDLING, DocumentHandling.EXTRACT_TEXT)
-
-    extractor = None
-    if handling == DocumentHandling.EXTRACT_TEXT:
-        try:
-            extractor = DocumentExtractor(
-                max_pdf_bytes=int(settings.MEDIA_MAX_PDF_MB * 1024 * 1024),
-                max_pdf_pages=settings.MEDIA_MAX_PDF_PAGES,
-            )
-        except ImportError as exc:
-            # A server setup problem, reported as a clear 422 instead of a bare 500.
-            raise ClientInputError(
-                "File uploads are not configured on this server: document text extraction "
-                'needs the media extra (pip install "10xgraph-api[media]"), or set '
-                "DOCUMENT_HANDLING to pass_raw or skip."
-            ) from exc
-    return DocumentPipeline(document_extractor=extractor, handling=handling)
+def _create_document_extractor(settings: MediaSettings) -> DocumentExtractor | None:
+    """The text extractor for uploaded documents; None when ``DOCUMENT_HANDLING`` is
+    ``pass_raw`` or ``skip`` (any other value extracts text)."""
+    if settings.DOCUMENT_HANDLING in ("pass_raw", "skip"):
+        return None
+    try:
+        return DocumentExtractor(
+            max_pdf_bytes=int(settings.MEDIA_MAX_PDF_MB * 1024 * 1024),
+            max_pdf_pages=settings.MEDIA_MAX_PDF_PAGES,
+        )
+    except ImportError as exc:
+        # A server setup problem, reported as a clear 422 instead of a bare 500.
+        raise ClientInputError(
+            "File uploads are not configured on this server: document text extraction "
+            'needs the media extra (pip install "10xgraph-api[media]"), or set '
+            "DOCUMENT_HANDLING to pass_raw or skip."
+        ) from exc

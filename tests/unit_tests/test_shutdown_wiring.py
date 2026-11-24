@@ -36,7 +36,6 @@ async def test_lifespan_calls_aclose_with_the_configured_times():
     graph = _graph(order)
     with (
         patch.object(app_main, "attach_all_modules", AsyncMock(return_value=graph)),
-        patch.object(app_main, "_cleanup_temp_media_cache", AsyncMock()),
         patch.object(app_main.settings, "SHUTDOWN_GRACE_SECONDS", 3.0),
         patch.object(app_main.settings, "SHUTDOWN_STOP_SECONDS", 2.0),
         patch.object(app_main.settings, "SHUTDOWN_TIMEOUT_SECONDS", 7.0),
@@ -62,7 +61,6 @@ async def test_sweeper_is_cancelled_before_the_graph_closes():
 
     with (
         patch.object(app_main, "attach_all_modules", AsyncMock(return_value=graph)),
-        patch.object(app_main, "_cleanup_temp_media_cache", AsyncMock()),
         patch.object(app_main, "_sweep_media_loop", sweep_loop),
     ):
         async with app_main.lifespan(FastAPI()):
@@ -93,7 +91,6 @@ async def test_graph_closes_first_then_leases_then_the_cache_store_once():
         patch.object(app_main, "container", container),
         patch.object(app_main, "attach_all_modules", AsyncMock(return_value=graph)),
         patch.object(app_main, "_prepare_checkpointer", AsyncMock()),
-        patch.object(app_main, "_cleanup_temp_media_cache", AsyncMock()),
     ):
         async with app_main.lifespan(FastAPI()):
             pass
@@ -106,7 +103,6 @@ async def test_a_failing_close_does_not_stop_the_rest_of_shutdown():
     graph.aclose = AsyncMock(side_effect=RuntimeError("boom"))
     with (
         patch.object(app_main, "attach_all_modules", AsyncMock(return_value=graph)),
-        patch.object(app_main, "_cleanup_temp_media_cache", AsyncMock()),
     ):
         async with app_main.lifespan(FastAPI()):
             pass  # exiting must not raise

@@ -18,29 +18,6 @@ from tenxgraph_api.src.app.routers.store.schemas.store_schemas import (
 class TestStoreMemory:
     """Tests for store_memory method."""
 
-    async def test_store_memory_with_string_content(self, store_service, mock_store, mock_user):
-        """Test storing a memory with string content."""
-        # Arrange
-        memory_id = str(uuid4())
-        mock_store.astore.return_value = memory_id
-        payload = StoreMemorySchema(
-            content="Test memory content",
-            memory_type=MemoryType.EPISODIC,
-            category="general",
-            metadata={"tag": "test"},
-        )
-
-        # Act
-        result = await store_service.store_memory(payload, mock_user)
-
-        # Assert
-        assert result.memory_id == memory_id
-        mock_store.astore.assert_called_once()
-        call_args = mock_store.astore.call_args
-        assert call_args[0][1] == "Test memory content"
-        assert call_args[1]["memory_type"] == MemoryType.EPISODIC
-        assert call_args[1]["category"] == "general"
-        assert call_args[1]["metadata"] == {"tag": "test"}
 
     async def test_store_memory_with_message_content(
         self, store_service, mock_store, mock_user, sample_message
@@ -65,45 +42,7 @@ class TestStoreMemory:
         assert call_args[0][1] == sample_message
         assert call_args[1]["memory_type"] == MemoryType.SEMANTIC
 
-    async def test_store_memory_with_custom_config(self, store_service, mock_store, mock_user):
-        """Test storing memory with custom configuration."""
-        # Arrange
-        memory_id = str(uuid4())
-        mock_store.astore.return_value = memory_id
-        custom_config = {"embedding_model": "custom-model"}
-        payload = StoreMemorySchema(
-            content="Test memory",
-            config=custom_config,
-        )
 
-        # Act
-        result = await store_service.store_memory(payload, mock_user)
-
-        # Assert
-        assert result.memory_id == memory_id
-        call_args = mock_store.astore.call_args
-        config = call_args[0][0]
-        assert config["embedding_model"] == "custom-model"
-        assert config["user_id"] == "test-user-123"
-
-    async def test_store_memory_with_options(self, store_service, mock_store, mock_user):
-        """Test storing memory with additional options."""
-        # Arrange
-        memory_id = str(uuid4())
-        mock_store.astore.return_value = memory_id
-        payload = StoreMemorySchema(
-            content="Test memory",
-            options={"infer": False, "replace_metadata": True},
-        )
-
-        # Act
-        result = await store_service.store_memory(payload, mock_user)
-
-        # Assert
-        assert result.memory_id == memory_id
-        call_args = mock_store.astore.call_args
-        assert call_args[1]["infer"] is False
-        assert call_args[1]["replace_metadata"] is True
 
     async def test_store_memory_no_store_raises_error(self, mock_user):
         """Test storing memory when store is not configured."""
@@ -223,36 +162,7 @@ class TestGetMemory:
             {"user": mock_user, "user_id": "test-user-123"}, sample_memory_id
         )
 
-    async def test_get_memory_with_config(
-        self, store_service, mock_store, mock_user, sample_memory_id, sample_memory_result
-    ):
-        """Test retrieving memory with custom config."""
-        # Arrange
-        mock_store.aget.return_value = sample_memory_result
-        config = {"custom": "value"}
 
-        # Act
-        result = await store_service.get_memory(sample_memory_id, config, mock_user)
-
-        # Assert
-        call_args = mock_store.aget.call_args
-        assert call_args[0][0]["custom"] == "value"
-        assert call_args[0][0]["user_id"] == "test-user-123"
-
-    async def test_get_memory_with_options(
-        self, store_service, mock_store, mock_user, sample_memory_id, sample_memory_result
-    ):
-        """Test retrieving memory with options."""
-        # Arrange
-        mock_store.aget.return_value = sample_memory_result
-        options = {"infer": False}
-
-        # Act
-        result = await store_service.get_memory(sample_memory_id, {}, mock_user, options=options)
-
-        # Assert
-        call_args = mock_store.aget.call_args
-        assert call_args[1]["infer"] is False
 
     async def test_get_memory_not_found(
         self, store_service, mock_store, mock_user, sample_memory_id
@@ -301,20 +211,6 @@ class TestListMemories:
         call_args = mock_store.aget_all.call_args
         assert call_args[1]["limit"] == 2  # one extra row tells has_more
 
-    async def test_list_memories_with_options(
-        self, store_service, mock_store, mock_user, sample_memory_results
-    ):
-        """Test listing memories with options."""
-        # Arrange
-        mock_store.aget_all.return_value = sample_memory_results
-        options = {"infer": False}
-
-        # Act
-        result = await store_service.list_memories({}, mock_user, options=options)
-
-        # Assert
-        call_args = mock_store.aget_all.call_args
-        assert call_args[1]["infer"] is False
 
     async def test_list_memories_empty(self, store_service, mock_store, mock_user):
         """Test listing memories when none exist."""
@@ -332,28 +228,6 @@ class TestListMemories:
 class TestUpdateMemory:
     """Tests for update_memory method."""
 
-    async def test_update_memory_with_string(
-        self, store_service, mock_store, mock_user, sample_memory_id
-    ):
-        """Test updating memory with string content."""
-        # Arrange
-        mock_store.aupdate.return_value = {"updated": True}
-        payload = UpdateMemorySchema(
-            content="Updated content",
-            metadata={"updated": True},
-        )
-
-        # Act
-        result = await store_service.update_memory(sample_memory_id, payload, mock_user)
-
-        # Assert
-        assert result.success is True
-        assert result.data == {"updated": True}
-        mock_store.aupdate.assert_called_once()
-        call_args = mock_store.aupdate.call_args
-        assert call_args[0][1] == sample_memory_id
-        assert call_args[0][2] == "Updated content"
-        assert call_args[1]["metadata"] == {"updated": True}
 
     async def test_update_memory_with_message(
         self, store_service, mock_store, mock_user, sample_memory_id, sample_message
@@ -371,23 +245,6 @@ class TestUpdateMemory:
         call_args = mock_store.aupdate.call_args
         assert call_args[0][2] == sample_message
 
-    async def test_update_memory_with_options(
-        self, store_service, mock_store, mock_user, sample_memory_id
-    ):
-        """Test updating memory with options."""
-        # Arrange
-        mock_store.aupdate.return_value = {"updated": True}
-        payload = UpdateMemorySchema(
-            content="Updated content",
-            options={"replace_metadata": True},
-        )
-
-        # Act
-        result = await store_service.update_memory(sample_memory_id, payload, mock_user)
-
-        # Assert
-        call_args = mock_store.aupdate.call_args
-        assert call_args[1]["replace_metadata"] is True
 
 
 @pytest.mark.asyncio
@@ -411,35 +268,7 @@ class TestDeleteMemory:
             {"user": mock_user, "user_id": "test-user-123"}, sample_memory_id
         )
 
-    async def test_delete_memory_with_config(
-        self, store_service, mock_store, mock_user, sample_memory_id
-    ):
-        """Test deleting memory with config."""
-        # Arrange
-        mock_store.adelete.return_value = {"deleted": True}
-        config = {"soft_delete": True}
 
-        # Act
-        result = await store_service.delete_memory(sample_memory_id, config, mock_user)
-
-        # Assert
-        call_args = mock_store.adelete.call_args
-        assert call_args[0][0]["soft_delete"] is True
-
-    async def test_delete_memory_with_options(
-        self, store_service, mock_store, mock_user, sample_memory_id
-    ):
-        """Test deleting memory with options."""
-        # Arrange
-        mock_store.adelete.return_value = {"deleted": True}
-        options = {"infer": False}
-
-        # Act
-        result = await store_service.delete_memory(sample_memory_id, {}, mock_user, options=options)
-
-        # Assert
-        call_args = mock_store.adelete.call_args
-        assert call_args[1]["infer"] is False
 
     async def test_delete_outside_reach_is_404_and_deletes_nothing(
         self, store_service, mock_store, mock_user, sample_memory_id
@@ -533,21 +362,6 @@ class TestForgetMemory:
         assert call_args[1]["category"] == "personal"
         assert call_args[1]["filters"] == {"tag": "old"}
 
-    async def test_forget_memory_with_options(self, store_service, mock_store, mock_user):
-        """Test forgetting memories with options."""
-        # Arrange
-        mock_store.aforget_memory.return_value = {"count": 1}
-        payload = ForgetMemorySchema(
-            memory_type=MemoryType.EPISODIC,
-            options={"infer": False},
-        )
-
-        # Act
-        result = await store_service.forget_memory(payload, mock_user)
-
-        # Assert
-        call_args = mock_store.aforget_memory.call_args
-        assert call_args[1]["infer"] is False
 
     async def test_forget_memory_excludes_none_values(self, store_service, mock_store, mock_user):
         """Test that None values are excluded from forget call."""

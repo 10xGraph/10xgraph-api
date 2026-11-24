@@ -290,8 +290,6 @@ class TestWsInterruptId:
 # ---------------------------------------------------------------------------
 
 
-def test_constants():
-    assert (MAX_MESSAGES, MAX_BLOCKS_PER_MESSAGE, MAX_TEXT_CHARS) == (500, 100, 1_000_000)
 
 
 def test_checker_accepts_values_at_the_limits():

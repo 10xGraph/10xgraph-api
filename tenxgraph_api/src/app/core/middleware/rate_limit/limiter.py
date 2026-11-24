@@ -12,13 +12,10 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+
+from injectq import InjectQ
 
 from tenxgraph_api.src.app.core.cache_store import BaseCacheStore, InMemoryCacheStore
-
-
-if TYPE_CHECKING:
-    from injectq import InjectQ
 
 
 logger = logging.getLogger("tenxgraph_api.rate_limit")
@@ -117,11 +114,9 @@ def bound_cache_store(
     store at startup, so the fallback only serves an app run without its lifespan.
     """
     global _process_store  # noqa: PLW0603 - one per process, made on first use
+    if container is None:
+        container = InjectQ.get_instance()
     try:
-        if container is None:
-            from tenxgraph_api.src.app.core.utils.container import current_container
-
-            container = current_container()
         bound = container.try_get(BaseCacheStore)
     except Exception:
         bound = None

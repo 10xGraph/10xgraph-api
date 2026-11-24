@@ -581,7 +581,6 @@ def test_setup_observability_hands_resolved_otlp_to_core():
     graph_config = _graph_config(_cfg(), observability={"level": "standard", **OBS})
     with (
         patch("tenxgraph.runtime.publisher.exporters.setup_observability") as core_setup,
-        patch.object(observability_module, "_bind_publisher"),
     ):
         sm._setup_observability(container, graph_config)
     core_setup.assert_called_once()
@@ -594,7 +593,6 @@ def test_setup_observability_runs_for_otlp_alone():
     obs = {"otlp": {"enabled": True, "endpoint": "http://t:4318"}}
     with (
         patch("tenxgraph.runtime.publisher.exporters.setup_observability") as core_setup,
-        patch.object(observability_module, "_bind_publisher"),
     ):
         sm._setup_observability(container, _graph_config(MetricsConfig(), observability=obs))
     core_setup.assert_called_once()

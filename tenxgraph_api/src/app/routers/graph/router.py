@@ -18,7 +18,7 @@ from fastapi import (  # noqa: F401
 from fastapi.logger import logger
 from fastapi.responses import StreamingResponse
 from injectq import InjectQ  # noqa: F401
-from injectq.integrations import InjectAPI
+from injectq.integrations.fastapi import InjectFastAPI
 from pydantic import ValidationError  # noqa: F401
 from tenxgraph.core.authz import Identity
 from tenxgraph.core.exceptions import ModelNotFoundError, ThreadNotFoundError  # noqa: F401
@@ -91,7 +91,6 @@ from tenxgraph_api.src.app.routers.graph.ws_frames import (  # noqa: F401
     WS_TRY_AGAIN_LATER,
     WsFrameTooLarge,
     WsSendTimeout,
-    _bind_ws_container,
     _cancel_tasks,
     _client_error,
     _close_expired,
@@ -162,7 +161,7 @@ async def _idempotency(
 async def invoke_graph(
     request: Request,
     graph_input: GraphInputSchema,
-    service: GraphService = InjectAPI(GraphService),
+    service: GraphService = InjectFastAPI(GraphService),
     identity: Identity | None = Depends(RequirePermission("graph", "invoke")),
 ):
     """
@@ -222,7 +221,7 @@ async def invoke_graph(
 )
 async def stream_graph(
     graph_input: GraphInputSchema,
-    service: GraphService = InjectAPI(GraphService),
+    service: GraphService = InjectFastAPI(GraphService),
     identity: Identity | None = Depends(RequirePermission("graph", "stream")),
     request: Request = None,  # type: ignore[assignment]  # injected by FastAPI
 ):
@@ -294,7 +293,7 @@ async def stream_graph(
 )
 async def graph_details(
     request: Request,
-    service: GraphService = InjectAPI(GraphService),
+    service: GraphService = InjectFastAPI(GraphService),
     identity: Identity | None = Depends(RequirePermission("graph", "read")),
 ):
     """
@@ -324,7 +323,7 @@ async def graph_details(
 )
 async def graph_tools(
     request: Request,
-    service: GraphService = InjectAPI(GraphService),
+    service: GraphService = InjectFastAPI(GraphService),
     identity: Identity | None = Depends(RequirePermission("graph", "read")),
 ):
     """List the tools exposed by the graph's tool nodes."""
@@ -354,7 +353,7 @@ async def observability(
     request: Request,
     thread_id: str,
     run_id: str | None = None,
-    service: GraphService = InjectAPI(GraphService),
+    service: GraphService = InjectFastAPI(GraphService),
     identity: Identity | None = Depends(RequirePermission("graph", "read")),
 ):
     """Return the reconstructed observability trace for a thread."""
@@ -378,7 +377,7 @@ async def observability(
 )
 async def state_schema(
     request: Request,
-    service: GraphService = InjectAPI(GraphService),
+    service: GraphService = InjectFastAPI(GraphService),
     identity: Identity | None = Depends(RequirePermission("graph", "read")),
 ):
     """
@@ -406,7 +405,7 @@ async def state_schema(
 async def stop_graph(
     request: Request,
     stop_request: GraphStopSchema,
-    service: GraphService = InjectAPI(GraphService),
+    service: GraphService = InjectFastAPI(GraphService),
     identity: Identity | None = Depends(RequirePermission("graph", "stop")),
 ):
     """
@@ -458,7 +457,7 @@ async def stop_graph(
 async def fix_graph(
     request: Request,
     fix_request: FixGraphRequestSchema,
-    service: GraphService = InjectAPI(GraphService),
+    service: GraphService = InjectFastAPI(GraphService),
     identity: Identity | None = Depends(RequirePermission("graph", "fix")),
 ):
     """

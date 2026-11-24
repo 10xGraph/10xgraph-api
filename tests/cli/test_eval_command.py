@@ -133,7 +133,6 @@ async def test_run_flat_pool_cases(cmd):
     )
 
     with (
-        patch("tenxgraph_api.cli.commands.eval.run._reset_inject_proxy"),
         patch("tenxgraph_api.cli.commands.eval.run.override_dependency"),
     ):
         results = await cmd._run_flat_pool([pc], max_concurrency=4, parallel=False)
@@ -167,7 +166,6 @@ async def test_run_flat_pool_case_error(cmd):
     )
 
     with (
-        patch("tenxgraph_api.cli.commands.eval.run._reset_inject_proxy"),
         patch("tenxgraph_api.cli.commands.eval.run.override_dependency"),
     ):
         results = await cmd._run_flat_pool([pc], max_concurrency=4, parallel=False)
@@ -397,12 +395,6 @@ def test_execute_collect_error(cmd, tmp_path):
         assert "Error loading test_eval.py: load error" in cmd.output.errors[0]
 
 
-def test_reset_inject_proxy():
-    from tenxgraph_api.cli.commands.eval import _reset_inject_proxy
-
-    _reset_inject_proxy(None)
-
-
 def test_load_module(cmd, tmp_path):
     f = tmp_path / "dummy_mod.py"
     f.write_text("x = 42")
@@ -592,7 +584,6 @@ async def test_run_flat_pool_parallel(cmd):
     )
 
     with (
-        patch("tenxgraph_api.cli.commands.eval.run._reset_inject_proxy"),
         patch("tenxgraph_api.cli.commands.eval.run.override_dependency"),
     ):
         results = await cmd._run_flat_pool([pc], max_concurrency=2, parallel=True)

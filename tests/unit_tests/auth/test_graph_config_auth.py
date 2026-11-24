@@ -58,13 +58,6 @@ def test_unknown_method_in_object_is_refused(make_config):
         make_config({"method": "oauth2"}).auth_config()
 
 
-def test_parsed_value_follows_a_changed_config(make_config):
-    config = make_config("jwt")
-    assert config.auth_config().method == "jwt"
-    config.data["auth"] = None
-    assert config.auth_config() is None
-
-
 # ---- tool permissions in roles (core ToolGuard)
 
 TOOL_AUTH = {

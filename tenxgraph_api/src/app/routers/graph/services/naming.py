@@ -1,6 +1,5 @@
 """Generated thread names, made in the background after a new thread's first run."""
 
-import asyncio
 from typing import Any
 
 from injectq import InjectQ
@@ -14,10 +13,6 @@ from tenxgraph_api.src.app.core.validation.request_config import (
 
 # Longest a background thread-naming call may run (it is a model call).
 THREAD_NAME_TIMEOUT_SECONDS = 60.0
-
-# Naming tasks kept by the service itself (no core task manager bound) are capped; over it the
-# thread simply stays unnamed, as the core manager does with its own limit.
-MAX_PENDING_THREAD_NAMES = 100
 
 
 class ThreadNamingMixin:
@@ -65,10 +60,19 @@ class ThreadNamingMixin:
     ) -> None:
         """Generate and save a new thread's name without holding up the response.
 
-        Runs on the core ``BackgroundTaskManager`` when one is bound, so shutdown drains it;
-        otherwise on a task this service keeps a reference to. A failure is logged, never
-        raised: the run itself already succeeded.
+        Runs on the core ``BackgroundTaskManager`` the graph binds, so shutdown drains it. A
+        failure is logged, never raised: the run itself already succeeded.
         """
+        from tenxgraph.utils.background_task_manager import BackgroundTaskManager
+
+        # Only a bound manager: try_get on an unbound concrete class would build a fresh,
+        # untracked one that shutdown never drains.
+        container = InjectQ.get_instance()
+        if BackgroundTaskManager not in container:
+            logger.warning(
+                "No BackgroundTaskManager bound; leaving thread %s unnamed", log_safe(thread_id)
+            )
+            return
 
         async def name_thread() -> None:
             try:
@@ -76,39 +80,8 @@ class ThreadNamingMixin:
             except Exception as exc:
                 logger.warning("Thread naming failed for thread %s: %s", log_safe(thread_id), exc)
 
-        from tenxgraph.utils.background_task_manager import BackgroundTaskManager
-
-        # Only a bound manager (the graph binds its own): try_get on an unbound concrete class
-        # would build a fresh, untracked one that shutdown never drains.
-        container = InjectQ.get_instance()
-        manager = (
-            container.try_get(BackgroundTaskManager) if BackgroundTaskManager in container else None
+        container.get(BackgroundTaskManager).create_task(
+            name_thread(),
+            name="thread_name",
+            timeout=THREAD_NAME_TIMEOUT_SECONDS,
         )
-        if isinstance(manager, BackgroundTaskManager):
-            manager.create_task(
-                name_thread(),
-                name="thread_name",
-                timeout=THREAD_NAME_TIMEOUT_SECONDS,
-            )
-            return
-        tasks: set[asyncio.Task[None]] = self.__dict__.setdefault("_naming_tasks", set())
-        if len(tasks) >= MAX_PENDING_THREAD_NAMES:
-            logger.warning(
-                "Too many thread names pending (%d); leaving thread %s unnamed",
-                len(tasks),
-                log_safe(thread_id),
-            )
-            return
-        task = asyncio.create_task(name_thread())
-        tasks.add(task)
-        task.add_done_callback(tasks.discard)
-
-    async def drain_naming_tasks(self) -> None:
-        """Wait for the naming tasks this service holds itself (call at shutdown).
-
-        Tasks on the core ``BackgroundTaskManager`` are drained with that manager. There is
-        no timeout: a naming model call is the developer's own.
-        """
-        tasks = list(self.__dict__.get("_naming_tasks", ()))
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)

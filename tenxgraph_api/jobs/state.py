@@ -1,8 +1,8 @@
 """Job state kept in the API's cache store: status records and cancel flags.
 
 Keys live under ``jobs:`` and expire after ``RESULT_TTL`` seconds. The store is the
-``BaseCacheStore`` bound in the InjectQ container: the one ``setup_taskiq`` attached to the
-broker in a worker, else the API's container.
+``BaseCacheStore`` bound in the current InjectQ container (the request's in the API, the task's
+in a worker under ``setup_taskiq``), else the one ``setup_taskiq`` attached to the broker.
 """
 
 from __future__ import annotations
@@ -12,12 +12,13 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
+from injectq import InjectionError, InjectQ
+from injectq.integrations.taskiq import get_container_taskiq
 from pydantic import BaseModel, Field, ValidationError
 from tenxgraph.core.authz import Identity
 
 
 if TYPE_CHECKING:
-    from injectq import InjectQ
     from taskiq import AsyncBroker
 
     from tenxgraph_api.src.app.core.cache_store import BaseCacheStore
@@ -84,13 +85,11 @@ def parse_config(labels: dict[str, Any]) -> dict[str, Any]:
 
 
 def container_for(broker: AsyncBroker | None) -> InjectQ:
-    """The broker's container (``setup_taskiq``), else the current API container."""
-    container = getattr(broker.state, "injectq_container", None) if broker else None
-    if container is not None:
-        return container
-    from tenxgraph_api.src.app.core.utils.container import current_container
-
-    return current_container()
+    """The current container (a request's or a task's), else the broker's, else the global one."""
+    try:
+        return get_container_taskiq(broker.state if broker else None)
+    except InjectionError:  # no container current and none attached to the broker
+        return InjectQ.get_instance()
 
 
 def cache_store_for(broker: AsyncBroker | None) -> BaseCacheStore | None:

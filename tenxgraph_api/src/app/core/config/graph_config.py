@@ -1,5 +1,6 @@
 import json
 import logging
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -77,6 +78,13 @@ def default_config_path() -> str:
     return CONFIG_FILE
 
 
+# The removed ``checkpointer`` key refuses the boot, like the removed ``authorization`` key.
+CHECKPOINTER_KEY_REMOVED = (
+    "`checkpointer` was removed from 10xgraph.json (the server never applied it): pass the "
+    "checkpointer to graph.compile(checkpointer=...) in your agent module and delete the key."
+)
+
+
 class GraphConfig:
     def __init__(self, path: str | None = None):
         with Path(path or default_config_path()).open() as f:
@@ -89,6 +97,8 @@ class GraphConfig:
 
         if isinstance(self.data, dict):
             check_cache_store_settings(self.data)
+            if "checkpointer" in self.data:
+                raise ValueError(CHECKPOINTER_KEY_REMOVED)
 
     @property
     def worker(self) -> "WorkerConfig | None":
@@ -105,10 +115,6 @@ class GraphConfig:
             return agent
 
         raise ValueError("Agent graph not found")
-
-    @property
-    def checkpointer_path(self) -> str | None:
-        return self.data.get("checkpointer", None)
 
     @property
     def injectq_path(self) -> str | None:
@@ -128,22 +134,14 @@ class GraphConfig:
             return False
         return _parse_bool(value, field="store_allow_tenant_mismatch")
 
-    @property
+    @cached_property
     def cache_store(self) -> CacheStoreConfig:
         """``cache_store`` key, parsed (:class:`CacheStoreConfig`); the memory store when absent.
 
-        Parsed once per raw value, so a config warning (such as the one about
-        ``trusted_proxy_headers``) is not repeated by every caller.
+        Parsed once (the config does not change after load), so a config warning (such as the
+        one about ``trusted_proxy_headers``) is not repeated by every caller.
         """
-        check_cache_store_settings(self.data)
-        raw = self.data.get("cache_store", None)
-        key = json.dumps(raw, sort_keys=True, default=str)
-        cached = getattr(self, "_cache_store_cache", None)
-        if cached is not None and cached[0] == key:
-            return cached[1]
-        parsed = CacheStoreConfig.parse(raw)
-        self._cache_store_cache = (key, parsed)
-        return parsed
+        return CacheStoreConfig.parse(self.data.get("cache_store", None))
 
     @property
     def thread_name_generator(self) -> str:
@@ -202,21 +200,19 @@ class GraphConfig:
         """
         return self.data.get("observability", None)
 
+    @cached_property
+    def _auth_parsed(self) -> "AuthConfig":
+        from tenxgraph_api.src.app.core.auth.auth_config import AuthConfig
+
+        return AuthConfig.parse(self.data.get("auth", None))
+
     def auth_config(self) -> "AuthConfig | None":
-        """The parsed ``auth`` setting; None when auth is off. Called on every request, so the
-        result is cached by the raw ``auth`` value (a changed config is parsed again).
+        """The parsed ``auth`` setting; None when auth is off. Called on every request, so it
+        is parsed once (the config does not change after load).
 
         Only parses; ``check_auth_config`` reports rule violations at boot.
         """
-        from tenxgraph_api.src.app.core.auth.auth_config import AuthConfig
-
-        raw = self.data.get("auth", None)
-        key = json.dumps(raw, sort_keys=True, default=str)
-        cached = getattr(self, "_auth_config_cache", None)
-        if cached is None or cached[0] != key:
-            cached = (key, AuthConfig.parse(raw))
-            self._auth_config_cache = cached
-        parsed = cached[1]
+        parsed = self._auth_parsed
         return None if parsed.method == "none" else parsed
 
     @property

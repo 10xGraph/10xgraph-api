@@ -13,6 +13,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import HTTPConnection, Request
 from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from tenxgraph.core.exceptions import StaleStateError
 
 from tenxgraph_api.src.app.core.exceptions.server_errors import UnhandledErrorMiddleware
 from tenxgraph_api.src.app.core.middleware.rate_limit import RateLimitMiddleware
@@ -25,10 +26,8 @@ from .graph_config import GraphConfig, RateLimitConfig
 from .metrics import setup_metrics
 from .observability import (  # noqa: F401  (re-exported: tests and the worker import them from here)
     _attach_otel_publisher,
-    _bind_publisher,
     _excluded_urls,
     _instrument_fastapi,
-    _make_otel_publisher,
     _observability_publishers,
     _setup_observability,
     _setup_otel,
@@ -88,15 +87,6 @@ def _is_health_check(scope: Scope, paths: tuple[str, ...] = HEALTH_PROBE_PATHS) 
 
 # Paths that should be excluded from GZip compression (streaming endpoints)
 GZIP_EXCLUDED_PATHS = frozenset({"/v1/graph/stream"})
-
-# StaleStateError is raised by checkpointers that do optimistic concurrency
-# control on state writes. It was added in a later core release, and this package
-# supports 10xgraph>=0.7.0, so treat it as optional: when the installed
-# core does not expose it, we simply do not register the 409 handler.
-try:
-    from tenxgraph.core.exceptions import StaleStateError
-except ImportError:  # pragma: no cover - depends on installed core version
-    StaleStateError = None  # type: ignore[assignment]
 
 
 class AllowlistCORSMiddleware(CORSMiddleware):
@@ -312,8 +302,7 @@ def setup_middleware(
     settings = get_settings()
 
     # A concurrent run on the same thread is a conflict (409), not a 500.
-    if StaleStateError is not None:
-        app.add_exception_handler(StaleStateError, _stale_state_handler)
+    app.add_exception_handler(StaleStateError, _stale_state_handler)
 
     meter_provider = _setup_metrics(app, graph_config)
     scrape_path = graph_config.metrics.scrape_path if graph_config is not None else None

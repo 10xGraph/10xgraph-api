@@ -55,12 +55,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Requires `injectq>=0.6.1,<0.7`, now listed as a direct dependency. Routes resolve services with `InjectFastAPI` (replacing the deprecated `InjectAPI`), and code inside a request or task finds the app's container with `InjectQ.get_instance()`, which injectq 0.6 makes current for HTTP, WebSocket and TaskIQ. The WebSocket container workaround and `current_container()` helper are removed.
 - Upload file names are cleaned by core's `sanitize_filename`: an empty or `..` name is stored as `unnamed` (it was `file`), and leading dots are removed (`.env` becomes `env`).
-- One rule checks every `"module:attr"` value in `10xgraph.json` (`agent`, `checkpointer`, `store`, `injectq`, `auth.path`, `cache_store.path`, `thread_name_generator`, `id_generator`, audit sinks), in the server and every CLI command. A value without a colon, with an empty part or with two colons (`"graph.react:"`, `"a:b:c"`) now fails when the config is read, with one message, instead of failing later at import; a dotted attribute (`"mod:obj.attr"`) now works for every key.
+- One rule checks every `"module:attr"` value in `10xgraph.json` (`agent`, `store`, `injectq`, `auth.path`, `cache_store.path`, `thread_name_generator`, `id_generator`, audit sinks), in the server and every CLI command. A value without a colon, with an empty part or with two colons (`"graph.react:"`, `"a:b:c"`) now fails when the config is read, with one message, instead of failing later at import; a dotted attribute (`"mod:obj.attr"`) now works for every key.
 - `10xgraph eval` loads the agent the same way the server does: a factory function is called, and the config folder is on the import path.
 - `10xgraph config` validates `audit`, `observability`, `test` and `evaluation` with the server's own rules, so it accepts what the server accepts (for example `observability.level: "FULL"`); its messages use the server's wording.
 - On invoke, an unknown model name answers 422 before the thread check, as stream already did.
 - The worker closes the same resources as the API server, in the same order (graph, lease manager, cache store, auth, telemetry); before, it did not close the lease manager or the auth class.
+- The server and the worker refuse to start when the graph was built with a different InjectQ container than the server's: the container named by `injectq` in `10xgraph.json`, or the global container when `injectq` is not set. Pass the same container to `StateGraph(container=...)` and to `injectq`, or set neither. Before, the server looked up the graph's checkpointer, background tasks and media store in its own container and did not find them.
+- `current_node` `"start"` and `"end"` are no longer accepted as node names (422 `unknown node`), since core no longer maps those spellings; use `"__start__"` and `"__end__"`.
+
+### Removed
+
+- The `checkpointer` key in `10xgraph.json`. The server never applied it (it only logged a warning); a config that still sets it now refuses to start, and `10xgraph config` reports it as an error, saying to pass the checkpointer to `graph.compile(checkpointer=...)` in the agent module. The config editor's Checkpointer page is gone.
 
 ### Fixed
 

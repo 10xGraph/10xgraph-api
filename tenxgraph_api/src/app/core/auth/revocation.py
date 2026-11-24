@@ -43,6 +43,7 @@ import logging
 from decimal import ROUND_CEILING, Decimal
 from typing import TYPE_CHECKING, Any
 
+from injectq import InjectQ
 from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.src.app.core.audit import audit_event
@@ -194,9 +195,8 @@ class TokenJtiMissingError(ValueError):
 def _bound() -> tuple[TokenRevocationConfig | None, BaseCacheStore | None]:
     """The revocation settings and cache store bound in the app's container."""
     from tenxgraph_api.src.app.core.cache_store import BaseCacheStore
-    from tenxgraph_api.src.app.core.utils.container import current_container
 
-    container = current_container()
+    container = InjectQ.get_instance()
     # ``in`` first: try_get builds an unbound class whose arguments all have defaults, which
     # would switch revocation on for every app.
     config = (

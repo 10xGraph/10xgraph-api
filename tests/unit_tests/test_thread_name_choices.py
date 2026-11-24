@@ -162,7 +162,6 @@ async def _run(choice: str, *, stream: bool) -> tuple[GraphService, str | None]:
             thread_id = thread_id or (chunk.get("metadata") or {}).get("thread_id")
     else:
         thread_id = (await service.invoke_graph(graph_input, user)).meta["thread_id"]
-    await service.drain_naming_tasks()
     await graph._state_graph._task_manager.wait_for_all()  # naming runs on the graph's manager
     info = await service.checkpointer.aget_thread({"thread_id": str(thread_id), "user_id": "alice"})
     await graph.aclose()
@@ -190,7 +189,6 @@ async def test_the_default_random_name_is_saved(leases, stream):
 async def test_none_leaves_the_thread_unnamed_but_saved(leases, stream):
     service, name = await _run("none", stream=stream)
     assert name is None
-    assert not service.__dict__.get("_naming_tasks")
 
 
 @pytest.mark.asyncio

@@ -20,10 +20,6 @@ def test_default_excludes_admin_only():
     assert ALL_PERMISSIONS - {"admin:read", "admin:write"} == DEFAULT_PERMISSIONS
 
 
-def test_tasks_pause_is_gone():
-    assert "tasks:pause" not in ALL_PERMISSIONS
-    with pytest.raises(ValueError, match="tasks:pause"):
-        expand(["tasks:pause"])
 
 
 def test_expand_star_resource_and_concrete():

@@ -176,7 +176,7 @@ KEY = "a" * 32
 
 @pytest.mark.asyncio
 async def test_thread_delete_releases_media_linked_through_put_state(monkeypatch):
-    media = MagicMock(supports_links=True)
+    media = MagicMock()
     media.unlink_threads = AsyncMock(return_value=[])
     media.release_thread = AsyncMock(return_value=[])
     monkeypatch.setattr(CheckpointerService, "_media_service", staticmethod(lambda: media))
@@ -188,7 +188,7 @@ async def test_thread_delete_releases_media_linked_through_put_state(monkeypatch
 
 @pytest.mark.asyncio
 async def test_thread_delete_reports_a_release_that_failed(monkeypatch):
-    media = MagicMock(supports_links=True)
+    media = MagicMock()
     media.unlink_threads = AsyncMock(return_value=[KEY])
     media.release_thread = AsyncMock(return_value=[])
     monkeypatch.setattr(CheckpointerService, "_media_service", staticmethod(lambda: media))
@@ -230,7 +230,7 @@ async def test_clean_thread_delete_is_still_a_plain_success(monkeypatch):
 async def test_message_media_is_released_only_after_the_core_delete(monkeypatch):
     order: list[str] = []
     message = _img(KEY, "m1")
-    media = MagicMock(supports_links=True)
+    media = MagicMock()
     media.unlink_threads = AsyncMock(side_effect=lambda *a: order.append("unlink") or [])
     monkeypatch.setattr(CheckpointerService, "_media_service", staticmethod(lambda: media))
     service = _service(state_context=[message], messages=[message])
@@ -246,7 +246,7 @@ async def test_message_media_is_released_only_after_the_core_delete(monkeypatch)
 @pytest.mark.asyncio
 async def test_message_media_still_in_state_through_another_message_is_kept(monkeypatch):
     gone, other = _img(KEY, "m1"), _img(KEY, "m2")
-    media = MagicMock(supports_links=True)
+    media = MagicMock()
     media.unlink_threads = AsyncMock(return_value=[])
     monkeypatch.setattr(CheckpointerService, "_media_service", staticmethod(lambda: media))
     service = _service(state_context=[gone, other], messages=[])

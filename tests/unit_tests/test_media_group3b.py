@@ -53,8 +53,7 @@ def _media(store: Any = None, **settings: Any) -> MediaService:
     svc._store = store if store is not None else ListStore()
     svc._extraction_cache = _BoundedCache(8)
     svc._signed_url_cache = _BoundedCache(8)
-    svc._links_notice_logged = False
-    svc._pipeline = SimpleNamespace(handling="skip")
+    svc.extractor = None
     return svc
 
 
@@ -141,26 +140,6 @@ async def test_quota_off_by_default():
 
 
 @pytest.mark.asyncio
-async def test_cleanup_uses_the_media_service_store():
-    """The temp-cache cleanup used to get media_store=None because nothing bound that name."""
-    store = object()
-    cache = AsyncMock()
-    cache.cleanup.return_value = 0
-    container = MagicMock()
-    container.try_get.side_effect = lambda key: (
-        SimpleNamespace(store=store)
-        if key is MediaService
-        else (object() if key in ("checkpointer",) else None)
-    )
-    with (
-        patch.object(main_module, "container", container),
-        patch("tenxgraph.storage.media.temp_cache.TemporaryMediaCache", return_value=cache),
-    ):
-        await main_module._cleanup_temp_media_cache()
-    assert cache.cleanup.await_args.args[1] is store
-
-
-@pytest.mark.asyncio
 async def test_sweeper_calls_sweep_orphans_and_survives_errors():
     calls: list[float] = []
 
@@ -243,17 +222,11 @@ def _pdf(pages: int, pad: int = 0) -> bytes:
 
 def _extracting_media(**settings: Any) -> MediaService:
     svc = _media(**settings)
-    svc._pipeline = SimpleNamespace(
-        handling="extract_text",
-        extractor=DocumentExtractor(
-            extractor=SimpleNamespace(extract=AsyncMock(return_value="text")),
-            max_pdf_bytes=int(svc._settings.MEDIA_MAX_PDF_MB * 1024 * 1024),
-            max_pdf_pages=svc._settings.MEDIA_MAX_PDF_PAGES,
-        ),
+    svc.extractor = DocumentExtractor(
+        extractor=SimpleNamespace(extract=AsyncMock(return_value="text")),
+        max_pdf_bytes=int(svc._settings.MEDIA_MAX_PDF_MB * 1024 * 1024),
+        max_pdf_pages=svc._settings.MEDIA_MAX_PDF_PAGES,
     )
-    from tenxgraph.storage.media.config import DocumentHandling
-
-    svc._pipeline.handling = DocumentHandling.EXTRACT_TEXT
     return svc
 
 

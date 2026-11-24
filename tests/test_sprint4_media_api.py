@@ -60,7 +60,7 @@ class TestMediaService:
     async def test_upload_file_extracts_text_for_documents(self):
         svc = self._make_service()
         with patch.object(
-            svc.pipeline.extractor,
+            svc.extractor,
             "extract",
             new_callable=AsyncMock,
             return_value="Extracted text!",
@@ -106,9 +106,7 @@ class TestMediaService:
     @pytest.mark.asyncio
     async def test_cached_extraction_lookup(self):
         svc = self._make_service()
-        with patch.object(
-            svc.pipeline.extractor, "extract", new_callable=AsyncMock, return_value="Cached!"
-        ):
+        with patch.object(svc.extractor, "extract", new_callable=AsyncMock, return_value="Cached!"):
             result = await svc.upload_file(b"%PDF-1.4 data", "report.pdf", "application/pdf")
         assert svc.get_cached_extraction(result["file_id"]) == "Cached!"
         assert await svc.aget_cached_extraction(result["file_id"]) == "Cached!"
@@ -266,16 +264,6 @@ class TestMultimodalPreprocessor:
 # ---------------------------------------------------------------------------
 
 
-class TestMediaSettings:
-    def test_defaults(self):
-        s = MediaSettings()
-        assert s.MEDIA_STORAGE_TYPE == MediaStorageType.LOCAL
-        assert s.MEDIA_MAX_SIZE_MB == 25.0
-        assert s.DOCUMENT_HANDLING == "extract_text"
-
-    def test_memory_type(self):
-        s = MediaSettings(MEDIA_STORAGE_TYPE="memory")
-        assert s.MEDIA_STORAGE_TYPE == MediaStorageType.MEMORY
 
 
 # ---------------------------------------------------------------------------
@@ -316,26 +304,3 @@ class TestMediaStoreFactory:
 # ---------------------------------------------------------------------------
 
 
-class TestSchemas:
-    def test_file_upload_response_schema(self):
-        from tenxgraph_api.src.app.routers.media.schemas import FileUploadResponse
-
-        r = FileUploadResponse(
-            file_id="abc",
-            mime_type="image/png",
-            size_bytes=1024,
-            filename="img.png",
-            url="/v1/files/abc",
-        )
-        assert r.file_id == "abc"
-        assert r.extracted_text is None
-
-    def test_multimodal_config_response_schema(self):
-        from tenxgraph_api.src.app.routers.media.schemas import MultimodalConfigResponse
-
-        r = MultimodalConfigResponse(
-            media_storage_type="local",
-            media_max_size_mb=25.0,
-            document_handling="extract_text",
-        )
-        assert r.media_storage_type == "local"

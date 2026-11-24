@@ -213,10 +213,6 @@ async def test_many_renewals_keep_the_heap_small():
     assert len(store._slots["concurrency:k"].heap) < 40
 
 
-def test_defaults_match_the_old_caps():
-    assert memory_store.DEFAULT_MAX_SLOT_KEYS == 50_000
-    assert memory_store.DEFAULT_MAX_VALUES == 10_000  # the old in-memory idempotency cap
-    assert InMemoryCacheStore().describe() is None
 
 
 @pytest.mark.asyncio

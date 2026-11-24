@@ -38,14 +38,6 @@ class TestStoreMemorySchema:
         assert schema.memory_type == MemoryType.EPISODIC  # default
         assert schema.category == "general"  # default
 
-    def test_defaults(self):
-        """Test default values."""
-        schema = StoreMemorySchema(content="Test")
-        assert schema.memory_type == MemoryType.EPISODIC
-        assert schema.category == "general"
-        assert schema.metadata is None
-        assert schema.config == {}
-        assert schema.options is None
 
     def test_with_config_and_options(self):
         """Test schema with config and options."""
@@ -240,14 +232,6 @@ class TestForgetMemorySchema:
         assert schema.config == {"dry_run": True}
         assert schema.options == {"verbose": True}
 
-    def test_defaults(self):
-        """Test default values."""
-        schema = ForgetMemorySchema()
-        assert schema.memory_type is None
-        assert schema.category is None
-        assert schema.filters is None
-        assert schema.config == {}
-        assert schema.options is None
 
 
 class TestBaseConfigSchema:

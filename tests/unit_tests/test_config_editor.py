@@ -160,7 +160,6 @@ def test_sections_for_the_cache_store_and_wiring_replace_plugins() -> None:
         assert removed not in ids
     for present in (
         "cache_store",
-        "checkpointer",
         "id_generator",
         "thread_name_generator",
         "store",
@@ -170,6 +169,7 @@ def test_sections_for_the_cache_store_and_wiring_replace_plugins() -> None:
     assert _section("cache_store")["subtitle"] == "rate limiting, token revocation"
     assert not {"redis", "rate_limit", "token_revocation"} & KNOWN_TOP_LEVEL_KEYS
     assert "id_generator" in KNOWN_TOP_LEVEL_KEYS
+    assert "checkpointer" not in ids and "checkpointer" not in KNOWN_TOP_LEVEL_KEYS
 
 
 def test_cache_store_fields_sit_under_cache_store() -> None:
@@ -202,11 +202,6 @@ def test_choice_sections_mirror_the_server_names() -> None:
 
     assert [c[0] for c in _section("id_generator")["choices"]] == list(ID_GENERATOR_NAMES)
     assert [c[0] for c in _section("thread_name_generator")["choices"]] == list(THREAD_NAME_CHOICES)
-
-
-def test_checkpointer_section_lists_its_environment() -> None:
-    names = [e["name"] for e in _section("checkpointer").get("env", [])]
-    assert names == ["DATABASE_URL", "REDIS_URL"]
 
 
 def test_cache_store_values_the_editor_writes_are_valid() -> None:
@@ -492,12 +487,14 @@ def test_unknown_keys_are_warnings_on_core_section() -> None:
     assert issue["section"] == "core"
 
 
-def test_wiring_keys_and_checkpointer_warning() -> None:
+def test_wiring_keys_and_the_removed_checkpointer_key() -> None:
     issues = validate_config(
         {"agent": "graph.react:app", "store": "not a path", "checkpointer": "graph.deps:cp"}
     )
     assert _levels(issues, "store") == ["error"]
-    assert _levels(issues, "checkpointer") == ["warning"]
+    assert _levels(issues, "checkpointer") == ["error"]
+    [issue] = [i for i in issues if i["path"] == "checkpointer"]
+    assert "graph.compile(checkpointer=...)" in issue["message"]
 
 
 def test_file_checks_use_base_dir(tmp_path: Path) -> None:

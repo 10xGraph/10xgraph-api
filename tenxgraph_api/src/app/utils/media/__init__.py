@@ -6,10 +6,8 @@ The API platform auto-extracts using textxtract.
 """
 
 from .extractor import DocumentExtractor
-from .pipeline import DocumentPipeline
 
 
 __all__ = [
     "DocumentExtractor",
-    "DocumentPipeline",
 ]

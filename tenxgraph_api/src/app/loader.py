@@ -2,7 +2,6 @@ import inspect
 import logging
 import os
 import sys
-import weakref
 from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
@@ -12,6 +11,7 @@ from tenxgraph.core import CompiledGraph
 from tenxgraph.core.graph.remote_tool import RemoteToolConfig as CoreRemoteToolConfig
 from tenxgraph.core.graph.utils.tenant_check import check_tenant_columns
 from tenxgraph.storage.checkpointer import BaseCheckpointer
+from tenxgraph.storage.checkpointer.pg_checkpointer import PgCheckpointer
 from tenxgraph.storage.store import BaseStore
 from tenxgraph.utils.id_generator import (
     BaseIDGenerator,
@@ -68,7 +68,7 @@ def _load_errors(path: str, kind: str, label: str):
         raise Exception(f"Failed to load {label} from {path}: {e}")
 
 
-async def load_graph(path: str) -> CompiledGraph | None:
+async def load_graph(path: str) -> CompiledGraph:
     _check_format(path, "graph")
     with _load_errors(path, "graph", "graph"):
         entry_point_obj = import_target(path)
@@ -125,7 +125,7 @@ def load_container(path: str | None) -> InjectQ | None:
         if not isinstance(container, InjectQ):
             raise TypeError("Loaded object is not a InjectQ.")
 
-    # if we have container, set it as the global instance
+    # make it the current container (context-local), which the lifespan and its tasks inherit
     container.activate()
     return container
 
@@ -239,10 +239,6 @@ def _check_checkpointer_id_type(
     Only ``PgCheckpointer`` declares its column type (``id_type``: ``string`` makes VARCHAR
     columns, ``int`` INTEGER, ``bigint`` BIGINT); other checkpointers store any id.
     """
-    try:
-        from tenxgraph.storage.checkpointer.pg_checkpointer import PgCheckpointer
-    except ImportError:  # pragma: no cover - the module imports without its drivers
-        return
     if not isinstance(checkpointer, PgCheckpointer):
         return
     raw = getattr(checkpointer, "id_type", "string")
@@ -263,10 +259,6 @@ def _check_checkpointer_id_type(
     )
 
 
-# Generators apply_id_generator put on a graph; see there.
-_applied_id_generators: weakref.WeakSet[BaseIDGenerator] = weakref.WeakSet()
-
-
 def apply_id_generator(
     graph: CompiledGraph, config: GraphConfig, container: InjectQ
 ) -> BaseIDGenerator | None:
@@ -275,51 +267,30 @@ def apply_id_generator(
     Core binds the graph's generator in the graph's InjectQ container as ``BaseIDGenerator``,
     ``"generated_id_type"`` and the ``"generated_id"`` factory, and reads them back from
     ``InjectQ.get_instance()`` for thread, message and memory ids; the API reads
-    ``"generated_id"`` for new thread ids. All three are rebound in the graph's container, the
-    API's container and the active one, so every id comes from the configured generator. A
-    ``PgCheckpointer`` whose ``id_type`` cannot hold the generator's ids refuses the boot.
-    A graph compiled with its own (non-default) generator refuses the setting, so the
-    generator lives in one place.
+    ``"generated_id"`` for new thread ids. All three are rebound in ``container``, which is the
+    graph's container (:func:`check_graph_container`). A ``PgCheckpointer`` whose ``id_type``
+    cannot hold the generator's ids refuses the boot. A graph compiled with its own
+    (non-default) generator refuses the setting, so the generator lives in one place.
     """
     name = config.id_generator
     if name is None:
         return None
     state_graph = getattr(graph, "_state_graph", None)
     compiled_with = getattr(state_graph, "_id_generator", None)
-    if (
-        compiled_with is not None
-        and type(compiled_with) is not DefaultIDGenerator
-        and compiled_with not in _applied_id_generators
-    ):
+    if compiled_with is not None and type(compiled_with) is not DefaultIDGenerator:
         raise ValueError(
             f"The graph is compiled with {type(compiled_with).__name__} "
             f"(StateGraph(id_generator=...)) and 10xgraph.json sets id_generator {name!r}. "
             "Set the generator in one place: remove one of them."
         )
     generator = load_id_generator(name)
+    _check_checkpointer_id_type(generator, name, getattr(graph, "_checkpointer", None))
 
-    containers: list[InjectQ] = []
-    for candidate in (getattr(state_graph, "_container", None), container, InjectQ.get_instance()):
-        if isinstance(candidate, InjectQ) and all(candidate is not c for c in containers):
-            containers.append(candidate)
-    checkpointer = next(
-        (c.try_get(BaseCheckpointer) for c in containers if BaseCheckpointer in c), None
-    )
-    _check_checkpointer_id_type(generator, name, checkpointer)
-
-    # Factories, not instances: InjectQ keeps a resolved instance binding in its singleton
-    # cache, so a rebound instance would not be seen; a factory is looked up first and called
-    # on every resolve (core rebinds "get_node" the same way in CompiledGraph.override_node).
-    id_type = generator.id_type
-    for target in containers:
-        target.bind_factory(BaseIDGenerator, lambda: generator)
-        target.bind_factory("generated_id_type", lambda: id_type)
-        target.bind_factory("generated_id", generator.generate)
+    container.bind_instance(BaseIDGenerator, generator)
+    container.bind("generated_id_type", generator.id_type)
+    container.bind_factory("generated_id", generator.generate)
     if state_graph is not None:
-        # GET /v1/graph reports the generator from here. Remembered, so loading the same graph
-        # object again (a second app in one process) is not mistaken for a compiled-in one.
-        state_graph._id_generator = generator
-        _applied_id_generators.add(generator)
+        state_graph._id_generator = generator  # GET /v1/graph reports the generator from here
     logger.info("ID generator: %s (id_generator %s)", type(generator).__name__, name)
     return generator
 
@@ -481,8 +452,7 @@ def warn_per_process_state(container: InjectQ) -> None:
 
 
 def check_store_tenant_columns(
-    graph: CompiledGraph | None,
-    container: InjectQ,
+    graph: CompiledGraph,
     store: BaseStore | None,
     *,
     allow_mismatch: bool = False,
@@ -491,37 +461,45 @@ def check_store_tenant_columns(
 
     ``compile()`` runs it for the store passed to it, honouring ``allow_tenant_mismatch``; the
     store from ``10xgraph.json`` never goes through ``compile()``. It is compared with the
-    graph's checkpointer and with the checkpointer bound in the container (when different).
-    Same rule as core: ``MODE=production`` refuses the boot (``GraphError``), any other mode
-    logs a warning. ``allow_mismatch`` (``store_allow_tenant_mismatch`` in ``10xgraph.json``)
-    never refuses and logs the mismatch at INFO. Skipped when
-    the store is the one the graph was compiled with (``compile()`` already checked it).
+    graph's checkpointer. Same rule as core: ``MODE=production`` refuses the boot
+    (``GraphError``), any other mode logs a warning. ``allow_mismatch``
+    (``store_allow_tenant_mismatch`` in ``10xgraph.json``) never refuses and logs the mismatch
+    at INFO. Skipped when the store is the one the graph was compiled with (``compile()``
+    already checked it).
     """
     if store is None:
         return
-    if graph is not None and getattr(graph, "_store", None) is store:
+    if getattr(graph, "_store", None) is store:
         return
-    checkpointers: list[object] = []
-    for candidate in (
-        getattr(graph, "_checkpointer", None) if graph is not None else None,
-        container.try_get(BaseCheckpointer),
-    ):
-        if candidate is not None and all(candidate is not seen for seen in checkpointers):
-            checkpointers.append(candidate)
-    for checkpointer in checkpointers:
+    checkpointer = getattr(graph, "_checkpointer", None)
+    if checkpointer is not None:
         check_tenant_columns(checkpointer, store, allow_mismatch=allow_mismatch)
+
+
+def check_graph_container(graph: CompiledGraph, container: InjectQ) -> None:
+    """Refuse a graph built with another InjectQ container than the server's.
+
+    Core binds the graph's checkpointer, background task manager and media store in the
+    graph's container; the server looks them up in its own (``injectq`` in 10xgraph.json,
+    else the global container), so the two must be one container.
+    """
+    if graph._container is not container:
+        raise ValueError(
+            "The graph was built with a different InjectQ container than the one named by "
+            "`injectq` in 10xgraph.json (the global container when `injectq` is not set). Pass "
+            "the same container to StateGraph(container=...) and to `injectq`, or set neither."
+        )
 
 
 async def attach_all_modules(
     config: GraphConfig,
     container: InjectQ,
-) -> CompiledGraph | None:
+) -> CompiledGraph:
     remote_tools = config.remote_tools
     graph = await load_graph(config.graph_path)
+    check_graph_container(graph, container)
 
     if remote_tools:
-        if graph is None:
-            raise RuntimeError("Cannot attach remote tools because the graph failed to load")
         grouped: dict[str, list[dict | CoreRemoteToolConfig]] = {}
         for tool in remote_tools:
             grouped.setdefault(tool.node_name, []).append(tool.to_tool_schema())
@@ -529,17 +507,9 @@ async def attach_all_modules(
             graph.attach_remote_tools(schemas, node_name)
         logger.info("Attached %d configured remote tools", len(remote_tools))
 
-    if graph is not None:
-        apply_id_generator(graph, config, container)
+    apply_id_generator(graph, config, container)
 
     logger.info("All modules attached successfully")
-
-    if config.checkpointer_path:
-        logger.warning(
-            'The "checkpointer" key in 10xgraph.json is not applied by the server and is '
-            "ignored. Pass the checkpointer to graph.compile(checkpointer=...) in your agent "
-            "module instead."
-        )
 
     # Bind the store instance (if configured) so the /v1/store endpoints — which
     # inject BaseStore via StoreService — can serve it. Without this the store
@@ -550,7 +520,6 @@ async def attach_all_modules(
     # from 10xgraph.json skips compile(), so run the same check here.
     check_store_tenant_columns(
         graph,
-        container,
         store,
         allow_mismatch=getattr(config, "store_allow_tenant_mismatch", False) is True,
     )
@@ -572,8 +541,7 @@ async def attach_all_modules(
         logger.info("Production mode: local telemetry store disabled (use OTEL/publisher)")
 
     # Auth: the shared rules first (errors refuse the boot), then bind the BaseAuth or None.
-    checkpointer = getattr(graph, "_checkpointer", None) or container.try_get(BaseCheckpointer)
-    check_auth_at_boot(config, checkpointer, store)
+    check_auth_at_boot(config, graph._checkpointer, store)
     auth_config = config.auth_config()
     load_and_bind_auth(container, auth_config)
     log_reach_all_roles(auth_config.rbac_config() if auth_config else None)

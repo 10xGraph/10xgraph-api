@@ -85,7 +85,6 @@ def _media(store: Any = None) -> MediaService:
     svc._store = store if store is not None else LinkStore()
     svc._extraction_cache = _BoundedCache(8)
     svc._signed_url_cache = _BoundedCache(8)
-    svc._links_notice_logged = False
     return svc
 
 
@@ -105,7 +104,7 @@ def delete_setting(monkeypatch):
 
 
 async def _upload(media: MediaService, owner: str = "alice") -> str:
-    media._pipeline = SimpleNamespace(handling="skip")
+    media.extractor = None
     result = await media.upload_file(b"\x89PNG\r\n\x1a\n", "a.png", "image/png", user_id=owner)
     return result["file_id"]
 
@@ -176,10 +175,6 @@ def test_gs_url_is_checked_and_an_allowlisted_bucket_accepted():
     with pytest.raises(MediaURLBlockedError):
         check_external_media_urls([_img("gs://other/o.png")], _Policy())
     check_external_media_urls([_img("gs://allowed/o.png")], _Policy())
-
-
-def test_no_policy_skips_the_check():
-    check_external_media_urls([_img("http://169.254.169.254/x")], None)
 
 
 def test_policy_comes_from_the_graph():
@@ -294,21 +289,6 @@ async def test_put_state_answers_400(checkpointer_service):
     checkpointer_service.checkpointer.aput_state.assert_not_called()
 
 
-@pytest.mark.asyncio
-async def test_thread_writes_skip_the_check_when_no_policy_exists(
-    checkpointer_service, monkeypatch
-):
-    monkeypatch.setattr(
-        CheckpointerService,
-        "_graph_service",
-        staticmethod(lambda: SimpleNamespace(media_policy=None)),
-    )
-    await checkpointer_service.put_state(
-        {"thread_id": "t1"}, Identity(user_id="u1"), {"context": [_BLOCKED_CTX]}
-    )
-    checkpointer_service.checkpointer.aput_state.assert_awaited_once()
-
-
 # ---------------------------------------------------------------------------
 # Q15: links
 # ---------------------------------------------------------------------------
@@ -377,24 +357,6 @@ async def test_put_state_links_the_thread(checkpointer_service, monkeypatch):
         {"thread_id": "t7"}, Identity(user_id="alice"), {"context": [context]}
     )
     assert (await media.store.get_metadata(key))["threads"] == ["t7"]
-
-
-@pytest.mark.asyncio
-async def test_old_core_store_tracks_nothing_and_logs_once(caplog):
-    class OldStore(InMemoryMediaStore):
-        # Stands in for a store without update_metadata (core before 1.0, or a custom store).
-        update_metadata = None
-
-    media = _media(OldStore())
-    assert not media.supports_links
-    key = await _upload(media)
-    assert "threads" not in await media.store.get_metadata(key)
-    with caplog.at_level("INFO", logger="tenxgraph_api.media"):
-        await media.link_threads([key], "t1", "alice")
-        await media.link_threads([key], "t1", "alice")
-    assert sum("update_metadata" in r.message for r in caplog.records) == 1
-    await media.unlink_threads([key], "t1")
-    assert await media.store.exists(key)
 
 
 # ---------------------------------------------------------------------------

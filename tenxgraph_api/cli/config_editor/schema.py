@@ -86,7 +86,6 @@ KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
         "injectq",
         "store",
         "store_allow_tenant_mismatch",
-        "checkpointer",
         "thread_name_generator",
         "remote_tools",
         "test",
@@ -958,43 +957,6 @@ _SECTIONS: list[dict[str, Any]] = [
             {
                 "name": "LOG_FORMAT",
                 "purpose": ("json writes every log line as one JSON object; use in production."),
-            },
-        ],
-    },
-    {
-        "id": "checkpointer",
-        "title": "Checkpointer",
-        "description": "Where thread state and messages are saved.",
-        "key": None,
-        "optional": False,
-        "fields": [
-            {
-                "path": ["checkpointer"],
-                "label": "Checkpointer",
-                "type": "text",
-                "placeholder": "graph.dependencies:checkpointer",
-                "help": (
-                    "module:attr of a BaseCheckpointer, for reference. The server uses the "
-                    "checkpointer passed to graph.compile()."
-                ),
-            },
-        ],
-        "notes": [
-            "PgCheckpointer needs a Postgres connection (postgres_dsn, usually from "
-            "DATABASE_URL) and a Redis connection for its hot cache (redis_url, usually from "
-            'REDIS_URL). Pass id_type="bigint" or "int" for integer ids.',
-            "SqliteCheckpointer needs a database file path (db_path). It defaults to a file in "
-            "the 10xgraph home directory.",
-            "InMemoryCheckpointer needs nothing and loses state when the process stops.",
-        ],
-        "env": [
-            {
-                "name": "DATABASE_URL",
-                "purpose": "Postgres connection string you pass to PgCheckpointer as postgres_dsn.",
-            },
-            {
-                "name": "REDIS_URL",
-                "purpose": "Redis connection string you pass to PgCheckpointer as redis_url.",
             },
         ],
     },

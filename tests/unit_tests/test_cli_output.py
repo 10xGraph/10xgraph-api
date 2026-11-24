@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import json
 import re
-import sys
 from types import SimpleNamespace
 
 from tenxgraph_api.cli.capabilities import ColorMode, OutputFormat, ProgressMode
@@ -27,10 +26,6 @@ def formatter(**kwargs) -> tuple[OutputFormatter, io.StringIO]:
     return OutputFormatter(stream=stream, **kwargs), stream
 
 
-def test_initialization_default_and_custom_stream() -> None:
-    assert OutputFormatter().stream == sys.stdout
-    custom = io.StringIO()
-    assert OutputFormatter(stream=custom).stream is custom
 
 
 def test_plain_banner_contains_title_and_subtitle() -> None:
@@ -430,19 +425,6 @@ def test_completion_screen_reveals_rows_progressively() -> None:
     assert "Open the docs" in full.renderable.plain
 
 
-def test_structured_activity_emits_lifecycle_events() -> None:
-    rendered, stream = formatter(output_format=OutputFormat.JSONL)
-    with rendered.activity("Loading graph", done="Graph loaded"):
-        pass
-    payloads = [json.loads(line) for line in stream.getvalue().splitlines()]
-    assert [payload["type"] for payload in payloads] == [
-        "progress_start",
-        "progress_end",
-        "success",
-    ]
-    assert payloads[1]["status"] == "completed"
-
-
 def test_structured_completion_screen_is_one_event() -> None:
     rendered, stream = formatter(output_format=OutputFormat.JSONL)
     rendered.completion_screen(
@@ -485,8 +467,6 @@ def test_global_convenience_functions_delegate(monkeypatch) -> None:
     ]
 
 
-def test_global_instance_exists() -> None:
-    assert isinstance(output, OutputFormatter)
 
 
 def test_ctrl_c_releases_the_fullscreen_frame_without_waiting(monkeypatch) -> None:
