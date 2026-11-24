@@ -236,8 +236,9 @@ class MediaService(_LinksMixin, _CachingMixin):
         self._check_content(data, mime_type)
 
         extractor = self.extractor
-        extracting = extractor is not None and self._is_extractable(mime_type)
-        if extracting:
+        if not self._is_extractable(mime_type):
+            extractor = None
+        if extractor is not None:
             try:
                 extractor.check_limits(data, mime_type)
             except DocumentTooLargeError as exc:
@@ -274,7 +275,7 @@ class MediaService(_LinksMixin, _CachingMixin):
         }
 
         # If it's a document, try extraction
-        if extracting:
+        if extractor is not None:
             try:
                 text = await extractor.extract(data, filename, mime_type)
                 if text:

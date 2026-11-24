@@ -1,19 +1,20 @@
 import os
 import re
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI
 from injectq import InjectQ
+from tenxgraph.runtime.publisher.identity import UserIdMode
 
 from .graph_config import GraphConfig
 from .metrics import resolve_use_metrics_endpoint
 from .settings import logger
 
 
-def _user_id_mode(graph_config: GraphConfig | None) -> str:
+def _user_id_mode(graph_config: GraphConfig | None) -> UserIdMode:
     """``observability.user_id_mode`` from ``10xgraph.json``: how traces carry the user id."""
     obs_cfg = graph_config.observability if graph_config is not None else None
-    return str((obs_cfg or {}).get("user_id_mode") or "raw")
+    return cast("UserIdMode", str((obs_cfg or {}).get("user_id_mode") or "raw"))
 
 
 def _attach_otel_publisher(

@@ -289,6 +289,8 @@ no_implicit_optional = true
 check_untyped_defs = false
 disallow_untyped_defs = false
 show_error_codes = true
+# injectq types get/try_get as type[T]; mypy rejects abstract base classes there.
+disable_error_code = ["type-abstract"]
 pretty = true
 
 [[tool.mypy.overrides]]
