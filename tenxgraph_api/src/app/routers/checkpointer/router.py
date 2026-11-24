@@ -1,6 +1,6 @@
 """Checkpointer router module."""
 
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from injectq.integrations.fastapi import InjectFastAPI
@@ -55,7 +55,7 @@ def validate_thread_id(thread_id: int | str) -> str | int:
             raise HTTPException(status_code=422, detail="thread_id must be a non-negative integer")
     else:
         raise HTTPException(status_code=422, detail="thread_id must be a string or integer")
-    return to_core_id(thread_id, "thread_id")
+    return cast("str | int", to_core_id(thread_id, "thread_id"))
 
 
 @router.get(
@@ -222,7 +222,7 @@ async def get_message(
     thread_id = validate_thread_id(thread_id)
     if not message_id or (isinstance(message_id, str) and not str(message_id).strip()):
         raise HTTPException(status_code=422, detail="message_id is required and cannot be empty")
-    message_id = to_core_id(message_id, "message_id")
+    message_id = cast("str | int", to_core_id(message_id, "message_id"))
 
     config = {"thread_id": thread_id}
 
@@ -271,7 +271,7 @@ async def put_message_feedback(
     thread_id = validate_thread_id(thread_id)
     if not message_id or (isinstance(message_id, str) and not str(message_id).strip()):
         raise HTTPException(status_code=422, detail="message_id is required and cannot be empty")
-    message_id = to_core_id(message_id, "message_id")
+    message_id = cast("str | int", to_core_id(message_id, "message_id"))
 
     result = await service.update_message_feedback(
         {"thread_id": thread_id},
@@ -372,7 +372,7 @@ async def delete_message(
     thread_id = validate_thread_id(thread_id)
     if not message_id or (isinstance(message_id, str) and not str(message_id).strip()):
         raise HTTPException(status_code=422, detail="message_id is required and cannot be empty")
-    message_id = to_core_id(message_id, "message_id")
+    message_id = cast("str | int", to_core_id(message_id, "message_id"))
 
     # The path thread_id is applied last so the body config cannot redirect the call to
     # another thread.
