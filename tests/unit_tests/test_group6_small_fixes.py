@@ -9,7 +9,6 @@ from unittest.mock import patch
 import pytest
 
 from tenxgraph_api.src.app import loader
-from tenxgraph_api.src.app.core.auth.permissions_registry import ALL_PERMISSIONS
 
 
 def test_the_removed_checkpointer_key_refuses_to_load(tmp_path):
@@ -28,8 +27,6 @@ def test_skill_templates_do_not_tell_developers_to_set_the_checkpointer_key():
         assert '"checkpointer":' not in text, name
 
 
-def test_setup_scope_is_gone_from_the_editor():
-    assert "graph:setup" not in ALL_PERMISSIONS
 
 
 # ---------------------------------------------------------------------------

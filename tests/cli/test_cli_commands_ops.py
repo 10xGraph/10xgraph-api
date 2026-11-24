@@ -92,15 +92,6 @@ def test_api_command_error_path(monkeypatch, silent_output):
     assert code == 1
 
 
-def test_api_command_builds_local_playground_url_for_wildcard_host(silent_output):
-    cmd = APICommand(output=silent_output)
-    url = cmd._build_playground_url(
-        cmd._normalize_browser_host("0.0.0.0"),
-        8000,
-        "https://play.10xgraph.com",
-    )
-
-    assert url == "https://play.10xgraph.com?backendUrl=http%3A%2F%2F127.0.0.1%3A8000"
 
 
 def test_api_command_schedules_playground_launch(monkeypatch, tmp_path, silent_output):

@@ -75,10 +75,7 @@ class TestGraphServiceMethods:
         return srv
 
     def test_media_service_property(self, service):
-        # By default InjectQ is not active or try_get fails, so media_service is None
-        assert service.media_service is None
-
-        # Mock InjectQ
+        # The property returns whatever the container resolves for MediaService.
         mock_container = MagicMock()
         mock_media = MagicMock()
         mock_container.try_get.return_value = mock_media

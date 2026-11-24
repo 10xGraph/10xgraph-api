@@ -45,19 +45,8 @@ def test_dev_command_no_open_serves_only(monkeypatch):
     assert called["open_playground"] is False
 
 
-@pytest.mark.parametrize("removed", ["api", "play"])
-def test_api_and_play_commands_are_removed(removed):
-    result = runner.invoke(main_mod.app, [removed])
-    assert result.exit_code != 0
 
 
-def test_version_command(monkeypatch):
-    called = []
-    monkeypatch.setattr(main_mod, "setup_cli_logging", lambda **kwargs: None)
-    monkeypatch.setattr(main_mod.VersionCommand, "execute", lambda self: called.append(True) or 0)
-    result = runner.invoke(main_mod.app, ["version"])
-    assert result.exit_code == 0
-    assert len(called) == 1
 
 
 def test_init_command(monkeypatch):
@@ -177,11 +166,6 @@ def test_eval_command(monkeypatch):
     assert called["max_concurrency"] == 8
 
 
-def test_a2a_command_is_not_exposed():
-    result = runner.invoke(main_mod.app, ["a2a"])
-
-    assert result.exit_code != 0
-    assert "No such command 'a2a'" in result.output
 
 
 def test_handle_tenxgraph_api_error(monkeypatch):

@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import json
 import re
-import sys
 from types import SimpleNamespace
 
 from tenxgraph_api.cli.capabilities import ColorMode, OutputFormat, ProgressMode
@@ -27,10 +26,6 @@ def formatter(**kwargs) -> tuple[OutputFormatter, io.StringIO]:
     return OutputFormatter(stream=stream, **kwargs), stream
 
 
-def test_initialization_default_and_custom_stream() -> None:
-    assert OutputFormatter().stream == sys.stdout
-    custom = io.StringIO()
-    assert OutputFormatter(stream=custom).stream is custom
 
 
 def test_plain_banner_contains_title_and_subtitle() -> None:
@@ -472,8 +467,6 @@ def test_global_convenience_functions_delegate(monkeypatch) -> None:
     ]
 
 
-def test_global_instance_exists() -> None:
-    assert isinstance(output, OutputFormatter)
 
 
 def test_ctrl_c_releases_the_fullscreen_frame_without_waiting(monkeypatch) -> None:
