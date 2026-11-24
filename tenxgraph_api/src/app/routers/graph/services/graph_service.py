@@ -43,6 +43,7 @@ from tenxgraph.core.graph.utils.stream_handler import (  # noqa: F401
     is_pause_chunk,
 )
 from tenxgraph.core.state import AgentState, Message, StreamChunk, StreamEvent
+from tenxgraph.core.state.message import generate_id
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.utils import (  # noqa: F401
     ResponseGranularity,
@@ -454,7 +455,7 @@ class GraphService(
 
         # A telemetry run, so the observability endpoint can rebuild the trace.
         run.thread_id = str(run.config["thread_id"])
-        run.run_id = str(run.config.get("run_id") or await self._generated_id())
+        run.run_id = str(run.config.get("run_id") or generate_id())
         run.config.setdefault("run_id", run.run_id)
         run.started = datetime.now().timestamp()
         if self.telemetry:

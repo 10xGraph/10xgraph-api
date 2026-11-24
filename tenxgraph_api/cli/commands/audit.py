@@ -42,7 +42,7 @@ from tenxgraph_api.src.app.core.auth.auth_config import check_auth_config
 from tenxgraph_api.src.app.core.config.graph_config import validate_remote_tools
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Diagnostic:
     """One audit result.
 

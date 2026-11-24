@@ -61,7 +61,7 @@ TENXGRAPH_THEME = Theme(
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Glyphs:
     """Symbol set for one invocation, chosen by terminal encoding support."""
 

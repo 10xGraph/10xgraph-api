@@ -16,7 +16,7 @@ class ConfigConflictError(Exception):
     """The file changed on disk after the editor loaded it."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LoadedConfig:
     config: dict[str, Any] | None
     version: str | None  # sha256 of the file bytes, None when the file does not exist

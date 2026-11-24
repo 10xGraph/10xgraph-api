@@ -1,8 +1,9 @@
 """``websocket`` section of 10xgraph.json."""
 
 import logging
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from pydantic import BaseModel
 
 
 if TYPE_CHECKING:
@@ -23,8 +24,7 @@ REALTIME_CLIENT_OVERRIDE_KEYS = frozenset({"voice", "modalities", "vad", "system
 DEFAULT_REALTIME_CLIENT_OVERRIDES: tuple[str, ...] = ("voice", "modalities", "vad")
 
 
-@dataclass
-class WebSocketConfig:
+class WebSocketConfig(BaseModel):
     """WebSocket settings and connection limits parsed from 10xgraph.json.
 
     Example::

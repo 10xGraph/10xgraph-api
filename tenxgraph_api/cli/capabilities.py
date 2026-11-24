@@ -36,7 +36,7 @@ class ProgressMode(StrEnum):
     QUIET = "quiet"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TerminalCapabilities:
     """Resolved capabilities for one CLI invocation."""
 

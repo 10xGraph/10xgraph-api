@@ -291,6 +291,10 @@ Production error responses hide only 5xx details; raise `request_config.ClientIn
 ruff check . && ruff format .
 ```
 
+- **Data classes:** pydantic `BaseModel` for anything public, configured, user-facing or serialized
+  (configs, results users read, contexts handed to user code, events, package exports, API
+  shapes); `@dataclass(slots=True)` only for private per-request or per-step state our own code
+  creates and never serializes.
 - Tests in `tests/`; `pytest` config and ruff/bandit are in `pyproject.toml`. Templates under
   `cli/templates/{dev,prod}` are excluded from lint/type/bandit (they are emitted code, not lib).
 - The `prod` template is the reference for a real project: it scaffolds `graph/` (agent, state,

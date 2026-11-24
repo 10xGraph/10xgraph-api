@@ -1,8 +1,10 @@
 """``to_core_id``: thread and message ids in the type of the bound id generator."""
 
+from unittest.mock import MagicMock
+
 import pytest
 from injectq import InjectQ
-from tenxgraph.utils.id_generator import IDType
+from tenxgraph.utils.id_generator import BaseIDGenerator, IDType
 
 from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
 from tenxgraph_api.src.app.core.validation.resource_ids import to_core_id
@@ -14,17 +16,21 @@ def bind_type(monkeypatch):
 
     def bind(id_type):
         container = InjectQ()
-        container.bind("generated_id_type", id_type)
+        if id_type is not None:
+            generator = MagicMock(spec=BaseIDGenerator)
+            generator.id_type = id_type
+            container.bind_instance(BaseIDGenerator, generator)
         monkeypatch.setattr(InjectQ, "get_instance", classmethod(lambda cls: container))
 
     return bind
 
 
-def test_string_generator_keeps_strings_and_writes_integers_as_text(bind_type):
-    bind_type(IDType.STRING)
+@pytest.mark.parametrize("id_type", [IDType.STRING, None])
+def test_string_or_no_generator_leaves_the_id_unchanged(bind_type, id_type):
+    bind_type(id_type)
     assert to_core_id("abc-1") == "abc-1"
     assert to_core_id("123") == "123"
-    assert to_core_id(123) == "123"
+    assert to_core_id(123) == "123"  # a JSON number is stored as text
     assert to_core_id(None) is None
 
 

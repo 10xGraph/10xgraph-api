@@ -31,6 +31,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Public data classes are pydantic models.** `AgUiConfig`, `MediaConfig`, `RateLimitConfig`,
+  `TokenRevocationConfig`, `CacheStoreConfig`, `WebSocketConfig`, `RunsConfig`, `SlotResult` and
+  `RateLimitDecision` were dataclasses; they keep their names, import paths, fields and
+  defaults, and now validate on construction. `SlotResult` still accepts positional arguments
+  (custom cache stores build it); `RateLimitDecision` takes keywords only. Private
+  per-request dataclasses (`Classified`, `RunChecks`, `IdempotentRun`, `Target`, the CLI
+  `Diagnostic`, `Step`, `Choice` and the like) stay dataclasses and now use `slots=True`.
 - **Ids follow the id generator.** The API makes no ids of its own for core storage: new thread
   ids and run ids come from the generator bound in the shared container. A thread or message id
   from a path, body, WebSocket frame or AG-UI message is converted to the generator's type

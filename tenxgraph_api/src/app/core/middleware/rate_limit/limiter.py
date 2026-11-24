@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
 
 from injectq import InjectQ
+from pydantic import BaseModel, ConfigDict
 
 from tenxgraph_api.src.app.core.cache_store import BaseCacheStore, InMemoryCacheStore
 
@@ -24,14 +24,15 @@ logger = logging.getLogger("tenxgraph_api.rate_limit")
 UNAVAILABLE_RETRY_AFTER_SECONDS = 5
 
 
-@dataclass(frozen=True)
-class RateLimitDecision:
+class RateLimitDecision(BaseModel):
     """Result of a single rate-limit check.
 
     ``unavailable`` marks a denial caused by the cache store (it could not be reached), not by
     the limit: the middleware then answers 503 ``RATE_LIMIT_UNAVAILABLE`` instead of 429, with
     ``reset_after`` as its ``Retry-After``.
     """
+
+    model_config = ConfigDict(frozen=True)
 
     allowed: bool
     remaining: int

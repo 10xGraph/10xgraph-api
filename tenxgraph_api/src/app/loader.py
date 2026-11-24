@@ -233,11 +233,12 @@ def apply_id_generator(
 
     Core binds the graph's generator in the graph's InjectQ container as ``BaseIDGenerator``,
     ``"generated_id_type"`` and the ``"generated_id"`` factory, and reads them back from
-    ``InjectQ.get_instance()`` for thread, message and memory ids; the API reads
-    ``"generated_id"`` for new thread ids. All three are rebound in ``container``, which is the
-    graph's container (:func:`check_graph_container`). A checkpointer whose id columns cannot
-    hold the generator's ids (core's ``check_id_type``) refuses the boot. A graph compiled with
-    its own (non-default) generator refuses the setting, so the generator lives in one place.
+    ``InjectQ.get_instance()`` for thread, run, message and memory ids (the API calls core's
+    ``generate_id`` and reads the type from ``BaseIDGenerator``). All three are bound once in
+    ``container``, which is the graph's container (:func:`check_graph_container`). A
+    checkpointer whose id columns cannot hold the generator's ids (core's ``check_id_type``)
+    refuses the boot. A graph compiled with its own (non-default) generator refuses the setting,
+    so the generator lives in one place.
     """
     name = config.id_generator
     if name is None:

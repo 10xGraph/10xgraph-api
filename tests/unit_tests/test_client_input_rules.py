@@ -23,6 +23,7 @@ from tenxgraph.core.authz import Identity
 from tenxgraph.core.graph import ToolNode
 from tenxgraph.core.state import AgentState, Message
 from tenxgraph.core.state.message_block import TextBlock
+from tenxgraph.utils.id_generator import BaseIDGenerator, IDType
 from tenxgraph.utils.thread_info import ThreadInfo
 
 from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
@@ -147,12 +148,26 @@ def _ag_ui_messages(client_id: str, role: str = "user") -> list[Message]:
     return to_tenxgraph_messages(run_input.messages)
 
 
+class _FixedGenerator(BaseIDGenerator):
+    def __init__(self, id_type, factory):
+        self._id_type = IDType(id_type)
+        self._factory = factory
+
+    @property
+    def id_type(self):
+        return self._id_type
+
+    def generate(self):
+        return self._factory()
+
+
 def _bind_generator(monkeypatch, id_type: str, factory) -> None:
     from injectq import InjectQ
 
     container = InjectQ()
     container.bind("generated_id_type", id_type)
     container.bind_factory("generated_id", factory)
+    container.bind_instance(BaseIDGenerator, _FixedGenerator(id_type, factory))
     monkeypatch.setattr(InjectQ, "get_instance", classmethod(lambda cls: container))
 
 

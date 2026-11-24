@@ -2,8 +2,9 @@
 
 import logging
 import os
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+from pydantic import BaseModel, Field
 
 
 if TYPE_CHECKING:
@@ -38,8 +39,7 @@ def default_run_timeout() -> float | None:
     return DEFAULT_PRODUCTION_RUN_TIMEOUT_SECONDS if mode == "production" else None
 
 
-@dataclass
-class RunsConfig:
+class RunsConfig(BaseModel):
     """Per-run policy for graph runs (``runs`` key in 10xgraph.json).
 
     Example::
@@ -99,7 +99,7 @@ class RunsConfig:
     config_keys: frozenset[str] | None = None
     state_keys: frozenset[str] = frozenset()
     max_concurrent_per_user: int | None = DEFAULT_MAX_CONCURRENT_RUNS_PER_USER
-    timeout: float | None = field(default_factory=default_run_timeout)
+    timeout: float | None = Field(default_factory=default_run_timeout)
     max_parallel_tool_calls: int | None = None
     max_recursion_limit: int = DEFAULT_MAX_RECURSION_LIMIT
 

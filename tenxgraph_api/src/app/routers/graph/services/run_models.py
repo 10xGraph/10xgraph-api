@@ -32,7 +32,7 @@ def _resume_http_error(exc: Exception) -> Exception:
 _UNREAD: Any = object()
 
 
-@dataclass
+@dataclass(slots=True)
 class RunChecks:
     """What was already checked for one run, so the run does not check or read it again.
 
@@ -44,7 +44,7 @@ class RunChecks:
     state: Any = _UNREAD
 
 
-@dataclass
+@dataclass(slots=True)
 class _Run:
     """One run's setup, filled in by ``_start_run`` and cleaned up by ``_end_run``."""
 

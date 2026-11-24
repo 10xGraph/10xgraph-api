@@ -4,7 +4,6 @@ import inspect
 from collections.abc import Iterator
 from typing import Any
 
-from injectq import InjectQ
 from pydantic import TypeAdapter, ValidationError
 from tenxgraph.core.authz import Identity, UserCredential
 from tenxgraph.core.exceptions import ModelNotFoundError
@@ -247,11 +246,6 @@ class RunChecksMixin:
         """A fresh server-made thread id (public name of :meth:`_new_thread_id`)."""
         return await self._new_thread_id()
 
-    async def _generated_id(self) -> str | int:
-        """A new id from the id generator bound in the shared container (core's default if none)."""
-        generated = await InjectQ.get_instance().atry_get("generated_id")
-        return generated if generated not in (None, "") else generate_id(None)
-
     async def _new_thread_id(self) -> str | int:
         """Generate a thread id that nobody owns yet.
 
@@ -262,7 +256,7 @@ class RunChecksMixin:
         unused id avoids that.
         """
         for _ in range(MAX_THREAD_ID_ATTEMPTS):
-            thread_id = await self._generated_id()
+            thread_id = generate_id()
             try:
                 owner = await self.checkpointer.aget_thread_owner(thread_id)
             except NotImplementedError:

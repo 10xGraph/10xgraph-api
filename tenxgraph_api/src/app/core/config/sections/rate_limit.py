@@ -2,8 +2,9 @@
 
 import ipaddress
 import logging
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from pydantic import BaseModel
 
 
 if TYPE_CHECKING:
@@ -57,8 +58,7 @@ RATE_LIMIT_KEYS: tuple[str, ...] = (
 )
 
 
-@dataclass
-class RateLimitConfig:
+class RateLimitConfig(BaseModel):
     """Rate limit configuration: ``cache_store.rate_limit`` in 10xgraph.json.
 
     Example::

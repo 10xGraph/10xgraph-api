@@ -109,7 +109,7 @@ async def _save(name: str, record: dict[str, Any]) -> None:
         logger.warning("Idempotency record could not be stored: %s", exc)
 
 
-@dataclass
+@dataclass(slots=True)
 class IdempotentRun:
     """A request that took its key: finish it with :meth:`complete`, always :meth:`release`."""
 
