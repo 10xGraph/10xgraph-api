@@ -144,7 +144,6 @@ def build_context(  # noqa: PLR0913
         "agent_name_slug": slug,
         "provider": resolved_provider,
         "websocket": websocket,
-        "id_generator": "uuid",
     }
 
     if resolved_mode == "quick":
@@ -249,7 +248,6 @@ def build_config(context: dict, is_prod: bool) -> dict:
     config["injectq"] = "graph.agent:container"
     if context.get("storage") == "postgres-memory":
         config["store"] = "graph.agent:store"
-    config["id_generator"] = context.get("id_generator", "uuid")
 
     # The API's cache store: rate limit counters, run locks and caps, idempotency,
     # ownership cache and token revocation. Redis is shared by every worker (empty url:
@@ -266,7 +264,8 @@ def build_config(context: dict, is_prod: bool) -> dict:
             "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"],
         }
     if auth in ("jwt", "custom") and context.get("token_revocation"):
-        # A leaked or logged-out token is rejected before it expires. See `10xgraph revoke`.
+        # A leaked or logged-out token is rejected before it expires.
+        # Revoke with `revoke_user` / `revoke_token`.
         cache_store["token_revocation"] = True
     config["cache_store"] = cache_store
 

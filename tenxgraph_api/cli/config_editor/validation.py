@@ -152,13 +152,13 @@ def production_readiness_warnings(config: dict) -> list[Issue]:
             "cache_store.token_revocation",
             "Token revocation is off, so a leaked or logged-out token works until it expires. "
             'Set "token_revocation": true under cache_store, with a redis or custom cache store, '
-            "and revoke with `10xgraph revoke`.",
+            "and revoke with `revoke_user` / `revoke_token` from `tenxgraph_api`.",
         )
     elif revocation and not revocation_off and store_type == "memory":
         out.warning(
             "cache_store.token_revocation",
-            "10xgraph revoke cannot reach an in-memory store; use redis or custom to share "
-            "revocations.",
+            "An in-memory store keeps revocations in one process; use redis or custom to share "
+            "them between workers.",
         )
     return out.issues
 

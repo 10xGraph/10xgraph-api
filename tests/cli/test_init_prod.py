@@ -201,7 +201,7 @@ def test_interactive_full_asks_four_more_questions(monkeypatch) -> None:
     assert context["cache_store"] == "memory"
     assert context["rate_limit"] is True
     assert context["token_revocation"] is True
-    assert context["id_generator"] == "uuid"
+    assert "id_generator" not in context
     assert (context["evals"], context["tests"]) == (True, True)
     assert (context["websocket"], context["ag_ui"], context["otel"]) == (False, False, False)
 
@@ -216,7 +216,7 @@ def test_interactive_full_writes_the_recommended_config(monkeypatch) -> None:
     assert config["ag_ui"] == {"enabled": False, "allow_client_tools": False}
     assert config["remote_tools"] == []
     assert check_auth_config(config, production=True) == []
-    assert config["id_generator"] == "uuid"
+    assert "id_generator" not in config
     assert config["cache_store"] == {
         "type": "memory",
         "rate_limit": {
@@ -232,7 +232,7 @@ def test_interactive_full_writes_the_recommended_config(monkeypatch) -> None:
     }
     template = Path(__file__).parents[2] / "tenxgraph_api/cli/templates/prod/10xgraph.json"
     static = json.loads(template.read_text(encoding="utf-8"))
-    for key in ("auth", "ag_ui", "remote_tools", "id_generator", "thread_name_generator"):
+    for key in ("auth", "ag_ui", "remote_tools", "thread_name_generator"):
         assert static[key] == config[key], key
 
 
@@ -247,7 +247,6 @@ def test_summary_shows_the_full_choices(monkeypatch) -> None:
         "Cache store",
         "Rate limit",
         "Token revocation",
-        "ID generator",
         "Evaluations",
         "Tests",
     ):

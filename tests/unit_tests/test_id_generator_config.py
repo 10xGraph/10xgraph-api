@@ -3,6 +3,7 @@
 # ruff: noqa: S101
 
 import json
+import warnings
 from types import SimpleNamespace
 
 import pytest
@@ -16,12 +17,12 @@ from tenxgraph.utils.constants import END
 from tenxgraph.utils.id_generator import (
     BaseIDGenerator,
     BigIntIDGenerator,
+    DefaultIDGenerator,
     HexIDGenerator,
     IDType,
     IntIDGenerator,
     ShortIDGenerator,
     TimestampIDGenerator,
-    UUIDGenerator,
 )
 
 from tenxgraph_api.src.app import loader
@@ -99,7 +100,7 @@ def _graph(*, container: InjectQ | None = None, id_generator=None, checkpointer=
 
 
 BUILTINS = {
-    "uuid": (UUIDGenerator, IDType.STRING),
+    "uuid": (DefaultIDGenerator, IDType.STRING),
     "hex": (HexIDGenerator, IDType.STRING),
     "short": (ShortIDGenerator, IDType.STRING),
     "int": (IntIDGenerator, IDType.INTEGER),
@@ -127,6 +128,12 @@ async def test_each_builtin_name(name, monkeypatch):
         value = await value
     assert isinstance(value, str if id_type == IDType.STRING else int)
     assert value not in ("", 0)
+
+
+def test_uuid_name_emits_no_deprecation_warning():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        loader.load_id_generator("uuid")
 
 
 def test_snowflake_without_its_package_names_the_extra(monkeypatch):

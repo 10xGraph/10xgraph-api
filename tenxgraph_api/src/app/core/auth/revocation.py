@@ -20,8 +20,9 @@ Revocations are kept in the API's cache store (``BaseCacheStore``): keys
 ``revoked:jti:<jti>`` (expires with the token) and ``revoked:user:<user_id>`` (holds the
 cutoff timestamp). A newer ``revoke_user`` cutoff is never replaced by an older one
 (``set(mode="if_greater")``). Times come from the store's clock, so pods with skewed clocks
-agree. From your own code call :func:`revoke_token` / :func:`revoke_user` with the app's
-cache store; from a shell use ``10xgraph revoke``.
+agree. From your own code (a tool, a custom auth class, a hook) call :func:`revoke_token` /
+:func:`revoke_user` (both importable from ``tenxgraph_api``) with the app's cache store,
+``InjectQ.get_instance().get(BaseCacheStore)``.
 
 Enable it in ``10xgraph.json`` with ``"cache_store": {"type": ..., "token_revocation": true}``
 (or an object with ``token_lifetime`` / ``user_ttl``, see ``TokenRevocationConfig``). With a

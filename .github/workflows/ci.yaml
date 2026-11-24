@@ -40,11 +40,8 @@ jobs:
           uv pip show 10xgraph
           uv run python -c "import importlib.metadata as m; print(m.distribution('10xgraph').read_text('direct_url.json'))"
 
-      - name: Run pre-commit (ruff, bandit, hygiene hooks)
+      - name: Run pre-commit (ruff, bandit, mypy, hygiene hooks)
         run: uv run pre-commit run --all-files --show-diff-on-failure
-
-      - name: Type check
-        run: uv run mypy
 
   test:
     name: Test (Python ${{ matrix.python-version }})

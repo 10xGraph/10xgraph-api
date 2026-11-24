@@ -155,7 +155,23 @@ async def test_live_tool_success_and_no_result_leak(sink):
 async def test_live_refused_call_is_failed_and_a_replay_is_recorded_once(sink):
     tools = ToolAudit(ALICE, "t", None)
     await tools.record_live(ToolCallEvent(id="x", name="ghost", args={}))
-    await tools.record_live(ToolResultEvent(id="x", result={"error": "not available"}))
+    await tools.record_live(
+        ToolResultEvent(id="x", result={"error": "not available"}, status="error")
+    )
     await tools.record_live(ToolCallEvent(id="x", name="ghost", args={}))
-    await tools.record_live(ToolResultEvent(id="x", result={"error": "not available"}))
+    await tools.record_live(
+        ToolResultEvent(id="x", result={"error": "not available"}, status="error")
+    )
     assert [(e.resource, e.result) for e in sink.events] == [("tool/ghost", "failed")]
+
+
+@pytest.mark.asyncio
+async def test_live_error_status_is_failed_without_a_failure_text(sink):
+    tools = ToolAudit(ALICE, "t", None)
+    await tools.record_live(ToolCallEvent(id="a", name="pay", args={}))
+    await tools.record_live(ToolResultEvent(id="a", result={"result": "oops"}, status="error"))
+    await tools.record_live(ToolCallEvent(id="b", name="pay", args={}))
+    await tools.record_live(
+        ToolResultEvent(id="b", result={"result": "Tool 'pay' failed: x"}, status="success")
+    )
+    assert [(e.tool_call_id, e.result) for e in sink.events] == [("a", "failed"), ("b", "success")]

@@ -21,7 +21,6 @@ from tenxgraph.utils.id_generator import (
     IntIDGenerator,
     ShortIDGenerator,
     TimestampIDGenerator,
-    UUIDGenerator,
 )
 
 from tenxgraph_api import BaseAuth
@@ -187,7 +186,7 @@ def _snowflake_id_generator() -> BaseIDGenerator:
 # ``id_generator`` names in 10xgraph.json (graph_config.ID_GENERATOR_NAMES): the concrete core
 # generators, plus the API's Snowflake one (reads the SNOWFLAKE_* environment variables).
 BUILTIN_ID_GENERATORS: dict[str, Callable[[], BaseIDGenerator]] = {
-    "uuid": UUIDGenerator,
+    "uuid": DefaultIDGenerator,
     "hex": HexIDGenerator,
     "short": ShortIDGenerator,
     "int": IntIDGenerator,
@@ -370,8 +369,8 @@ def _enable_token_revocation(container: InjectQ, config: GraphConfig, auth_enabl
     if is_in_memory(store) and (is_production() or workers > 1):
         logger.warning(
             "token_revocation is on with an in-memory cache store (workers=%d): a revocation "
-            "reaches only the process that recorded it, and `10xgraph revoke` cannot reach it "
-            'at all. Set "cache_store": {"type": "redis", "url": ...} (or type custom) to '
+            "reaches only the process that recorded it. Set "
+            '"cache_store": {"type": "redis", "url": ...} (or type custom) to '
             "share revocations between workers.",
             workers,
         )

@@ -1,3 +1,5 @@
+from typing import cast
+
 from ag_ui.encoder import EventEncoder
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -89,7 +91,7 @@ async def run_ag_ui(
     if thread_id is None or thread_id == NEW_THREAD:
         # The protocol makes threadId required, so a client that wants a server-made thread
         # sends it blank or "new". The new id comes back in RUN_STARTED.
-        thread_id = await service.new_thread_id()
+        thread_id = cast("str", await service.new_thread_id())
     else:
         if problem := resource_id_error(thread_id, "threadId"):
             raise ClientInputError(problem)

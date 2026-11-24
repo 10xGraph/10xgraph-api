@@ -73,7 +73,7 @@ def test_memory_cache_store_with_rate_limit_or_revocation_warns() -> None:
     messages = {i["path"]: i["message"] for i in issues}
     assert "per process" in messages["cache_store.rate_limit"]
     assert (
-        "10xgraph revoke cannot reach an in-memory store"
+        "An in-memory store keeps revocations in one process"
         in messages["cache_store.token_revocation"]
     )
     custom = _with(type="custom", url=None, path="graph.cache:store")

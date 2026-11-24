@@ -21,14 +21,12 @@ Import ID generators from `tenxgraph.utils`.
 
 Built-ins:
 
-- `DefaultIDGenerator`
-- `UUIDGenerator`
+- `DefaultIDGenerator` (uuid4, the default)
 - `BigIntIDGenerator`
 - `TimestampIDGenerator`
 - `IntIDGenerator`
 - `HexIDGenerator`
 - `ShortIDGenerator`
-- `AsyncIDGenerator`
 
 Related types:
 

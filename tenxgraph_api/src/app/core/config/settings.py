@@ -150,9 +150,9 @@ class Settings(BaseSettings):
     #################################
     # The API's cache store (run locks and caps, idempotency, rate limit, token revocation)
     # comes from `cache_store` in 10xgraph.json; a Redis one names its URL
-    # there (`"url": "${REDIS_URL}"`). Limits for the Redis client of a RedisCacheStore (and
-    # of `10xgraph revoke`) follow. Without them a Redis that stops
-    # answering (not refusing) would hang each request that touches it. Seconds; 0 turns the
+    # there (`"url": "${REDIS_URL}"`). Limits for the Redis client of a RedisCacheStore
+    # follow. Without them a Redis that stops answering (not refusing) would hang each
+    # request that touches it. Seconds; 0 turns the
     # timeout off. REDIS_MAX_CONNECTIONS bounds each client's pool; a request waits up to
     # REDIS_POOL_TIMEOUT for a free connection. 0 means no bound.
     REDIS_SOCKET_TIMEOUT: float = Field(default=5.0, ge=0.0)

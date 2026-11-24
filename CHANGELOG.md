@@ -27,10 +27,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased]
+## [1.1.0] - Unreleased
+
+### Removed
+
+- **`10xgraph revoke` is removed.** Revocation runs in the server and the CLI is not in the server's Docker image, so the command could not reach the server's cache store. This is an exception to the deprecation policy: it is removed in a minor release without a deprecation period. Token revocation itself is unchanged; call `revoke_user` / `revoke_token` (now importable from `tenxgraph_api`) with the cache store, `InjectQ.get_instance().get(BaseCacheStore)`, from a tool, custom auth class or hook.
 
 ### Changed
 
+- **`"id_generator": "uuid"` maps to core's `DefaultIDGenerator`**, not the deprecated
+  `UUIDGenerator`, so the value stays valid and no longer warns. uuid is the default, so
+  `10xgraph init` Production no longer writes `id_generator` and the summary no longer lists it.
 - **Public data classes are pydantic models.** `AgUiConfig`, `MediaConfig`, `RateLimitConfig`,
   `TokenRevocationConfig`, `CacheStoreConfig`, `WebSocketConfig`, `RunsConfig`, `SlotResult` and
   `RateLimitDecision` were dataclasses; they keep their names, import paths, fields and
@@ -53,6 +60,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Live tool audit uses the result event's `status`.** The `/v1/graph/live` audit reads core's `ToolResultEvent.status` (`error`) to record a failed tool call, instead of guessing from the result text. A ToolGuard denial is still recorded as `denied` with its reason. Needs a core that sets `status` on realtime tool results.
 - **New `runs.max_recursion_limit` in 10xgraph.json** (positive integer, default 100, editable in
   `10xgraph config`). A request's `recursion_limit` (steps per run) is no longer capped at 100 by
   the schema: the operator sets the cap, and a larger value gets 422 naming the key. Raise it
@@ -81,7 +89,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Requires `injectq>=0.6.1,<0.7`, now listed as a direct dependency. Routes resolve services with `InjectFastAPI` (replacing the deprecated `InjectAPI`), and code inside a request or task finds the app's container with `InjectQ.get_instance()`, which injectq 0.6 makes current for HTTP, WebSocket and TaskIQ. The WebSocket container workaround and `current_container()` helper are removed.
+- Requires `injectq>=0.7.0,<0.8`, now listed as a direct dependency. Routes resolve services with `InjectFastAPI` (replacing the deprecated `InjectAPI`), and code inside a request or task finds the app's container with `InjectQ.get_instance()`, which injectq 0.6 makes current for HTTP, WebSocket and TaskIQ. The WebSocket container workaround and `current_container()` helper are removed.
 - Upload file names are cleaned by core's `sanitize_filename`: an empty or `..` name is stored as `unnamed` (it was `file`), and leading dots are removed (`.env` becomes `env`).
 - One rule checks every `"module:attr"` value in `10xgraph.json` (`agent`, `store`, `injectq`, `auth.path`, `cache_store.path`, `thread_name_generator`, `id_generator`, audit sinks), in the server and every CLI command. A value without a colon, with an empty part or with two colons (`"graph.react:"`, `"a:b:c"`) now fails when the config is read, with one message, instead of failing later at import; a dotted attribute (`"mod:obj.attr"`) now works for every key.
 - `10xgraph eval` loads the agent the same way the server does: a factory function is called, and the config folder is on the import path.
