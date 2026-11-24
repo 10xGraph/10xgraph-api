@@ -91,11 +91,10 @@ With auth on, the worker rebuilds the identity from the stored claims with the c
 
 `"cache_store": {"type": "redis", "url": "${REDIS_URL}", "token_revocation": true}` (or
 `"token_revocation": {"enabled": true, "token_lifetime": 3600, "user_ttl": 2592000}` inside
-`cache_store`) rejects revoked tokens with 401 before they expire: by `jti` (`10xgraph revoke --jti`) or every
-token of a user issued before a cutoff (`10xgraph revoke --user`). Revocations live in the API's
+`cache_store`) rejects revoked tokens with 401 before they expire: by `jti` (`revoke_token`) or every
+token of a user issued before a cutoff (`revoke_user`). Both are importable from `tenxgraph_api` and take the cache store (`InjectQ.get_instance().get(BaseCacheStore)`); there is no CLI command. Revocations live in the API's
 cache store, so share them between workers with `cache_store` type `redis` or `custom`; with
-the in-memory store a revocation reaches one process and `10xgraph revoke` refuses to run
-(`--redis-url` points it at a Redis directly). It fails closed: while the cache store is
+the in-memory store a revocation reaches one process. It fails closed: while the cache store is
 unreachable, authenticated requests get 503 and the server refuses to start. The value is
 `true`, `false`, `null` or the object above; a string or a top-level `token_revocation` is a
 config error. It only applies with auth on. With it on, every token needs a `jti`: a token without one answers 401 `INVALID_TOKEN` ("Invalid token, jti missing").

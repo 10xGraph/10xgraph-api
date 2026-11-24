@@ -323,3 +323,10 @@ async def test_ws_run_gate_closes_on_a_token_without_jti(monkeypatch):
 
     assert await graph_router._ws_run_gate(websocket, Identity(user_id="a")) == "close"
     websocket.close.assert_awaited_once_with(code=1008)
+
+
+def test_revoke_functions_are_public():
+    import tenxgraph_api
+
+    assert tenxgraph_api.revoke_user is revoke_user
+    assert tenxgraph_api.revoke_token is revoke_token

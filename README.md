@@ -139,7 +139,6 @@ Run `10xgraph --help` or `10xgraph COMMAND --help` for options. Reference: [CLI]
 | `10xgraph build` | Write a `Dockerfile`, and with `--docker-compose` and `--k8s` a Compose file and a Kubernetes manifest. |
 | `10xgraph worker` | Run the TaskIQ worker for background jobs. |
 | `10xgraph scheduler` | Run the TaskIQ scheduler. Run exactly one. |
-| `10xgraph revoke` | Revoke one token (`--jti`) or all tokens of a user (`--user`). |
 | `10xgraph audit` | Read-only check of the interpreter, installed packages, `10xgraph.json` and the default port. Exits `1` on failure, so it works as a CI gate. |
 | `10xgraph test` | Run the project tests with pytest. |
 | `10xgraph eval` | Run agent evaluations and write JSON and HTML reports to `eval_reports/`. |

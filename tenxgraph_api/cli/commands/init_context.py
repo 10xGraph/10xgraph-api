@@ -264,7 +264,7 @@ def build_config(context: dict, is_prod: bool) -> dict:
             "exclude_paths": ["/ping", "/docs", "/redocs", "/openapi.json"],
         }
     if auth in ("jwt", "custom") and context.get("token_revocation"):
-        # A leaked or logged-out token is rejected before it expires. See `10xgraph revoke`.
+        # A leaked or logged-out token is rejected before it expires. Revoke with `revoke_user` / `revoke_token`.
         cache_store["token_revocation"] = True
     config["cache_store"] = cache_store
 

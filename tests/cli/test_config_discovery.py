@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 import tenxgraph_api.cli.commands.config as config_module
-from tenxgraph_api.cli.commands import revoke, worker
+from tenxgraph_api.cli.commands import worker
 from tenxgraph_api.cli.commands.audit import AuditCommand
 from tenxgraph_api.cli.commands.build import BuildCommand
 from tenxgraph_api.cli.commands.config import ConfigCommand
@@ -119,7 +119,6 @@ def test_config_command_uses_parent_file(
 
 
 @pytest.mark.parametrize("name", ["10xgraph.json", "agentflow.json"])
-def test_worker_and_revoke_find_parent(tmp_path: Path, sub: Path, name: str) -> None:
+def test_worker_finds_parent(tmp_path: Path, sub: Path, name: str) -> None:
     _write(tmp_path, name)
     assert worker.resolve_default_config("10xgraph.json") == (tmp_path / name).resolve()
-    assert revoke.resolve_default_config("10xgraph.json") == (tmp_path / name).resolve()

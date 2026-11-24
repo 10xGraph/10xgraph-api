@@ -369,8 +369,8 @@ def _enable_token_revocation(container: InjectQ, config: GraphConfig, auth_enabl
     if is_in_memory(store) and (is_production() or workers > 1):
         logger.warning(
             "token_revocation is on with an in-memory cache store (workers=%d): a revocation "
-            "reaches only the process that recorded it, and `10xgraph revoke` cannot reach it "
-            'at all. Set "cache_store": {"type": "redis", "url": ...} (or type custom) to '
+            "reaches only the process that recorded it. Set "
+            '"cache_store": {"type": "redis", "url": ...} (or type custom) to '
             "share revocations between workers.",
             workers,
         )

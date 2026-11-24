@@ -13,6 +13,7 @@ from tenxgraph.core.authz import Identity
 from .src.app.core.audit import AuditEvent, BaseAuditSink
 from .src.app.core.auth.base_auth import BaseAuth
 from .src.app.core.auth.permissions import RequireIdentity, RequirePermission
+from .src.app.core.auth.revocation import revoke_token, revoke_user
 from .src.app.core.cache_store import (
     BaseCacheStore,
     InMemoryCacheStore,
@@ -39,4 +40,6 @@ __all__ = [
     "SnowFlakeIdGenerator",
     "ThreadNameGenerator",
     "__version__",
+    "revoke_token",
+    "revoke_user",
 ]

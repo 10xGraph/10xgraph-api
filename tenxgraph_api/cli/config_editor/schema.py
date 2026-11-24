@@ -326,7 +326,7 @@ _SECTIONS: list[dict[str, Any]] = [
                 "exclusive_min": 0,
                 "step": 1,
                 "null_label": "Until deleted",
-                "help": "How long a revoke --user entry is kept by default.",
+                "help": "How long a revoke_user entry is kept by default.",
             },
         ],
         "env": [

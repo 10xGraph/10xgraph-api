@@ -573,11 +573,11 @@ export function CacheStoreWidget({ sec }) {
           <>
             <FeatureHead
               id="cache-token-revocation" title="Token revocation" on={on.revoke} onChange={setRevocation}
-              text="Reject revoked tokens before they expire (10xgraph revoke)."
+              text="Reject revoked tokens before they expire (revoke_user / revoke_token)."
             />
             {on.revoke ? (
               <>
-                {memory ? <InlineNote warn>10xgraph revoke cannot reach an in-memory store; pick Redis or Custom.</InlineNote> : null}
+                {memory ? <InlineNote warn>An in-memory store keeps revocations in one process; pick Redis or Custom to share them.</InlineNote> : null}
                 <div class="grid gap-x-6 sm:grid-cols-2">
                   <Field field={field("cache_store.token_revocation.token_lifetime")} />
                   <Field field={field("cache_store.token_revocation.user_ttl")} />

@@ -29,6 +29,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.1.0] - Unreleased
 
+### Removed
+
+- **`10xgraph revoke` is removed.** Revocation runs in the server and the CLI is not in the server's Docker image, so the command could not reach the server's cache store. This is an exception to the deprecation policy: it is removed in a minor release without a deprecation period. Token revocation itself is unchanged; call `revoke_user` / `revoke_token` (now importable from `tenxgraph_api`) with the cache store, `InjectQ.get_instance().get(BaseCacheStore)`, from a tool, custom auth class or hook.
+
 ### Changed
 
 - **`"id_generator": "uuid"` maps to core's `DefaultIDGenerator`**, not the deprecated
