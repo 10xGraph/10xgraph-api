@@ -11,7 +11,7 @@ resolution-markers = [
 [[package]]
 name = "10xgraph"
 version = "1.0.0"
-source = { git = "https://github.com/10xGraph/10xGraph?branch=main#c29e17e3c02c59d035cc9f335785b8b9a62b51bc" }
+source = { git = "https://github.com/10xGraph/10xGraph?branch=main#62a214c58d9ee3bfc42ca4371edad462ac67fcfc" }
 dependencies = [
     { name = "injectq" },
     { name = "pydantic" },
@@ -31,6 +31,7 @@ source = { editable = "." }
 dependencies = [
     { name = "10xgraph" },
     { name = "fastapi" },
+    { name = "injectq" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
@@ -138,6 +139,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.116,<1.0" },
     { name = "firebase-admin", marker = "extra == 'firebase'", specifier = ">=6.5.0" },
     { name = "google-cloud-logging", marker = "extra == 'gcloud'" },
+    { name = "injectq", specifier = ">=0.6.1,<0.7" },
     { name = "oauth2client", marker = "extra == 'firebase'", specifier = ">=4.1.3" },
     { name = "opentelemetry-api", marker = "extra == 'metrics'", specifier = ">=1.45.1" },
     { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.45.1" },
@@ -1460,14 +1462,14 @@ wheels = [
 
 [[package]]
 name = "injectq"
-version = "0.4.2"
+version = "0.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c7/61/8399d1a71eeab69af49566e89401092dd59d70807b721b0a4fb73db63dfb/injectq-0.4.2.tar.gz", hash = "sha256:efcb6416e3b80d5a0b10c32138b05fe7128640287da15482e5314372d32222df", size = 2179419, upload-time = "2026-05-07T11:55:09.957Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e3/18/e592a1d18dfc60993514908fed6414320c58eba5e79b0c7154be53490a05/injectq-0.6.1.tar.gz", hash = "sha256:e1b70cf77d29b30fabfaac7065d4daaf7df5e017e72fca7146a291a31081117d", size = 410247, upload-time = "2026-11-23T15:30:25.463Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/34/a7/329aa7afeb0617b413fcd8b10d0e9c11eef8c9bfd8db5a254b15bd7d5b73/injectq-0.4.2-py3-none-any.whl", hash = "sha256:a8b8873e3b1d53ea2a3020478f42ba2698b39436eed2855fac4ee6698b5e650f", size = 74072, upload-time = "2026-05-07T11:55:05.975Z" },
+    { url = "https://files.pythonhosted.org/packages/67/64/d920183e470bcf5bd9ecb5fc486ca570d0c9a29a2f68332df23b5371d89d/injectq-0.6.1-py3-none-any.whl", hash = "sha256:642b8261bd1eac81bef654ddbe02fcafc6f3eaaa23a441cc90f78374b3aa7a92", size = 105713, upload-time = "2026-11-23T15:30:20.531Z" },
 ]
 
 [[package]]
