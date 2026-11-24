@@ -205,7 +205,8 @@ def test_the_container_gets_the_generator():
 
 def _pg(id_type) -> PgCheckpointer:
     checkpointer = PgCheckpointer.__new__(PgCheckpointer)  # no database needed
-    checkpointer.id_type = id_type
+    # The deprecated id_type= pin: core stores it here, and id_type reads it back.
+    checkpointer._set_declared_id_type(id_type)
     return checkpointer
 
 
