@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import AwareDatetime, BaseModel, Field, StringConstraints
 from tenxgraph.core.state import Message
 from tenxgraph.storage.store.store_schema import (
     DistanceMetric,
+    MemoryOrigin,
     MemoryRecord,
     MemorySearchResult,
     MemoryType,
@@ -57,6 +58,10 @@ class StoreMemorySchema(BaseConfigSchema):
         default=None,
         description="Arbitrary metadata associated with the memory.",
     )
+    expires_at: AwareDatetime | None = Field(
+        default=None,
+        description="When the memory expires (timezone required). Omit to keep it.",
+    )
 
 
 class SearchMemorySchema(BaseConfigSchema):
@@ -103,6 +108,11 @@ class SearchMemorySchema(BaseConfigSchema):
         le=MAX_SEARCH_TOKENS,
         description="Maximum tokens used for truncation in similarity search.",
     )
+    origins: list[MemoryOrigin | None] | None = Field(
+        default=None,
+        max_length=len(MemoryOrigin) + 1,
+        description="Only memories written by these origins; null in the list means unknown.",
+    )
 
 
 class UpdateMemorySchema(BaseConfigSchema):
@@ -112,6 +122,10 @@ class UpdateMemorySchema(BaseConfigSchema):
     metadata: BoundedDict | None = Field(
         default=None,
         description="Updated metadata for the memory.",
+    )
+    expires_at: AwareDatetime | None = Field(
+        default=None,
+        description="New expiry (timezone required). Omit to leave it unchanged.",
     )
 
 
@@ -141,6 +155,11 @@ class ListMemoriesSchema(BaseConfigSchema):
     filters: BoundedDict | None = Field(
         default=None,
         description="Additional filters that narrow the list; the isolation scope still applies.",
+    )
+    origins: list[MemoryOrigin | None] | None = Field(
+        default=None,
+        max_length=len(MemoryOrigin) + 1,
+        description="Only memories written by these origins; null in the list means unknown.",
     )
 
 
@@ -220,6 +239,7 @@ __all__ = [
     "MemoryItemResponseSchema",
     "MemoryListResponseSchema",
     "MemoryOperationResponseSchema",
+    "MemoryOrigin",
     "MemoryRecord",
     "MemorySearchResponseSchema",
     "MemorySearchResult",
