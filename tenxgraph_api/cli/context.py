@@ -9,7 +9,7 @@ from uuid import uuid4
 from tenxgraph_api.cli.capabilities import TerminalCapabilities
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CLIContext:
     """Invocation-scoped CLI state passed through Typer's context object."""
 

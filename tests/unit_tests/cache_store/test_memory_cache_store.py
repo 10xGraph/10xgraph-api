@@ -213,8 +213,6 @@ async def test_many_renewals_keep_the_heap_small():
     assert len(store._slots["concurrency:k"].heap) < 40
 
 
-
-
 @pytest.mark.asyncio
 async def test_wall_clock_jump_does_not_expire_live_slots_or_keys(monkeypatch):
     """A host suspend moves wall time but not the monotonic clock the lease renewer runs on."""

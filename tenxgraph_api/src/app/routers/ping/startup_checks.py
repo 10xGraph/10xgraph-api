@@ -57,7 +57,7 @@ class StartupCheckError(RuntimeError):
     """A required backend stayed unreachable for the whole startup window."""
 
 
-@dataclass
+@dataclass(slots=True)
 class Target:
     """One bound backend to check: a name, its probe and what to call it in messages."""
 

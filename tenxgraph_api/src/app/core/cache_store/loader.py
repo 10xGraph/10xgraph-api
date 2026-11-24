@@ -59,7 +59,7 @@ def build_cache_store(graph_config: GraphConfig | None) -> tuple[BaseCacheStore,
         ) from None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CacheStoreSource:
     """The config key the bound cache store came from (``cache_store.url``), for the startup
     check."""

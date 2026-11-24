@@ -492,6 +492,18 @@ _SECTIONS: list[dict[str, Any]] = [
                     "10, or the TENXGRAPH_MAX_PARALLEL_TOOL_CALLS environment variable."
                 ),
             },
+            {
+                "path": ["runs", "max_recursion_limit"],
+                "label": "Max steps per run (recursion limit)",
+                "type": "number",
+                "min": 1,
+                "step": 1,
+                "placeholder": "100",
+                "help": (
+                    "Highest recursion_limit a request may ask for; a larger value gets 422. "
+                    "Empty uses 100. Raise it for agents that need hundreds of steps."
+                ),
+            },
         ],
         "env": [
             {
@@ -994,8 +1006,9 @@ _SECTIONS: list[dict[str, Any]] = [
         ],
         "notes": [
             "snowflake needs the snowflakekit extra and reads the SNOWFLAKE_* variables.",
-            "Integer ids (int, bigint, snowflake, timestamp) need PgCheckpointer with "
-            'id_type="bigint" or "int".',
+            "The id type of PgCheckpointer follows the generator (text ids for uuid, hex and "
+            "short; integers for int, bigint, snowflake and timestamp). Its id_type argument is "
+            "deprecated.",
         ],
         "env": [
             {"name": "SNOWFLAKE_EPOCH", "purpose": "Epoch in milliseconds for Snowflake ids."},

@@ -244,15 +244,20 @@ class InMemoryCacheStore(BaseCacheStore):
             if count >= limit:
                 if slots is not None and not slots.expiries:
                     del self._slots[key]
-                    return SlotResult(False, 0, None, None)
+                    return SlotResult(granted=False, count=0, oldest_expiry=None, slot_id=None)
                 oldest = self._to_epoch(slots.oldest() if slots else None)
-                return SlotResult(False, count, oldest, None)
+                return SlotResult(granted=False, count=count, oldest_expiry=oldest, slot_id=None)
             if slots is None:
                 self._make_room_for_slots(now)
                 slots = self._slots[key] = _SlotSet()
             slot_id = uuid.uuid4().hex
             slots.put(slot_id, now + ttl)
-            return SlotResult(True, count + 1, self._to_epoch(slots.oldest()), slot_id)
+            return SlotResult(
+                granted=True,
+                count=count + 1,
+                oldest_expiry=self._to_epoch(slots.oldest()),
+                slot_id=slot_id,
+            )
 
     async def renew(self, key: str, slot_id: str, ttl: float) -> bool:
         _check_ttl(ttl)

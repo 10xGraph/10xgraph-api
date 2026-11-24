@@ -35,7 +35,7 @@ _DRIVER_MODULES = ("redis", "asyncpg", "psycopg", "psycopg2", "psycopg_pool")
 _MAX_CHAIN = 8
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Classified:
     status_code: int
     error_code: str

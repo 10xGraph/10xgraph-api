@@ -47,7 +47,7 @@ class StepState(StrEnum):
     SKIPPED = "skipped"
 
 
-@dataclass
+@dataclass(slots=True)
 class Step:
     """One declared stage and everything needed to render its current state."""
 

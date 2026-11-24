@@ -86,7 +86,6 @@ class TestCheckpointerService:
         with pytest.raises(ValueError, match="Checkpointer is not configured"):
             checkpointer_service_no_checkpointer._config(config, ALICE)
 
-
     @pytest.mark.asyncio
     async def test_get_state_fallback_to_cache(self, checkpointer_service, mock_checkpointer):
         """Test get_state falls back to cache when primary state is None."""
@@ -98,11 +97,6 @@ class TestCheckpointerService:
         assert isinstance(result, StateResponseSchema)
         assert result.state == {"cached": "data"}
         mock_checkpointer.aget_state_cache.assert_called_once()
-
-
-
-
-
 
     def test_merge_states_basic(self, checkpointer_service):
         """Test _merge_states with basic merging."""

@@ -16,13 +16,11 @@ from tenxgraph_api.src.app.core.exceptions.client_errors import client_error
 from tenxgraph_api.src.app.core.threads import set_user
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.core.validation.request_config import ClientInputError, tool_result_ids
-from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (
-    KEEP_MESSAGE_IDS,
-    GraphInputSchema,
-)
+from tenxgraph_api.src.app.core.validation.resource_ids import to_core_id
+from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import GraphInputSchema
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService, RunChecks
 
-from .converter import select_new_messages, to_tenxgraph_messages
+from .converter import known_message_ids, select_new_messages, to_tenxgraph_messages
 from .event_mapper import AgUiEventMapper
 
 
@@ -111,7 +109,7 @@ async def _run_events(
     context = list(getattr(checkpoint_state, "context", None) or [])
     new_messages = select_new_messages(
         run_input.messages,
-        known_ids={str(m.message_id) for m in context},
+        known_ids=known_message_ids(context),
         answered_call_ids=set(tool_result_ids(context)),
     )
     messages = to_tenxgraph_messages(new_messages)
@@ -147,7 +145,7 @@ def _client_state(state: Any) -> dict[str, Any] | None:
 async def _checkpoint_state(service: GraphService, thread_id: str, user: Identity | None) -> Any:
     if service.checkpointer is None:
         return None
-    config: dict[str, Any] = {"thread_id": thread_id}
+    config: dict[str, Any] = {"thread_id": to_core_id(thread_id)}
     set_user(config, user)
     return await service.checkpointer.aget_state(config)
 
@@ -187,7 +185,7 @@ def _graph_request(
 ) -> tuple[GraphInputSchema, dict[str, Any]]:
     """The graph input for one AG-UI run, and the server-owned run config that goes with it."""
     extra: dict[str, Any] = {} if resume is _NO_RESUME else {"resume": resume}
-    # AG-UI keeps the client's message ids: select_new_messages dedups on them.
+    # Like REST, the schema replaces the client's message ids with server ids.
     graph_input = GraphInputSchema.model_validate(
         {
             "messages": messages,
@@ -196,7 +194,6 @@ def _graph_request(
             "response_granularity": ResponseGranularity.FULL,
             **extra,
         },
-        context={KEEP_MESSAGE_IDS: True},
     )
     # Server-owned keys go in after the client allow-list check (``runs.config_keys``), so that
     # setting cannot reject them, and clients of the plain graph routes cannot set them.

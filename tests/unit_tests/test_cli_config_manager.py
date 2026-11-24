@@ -34,8 +34,6 @@ class TestConfigManager:
 
         shutil.rmtree(temp_dir)
 
-
-
     def test_find_config_file_absolute_path(self, temp_config_file):
         """Test finding config file with absolute path."""
         manager = ConfigManager()

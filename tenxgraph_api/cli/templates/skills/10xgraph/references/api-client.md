@@ -43,7 +43,7 @@ For remote tools, read `remote-tools.md`; that flow has a client-managed executi
 - The client serializes `Message` instances to plain API payloads.
 - Server expects message content as an array of content blocks.
 - `message_id` is sent as a string; `"0"` lets the server generate/normalize where applicable.
-- `recursion_limit` defaults to `25`.
+- `recursion_limit` defaults to `25`; the server rejects a larger value than `runs.max_recursion_limit` (default `100`) with 422.
 - Streaming defaults to low response granularity in the client.
 
 ## Rules

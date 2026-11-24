@@ -11,7 +11,6 @@ import importlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from injectq import InjectQ
 
 from tenxgraph_api.src.app.routers.graph.services import run_checks
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService
@@ -33,9 +32,7 @@ def generated_ids(monkeypatch):
 
     def _set(*ids):
         sequence = iter(ids)
-        container = MagicMock()
-        container.atry_get = AsyncMock(side_effect=lambda key: next(sequence))
-        monkeypatch.setattr(InjectQ, "get_instance", staticmethod(lambda: container))
+        monkeypatch.setattr(run_checks, "generate_id", lambda explicit_id=None: next(sequence))
 
     return _set
 

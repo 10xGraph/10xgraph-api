@@ -2,8 +2,9 @@
 
 import logging
 import os
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from pydantic import BaseModel, ConfigDict
 
 
 if TYPE_CHECKING:
@@ -26,8 +27,7 @@ def _positive_seconds(value: object, *, field: str) -> float:
     return float(value)
 
 
-@dataclass(frozen=True)
-class TokenRevocationConfig:
+class TokenRevocationConfig(BaseModel):
     """``cache_store.token_revocation`` in 10xgraph.json: ``true``, or an object.
 
     Example::
@@ -44,6 +44,8 @@ class TokenRevocationConfig:
     ``user_ttl`` is how long a ``revoke_user`` entry is kept by default (``null`` keeps it
     until deleted).
     """
+
+    model_config = ConfigDict(frozen=True)
 
     token_lifetime: float | None = None
     user_ttl: float | None = DEFAULT_USER_REVOCATION_TTL
@@ -113,8 +115,7 @@ def check_cache_store_settings(data: dict) -> None:
             raise ValueError(message)
 
 
-@dataclass(frozen=True)
-class CacheStoreConfig:
+class CacheStoreConfig(BaseModel):
     """``cache_store`` in 10xgraph.json: the API's cache store and the features it backs.
 
     Example::
@@ -135,6 +136,8 @@ class CacheStoreConfig:
     the revocations of ``token_revocation`` (:class:`TokenRevocationConfig`); both are off
     when absent. ``rate_limit`` is kept here even when its ``enabled`` is false.
     """
+
+    model_config = ConfigDict(frozen=True)
 
     type: str = "memory"
     url: str | None = None  # as written; see expanded_url

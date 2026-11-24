@@ -16,17 +16,11 @@ def teardown_function() -> None:
     root.handlers.clear()
 
 
-
-
-
-
 def test_quiet_and_verbose_levels() -> None:
     setup_cli_logging(verbose=True)
     assert logging.getLogger("tenxgraph_api.cli").level == logging.DEBUG
     setup_cli_logging(quiet=True, verbose=True)
     assert logging.getLogger("tenxgraph_api.cli").level == logging.ERROR
-
-
 
 
 def test_custom_stream_is_isolated() -> None:

@@ -290,8 +290,6 @@ class TestWsInterruptId:
 # ---------------------------------------------------------------------------
 
 
-
-
 def test_checker_accepts_values_at_the_limits():
     assert request_size_error([_msg()] * MAX_MESSAGES) is None
     block = {"type": "text", "text": ""}

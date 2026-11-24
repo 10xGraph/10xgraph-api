@@ -14,11 +14,6 @@ from tenxgraph_api.src.app.core.validation.request_config import (
 )
 
 
-# Validation context key: keep the messages' own ids (the AG-UI adapter, whose converter
-# dedups on them). Without it the server generates every id.
-KEEP_MESSAGE_IDS = "keep_message_ids"
-
-
 class GraphInputSchema(BaseModel):
     """
     Schema for graph input including messages and configuration.
@@ -56,8 +51,10 @@ class GraphInputSchema(BaseModel):
     recursion_limit: int = Field(
         default=25,
         ge=1,
-        le=100,
-        description="Maximum recursion limit for graph execution",
+        description=(
+            "Maximum steps for this run. The server caps it with runs.max_recursion_limit "
+            "(default 100); a larger value is rejected with 422."
+        ),
     )
     on_busy: Literal["wait", "cancel"] = Field(
         default="wait",
@@ -87,11 +84,9 @@ class GraphInputSchema(BaseModel):
 
     @field_validator("messages")
     @classmethod
-    def client_messages_only(cls, v: list[Message], info: ValidationInfo) -> list[Message]:
+    def client_messages_only(cls, v: list[Message]) -> list[Message]:
         if error := client_message_error(v):
             raise ValueError(error)
-        if (info.context or {}).get(KEEP_MESSAGE_IDS):
-            return v
         return with_fresh_message_ids(v)
 
     @model_validator(mode="after")
@@ -473,8 +468,10 @@ class WsGraphInputSchema(BaseModel):
     recursion_limit: int = Field(
         default=25,
         ge=1,
-        le=100,
-        description="Maximum recursion limit for graph execution.",
+        description=(
+            "Maximum steps for this run. The server caps it with runs.max_recursion_limit "
+            "(default 100); a larger value is rejected with 422."
+        ),
     )
     on_busy: Literal["wait", "cancel"] = Field(
         default="wait",

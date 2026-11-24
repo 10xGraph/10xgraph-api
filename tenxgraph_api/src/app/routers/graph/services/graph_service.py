@@ -20,7 +20,6 @@ from http import (  # noqa: F401
     HTTPStatus,
 )
 from typing import Any
-from uuid import uuid4
 
 from injectq import (  # noqa: F401
     InjectQ,
@@ -44,6 +43,7 @@ from tenxgraph.core.graph.utils.stream_handler import (  # noqa: F401
     is_pause_chunk,
 )
 from tenxgraph.core.state import AgentState, Message, StreamChunk, StreamEvent
+from tenxgraph.core.state.message import generate_id
 from tenxgraph.storage.checkpointer import BaseCheckpointer
 from tenxgraph.utils import (  # noqa: F401
     ResponseGranularity,
@@ -101,6 +101,7 @@ from tenxgraph_api.src.app.core.validation.request_config import (  # noqa: F401
     tool_result_ids,
     unanswered_tool_calls,
 )
+from tenxgraph_api.src.app.core.validation.resource_ids import to_core_id
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import (  # noqa: F401
     GraphInputSchema,
     GraphInvokeOutputSchema,
@@ -318,7 +319,7 @@ class GraphService(
 
             # Start with client config if provided, then overlay trusted attributes
             stop_config = client_config(config)
-            stop_config["thread_id"] = thread_id
+            stop_config["thread_id"] = to_core_id(thread_id)
             set_user(stop_config, user)
 
             # Call the graph's astop method
@@ -454,7 +455,7 @@ class GraphService(
 
         # A telemetry run, so the observability endpoint can rebuild the trace.
         run.thread_id = str(run.config["thread_id"])
-        run.run_id = str(run.config.get("run_id") or uuid4())
+        run.run_id = str(run.config.get("run_id") or generate_id())
         run.config.setdefault("run_id", run.run_id)
         run.started = datetime.now().timestamp()
         if self.telemetry:

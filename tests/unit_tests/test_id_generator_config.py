@@ -205,7 +205,8 @@ def test_the_container_gets_the_generator():
 
 def _pg(id_type) -> PgCheckpointer:
     checkpointer = PgCheckpointer.__new__(PgCheckpointer)  # no database needed
-    # The deprecated id_type= pin: core stores it here, and id_type reads it back.
+    # The deprecated id_type= pin (core ``check_id_type`` runs at boot); without it the id type
+    # follows the bound generator.
     checkpointer._set_declared_id_type(id_type)
     return checkpointer
 
@@ -214,7 +215,7 @@ def _pg(id_type) -> PgCheckpointer:
     ("name", "column", "fix"),
     [
         ("bigint", "string", 'id_type="bigint"'),
-        ("timestamp", "string", 'id_type="bigint"'),
+        ("timestamp", "string", 'id_type="int"'),
         ("uuid", "bigint", 'id_type="string"'),
         ("hex", "int", 'id_type="string"'),
         ("bigint", "int", 'id_type="bigint"'),
@@ -228,7 +229,8 @@ def test_a_pg_checkpointer_that_cannot_hold_the_ids_refuses_boot(name, column, f
     with pytest.raises(ValueError) as info:
         loader.apply_id_generator(graph, _config(name), container)
     message = str(info.value)
-    assert f"id_generator {name!r} makes" in message
+    assert "The id generator " in message
+    assert "ids but PgCheckpointer stores" in message
     assert f"Pass {fix} to PgCheckpointer(...)" in message
 
 

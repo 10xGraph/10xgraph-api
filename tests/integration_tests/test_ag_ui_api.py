@@ -271,8 +271,9 @@ def test_second_turn_sends_only_the_new_message(setup):
     import anyio
 
     state = anyio.run(checkpointer.aget_state, {"thread_id": "t3", "user_id": "alice"})
-    user_ids = [m.message_id for m in state.context if m.role == "user"]
-    assert user_ids == ["u1", "u2"]
+    users = [m for m in state.context if m.role == "user"]
+    assert [m.metadata["client_message_id"] for m in users] == ["u1", "u2"]
+    assert not {"u1", "u2"} & {m.message_id for m in users}
 
 
 def test_resending_a_known_message_does_not_rerun_the_graph(setup):

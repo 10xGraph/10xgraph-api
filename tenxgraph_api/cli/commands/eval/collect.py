@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from tenxgraph_api.cli.core.output import OutputFormatter
 
 
-@dataclass
+@dataclass(slots=True)
 class _PendingCase:
     case: Any  # EvalCase
     evaluator: AgentEvaluator
@@ -31,7 +31,7 @@ class _PendingCase:
     config_source: str = ""  # where config came from: per-file / confeval.py / defaults
 
 
-@dataclass
+@dataclass(slots=True)
 class _PendingSimulation:
     scenario: Any  # ConversationScenario
     graph: Any

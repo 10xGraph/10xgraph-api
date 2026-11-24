@@ -72,7 +72,6 @@ class TestUploadFileLogic:
         assert exc_info.value.status_code == 400
         assert "empty" in exc_info.value.detail.lower()
 
-
     @pytest.mark.asyncio
     async def test_upload_file_handles_service_error(self, mock_request, mock_service, mock_user):
         """Test that upload_file handles service errors."""
@@ -99,7 +98,6 @@ class TestUploadFileLogic:
 class TestGetFileLogic:
     """Test GET /v1/files/{file_id} endpoint logic."""
 
-
     @pytest.mark.asyncio
     async def test_get_file_handles_not_found(self, mock_service, mock_user):
         """Test that get_file handles file not found."""
@@ -118,7 +116,6 @@ class TestGetFileLogic:
 
 class TestGetFileInfoLogic:
     """Test GET /v1/files/{file_id}/info endpoint logic."""
-
 
     @pytest.mark.asyncio
     async def test_get_file_info_handles_not_found(self, mock_request, mock_service, mock_user):
@@ -140,8 +137,6 @@ class TestGetFileInfoLogic:
 class TestGetFileAccessUrlLogic:
     """Test GET /v1/files/{file_id}/url endpoint logic."""
 
-
-
     @pytest.mark.asyncio
     async def test_get_file_access_url_handles_not_found(
         self, mock_request, mock_service, mock_user
@@ -159,5 +154,3 @@ class TestGetFileAccessUrlLogic:
                 identity=mock_user,
             )
         assert exc_info.value.status_code == 404
-
-

@@ -12,6 +12,7 @@ from tenxgraph_api.src.app.core.auth.permissions import RequirePermission
 from tenxgraph_api.src.app.core.config.settings import get_settings
 from tenxgraph_api.src.app.core.validation.client_filters import parse_filters_param
 from tenxgraph_api.src.app.core.validation.request_config import client_config
+from tenxgraph_api.src.app.core.validation.resource_ids import to_core_id
 from tenxgraph_api.src.app.utils.parse_output import parse_message_output
 from tenxgraph_api.src.app.utils.response_helper import success_response
 from tenxgraph_api.src.app.utils.swagger_helper import generate_swagger_responses
@@ -44,7 +45,8 @@ def _clamp_limit(limit: int | None) -> int:
     return min(limit, MAX_PAGE_LIMIT)
 
 
-def validate_thread_id(thread_id: int | str) -> None:
+def validate_thread_id(thread_id: int | str) -> str | int:
+    """Check the path thread id and return it in the id generator's type."""
     if isinstance(thread_id, str):
         if not thread_id.strip():
             raise HTTPException(status_code=422, detail="thread_id cannot be empty or whitespace")
@@ -53,6 +55,7 @@ def validate_thread_id(thread_id: int | str) -> None:
             raise HTTPException(status_code=422, detail="thread_id must be a non-negative integer")
     else:
         raise HTTPException(status_code=422, detail="thread_id must be a string or integer")
+    return to_core_id(thread_id, "thread_id")
 
 
 @router.get(
@@ -77,7 +80,7 @@ async def get_state(
     Returns:
         State response with state data or error
     """
-    validate_thread_id(thread_id)
+    thread_id = validate_thread_id(thread_id)
 
     config = {"thread_id": thread_id}
 
@@ -117,7 +120,7 @@ async def put_state(
     Returns:
         Success response or error
     """
-    validate_thread_id(thread_id)
+    thread_id = validate_thread_id(thread_id)
     # The path thread_id is applied last so the body config cannot redirect the call to
     # another thread.
     config = {**client_config(payload.config), "thread_id": thread_id}
@@ -165,7 +168,7 @@ async def clear_state(
     Returns:
         Success response or error
     """
-    validate_thread_id(thread_id)
+    thread_id = validate_thread_id(thread_id)
     config = {"thread_id": thread_id}
 
     res = await service.clear_state(
@@ -216,9 +219,10 @@ async def get_message(
     Returns:
         Message response with message data or error
     """
-    validate_thread_id(thread_id)
+    thread_id = validate_thread_id(thread_id)
     if not message_id or (isinstance(message_id, str) and not str(message_id).strip()):
         raise HTTPException(status_code=422, detail="message_id is required and cannot be empty")
+    message_id = to_core_id(message_id, "message_id")
 
     config = {"thread_id": thread_id}
 
@@ -264,9 +268,10 @@ async def put_message_feedback(
     Returns:
         The updated message, or 404 when the thread has no such message
     """
-    validate_thread_id(thread_id)
+    thread_id = validate_thread_id(thread_id)
     if not message_id or (isinstance(message_id, str) and not str(message_id).strip()):
         raise HTTPException(status_code=422, detail="message_id is required and cannot be empty")
+    message_id = to_core_id(message_id, "message_id")
 
     result = await service.update_message_feedback(
         {"thread_id": thread_id},
@@ -316,7 +321,7 @@ async def list_messages(
     Returns:
         Messages list response with messages data or error
     """
-    validate_thread_id(thread_id)
+    thread_id = validate_thread_id(thread_id)
     if offset is not None and offset < 0:
         raise HTTPException(status_code=422, detail="offset must be >= 0")
     if limit is not None and limit <= 0:
@@ -364,9 +369,10 @@ async def delete_message(
     Returns:
         Success response or error
     """
-    validate_thread_id(thread_id)
+    thread_id = validate_thread_id(thread_id)
     if not message_id or (isinstance(message_id, str) and not str(message_id).strip()):
         raise HTTPException(status_code=422, detail="message_id is required and cannot be empty")
+    message_id = to_core_id(message_id, "message_id")
 
     # The path thread_id is applied last so the body config cannot redirect the call to
     # another thread.
@@ -418,7 +424,7 @@ async def get_thread(
     Returns:
         Thread response with thread data or error
     """
-    validate_thread_id(thread_id)
+    thread_id = validate_thread_id(thread_id)
     result = await service.get_thread(
         {"thread_id": thread_id},
         identity,
@@ -512,7 +518,7 @@ async def delete_thread(
     Returns:
         Success response or error
     """
-    validate_thread_id(thread_id)
+    thread_id = validate_thread_id(thread_id)
     # The path thread_id is applied last so the body config cannot redirect the call to
     # another thread.
     config = {**client_config(payload.config), "thread_id": thread_id}

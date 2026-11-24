@@ -160,6 +160,18 @@ def _upgrade_part(part: Any) -> Any:
     return {"type": part_type, "source": source}
 
 
+CLIENT_MESSAGE_ID = "client_message_id"
+
+
+def known_message_ids(stored: list[Any]) -> set[str]:
+    """Message ids and client message ids of the messages already in the checkpoint."""
+    ids = {str(m.message_id) for m in stored}
+    ids.update(
+        str(m.metadata[CLIENT_MESSAGE_ID]) for m in stored if CLIENT_MESSAGE_ID in m.metadata
+    )
+    return ids
+
+
 def select_new_messages(
     messages: list[Any],
     known_ids: set[str] | frozenset[str] = frozenset(),
@@ -169,7 +181,8 @@ def select_new_messages(
 
     Args:
         messages: ``RunAgentInput.messages``, the full client-side history.
-        known_ids: Message ids already in the thread's checkpoint.
+        known_ids: Ids already in the thread's checkpoint: message ids and the
+            ``client_message_id`` of stored messages.
         answered_call_ids: Tool call ids the checkpoint already has a result for. Clients mint
             a fresh id for each tool message, so results are matched by call id instead.
     """
@@ -189,13 +202,23 @@ def select_new_messages(
 
 
 def to_tenxgraph_messages(messages: list[Any]) -> list[Message]:
-    """Convert AG-UI user and tool messages to 10xGraph messages, keeping their ids."""
+    """Convert AG-UI user and tool messages to 10xGraph messages.
+
+    The message id is a placeholder: the graph schema replaces it with a server id, like REST.
+    The client's id is kept in ``metadata["client_message_id"]``.
+    """
     converted: list[Message] = []
     for message in messages:
         if message.role == "user":
             blocks = _content_blocks(message.content)
             if blocks:
-                converted.append(Message(message_id=message.id, role="user", content=blocks))
+                converted.append(
+                    Message(
+                        role="user",
+                        content=blocks,
+                        metadata={CLIENT_MESSAGE_ID: str(message.id)},
+                    )
+                )
         elif message.role == "tool":
             error = getattr(message, "error", None)
             output = error or _text(message.content)
@@ -205,7 +228,13 @@ def to_tenxgraph_messages(messages: list[Any]) -> list[Message]:
                 is_error=bool(error),
                 status="failed" if error else "completed",
             )
-            converted.append(Message(message_id=message.id, role="tool", content=[result]))
+            converted.append(
+                Message(
+                    role="tool",
+                    content=[result],
+                    metadata={CLIENT_MESSAGE_ID: str(message.id)},
+                )
+            )
     return converted
 
 

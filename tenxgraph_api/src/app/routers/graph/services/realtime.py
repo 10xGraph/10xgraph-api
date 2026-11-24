@@ -11,6 +11,7 @@ from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
 from tenxgraph_api.src.app.core.validation.request_config import (
     normalize_thread_id,
 )
+from tenxgraph_api.src.app.core.validation.resource_ids import to_core_id
 
 
 # Realtime init-frame key -> RealtimeConfig field name.
@@ -42,7 +43,7 @@ class RealtimeMixin:
         an ``AudioAgent``); otherwise ``arealtime`` raises.
         """
         thread_id = normalize_thread_id(init.get("thread_id")) or await self._new_thread_id()
-        config: dict[str, Any] = {"thread_id": thread_id}
+        config: dict[str, Any] = {"thread_id": to_core_id(thread_id)}
         set_user(config, user, credential)
         # Map the client init frame onto RealtimeConfig field names so the live agent can
         # apply per-session overrides (model/voice/modalities/vad/...). Only present keys

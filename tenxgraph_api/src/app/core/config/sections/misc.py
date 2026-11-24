@@ -1,10 +1,9 @@
 """Remote tools, generator names, ``ag_ui`` and ``media`` sections of 10xgraph.json."""
 
 import logging
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from tenxgraph.core.graph.remote_tool import RemoteToolConfig
 
 
@@ -53,8 +52,7 @@ ID_GENERATOR_NAMES: tuple[str, ...] = (
 THREAD_NAME_CHOICES: tuple[str, ...] = ("none", "random", "first_message")
 
 
-@dataclass
-class AgUiConfig:
+class AgUiConfig(BaseModel):
     """AG-UI protocol endpoint settings parsed from 10xgraph.json.
 
     Example::
@@ -89,8 +87,7 @@ class AgUiConfig:
         )
 
 
-@dataclass
-class MediaConfig:
+class MediaConfig(BaseModel):
     """Uploaded-file lifecycle settings parsed from 10xgraph.json.
 
     Example::

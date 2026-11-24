@@ -42,8 +42,8 @@ Client messages are user messages. :func:`client_message_error` refuses the ``as
 lets a ``tool`` message through only when it carries nothing but tool results. The built-in state
 fields ``context_summary`` and ``execution_meta`` are never client-writable
 (:func:`reject_builtin_state_keys`). The server also generates every message id itself
-(:func:`with_fresh_message_ids`); the AG-UI adapter alone keeps client ids, since its converter
-uses them to skip messages the thread already stores.
+(:func:`with_fresh_message_ids`), AG-UI included; the AG-UI converter keeps the client's id in
+``metadata["client_message_id"]`` to skip messages the thread already stores.
 
 A request is also bounded in size before anything heavy runs (:func:`request_size_error`): the
 body cap lets a few MB of messages or content blocks through, and core then copies and serialises

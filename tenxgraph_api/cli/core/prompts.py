@@ -74,7 +74,7 @@ def _accept_any(_selected: list[str]) -> bool:
     return True
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Choice:
     """One option in a select or multi-select prompt."""
 

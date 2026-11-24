@@ -27,8 +27,6 @@ def test_skill_templates_do_not_tell_developers_to_set_the_checkpointer_key():
         assert '"checkpointer":' not in text, name
 
 
-
-
 # ---------------------------------------------------------------------------
 # G-119
 # ---------------------------------------------------------------------------

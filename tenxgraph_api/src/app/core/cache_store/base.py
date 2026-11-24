@@ -23,16 +23,18 @@ a valid key. A key holds either slots or a value, never both.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Literal
+
+from pydantic import BaseModel, ConfigDict
 
 
 SetMode = Literal["always", "if_absent", "if_greater"]
 
 
-@dataclass(frozen=True)
-class SlotResult:
+class SlotResult(BaseModel):
     """Outcome of :meth:`BaseCacheStore.acquire`."""
+
+    model_config = ConfigDict(frozen=True)
 
     granted: bool
     # Live slots after this call, including ours when granted.
@@ -41,6 +43,16 @@ class SlotResult:
     oldest_expiry: float | None
     # The new slot's id when granted (pass it to renew / release); None when denied.
     slot_id: str | None
+
+    def __init__(
+        self,
+        granted: bool,
+        count: int,
+        oldest_expiry: float | None,
+        slot_id: str | None,
+    ) -> None:
+        # Positional construction keeps working for custom cache stores (it was a dataclass).
+        super().__init__(granted=granted, count=count, oldest_expiry=oldest_expiry, slot_id=slot_id)
 
 
 class BaseCacheStore(ABC):

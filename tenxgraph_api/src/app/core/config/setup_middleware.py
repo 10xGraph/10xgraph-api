@@ -1,5 +1,4 @@
 import uuid
-from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -352,9 +351,8 @@ def setup_middleware(
         rate_limit_config = graph_config.rate_limit
         if rate_limit_config is not None:
             if scrape_path:  # scrapes come every few seconds from one address
-                rate_limit_config = replace(
-                    rate_limit_config,
-                    exclude_paths=(*rate_limit_config.exclude_paths, scrape_path),
+                rate_limit_config = rate_limit_config.model_copy(
+                    update={"exclude_paths": (*rate_limit_config.exclude_paths, scrape_path)}
                 )
             # The counters live in the cache store, bound in the container at startup.
             app.add_middleware(

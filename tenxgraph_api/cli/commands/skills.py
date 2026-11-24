@@ -24,7 +24,7 @@ BLOCK_START = b"<!-- 10xgraph:start -->"
 BLOCK_END = b"<!-- 10xgraph:end -->"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _InstallArtifact:
     """Describes one file or folder installed for an agent."""
 
@@ -36,7 +36,7 @@ class _InstallArtifact:
     skill_path: str = ""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _AgentTarget:
     """Describes how the bundled skill is materialised for one agent."""
 

@@ -44,10 +44,6 @@ def mock_user():
     return Identity(user_id="user-123", roles=frozenset({"admin"}))
 
 
-
-
-
-
 @pytest.mark.asyncio
 async def test_graph_details_endpoint(mock_request, mock_service, mock_user):
     mock_service.graph_details.return_value = {"info": {}}
@@ -76,10 +72,6 @@ async def test_state_schema_endpoint(mock_request, mock_service, mock_user):
         )
         assert res == {"status": "success"}
         mock_service.get_state_schema.assert_called_once()
-
-
-
-
 
 
 FORGED_THREAD_ID = "x\n2026-10-26 ERROR admin login ok"
