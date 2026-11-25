@@ -208,8 +208,10 @@ def setup_otel_provider(settings, *, metrics_owned: bool = False) -> bool:
     if endpoint:
         try:
             from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+            from tenxgraph.runtime.publisher._export_health import log_export_health
 
-            provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
+            exporter = log_export_health(OTLPSpanExporter(endpoint=endpoint), "otlp-grpc")
+            provider.add_span_processor(BatchSpanProcessor(exporter))
             logger.info("OTEL: exporting traces to %s", endpoint)
         except ImportError:
             logger.warning(
