@@ -81,13 +81,13 @@ def _observability_publishers(publisher: Any) -> list[Any]:
 def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | None) -> None:
     """Wire Logfire/LangSmith/Phoenix/OTLP from the ``observability`` block of ``10xgraph.json``.
 
-    Configures the tracer provider(s)/exporters and binds an ``OtelPublisher``
-    into the DI container. This runs at app-construction time, before the graph
-    is loaded and compiled — the only reliable attach point, because InjectQ
-    freezes the ``BasePublisher`` binding at ``container.compile()`` (which runs
-    inside ``StateGraph.compile()``). The core ``StateGraph.compile()`` guard
-    preserves a publisher already present in the container instead of clobbering
-    it with ``None``.
+    Configures the tracer provider(s)/exporters and binds a ``BackendsPublisher`` (writing
+    the attribute keys of every enabled backend) into the DI container. This runs at
+    app-construction time, before the graph is loaded and compiled — the only reliable
+    attach point, because InjectQ freezes the ``BasePublisher`` binding at
+    ``container.compile()`` (which runs inside ``StateGraph.compile()``). The core
+    ``StateGraph.compile()`` guard preserves a publisher already present in the container
+    instead of clobbering it with ``None``.
 
     Secrets stay in the environment (``LOGFIRE_TOKEN``, ``LANGSMITH_API_KEY``, ``PHOENIX_API_KEY``);
     only non-secret settings live in ``10xgraph.json``.
@@ -108,10 +108,14 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
         return
 
     try:
+        from tenxgraph.runtime.publisher.backends_publisher import (
+            BackendsPublisher,
+            enabled_backends,
+        )
         from tenxgraph.runtime.publisher.base_publisher import BasePublisher
         from tenxgraph.runtime.publisher.composite_publisher import CompositePublisher
         from tenxgraph.runtime.publisher.exporters import setup_observability
-        from tenxgraph.runtime.publisher.otel_publisher import ObservabilityLevel, OtelPublisher
+        from tenxgraph.runtime.publisher.otel_publisher import ObservabilityLevel
     except ImportError:
         logger.warning(
             "observability is configured but required packages are not installed. "
@@ -150,7 +154,11 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
         )
         level = ObservabilityLevel.FULL
 
-    otel_publisher = OtelPublisher(level=level, user_id_mode=_user_id_mode(graph_config))
+    # One span goes to every enabled exporter, so it carries the keys of each backend
+    # (OpenInference for phoenix, langsmith.* for langsmith, logfire.msg for logfire).
+    otel_publisher = BackendsPublisher(
+        enabled_backends(obs_cfg), level=level, user_id_mode=_user_id_mode(graph_config)
+    )
     existing = container.try_get(BasePublisher)
 
     if existing is None:
