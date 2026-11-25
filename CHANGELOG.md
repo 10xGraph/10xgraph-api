@@ -35,6 +35,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`POST /v1/graph/invoke` returns `thread_id` and `run_id` at the top level of `data`**, the same names stream events use. `meta.thread_id` and `meta.is_new_thread` are unchanged.
 - **`"id_generator": "uuid"` maps to core's `DefaultIDGenerator`**, not the deprecated
   `UUIDGenerator`, so the value stays valid and no longer warns. uuid is the default, so
   `10xgraph init` Production no longer writes `id_generator` and the summary no longer lists it.

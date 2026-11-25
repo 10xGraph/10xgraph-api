@@ -127,6 +127,14 @@ class GraphInvokeOutputSchema(BaseModel):
         default=None,
         description="Summary information from the graph execution",
     )
+    thread_id: str | None = Field(
+        default=None,
+        description="Thread id of the run, the same field name stream events carry",
+    )
+    run_id: str | None = Field(
+        default=None,
+        description="Run id of the run, the same field name stream events carry",
+    )
     meta: dict[str, Any] | None = Field(
         default=None,
         description="Meta information from the graph execution",

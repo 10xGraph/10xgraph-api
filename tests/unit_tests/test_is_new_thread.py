@@ -48,6 +48,18 @@ async def test_invoke_second_call_is_not_new(service):
 
 
 @pytest.mark.asyncio
+async def test_invoke_carries_top_level_thread_and_run_id(service):
+    first = await service.invoke_graph(_input(), None)
+    assert first.thread_id == first.meta["thread_id"]
+    assert isinstance(first.run_id, str) and first.run_id
+
+    second = await service.invoke_graph(_input(first.thread_id), None)
+    assert second.thread_id == first.thread_id == second.meta["thread_id"]
+    assert isinstance(second.run_id, str) and second.run_id
+    assert second.run_id != first.run_id
+
+
+@pytest.mark.asyncio
 async def test_stream_second_call_is_not_new(service):
     async def meta_of(graph_input):
         async for chunk in service.stream_graph(graph_input, None):

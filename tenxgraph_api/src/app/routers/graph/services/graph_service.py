@@ -415,6 +415,8 @@ class GraphService(
                 state=parse_state_output(get_settings(), raw_state) if raw_state else None,
                 context=[client_message(m) for m in context] if context else context,
                 summary=context_summary,
+                thread_id=inv_thread_id,
+                run_id=inv_run_id,
                 meta=meta,
             )
 
