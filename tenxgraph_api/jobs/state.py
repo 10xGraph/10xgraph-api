@@ -29,6 +29,8 @@ logger = logging.getLogger("tenxgraph_api.jobs")
 # How long status records and cancel flags are kept, in seconds. jobs.config sets it from
 # ``worker.result_ttl``.
 RESULT_TTL: int = 86400
+# Task ids of a schedule's recent runs kept for ``GET /v1/tasks/{schedule_id}``.
+MAX_SCHEDULE_RUNS = 20
 # Message label that carries the run config as a JSON string (labels keep only scalars).
 CONFIG_LABEL = "tenxgraph_config"
 # Set by the Redis stream broker on a message delivered more than ``max_deliveries`` times
@@ -44,6 +46,8 @@ class TaskStatus(BaseModel):
     task_id: str
     task_name: str
     status: Status
+    # Why the run failed when no saved result can say so (the result could not be saved).
+    error: str | None = None
     owner: str | None = None
     # The owner's user_id and tenant values: what ``can_reach`` compares for reach tenant/all.
     user_id: str | None = None
@@ -115,18 +119,44 @@ async def write_status(store: BaseCacheStore, record: TaskStatus) -> None:
     await store.set(_key("status", record.task_id), record.model_dump_json().encode(), RESULT_TTL)
 
 
+# A status only moves forward: a late ``queued`` never replaces ``running``, and a final status
+# is replaced only by another final one (the worker's own, after a redelivery).
+_RANK: dict[str, int] = {"queued": 0, "running": 1, "success": 2, "failure": 2, "cancelled": 2}
+
+
 async def update_status(
-    store: BaseCacheStore, task_id: str, task_name: str, status: Status, config: dict[str, Any]
+    store: BaseCacheStore,
+    task_id: str,
+    task_name: str,
+    status: Status,
+    config: dict[str, Any],
+    error: str | None = None,
+    only_from: Status | None = None,
 ) -> None:
     """Set ``status``, keeping owner and created time of an existing record (a new record takes
-    its owner from the run ``config``)."""
+    its owner from the run ``config``). A step back (see ``_RANK``) is skipped, and so is a
+    change when ``only_from`` is given and the record has another status (cancel uses it)."""
     record = await read_status(store, task_id)
     if record is None:
         record = TaskStatus(
             task_id=task_id, task_name=task_name, status=status, **owner_fields(config)
         )
+    elif _RANK[status] < _RANK[record.status] or only_from not in (None, record.status):
+        return
     record.status = status
+    record.error = error
     await write_status(store, record)
+
+
+async def fail_unsaved(task_id: str, error: BaseException) -> None:
+    """The result could not be saved (not JSON-serialisable, backend down): mark the task
+    ``failure`` with a message GET shows. Only the error type is kept, as task values and
+    backend details can be internal; the worker log has the rest."""
+    store = cache_store_for(None)
+    if store is None:
+        return
+    text = f"The result could not be saved ({type(error).__name__}); see the worker log"
+    await update_status(store, task_id, "", "failure", {}, error=text)
 
 
 async def set_cancel_flag(store: BaseCacheStore, task_id: str) -> None:
@@ -135,3 +165,19 @@ async def set_cancel_flag(store: BaseCacheStore, task_id: str) -> None:
 
 async def is_cancel_flag_set(store: BaseCacheStore, task_id: str) -> bool:
     return await store.get(_key("cancel", task_id)) is not None
+
+
+async def read_schedule_runs(store: BaseCacheStore, schedule_id: str) -> list[str]:
+    """Task ids of the schedule's last ``MAX_SCHEDULE_RUNS`` runs, newest first."""
+    raw = await store.get(_key("schedule-runs", schedule_id))
+    return json.loads(raw) if raw else []
+
+
+async def add_schedule_run(store: BaseCacheStore, schedule_id: str, task_id: str) -> None:
+    """Remember a run the scheduler sent. Only the scheduler writes it, one send at a time."""
+    runs = [task_id, *await read_schedule_runs(store, schedule_id)][:MAX_SCHEDULE_RUNS]
+    await store.set(_key("schedule-runs", schedule_id), json.dumps(runs).encode(), RESULT_TTL)
+
+
+async def delete_schedule_runs(store: BaseCacheStore, schedule_id: str) -> None:
+    await store.delete(_key("schedule-runs", schedule_id))

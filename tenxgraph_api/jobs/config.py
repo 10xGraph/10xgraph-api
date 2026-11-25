@@ -1,12 +1,15 @@
 """The ``worker`` key of 10xgraph.json and the factories that turn it into TaskIQ objects."""
 
 import importlib
+import logging
 from collections.abc import Sequence
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from tenxgraph_api.src.app.core.config.graph_config import _expand_env, redis_url_or_env
+from tenxgraph_api.src.app.core.config.settings import get_settings
+from tenxgraph_api.src.app.core.redis_client import prefixed
 
 
 BROKER_TYPES = ("redis_stream", "rabbitmq", "kafka", "memory")
@@ -21,6 +24,9 @@ EXTRAS = {
     "taskiq_aio_kafka": "jobs-kafka",
 }
 GLOB_MARKS = ("*", "?", "[", "/")
+
+
+logger = logging.getLogger("tenxgraph_api.jobs")
 
 
 def is_glob(entry: str) -> bool:
@@ -133,6 +139,9 @@ def build_broker(cfg: WorkerConfig) -> Any:
         from tenxgraph_api.jobs.redis_broker import ReclaimingRedisStreamBroker
 
         options.setdefault("unacknowledged_lock_timeout", 60)
+        # REDIS_KEY_PREFIX in front; unset keeps TaskIQ's own names ("taskiq").
+        options.setdefault("queue_name", prefixed("taskiq"))
+        options.setdefault("consumer_group_name", prefixed("taskiq"))
         broker = ReclaimingRedisStreamBroker(redis_url_or_env(cfg.broker.url, KEY), **options)
     elif kind == "rabbitmq":
         _require("taskiq_aio_pika")
@@ -171,11 +180,13 @@ def build_result_backend(cfg: WorkerConfig) -> Any | None:
     if not _redis_results(cfg):
         return None
     _require("taskiq_redis")
-    from taskiq_redis import RedisAsyncResultBackend
+    from tenxgraph_api.jobs.result_backend import StatusResultBackend
 
     options = dict(cfg.result_backend.options) if cfg.result_backend else {}
     options.setdefault("result_ex_time", cfg.result_ttl)
-    return RedisAsyncResultBackend(_results_url(cfg), **options)
+    # Result and progress keys are ``<prefix>:<task id>``; unset keeps the bare task id.
+    options.setdefault("prefix_str", get_settings().REDIS_KEY_PREFIX or None)
+    return StatusResultBackend(_results_url(cfg), **options)
 
 
 # Seconds a schedule-source or scheduler-lease Redis call may take, so a stalled Redis fails
@@ -202,8 +213,30 @@ def build_schedule_source(cfg: WorkerConfig) -> Any | None:
 
     return CheckedScheduleSource(
         url,
+        prefix=prefixed("schedule"),  # unset REDIS_KEY_PREFIX keeps taskiq-redis's "schedule"
         serializer=JSONSerializer(),
         timeout=SCHEDULE_REDIS_TIMEOUT,  # waiting for a pool connection
         socket_timeout=SCHEDULE_REDIS_TIMEOUT,
         socket_connect_timeout=SCHEDULE_REDIS_TIMEOUT,
     )
+
+
+def warn_memory_state(cfg: WorkerConfig, cache_store_type: str) -> None:
+    """Warn at boot (API and worker) when the broker reaches other processes but the cache
+    store or the result backend stays inside one: the API and the worker would not share task
+    status, results or cancel flags (status stays ``queued``, a cancel never reaches the run)."""
+    if cfg.broker.type == "memory":
+        return
+    memory = []
+    if cache_store_type == "memory":
+        memory.append('cache_store.type is "memory" (task status and cancel flags)')
+    if cfg.result_backend is not None and cfg.result_backend.type == "memory":
+        memory.append('worker.result_backend.type is "memory" (task results)')
+    if memory:
+        logger.warning(
+            "worker.broker.type is %r, which runs tasks in other processes, but %s: the API "
+            "and the worker do not share them, so task status stays queued and cancel does not "
+            'reach a running task. Use "redis" for both.',
+            cfg.broker.type,
+            " and ".join(memory),
+        )

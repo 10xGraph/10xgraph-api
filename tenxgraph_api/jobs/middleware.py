@@ -19,16 +19,23 @@ import inspect
 import json
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from taskiq import AsyncBroker, TaskiqMessage, TaskiqMiddleware, TaskiqResult
 from taskiq.exceptions import NoResultError
 from tenxgraph.core.authz import Identity
 
 from tenxgraph_api.jobs import state
-from tenxgraph_api.jobs.arguments import ReservedArgumentError, check_arguments, injected_names
+from tenxgraph_api.jobs._taskiq_patches import patch_receiver
+from tenxgraph_api.jobs.arguments import (
+    ReservedArgumentError,
+    TaskArgumentError,
+    check_arguments,
+    injected_names,
+)
 from tenxgraph_api.jobs.context import TaskCancelled
 from tenxgraph_api.jobs.monitoring import MonitoringMiddleware
+from tenxgraph_api.jobs.retry import DeliveryLimitError, RetryScheduled
 
 
 if TYPE_CHECKING:
@@ -51,11 +58,6 @@ _GUARD_MARK = "__tenxgraph_guard__"
 IDENTITY_LABEL = "identity"
 _REFUSED = "This run's identity may not run this task"
 _warned_auth_off: set[str] = set()
-
-
-class DeliveryLimitError(RuntimeError):
-    """The message was delivered more than ``max_deliveries`` times (a task that keeps killing
-    its worker): the run fails without executing."""
 
 
 def _guard(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -84,6 +86,7 @@ def _guard(func: Callable[..., Any]) -> Callable[..., Any]:
 def wrap_tasks(broker: AsyncBroker) -> None:
     """Put the guard around every registered task's function (the receiver calls
     ``task.original_func``). Safe to call more than once."""
+    patch_receiver()
     for task in broker.get_all_tasks().values():
         if not getattr(task.original_func, _GUARD_MARK, False):
             task.original_func = _guard(task.original_func)
@@ -120,6 +123,8 @@ class TaskMiddleware(TaskiqMiddleware):
             for name in injected_names(task.original_func) & set(message.kwargs):
                 message.kwargs.pop(name)
             _ABORT.set(error)
+        except TaskArgumentError as error:  # the task would fail with a TypeError
+            _ABORT.set(error)
         if (limit := message.labels.pop(state.DELIVERY_LIMIT_LABEL, None)) is not None:
             _ABORT.set(_ABORT.get() or DeliveryLimitError(limit))
         try:
@@ -146,20 +151,29 @@ class TaskMiddleware(TaskiqMiddleware):
 
     async def post_execute(self, message: TaskiqMessage, result: TaskiqResult[Any]) -> None:
         _ABORT.set(None)  # the in-memory broker can run a task in the caller's context
+        if isinstance(result.error, RetryScheduled):
+            return  # the next attempt writes ``running``; a ``queued`` here could come after it
+        if isinstance(result.error, NoResultError):
+            # TaskIQ saves no result and calls no ``post_save``: the task raised it itself.
+            await self._write_status(message, "success")
+
+    async def post_save(self, message: TaskiqMessage, result: TaskiqResult[Any]) -> None:
+        """The final status, written once the result is saved: ``success`` never comes before
+        a result that could not be stored (see ``jobs.result_backend``)."""
+        await self._write_status(message, _final_status(result))
+
+    async def _write_status(self, message: TaskiqMessage, status: state.Status) -> None:
         try:
             store = state.cache_store_for(self.broker)
             if store is None:
                 return
             config = state.parse_config(message.labels)
-            status = _final_status(result)
             await state.update_status(store, message.task_id, message.task_name, status, config)
         except Exception:
             logger.exception("Task %s (%s): status not saved", message.task_name, message.task_id)
 
 
 def _final_status(result: TaskiqResult[Any]) -> state.Status:
-    if isinstance(result.error, NoResultError):
-        return "queued"  # SimpleRetryMiddleware sent it again
     if isinstance(result.error, TaskCancelled):
         return "cancelled"
     return "failure" if result.is_err else "success"
@@ -215,11 +229,54 @@ async def _run_identity(container: InjectQ, task: Any, config: dict[str, Any]) -
                     raise PermissionError(_REFUSED)
     except (ValueError, InvalidClaimsError) as exc:  # ValidationError is a ValueError
         logger.warning("Task %s: stored identity is not valid: %s", task.task_name, exc)
+        await _audit_trigger(task, config, "denied", reason="invalid_identity")
         raise PermissionError(_REFUSED) from None
-    if not await auth.authorize(identity, "tasks:trigger", task.task_name):
-        raise PermissionError(_REFUSED)
+    except PermissionError:
+        await _audit_trigger(task, config, "denied", reason="invalid_identity")
+        raise
+    await _authorize_trigger(auth, identity, task, config)
     config["user"] = identity.model_dump(mode="json")
     return True
+
+
+async def _authorize_trigger(
+    auth: Any, identity: Identity, task: Any, config: dict[str, Any]
+) -> None:
+    """``authorize(identity, "tasks:trigger", task_name)``, audited; PermissionError when
+    refused."""
+    try:
+        allowed = await auth.authorize(identity, "tasks:trigger", task.task_name)
+    except Exception:
+        await _audit_trigger(task, config, "denied", identity=identity, reason="error")
+        raise
+    await _audit_trigger(task, config, "allowed" if allowed else "denied", identity=identity)
+    if not allowed:
+        raise PermissionError(_REFUSED)
+
+
+async def _audit_trigger(
+    task: Any,
+    config: dict[str, Any],
+    result: Literal["allowed", "denied"],
+    *,
+    identity: Identity | None = None,
+    reason: str | None = None,
+) -> None:
+    """The worker's per-run ``tasks:trigger`` decision as an ``access`` event (W4); resource
+    ``task/<name>/<task id>``, as on the ``/v1/tasks`` routes."""
+    from tenxgraph_api.src.app.core.audit import audit_event
+
+    user = config.get("user")
+    user_id = user.get("user_id") if isinstance(user, dict) else None
+    await audit_event(
+        "access",
+        result,
+        action="tasks:trigger",
+        resource=f"task/{task.task_name}/{config.get('task_id')}",
+        reason=reason,
+        identity=identity,
+        user_id=None if user_id is None else str(user_id),
+    )
 
 
 def _system_identity(container: InjectQ, name: str, rbac: RbacConfig | None) -> Identity:

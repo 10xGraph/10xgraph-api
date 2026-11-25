@@ -334,16 +334,16 @@ class RequireIdentity:
         if auth is None:
             if self.permission is not None:
                 # Auth off: everyone is allowed; the event records the call (user_id null).
-                await _audit_access(None, self.permission, _path_resource(connection), "allowed")
+                _, resource = await self.target(connection, None)
+                await _audit_access(None, self.permission, resource, "allowed")
             return None
         _tp0 = _perf_now()  # TEMP-PERF
         identity = await _identity(connection, response, auth)
         _perf_done("api_auth_total", _tp0)  # TEMP-PERF
         if self.permission is not None:
             _tp0 = _perf_now()  # TEMP-PERF
-            resource_id = await _resource_id(connection)
+            resource_id, resource = await self.target(connection, identity)
             _perf_done("api_resource_id", _tp0)  # TEMP-PERF
-            resource = _resource_label(connection, resource_id)
             try:
                 _tp0 = _perf_now()  # TEMP-PERF
                 await _authorize(auth, identity, self.permission, resource_id, resource)
@@ -351,6 +351,17 @@ class RequireIdentity:
             except HTTPException as exc:
                 _reject(connection, exc.status_code, str(exc.detail))
         return identity
+
+    async def target(
+        self, connection: HTTPConnection, identity: Identity | None
+    ) -> tuple[str | None, str | None]:
+        """``(resource for authorize, audit resource)`` of the request. With auth off
+        (``identity`` None) only the path is read, never the body. A subclass names another
+        target (the tasks routes pass the task name)."""
+        if identity is None:
+            return None, _path_resource(connection)
+        resource_id = await _resource_id(connection)
+        return resource_id, _resource_label(connection, resource_id)
 
 
 class RequirePermission(RequireIdentity):

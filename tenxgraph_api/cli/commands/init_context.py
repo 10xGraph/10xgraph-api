@@ -249,8 +249,8 @@ def build_config(context: dict, is_prod: bool) -> dict:
     if context.get("storage") == "postgres-memory":
         config["store"] = "graph.agent:store"
 
-    # The API's cache store: rate limit counters, run locks and caps, idempotency,
-    # ownership cache and token revocation. Redis is shared by every worker (empty url:
+    # The API's cache store: rate limit counters, run locks and caps, idempotency, token
+    # revocation and background-task status. Redis is shared by every worker (empty url:
     # the URL comes from REDIS_URL in .env); memory is per process.
     cache_store: dict[str, Any] = {"type": context.get("cache_store") or "memory"}
     if context.get("rate_limit"):

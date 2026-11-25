@@ -300,3 +300,15 @@ def test_boot_imports_modules_and_globs(tmp_path, monkeypatch):
     boot._import_task_modules(str(tmp_path / "10xgraph.json"), ["pkg_tasks_a", "jobs_dir/*.py"])
     assert importlib.import_module("pkg_tasks_a").VALUE == 1
     assert importlib.import_module("jobs_dir.b_tasks").VALUE == 2
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"args": [1], "kwargs": {"bogus": 1}}, {"args": [1]}, {"args": [1, 2], "kwargs": {"a": 1}}],
+)
+def test_unknown_missing_or_repeated_argument_is_422(env, body):
+    """S3: a call that cannot bind to the signature fails at trigger time, run or schedule."""
+    assert env.call("POST", f"/v1/tasks/{ADD}", json=body).status_code == 422
+    scheduled = {**body, "schedule": {"every": 60}}
+    assert env.call("POST", f"/v1/tasks/{ADD}", json=scheduled).status_code == 422
+    assert not env.source.schedules

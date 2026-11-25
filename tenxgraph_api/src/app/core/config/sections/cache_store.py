@@ -132,7 +132,7 @@ class CacheStoreConfig(BaseModel):
     ``custom`` (``path`` is ``"module:attr"``, a ``BaseCacheStore`` instance or zero-argument
     factory). ``url`` expands ``$VAR`` / ``${VAR}`` when the store is built, and an unset
     variable is a config error. The store holds the run locks and caps, idempotency records
-    and the ownership cache, plus the counters of ``rate_limit`` (:class:`RateLimitConfig`) and
+    and background-task status, plus the counters of ``rate_limit`` (:class:`RateLimitConfig`) and
     the revocations of ``token_revocation`` (:class:`TokenRevocationConfig`); both are off
     when absent. ``rate_limit`` is kept here even when its ``enabled`` is false.
     """

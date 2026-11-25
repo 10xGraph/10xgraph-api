@@ -6,10 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 from taskiq import InMemoryBroker
-from taskiq.middlewares import SimpleRetryMiddleware
 
 from tenxgraph_api.jobs import middleware as mw
 from tenxgraph_api.jobs import monitoring
+from tenxgraph_api.jobs.retry import TaskRetryMiddleware
 
 
 def load_worker(monkeypatch, tmp_path, data):
@@ -40,8 +40,8 @@ def test_middlewares_in_order(monkeypatch, tmp_path):
     data = {"agent": "a:b", "worker": {"broker": {"type": "memory"}, "retries": 5}}
     worker = load_worker(monkeypatch, tmp_path, data)
     kinds = [type(m) for m in worker.broker.middlewares]
-    assert kinds == [SimpleRetryMiddleware, monitoring.MonitoringMiddleware, mw.TaskMiddleware]
-    assert worker.broker.middlewares[0].default_retry_count == 5
+    assert kinds == [TaskRetryMiddleware, monitoring.MonitoringMiddleware, mw.TaskMiddleware]
+    assert worker.broker.middlewares[0].default_retry_count == 6  # 5 retries, 6 runs
 
 
 @pytest.mark.asyncio

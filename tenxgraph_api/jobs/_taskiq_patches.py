@@ -10,9 +10,10 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from taskiq import AckableMessage, ScheduledTask
+from taskiq import AckableMessage, ScheduledTask, TaskiqMessage, TaskiqMiddleware, TaskiqResult
 from taskiq.cli.scheduler.run import SchedulerLoop
 from taskiq.receiver import Receiver
+from taskiq.utils import maybe_awaitable
 
 
 logger = logging.getLogger("tenxgraph_api.jobs")
@@ -97,6 +98,34 @@ async def _callback_ending_lease(
                 logger.exception("Ending the message lease failed")
 
 
+_original_run_task = Receiver.run_task
+
+
+async def _run_task_unless_aborted(
+    self: Receiver, target: Any, message: TaskiqMessage, ack_controller: Any = None
+) -> TaskiqResult[Any]:
+    """TASKIQ_UPSTREAM.md "Worker / receiver / broker": ``Receiver.run_task`` resolves the
+    task's dependencies before calling the function, so a generator dependency (a connection, a
+    lock) ran its setup and teardown for a run that ``TaskMiddleware`` had already stopped
+    (cancelled, refused). When it set an abort error, return the error result without resolving
+    anything and run the ``on_error`` middlewares as TaskIQ does."""
+    from tenxgraph_api.jobs.middleware import _ABORT
+
+    error = _ABORT.get()
+    if error is None:
+        return await _original_run_task(self, target, message, ack_controller)
+    result: TaskiqResult[Any] = TaskiqResult(
+        is_err=True, log=None, return_value=None, execution_time=0, error=error,
+        labels=message.labels,
+    )  # fmt: skip
+    for middleware in reversed(self.broker.middlewares):
+        if middleware.__class__.on_error != TaskiqMiddleware.on_error:
+            await maybe_awaitable(middleware.on_error(message, result, error))
+    return result
+
+
 def patch_receiver() -> None:
-    """Apply the receiver patch (idempotent). Called on import of ``jobs.redis_broker``."""
+    """Apply the receiver patches (idempotent). Called on import of ``jobs.redis_broker`` and by
+    ``wrap_tasks``."""
     Receiver.callback = _callback_ending_lease  # type: ignore[method-assign]
+    Receiver.run_task = _run_task_unless_aborted  # type: ignore[method-assign]

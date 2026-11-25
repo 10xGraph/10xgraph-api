@@ -11,12 +11,12 @@ from pathlib import Path
 from injectq import InjectQ
 from injectq.integrations.taskiq import setup_taskiq
 from taskiq import InMemoryBroker, TaskiqEvents, TaskiqState
-from taskiq.middlewares import SimpleRetryMiddleware
 
 from tenxgraph_api.jobs import state as job_state
-from tenxgraph_api.jobs.config import build_broker
+from tenxgraph_api.jobs.config import build_broker, warn_memory_state
 from tenxgraph_api.jobs.middleware import TaskMiddleware, wrap_tasks
 from tenxgraph_api.jobs.monitoring import MonitoringMiddleware
+from tenxgraph_api.jobs.retry import TaskRetryMiddleware
 from tenxgraph_api.src.app.core.config.graph_config import GraphConfig, default_config_path
 
 
@@ -39,7 +39,7 @@ else:
     job_state.RESULT_TTL = worker_config.result_ttl
 
 broker.add_middlewares(
-    SimpleRetryMiddleware(default_retry_count=worker_config.retries if worker_config else 3),
+    TaskRetryMiddleware(retries=worker_config.retries if worker_config else 3),
     MonitoringMiddleware(),
     TaskMiddleware(),
 )
@@ -50,6 +50,7 @@ async def worker_startup(state: TaskiqState) -> None:
 
     The ``taskiq worker`` CLI has imported the task modules before this event.
     """
+    from tenxgraph_api.jobs.tool_audit import setup_worker_audit
     from tenxgraph_api.src.app import loader
     from tenxgraph_api.src.app.core.config.metrics import setup_metrics
     from tenxgraph_api.src.app.core.config.settings import get_settings
@@ -62,6 +63,7 @@ async def worker_startup(state: TaskiqState) -> None:
 
     if graph_config is None or worker_config is None:
         raise RuntimeError('The worker needs a "worker" key in 10xgraph.json')
+    warn_memory_state(worker_config, graph_config.cache_store.type)
     container = build_container(graph_config)
     settings = get_settings()
     metrics_cfg = graph_config.metrics
@@ -75,6 +77,7 @@ async def worker_startup(state: TaskiqState) -> None:
     _setup_observability(container, graph_config)
     state.container = container
     state.graph = await loader.attach_all_modules(graph_config, container)
+    setup_worker_audit(container, graph_config)  # W4: as the API lifespan, after auth is bound
     await check_backends(container, settings)
     setup_taskiq(container, broker)
     wrap_tasks(broker)

@@ -3,6 +3,10 @@
 Sources: static ``schedule=`` labels on tasks, plus the Redis source for dynamic schedules when
 the result backend is Redis (any broker but ``memory``). All schedules are UTC.
 
+A run of an HTTP schedule gets its task id here: the scheduler writes its ``queued`` status
+(owner from the schedule's run config) and adds the id to the schedule's recent runs before the
+send, so ``GET`` and cancel by task id work for it like for ``POST /v1/tasks/{name}``.
+
 Run exactly one scheduler. With Redis, the scheduler holds a lease (``LEASE_KEY``): a second
 one logs a warning and waits as a standby, sending nothing until the first stops or its lease
 expires. A standby (not a refusal) so a restart or a rolling deploy takes over by itself.
@@ -19,8 +23,12 @@ import uuid
 from typing import Any
 
 from taskiq import AsyncBroker, ScheduledTask, ScheduleSource, TaskiqScheduler
+from taskiq.exceptions import ScheduledTaskCancelledError
+from taskiq.kicker import AsyncKicker
 from taskiq.schedule_sources import LabelScheduleSource
+from taskiq.utils import maybe_awaitable
 
+from tenxgraph_api.jobs import state
 from tenxgraph_api.jobs._taskiq_patches import patch_scheduler_loop
 from tenxgraph_api.jobs.config import (
     SCHEDULE_REDIS_TIMEOUT,
@@ -28,12 +36,13 @@ from tenxgraph_api.jobs.config import (
     schedule_redis_url,
 )
 from tenxgraph_api.jobs.schedule_rules import HTTP_SCHEDULE_LABEL
-from tenxgraph_api.jobs.worker import broker, worker_config
+from tenxgraph_api.jobs.worker import broker, graph_config, worker_config
+from tenxgraph_api.src.app.core.redis_client import prefixed
 
 
 logger = logging.getLogger("tenxgraph_api.jobs")
 
-LEASE_KEY = "10xgraph:scheduler:lease"
+LEASE_KEY = "10xgraph:scheduler:lease"  # REDIS_KEY_PREFIX goes in front (``lease_key``)
 LEASE_TTL = 30  # seconds; a crashed scheduler's lease frees itself after this
 LEASE_RENEW_EVERY = 10
 HTTP_LABEL = "http"
@@ -47,6 +56,8 @@ class LeasedScheduler(TaskiqScheduler):
     ) -> None:
         super().__init__(broker, sources)
         self.lease_url = lease_url
+        self.lease_key = prefixed(LEASE_KEY)
+        self.cache_store: Any = None  # the API's cache store, for the runs of HTTP schedules
         self.token = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self.lease_until = 0.0  # time.monotonic() when the held lease may have expired
         self.redis: Any = None
@@ -59,6 +70,10 @@ class LeasedScheduler(TaskiqScheduler):
 
     async def startup(self) -> None:
         await super().startup()
+        if graph_config is not None:
+            from tenxgraph_api.src.app.core.cache_store.loader import build_cache_store
+
+            self.cache_store, _ = build_cache_store(graph_config)
         if self.lease_url is None:
             logger.warning(
                 "No Redis for the scheduler lease: a second scheduler cannot be detected. "
@@ -82,12 +97,12 @@ class LeasedScheduler(TaskiqScheduler):
         started = time.monotonic()
         holder: bytes | None = None
         try:
-            if await self.redis.set(LEASE_KEY, self.token, nx=True, ex=LEASE_TTL):
+            if await self.redis.set(self.lease_key, self.token, nx=True, ex=LEASE_TTL):
                 held = True
             else:
-                holder = await self.redis.get(LEASE_KEY)
+                holder = await self.redis.get(self.lease_key)
                 held = holder == self.token.encode() and bool(
-                    await self.redis.expire(LEASE_KEY, LEASE_TTL)
+                    await self.redis.expire(self.lease_key, LEASE_TTL)
                 )
         except Exception:
             # Keep sending until the lease could have expired, then stop.
@@ -106,7 +121,7 @@ class LeasedScheduler(TaskiqScheduler):
             logger.warning(
                 "Another scheduler is running (lease %s held by %s). Run exactly one "
                 "scheduler: this one waits as a standby and sends nothing until that one stops.",
-                LEASE_KEY,
+                self.lease_key,
                 _text(holder),
             )
         self._standby_logged = True
@@ -130,19 +145,69 @@ class LeasedScheduler(TaskiqScheduler):
             )
             return
         try:
-            await super().on_ready(source, task)
+            await self._send(source, task)
         except Exception:
             logger.exception(
                 "Sending schedule %s (task %s) failed", task.schedule_id, task.task_name
             )
 
+    async def _send(self, source: ScheduleSource, task: ScheduledTask) -> None:
+        """``TaskiqScheduler.on_ready`` with the task id chosen here, so a run of an HTTP
+        schedule is recorded (``_record_run``) before it is sent."""
+        try:
+            await maybe_awaitable(source.pre_send(task))
+        except ScheduledTaskCancelledError:
+            logger.info("Scheduled task %s has been cancelled.", task.task_name)
+            return
+        task_id = task.task_id or self.broker.id_generator()
+        if task.labels.get(HTTP_SCHEDULE_LABEL):
+            await self._record_run(task, task_id)
+        await (
+            AsyncKicker(task.task_name, self.broker, task.labels)
+            .with_labels(schedule_id=task.schedule_id)
+            .with_task_id(task_id=task_id)
+            .kiq(*task.args, **task.kwargs)
+        )
+        await maybe_awaitable(source.post_send(task))
+
+    async def _record_run(self, task: ScheduledTask, task_id: str) -> None:
+        """The run's ``queued`` status (owner from the schedule's run config) and its id in
+        the schedule's recent runs. A failure is logged and the run is still sent."""
+        if self.cache_store is None:
+            return
+        try:
+            config = state.parse_config(task.labels)
+            await state.write_status(
+                self.cache_store,
+                state.TaskStatus(
+                    task_id=task_id,
+                    task_name=task.task_name,
+                    status="queued",
+                    **state.owner_fields(config),
+                ),
+            )
+            await state.add_schedule_run(self.cache_store, task.schedule_id, task_id)
+        except Exception:
+            logger.exception(
+                "Run %s of schedule %s not recorded: GET /v1/tasks/%s answers 404 until the "
+                "worker starts it",
+                task_id,
+                task.schedule_id,
+                task_id,
+            )
+
     async def shutdown(self) -> None:
         if self._renewer is not None:
             self._renewer.cancel()
+        if self.cache_store is not None:
+            try:
+                await self.cache_store.aclose()
+            except Exception:
+                logger.exception("Cannot close the cache store")
         if self.redis is not None:
             try:
-                if await self.redis.get(LEASE_KEY) == self.token.encode():
-                    await self.redis.delete(LEASE_KEY)  # a restart takes over at once
+                if await self.redis.get(self.lease_key) == self.token.encode():
+                    await self.redis.delete(self.lease_key)  # a restart takes over at once
             except Exception:
                 logger.exception("Cannot release the scheduler lease")
             await self.redis.aclose()

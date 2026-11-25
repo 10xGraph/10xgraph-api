@@ -57,5 +57,8 @@ async def cancel(task_id: str, broker: AsyncBroker | None = None) -> None:
     await state.set_cancel_flag(store, task_id)
     record = await state.read_status(store, task_id)
     if record is not None and record.status == "queued":
-        record.status = "cancelled"
-        await state.write_status(store, record)
+        # Only from ``queued``, checked on a fresh read: a worker that started the task in
+        # between keeps ``running``, a finished one keeps its final status.
+        await state.update_status(
+            store, task_id, record.task_name, "cancelled", {}, only_from="queued"
+        )

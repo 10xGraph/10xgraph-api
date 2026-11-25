@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from starlette.requests import HTTPConnection
 from taskiq import AsyncTaskiqDecoratedTask
 from tenxgraph.core.authz import Identity, Reach, can_reach
 
@@ -67,6 +68,28 @@ def _visible(
     if not widen or identity is None or identity.reach is Reach.OWN:
         return False
     return can_reach({"user": identity}, record.user_id, record.tenant)
+
+
+class RequireTaskPermission(RequirePermission):
+    """``authorize`` gets the task name, as in the worker's ``tasks:trigger`` check (L11):
+    from the path on POST, else of the task or schedule the id names when the caller can see
+    it (None otherwise; the route then answers 404). The audit resource is ``task/<name>``,
+    plus ``/<id>`` when the path names one."""
+
+    async def target(
+        self, connection: HTTPConnection, identity: Identity | None
+    ) -> tuple[str | None, str | None]:
+        params = connection.path_params
+        if "name" in params:
+            return str(params["name"]), f"task/{params['name']}"
+        ident = str(params.get("task_id") or params.get("schedule_id") or "")
+        store = state.cache_store_for(None)
+        if store is None or not ident:
+            return None, None
+        record = await _read_schedule(store, ident) or await state.read_status(store, ident)
+        if record is None or not _visible(record, identity, widen=True):
+            return None, None
+        return record.task_name, f"task/{record.task_name}/{ident}"
 
 
 def _http_task(name: str) -> AsyncTaskiqDecoratedTask[Any, Any]:
@@ -189,7 +212,7 @@ async def start_task(
     request: Request,
     name: str,
     body: TaskCall,
-    identity: Identity | None = Depends(RequirePermission("tasks", "trigger")),
+    identity: Identity | None = Depends(RequireTaskPermission("tasks", "trigger")),
 ):
     """Run the task now (``{task_id}``), or schedule it when ``schedule`` is set
     (``{schedule_id}``)."""
@@ -263,7 +286,7 @@ async def start_task(
 async def get_task(
     request: Request,
     task_id: str,
-    identity: Identity | None = Depends(RequirePermission("tasks", "read")),
+    identity: Identity | None = Depends(RequireTaskPermission("tasks", "read")),
 ):
     """A schedule: its task, time and arguments. A task: status, progress, result, error."""
     store = _store()
@@ -271,13 +294,15 @@ async def get_task(
     if schedule is not None and _visible(schedule, identity, widen=True):
         shown = schedule.model_dump(mode="json", exclude={"config", "slot_id"})
         shown["status"] = "sent" if await _sent(schedule) else "scheduled"
+        # Task ids of the last runs the scheduler sent, newest first (S5).
+        shown["runs"] = await state.read_schedule_runs(store, task_id)
         return success_response(shown, request)
     record = await state.read_status(store, task_id)
     if schedule is not None or record is None or not _visible(record, identity, widen=True):
         raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
 
     data: dict[str, Any] = record.model_dump(mode="json")
-    data.update(progress=None, result=None, error=None)
+    data.update(progress=None, result=None)  # ``error`` is the record's own (unsaved result)
     backend = broker.result_backend
     progress = await backend.get_progress(task_id)
     if progress is not None:
@@ -285,7 +310,7 @@ async def get_task(
     if await backend.is_result_ready(task_id):
         result = await backend.get_result(task_id)
         data["result"] = None if result.is_err else result.return_value
-        data["error"] = _error_text(result.error)
+        data["error"] = _error_text(result.error) or data["error"]
     return success_response(data, request)
 
 
@@ -294,7 +319,7 @@ async def change_schedule(
     request: Request,
     schedule_id: str,
     body: ScheduleChange,
-    identity: Identity | None = Depends(RequirePermission("tasks", "trigger")),
+    identity: Identity | None = Depends(RequireTaskPermission("tasks", "trigger")),
 ):
     """Delete and add again with the same id, arguments and run config (TaskIQ has no
     update). A one-time schedule already sent is 409."""
@@ -326,7 +351,7 @@ async def change_schedule(
 async def cancel_task(
     request: Request,
     task_id: str,
-    identity: Identity | None = Depends(RequirePermission("tasks", "cancel")),
+    identity: Identity | None = Depends(RequireTaskPermission("tasks", "cancel")),
 ):
     """A schedule is deleted. A queued task is not run; a running one sees
     ``ctx.cancelled()``."""
@@ -340,6 +365,7 @@ async def cancel_task(
             await _source().delete_schedule(task_id)
             await store.delete(_schedule_key(task_id))
             await _release_slot(store, schedule)
+            await state.delete_schedule_runs(store, task_id)
         await audit_event(
             "change",
             "success",

@@ -174,8 +174,8 @@ _SECTIONS: list[dict[str, Any]] = [
         "title": "Cache store",
         "subtitle": "rate limiting, token revocation",
         "description": (
-            "Shared state between workers: run locks, idempotency, ownership cache, rate limits "
-            "and token revocations."
+            "Shared state between workers: run locks, idempotency, rate limits, token "
+            "revocations and background-task status."
         ),
         "key": "cache_store",
         "optional": False,

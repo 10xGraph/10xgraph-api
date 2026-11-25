@@ -140,6 +140,9 @@ async def lifespan(app: FastAPI):
         from tenxgraph_api.src.app.routers.tasks import start_broker
 
         await start_broker(graph_path, graph_config.worker.tasks, container)
+        from tenxgraph_api.jobs.config import warn_memory_state
+
+        warn_memory_state(graph_config.worker, graph_config.cache_store.type)
 
     sweeper: asyncio.Task | None = None
     from tenxgraph_api.src.app.core.config.media_settings import get_media_settings

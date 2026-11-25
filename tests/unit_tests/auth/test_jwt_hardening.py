@@ -169,3 +169,18 @@ def test_auth_string_is_matched_exactly():
     for bad in ("JWT", " jwt", "no-jwt-here", "jwt_custom", "notjwt", "custom jwt"):
         with pytest.raises(ValueError, match="auth must be null"):
             AuthConfig.parse(bad)
+
+
+# A missing key refuses the boot instead of answering 500 on every request.
+
+
+@pytest.mark.parametrize("mode", ["development", "production"])
+def test_missing_secret_key_refuses_boot(mode):
+    with pytest.raises(ValueError, match="needs a verification key: set JWT_SECRET_KEY"):
+        check_jwt_settings(_settings(JWT_SECRET_KEY=None, MODE=mode))
+
+
+def test_rotation_keys_alone_boot_with_default_algorithm():
+    settings = _settings(JWT_SECRET_KEY=None, JWT_SECRET_KEYS=[{"kid": "a", "key": "k" * 48}])
+    assert settings.JWT_ALGORITHM == "HS256"
+    check_jwt_settings(settings)

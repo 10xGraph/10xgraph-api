@@ -227,6 +227,19 @@ class ToolAudit:
             return
         try:
             state = await checkpointer.aget_state(config)
+        except Exception as exc:
+            logger.error("Tool audit ledger read failed: %s: %s", type(exc).__name__, exc)
+            return
+        await self.record_paused(checkpointer, config, state)
+
+    async def record_paused(self, checkpointer: Any, config: dict[str, Any], state: Any) -> None:
+        """When ``state`` is paused in a tool turn: record that turn's finished calls not seen
+        yet (``after_run`` with the state in hand, as the worker's lifecycle hook has it)."""
+        if not audit_enabled() or checkpointer is None:
+            return
+        if not self.resumed and not self.called - self.recorded:
+            return
+        try:
             if state is None or pending_interrupt(state) is None:
                 return
             for call_id, entry in await self._ledger(checkpointer, config, state):

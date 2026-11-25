@@ -51,8 +51,9 @@ def _require_pyjwt() -> None:
 def check_jwt_settings(settings: Settings) -> None:
     """Check the JWT settings at startup.
 
-    Refuses a missing PyJWT and an algorithm outside ``ALLOWED_JWT_ALGORITHMS`` (``none``
-    included), always. Refuses a guessable HMAC secret in production, warns about it otherwise.
+    Refuses a missing PyJWT, an algorithm outside ``ALLOWED_JWT_ALGORITHMS`` (``none``
+    included) and no verification key (neither ``JWT_SECRET_KEY`` nor ``JWT_SECRET_KEYS``),
+    always. Refuses a guessable HMAC secret in production, warns about it otherwise.
 
     A short HS* secret can be brute-forced offline from any one token, after which anyone can
     mint a token for any ``user_id``.
@@ -64,10 +65,17 @@ def check_jwt_settings(settings: Settings) -> None:
             f"JWT_ALGORITHM {configured!r} is not allowed. Use one of: "
             f"{', '.join(sorted(ALLOWED_JWT_ALGORITHMS))} (HS256 is the default)."
         )
+    secrets = [key for _, key in verification_keys(settings)]
+    if not secrets:
+        # Without a key every request would answer 500 JWT_SETTINGS_NOT_CONFIGURED.
+        raise ValueError(
+            'auth method "jwt" needs a verification key: set JWT_SECRET_KEY (or the rotation '
+            "list JWT_SECRET_KEYS) in the environment or the .env file. Generate one with: "
+            "python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+        )
     algorithm = configured.upper()
     if not algorithm.startswith("HS"):
         return
-    secrets = [key for _, key in verification_keys(settings)]
     if all(len(secret.encode()) >= MIN_HMAC_BYTES for secret in secrets):
         return
     message = (

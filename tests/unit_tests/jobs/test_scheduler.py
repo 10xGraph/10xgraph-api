@@ -287,8 +287,8 @@ async def test_second_scheduler_waits_as_standby(fake_redis, caplog):
     for scheduler in (first, second):
         scheduler.broker.find_task = lambda name: None
     task = _task("s1", cron="* * * * *")
-    orig = TaskiqScheduler.on_ready
-    TaskiqScheduler.on_ready = record  # type: ignore[method-assign]
+    orig = LeasedScheduler._send
+    LeasedScheduler._send = record  # type: ignore[method-assign]
     try:
         await first.startup()
         with caplog.at_level(logging.WARNING, logger="tenxgraph_api.jobs"):
@@ -308,7 +308,7 @@ async def test_second_scheduler_waits_as_standby(fake_redis, caplog):
         assert sent == ["s1", "s1"]
         await second.shutdown()
     finally:
-        TaskiqScheduler.on_ready = orig  # type: ignore[method-assign]
+        LeasedScheduler._send = orig  # type: ignore[method-assign]
 
 
 def test_lease_redis_and_source_have_timeouts():
