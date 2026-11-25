@@ -13,6 +13,8 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from tenxgraph.core.authz import Identity
+from tenxgraph.utils.temp_perf import done as _perf_done  # TEMP-PERF
+from tenxgraph.utils.temp_perf import now as _perf_now  # TEMP-PERF
 
 from tenxgraph_api.src.app.core.config.graph_config import RunsConfig
 from tenxgraph_api.src.app.core.leases import Lease
@@ -47,13 +49,19 @@ async def acquire_run_guard(
     """
     thread_lock = Lease(None)
     if thread_id is not None:
+        _tp0 = _perf_now()  # TEMP-PERF
         thread_lock = await acquire_thread_lock(
             thread_id, on_busy=on_busy, stop=stop, is_disconnected=is_disconnected
         )
+        _perf_done("api_thread_lock", _tp0)  # TEMP-PERF
     try:
         if recheck is not None and thread_id is not None:
+            _tp0 = _perf_now()  # TEMP-PERF
             await recheck()
+            _perf_done("api_thread_recheck", _tp0)  # TEMP-PERF
+        _tp0 = _perf_now()  # TEMP-PERF
         slot = await acquire_run_slot(user, runs)
+        _perf_done("api_run_slot", _tp0)  # TEMP-PERF
     except BaseException:
         thread_lock.release()
         raise

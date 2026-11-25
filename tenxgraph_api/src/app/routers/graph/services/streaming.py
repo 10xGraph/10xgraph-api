@@ -10,6 +10,8 @@ from tenxgraph.core.graph.utils.stream_handler import is_pause_chunk
 from tenxgraph.core.state import StreamChunk, StreamEvent
 from tenxgraph.utils import ResponseGranularity
 from tenxgraph.utils.interrupt import pending_interrupt
+from tenxgraph.utils.temp_perf import done as _perf_done  # TEMP-PERF
+from tenxgraph.utils.temp_perf import now as _perf_now  # TEMP-PERF
 from tenxgraph.utils.validators import ValidationError as InputValidationError
 
 from tenxgraph_api.src.app.core import logger
@@ -96,7 +98,10 @@ class StreamingMixin:
                 graph_input, user, credential=credential, checks=checks
             ):
                 errored = errored or chunk.event == StreamEvent.ERROR
-                yield chunk.model_dump_json(serialize_as_any=True) + "\n"
+                _tp0 = _perf_now()  # TEMP-PERF
+                _line = chunk.model_dump_json(serialize_as_any=True) + "\n"  # TEMP-PERF
+                _perf_done("api_stream_chunk_encode", _tp0)  # TEMP-PERF
+                yield _line  # TEMP-PERF (was: yield chunk.model_dump_json(...) + newline)
                 # The graph reuses one chunk object, so keep only the ids, not the object.
                 last = StreamChunk(
                     event=StreamEvent.UPDATES,
@@ -154,11 +159,13 @@ class StreamingMixin:
             async for raw_chunk in self._astream_bounded(
                 input_data, config, graph_input.response_granularity
             ):
+                _tp0 = _perf_now()  # TEMP-PERF
                 chunk = client_chunk(sanitize_error_chunk(raw_chunk), is_production())
                 mt = chunk.metadata or {}
                 mt.update(meta)
                 chunk.metadata = mt
                 self._record_chunk(thread_id, run_id, chunk, datetime.now().timestamp())
+                _perf_done("api_stream_chunk_prepare", _tp0)  # TEMP-PERF
                 if is_pause_chunk(chunk):
                     saw_pause = True
                 if getattr(chunk, "is_error", False) or getattr(chunk, "event", None) in (

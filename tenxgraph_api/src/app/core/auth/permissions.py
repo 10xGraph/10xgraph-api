@@ -22,6 +22,8 @@ from injectq import InjectQ
 from injectq.integrations.fastapi import InjectFastAPI
 from starlette.requests import HTTPConnection, Request
 from tenxgraph.core.authz import Identity, UserCredential
+from tenxgraph.utils.temp_perf import done as _perf_done  # TEMP-PERF
+from tenxgraph.utils.temp_perf import now as _perf_now  # TEMP-PERF
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.audit import audit_enabled, audit_event
@@ -244,9 +246,13 @@ async def _identity(
     Each refusal emits one ``auth`` audit event; the WARNING lines are written only while audit
     is off, so the record is not doubled.
     """
+    _tp0 = _perf_now()  # TEMP-PERF
     claims, credential = await _authenticate(auth, connection, response)
+    _perf_done("api_auth_authenticate", _tp0)  # TEMP-PERF
     try:
+        _tp0 = _perf_now()  # TEMP-PERF
         identity = resolve(claims, auth.rbac)
+        _perf_done("api_rbac_resolve", _tp0)  # TEMP-PERF
     except InvalidClaimsError as exc:
         if not audit_enabled():
             logger.warning("Rejected token claims: %s", exc)
@@ -261,7 +267,9 @@ async def _identity(
         await _auth_failed("reserved_id")
         _reject_token(connection, RESERVED_USER_ID_MESSAGE, "INVALID_TOKEN")
     try:
+        _tp0 = _perf_now()  # TEMP-PERF
         revoked = await token_revoked(identity)
+        _perf_done("api_auth_revocation", _tp0)  # TEMP-PERF
     except TokenJtiMissingError:
         # Revocation is on: a token without a jti could never be revoked by itself.
         if not audit_enabled():
@@ -328,12 +336,18 @@ class RequireIdentity:
                 # Auth off: everyone is allowed; the event records the call (user_id null).
                 await _audit_access(None, self.permission, _path_resource(connection), "allowed")
             return None
+        _tp0 = _perf_now()  # TEMP-PERF
         identity = await _identity(connection, response, auth)
+        _perf_done("api_auth_total", _tp0)  # TEMP-PERF
         if self.permission is not None:
+            _tp0 = _perf_now()  # TEMP-PERF
             resource_id = await _resource_id(connection)
+            _perf_done("api_resource_id", _tp0)  # TEMP-PERF
             resource = _resource_label(connection, resource_id)
             try:
+                _tp0 = _perf_now()  # TEMP-PERF
                 await _authorize(auth, identity, self.permission, resource_id, resource)
+                _perf_done("api_authorize", _tp0)  # TEMP-PERF
             except HTTPException as exc:
                 _reject(connection, exc.status_code, str(exc.detail))
         return identity
@@ -381,7 +395,9 @@ async def _authorize(
     ``resource_id`` goes to ``authorize``; ``resource`` (``"thread/<id>"``) to the audit event.
     """
     try:
+        _tp0 = _perf_now()  # TEMP-PERF
         allowed = await auth.authorize(identity, permission, resource_id)
+        _perf_done("api_rbac_authorize_call", _tp0)  # TEMP-PERF
     except HTTPException:
         await _audit_access(identity, permission, resource, "denied")
         raise
