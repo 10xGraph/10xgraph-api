@@ -17,6 +17,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 from tenxgraph.core.authz import Identity
+from tenxgraph.utils.temp_perf import done as _perf_done  # TEMP-PERF
+from tenxgraph.utils.temp_perf import now as _perf_now  # TEMP-PERF
 
 from tenxgraph_api.src.app.core.audit.config import AuditConfig
 from tenxgraph_api.src.app.core.config.metrics import count_audit_sink_error
@@ -114,6 +116,7 @@ async def audit_event(  # noqa: PLR0913
         return
     if not _Active.include_reads and event == "access" and result == "allowed":
         return
+    _tp0 = _perf_now()  # TEMP-PERF
     ctx = get_request_context()
     if identity is not None:
         user_id = identity.user_id
@@ -141,6 +144,7 @@ async def audit_event(  # noqa: PLR0913
             await sink.emit(record)
         except Exception as exc:
             _sink_failed(sink, exc)
+    _perf_done("api_audit_write", _tp0)  # TEMP-PERF
 
 
 def _sink_failed(sink: BaseAuditSink, exc: Exception) -> None:

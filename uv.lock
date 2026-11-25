@@ -14,7 +14,7 @@ overrides = [{ name = "injectq", specifier = ">=0.7.0,<0.8" }]
 [[package]]
 name = "10xgraph"
 version = "1.0.0"
-source = { git = "https://github.com/10xGraph/10xGraph?branch=main#b33eff1c8198169def1fc428cdd0e0e0706b171a" }
+source = { git = "https://github.com/10xGraph/10xGraph?rev=f8f8d72c25cf121eff3b7b5c20c64770e287cc80#f8f8d72c25cf121eff3b7b5c20c64770e287cc80" }
 dependencies = [
     { name = "injectq" },
     { name = "pydantic" },
@@ -115,6 +115,10 @@ dev = [
     { name = "httpx" },
     { name = "hypothesis" },
     { name = "mypy" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-exporter-otlp" },
+    { name = "opentelemetry-instrumentation-fastapi" },
+    { name = "opentelemetry-sdk" },
     { name = "pre-commit" },
     { name = "pyjwt" },
     { name = "pytest" },
@@ -136,8 +140,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "10xgraph", git = "https://github.com/10xGraph/10xGraph?branch=main" },
-    { name = "10xgraph", extras = ["images"], marker = "extra == 'images'", git = "https://github.com/10xGraph/10xGraph?branch=main" },
+    { name = "10xgraph", git = "https://github.com/10xGraph/10xGraph?rev=f8f8d72c25cf121eff3b7b5c20c64770e287cc80" },
+    { name = "10xgraph", extras = ["images"], marker = "extra == 'images'", git = "https://github.com/10xGraph/10xGraph?rev=f8f8d72c25cf121eff3b7b5c20c64770e287cc80" },
     { name = "ag-ui-protocol", marker = "extra == 'ag-ui'", specifier = ">=1.0,<2" },
     { name = "fastapi", specifier = ">=0.116,<1.0" },
     { name = "firebase-admin", marker = "extra == 'firebase'", specifier = ">=6.5.0" },
@@ -182,12 +186,16 @@ provides-extras = ["sentry", "firebase", "snowflakekit", "redis", "jobs", "jobs-
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "10xgraph", git = "https://github.com/10xGraph/10xGraph?branch=main" },
+    { name = "10xgraph", git = "https://github.com/10xGraph/10xGraph?rev=f8f8d72c25cf121eff3b7b5c20c64770e287cc80" },
     { name = "ag-ui-protocol", specifier = ">=1.0,<2" },
     { name = "gunicorn", specifier = ">=23,<27" },
     { name = "httpx", specifier = "==0.27.0" },
     { name = "hypothesis", specifier = ">=6.100.0" },
     { name = "mypy", specifier = ">=1.11.0" },
+    { name = "opentelemetry-api", specifier = ">=1.45.1" },
+    { name = "opentelemetry-exporter-otlp", specifier = ">=1.20.0" },
+    { name = "opentelemetry-instrumentation-fastapi", specifier = ">=0.40b0" },
+    { name = "opentelemetry-sdk", specifier = ">=1.45.1" },
     { name = "pre-commit", specifier = ">=3.8.0" },
     { name = "pyjwt" },
     { name = "pytest", specifier = ">=8.4.2" },

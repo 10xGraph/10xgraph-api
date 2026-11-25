@@ -6,9 +6,11 @@ from fastapi import FastAPI
 from injectq import InjectQ
 from tenxgraph.runtime.publisher.identity import UserIdMode
 
+from .backends_publisher import BackendsPublisher, enabled_backends
 from .graph_config import GraphConfig
 from .metrics import resolve_use_metrics_endpoint
 from .settings import logger
+from .tracing_backends import configure_tracing_backends
 
 
 def _user_id_mode(graph_config: GraphConfig | None) -> UserIdMode:
@@ -81,13 +83,13 @@ def _observability_publishers(publisher: Any) -> list[Any]:
 def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | None) -> None:
     """Wire Logfire/LangSmith/Phoenix/OTLP from the ``observability`` block of ``10xgraph.json``.
 
-    Configures the tracer provider(s)/exporters and binds an ``OtelPublisher``
-    into the DI container. This runs at app-construction time, before the graph
-    is loaded and compiled — the only reliable attach point, because InjectQ
-    freezes the ``BasePublisher`` binding at ``container.compile()`` (which runs
-    inside ``StateGraph.compile()``). The core ``StateGraph.compile()`` guard
-    preserves a publisher already present in the container instead of clobbering
-    it with ``None``.
+    Configures the tracer provider(s)/exporters and binds a ``BackendsPublisher`` (writing
+    the attribute keys of every enabled backend) into the DI container. This runs at
+    app-construction time, before the graph is loaded and compiled — the only reliable
+    attach point, because InjectQ freezes the ``BasePublisher`` binding at
+    ``container.compile()`` (which runs inside ``StateGraph.compile()``). The core
+    ``StateGraph.compile()`` guard preserves a publisher already present in the container
+    instead of clobbering it with ``None``.
 
     Secrets stay in the environment (``LOGFIRE_TOKEN``, ``LANGSMITH_API_KEY``, ``PHOENIX_API_KEY``);
     only non-secret settings live in ``10xgraph.json``.
@@ -100,18 +102,14 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
         return
     obs_cfg = resolve_use_metrics_endpoint(obs_cfg, graph_config.metrics)
 
-    logfire_on = bool((obs_cfg.get("logfire") or {}).get("enabled", False))
-    langsmith_on = bool((obs_cfg.get("langsmith") or {}).get("enabled", False))
-    phoenix_on = bool((obs_cfg.get("phoenix") or {}).get("enabled", False))
-    otlp_on = bool((obs_cfg.get("otlp") or {}).get("enabled", False))
-    if not (logfire_on or langsmith_on or phoenix_on or otlp_on):
+    backends = enabled_backends(obs_cfg)
+    if not backends:
         return
 
     try:
         from tenxgraph.runtime.publisher.base_publisher import BasePublisher
         from tenxgraph.runtime.publisher.composite_publisher import CompositePublisher
-        from tenxgraph.runtime.publisher.exporters import setup_observability
-        from tenxgraph.runtime.publisher.otel_publisher import ObservabilityLevel, OtelPublisher
+        from tenxgraph.runtime.publisher.otel_publisher import ObservabilityLevel
     except ImportError:
         logger.warning(
             "observability is configured but required packages are not installed. "
@@ -132,11 +130,10 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
         )
         return
 
-    # Configure the provider(s)/exporter(s) only. graph=None means no publisher
-    # is attached here; we bind it into the container ourselves below so it is
-    # in place before the graph compiles.
+    # Configure the provider(s)/exporter(s) only; the publisher is bound into the
+    # container below so it is in place before the graph compiles.
     try:
-        setup_observability(None, obs_cfg)
+        configure_tracing_backends(obs_cfg)
     except (ImportError, ValueError) as exc:
         logger.warning("Observability setup skipped: %s", exc)
         return
@@ -150,7 +147,11 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
         )
         level = ObservabilityLevel.FULL
 
-    otel_publisher = OtelPublisher(level=level, user_id_mode=_user_id_mode(graph_config))
+    # One span goes to every enabled exporter, so it carries the keys of each backend
+    # (OpenInference for phoenix, langsmith.* for langsmith, logfire.msg for logfire).
+    otel_publisher = BackendsPublisher(
+        backends, level=level, user_id_mode=_user_id_mode(graph_config)
+    )
     existing = container.try_get(BasePublisher)
 
     if existing is None:
@@ -162,10 +163,10 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
 
     logger.info(
         "Observability enabled (logfire=%s, langsmith=%s, phoenix=%s, otlp=%s, level=%s)",
-        logfire_on,
-        langsmith_on,
-        phoenix_on,
-        otlp_on,
+        "logfire" in backends,
+        "langsmith" in backends,
+        "phoenix" in backends,
+        "otlp" in backends,
         level,
     )
 
@@ -207,8 +208,10 @@ def setup_otel_provider(settings, *, metrics_owned: bool = False) -> bool:
     if endpoint:
         try:
             from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+            from tenxgraph.runtime.publisher._export_health import log_export_health
 
-            provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
+            exporter = log_export_health(OTLPSpanExporter(endpoint=endpoint), "otlp-grpc")
+            provider.add_span_processor(BatchSpanProcessor(exporter))
             logger.info("OTEL: exporting traces to %s", endpoint)
         except ImportError:
             logger.warning(
@@ -245,10 +248,12 @@ def _setup_otel_metrics(resource, endpoint: str | None) -> None:
         from opentelemetry.sdk.metrics import MeterProvider
         from opentelemetry.sdk.metrics.export import (
             ConsoleMetricExporter,
+            MetricExporter,
             PeriodicExportingMetricReader,
         )
         from tenxgraph.utils.metrics import setup_otel_metrics
 
+        exporter: MetricExporter
         if endpoint:
             from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 

@@ -462,6 +462,16 @@ def test_setup_middleware_all():
 # ── _setup_observability ──────────────────────────────────────────────────────
 
 
+_CONFIGURE = "tenxgraph_api.src.app.core.config.observability.configure_tracing_backends"
+_BACKENDS = "tenxgraph_api.src.app.core.config.observability.BackendsPublisher"
+
+
+class FakeBackendsPublisher:
+    def __init__(self, backends, level=None, user_id_mode="raw"):
+        self.backends = list(backends)
+        self.level = level
+
+
 def _obs_modules(*, setup_side_effect=None, existing=None, composite_cls=None):
     """Fake tenxgraph.runtime.publisher modules used by _setup_observability."""
 
@@ -487,24 +497,18 @@ def _obs_modules(*, setup_side_effect=None, existing=None, composite_cls=None):
         def __repr__(self):
             return f"level:{self.val}"
 
-    class FakeOtelPublisher:
-        def __init__(self, level=None, user_id_mode="raw"):
-            self.level = level
-
-    setup_observability = MagicMock(side_effect=setup_side_effect)
+    configure = MagicMock(side_effect=setup_side_effect)
 
     modules = {
         "tenxgraph.runtime.publisher.base_publisher": MagicMock(BasePublisher=FakeBasePublisher),
         "tenxgraph.runtime.publisher.composite_publisher": MagicMock(
             CompositePublisher=composite_cls or FakeCompositePublisher
         ),
-        "tenxgraph.runtime.publisher.exporters": MagicMock(setup_observability=setup_observability),
         "tenxgraph.runtime.publisher.otel_publisher": MagicMock(
-            ObservabilityLevel=FakeObservabilityLevel,
-            OtelPublisher=FakeOtelPublisher,
+            ObservabilityLevel=FakeObservabilityLevel
         ),
     }
-    return modules, setup_observability, FakeBasePublisher, FakeCompositePublisher
+    return modules, configure, FakeBasePublisher, FakeCompositePublisher
 
 
 def _graph_config(observability):
@@ -549,26 +553,32 @@ def test_setup_observability_binds_when_none_existing():
     container = MagicMock()
     container.try_get.return_value = None
 
-    with patch.dict(sys.modules, modules):
+    with (
+        patch.dict(sys.modules, modules),
+        patch(_CONFIGURE, setup_obs),
+        patch(_BACKENDS, FakeBackendsPublisher),
+    ):
         _setup_observability(container, _graph_config(cfg))
 
-    # provider config invoked in graph=None (provider-only) mode
-    setup_obs.assert_called_once()
-    assert setup_obs.call_args[0][0] is None
-    assert setup_obs.call_args[0][1] == cfg
+    # provider config gets the observability block
+    setup_obs.assert_called_once_with(cfg)
     container.bind_instance.assert_called_once()
 
 
 def test_setup_observability_adds_to_existing_composite():
     from tenxgraph_api.src.app.core.config.setup_middleware import _setup_observability
 
-    modules, _setup_obs, _base, comp_cls = _obs_modules()
+    modules, setup_obs, _base, comp_cls = _obs_modules()
     existing = comp_cls()
     cfg = {"langsmith": {"enabled": True, "project": "p"}}
     container = MagicMock()
     container.try_get.return_value = existing
 
-    with patch.dict(sys.modules, modules):
+    with (
+        patch.dict(sys.modules, modules),
+        patch(_CONFIGURE, setup_obs),
+        patch(_BACKENDS, FakeBackendsPublisher),
+    ):
         _setup_observability(container, _graph_config(cfg))
 
     assert len(existing.publishers) == 1
@@ -583,18 +593,69 @@ def test_setup_observability_binds_for_phoenix_only():
     container = MagicMock()
     container.try_get.return_value = None
 
-    with patch.dict(sys.modules, modules):
+    with (
+        patch.dict(sys.modules, modules),
+        patch(_CONFIGURE, setup_obs),
+        patch(_BACKENDS, FakeBackendsPublisher),
+    ):
         _setup_observability(container, _graph_config(cfg))
 
-    setup_obs.assert_called_once()
-    assert setup_obs.call_args[0][1] == cfg
+    setup_obs.assert_called_once_with(cfg)
     container.bind_instance.assert_called_once()
+    assert container.bind_instance.call_args[0][1].backends == ["phoenix"]
+
+
+@pytest.mark.parametrize(
+    ("cfg", "backends"),
+    [
+        ({"phoenix": {"enabled": True}}, ["phoenix"]),
+        ({"langsmith": {"enabled": True}, "phoenix": {"enabled": True}}, ["phoenix", "langsmith"]),
+        ({"otlp": {"enabled": True}}, ["otlp"]),
+    ],
+)
+def test_setup_observability_publisher_writes_enabled_backend_keys(cfg, backends):
+    """The bound publisher is real and its spans carry the keys of the enabled backends only."""
+    pytest.importorskip("opentelemetry.sdk")
+    from tenxgraph.runtime.publisher.events import ContentType, Event, EventModel, EventType
+
+    from tenxgraph_api.src.app.core.config.setup_middleware import _setup_observability
+
+    container = MagicMock()
+    container.try_get.return_value = None
+    with patch(_CONFIGURE):
+        _setup_observability(container, _graph_config(cfg))
+    publisher = container.bind_instance.call_args[0][1]
+    assert publisher.backends == backends
+
+    attrs: dict = {}
+    span = MagicMock(name="span")
+    span.set_attribute.side_effect = attrs.__setitem__
+    publisher._tracer = MagicMock(start_span=MagicMock(return_value=span))
+    for etype in (EventType.START, EventType.END):
+        publisher._dispatch(
+            EventModel(
+                event=Event.LLM_CALL,
+                event_type=etype,
+                node_name="MAIN",
+                run_id="r1",
+                thread_id="t1",
+                user_id="u1",
+                data={"model": "m1", "input_tokens": 1, "output_tokens": 1},
+                content_type=[ContentType.MESSAGE],
+            )
+        )
+    span.end.assert_called_once()
+    assert ("openinference.span.kind" in attrs) == ("phoenix" in backends)
+    assert ("session.id" in attrs) == ("phoenix" in backends)
+    assert ("langsmith.span.kind" in attrs) == ("langsmith" in backends)
+    assert not any(k.startswith("logfire.") for k in attrs)
+    assert attrs["gen_ai.request.model"] == "m1"
 
 
 def test_setup_observability_wraps_single_existing():
     from tenxgraph_api.src.app.core.config.setup_middleware import _setup_observability
 
-    modules, _setup_obs, _base, _comp = _obs_modules()
+    modules, setup_obs, _base, _comp = _obs_modules()
 
     class SinglePublisher:
         pass
@@ -603,7 +664,11 @@ def test_setup_observability_wraps_single_existing():
     container = MagicMock()
     container.try_get.return_value = SinglePublisher()
 
-    with patch.dict(sys.modules, modules):
+    with (
+        patch.dict(sys.modules, modules),
+        patch(_CONFIGURE, setup_obs),
+        patch(_BACKENDS, FakeBackendsPublisher),
+    ):
         _setup_observability(container, _graph_config(cfg))
 
     container.bind_instance.assert_called_once()
@@ -612,16 +677,20 @@ def test_setup_observability_wraps_single_existing():
 def test_setup_observability_skips_on_value_error():
     from tenxgraph_api.src.app.core.config.setup_middleware import _setup_observability
 
-    # setup_observability raising ValueError (e.g. LangSmith key missing) must
+    # configure_tracing_backends raising ValueError (e.g. LangSmith key missing) must
     # not crash startup and must not bind a publisher.
-    modules, _setup_obs, _base, _comp = _obs_modules(
+    modules, setup_obs, _base, _comp = _obs_modules(
         setup_side_effect=ValueError("LANGSMITH_API_KEY not set")
     )
     cfg = {"langsmith": {"enabled": True}}
     container = MagicMock()
     container.try_get.return_value = None
 
-    with patch.dict(sys.modules, modules):
+    with (
+        patch.dict(sys.modules, modules),
+        patch(_CONFIGURE, setup_obs),
+        patch(_BACKENDS, FakeBackendsPublisher),
+    ):
         _setup_observability(container, _graph_config(cfg))
 
     container.bind_instance.assert_not_called()
@@ -642,12 +711,16 @@ def test_setup_observability_import_error_warns():
 def test_setup_observability_invalid_level_falls_back():
     from tenxgraph_api.src.app.core.config.setup_middleware import _setup_observability
 
-    modules, _setup_obs, _base, _comp = _obs_modules()
+    modules, setup_obs, _base, _comp = _obs_modules()
     cfg = {"level": "bogus", "logfire": {"enabled": True}}
     container = MagicMock()
     container.try_get.return_value = None
 
-    with patch.dict(sys.modules, modules):
+    with (
+        patch.dict(sys.modules, modules),
+        patch(_CONFIGURE, setup_obs),
+        patch(_BACKENDS, FakeBackendsPublisher),
+    ):
         _setup_observability(container, _graph_config(cfg))
 
     # Falls back to FULL and still binds.
@@ -657,12 +730,16 @@ def test_setup_observability_invalid_level_falls_back():
 def test_setup_observability_without_level_uses_full():
     from tenxgraph_api.src.app.core.config.setup_middleware import _setup_observability
 
-    modules, _setup_obs, _base, _comp = _obs_modules()
+    modules, setup_obs, _base, _comp = _obs_modules()
     cfg = {"logfire": {"enabled": True}}
     container = MagicMock()
     container.try_get.return_value = None
 
-    with patch.dict(sys.modules, modules):
+    with (
+        patch.dict(sys.modules, modules),
+        patch(_CONFIGURE, setup_obs),
+        patch(_BACKENDS, FakeBackendsPublisher),
+    ):
         _setup_observability(container, _graph_config(cfg))
 
     publisher = container.bind_instance.call_args[0][1]
@@ -797,7 +874,12 @@ def test_setup_observability_reuses_existing_observability_publisher(caplog):
     container = MagicMock()
     container.try_get.return_value = existing
 
-    with patch.dict(sys.modules, modules), caplog.at_level("WARNING"):
+    with (
+        patch.dict(sys.modules, modules),
+        patch(_CONFIGURE, setup_obs),
+        patch(_BACKENDS, FakeBackendsPublisher),
+        caplog.at_level("WARNING"),
+    ):
         _setup_observability(container, _graph_config(cfg))
 
     setup_obs.assert_not_called()
@@ -821,7 +903,11 @@ def test_setup_observability_reuses_real_otel_publisher():
     container = MagicMock()
     container.try_get.return_value = existing
 
-    with patch.dict(sys.modules, modules):
+    with (
+        patch.dict(sys.modules, modules),
+        patch(_CONFIGURE, setup_obs),
+        patch(_BACKENDS, FakeBackendsPublisher),
+    ):
         _setup_observability(container, _graph_config({"logfire": {"enabled": True}}))
 
     setup_obs.assert_not_called()
@@ -838,7 +924,11 @@ def test_setup_observability_events_only_publisher_still_adds_otel():
     container = MagicMock()
     container.try_get.return_value = existing
 
-    with patch.dict(sys.modules, modules):
+    with (
+        patch.dict(sys.modules, modules),
+        patch(_CONFIGURE, setup_obs),
+        patch(_BACKENDS, FakeBackendsPublisher),
+    ):
         _setup_observability(container, _graph_config(cfg))
 
     setup_obs.assert_called_once()
@@ -848,7 +938,11 @@ def test_setup_observability_events_only_publisher_still_adds_otel():
     modules, setup_obs, _base, _comp = _obs_modules()
     container = MagicMock()
     container.try_get.return_value = events_cls()
-    with patch.dict(sys.modules, modules):
+    with (
+        patch.dict(sys.modules, modules),
+        patch(_CONFIGURE, setup_obs),
+        patch(_BACKENDS, FakeBackendsPublisher),
+    ):
         _setup_observability(container, _graph_config(cfg))
     setup_obs.assert_called_once()
     container.bind_instance.assert_called_once()
@@ -873,7 +967,12 @@ def test_setup_observability_reuses_observability_inside_composite(caplog):
     container = MagicMock()
     container.try_get.return_value = existing
 
-    with patch.dict(sys.modules, modules), caplog.at_level("WARNING"):
+    with (
+        patch.dict(sys.modules, modules),
+        patch(_CONFIGURE, setup_obs),
+        patch(_BACKENDS, FakeBackendsPublisher),
+        caplog.at_level("WARNING"),
+    ):
         _setup_observability(container, _graph_config({"otlp": {"enabled": True}}))
 
     setup_obs.assert_not_called()

@@ -25,6 +25,8 @@ from tenxgraph.core.exceptions import ModelNotFoundError, ThreadNotFoundError  #
 from tenxgraph.core.realtime.base import ErrorEvent  # noqa: F401
 from tenxgraph.core.realtime.queue import LiveInputQueue  # noqa: F401
 from tenxgraph.core.state import StreamChunk, StreamEvent  # noqa: F401
+from tenxgraph.utils.temp_perf import done as _perf_done  # TEMP-PERF
+from tenxgraph.utils.temp_perf import now as _perf_now  # TEMP-PERF
 
 from tenxgraph_api.src.app.core.audit import audit_event
 from tenxgraph_api.src.app.core.auth.permissions import (
@@ -122,6 +124,13 @@ router = APIRouter(
 )
 
 
+def _perf_pre_handler(request: Request | None) -> None:  # TEMP-PERF
+    state = getattr(request, "scope", {}).get("state", {})  # TEMP-PERF
+    t0 = state.get("_perf_t0") if isinstance(state, dict) else None  # TEMP-PERF
+    if isinstance(t0, float):  # TEMP-PERF
+        _perf_done("api_pre_handler", t0)  # TEMP-PERF
+
+
 async def _http_run_guard(
     service: GraphService,
     graph_input: GraphInputSchema,
@@ -130,7 +139,8 @@ async def _http_run_guard(
 ) -> Lease:
     """The thread lock and run slot for an HTTP run (``on_busy`` as the request set it)."""
     thread_id = requested_thread_id(graph_input.config)
-    return await acquire_run_guard(
+    _tp0 = _perf_now()  # TEMP-PERF
+    _lease = await acquire_run_guard(  # TEMP-PERF (was: return await acquire_run_guard()
         user=identity,
         runs=service.runs_policy(),
         thread_id=thread_id,
@@ -139,6 +149,8 @@ async def _http_run_guard(
         is_disconnected=request.is_disconnected if request is not None else None,
         recheck=lambda: service.require_run_thread(thread_id, identity),
     )
+    _perf_done("api_run_guard", _tp0)  # TEMP-PERF
+    return _lease  # TEMP-PERF
 
 
 async def _idempotency(
@@ -148,7 +160,10 @@ async def _idempotency(
     key = request.headers.get(idempotency.IDEMPOTENCY_HEADER) if request is not None else None
     if not isinstance(key, str):
         return None, None
-    return await idempotency.check(identity, key, kind, await request.body())
+    _tp0 = _perf_now()  # TEMP-PERF
+    _idem = await idempotency.check(identity, key, kind, await request.body())  # TEMP-PERF
+    _perf_done("api_idempotency", _tp0)  # TEMP-PERF
+    return _idem  # TEMP-PERF
 
 
 @router.post(
@@ -167,12 +182,15 @@ async def invoke_graph(
     """
     Invoke the graph with the provided input and return the final result.
     """
+    _perf_pre_handler(request)  # TEMP-PERF
     logger.info(f"Graph invoke request received with {len(graph_input.messages)} messages")
+    _tp0 = _perf_now()  # TEMP-PERF
     checks = service.check_run_input(graph_input.messages, graph_input.config)
     # A thread the caller cannot run on is a 404 before anything is held.
     await service.require_run_thread(requested_thread_id(graph_input.config), identity)
     # Inline media the run would store gets the upload checks (signature, quota): 422.
     await service.check_inline_media(graph_input.messages, identity)
+    _perf_done("api_run_checks", _tp0)  # TEMP-PERF
 
     # Opt-in Idempotency-Key: a finished run's stored result is returned, a running one is 409.
     idem, replay = await _idempotency(request, identity, "invoke")
@@ -206,10 +224,13 @@ async def invoke_graph(
 
     logger.info("Graph invoke completed successfully")
 
-    return success_response(
+    _tp0 = _perf_now()  # TEMP-PERF
+    _resp = success_response(  # TEMP-PERF (was: return success_response(result, request))
         result,
         request,
     )
+    _perf_done("api_response_build", _tp0)  # TEMP-PERF
+    return _resp  # TEMP-PERF
 
 
 @router.post(
@@ -228,13 +249,16 @@ async def stream_graph(
     """
     Stream the graph execution with real-time output.
     """
+    _perf_pre_handler(request)  # TEMP-PERF
     logger.info(f"Graph stream request received with {len(graph_input.messages)} messages")
     # Before the response starts, so a blocked URL is a real 400 and a thread the caller
     # cannot run on a real 404, not an error chunk.
+    _tp0 = _perf_now()  # TEMP-PERF
     checks = service.check_run_input(graph_input.messages, graph_input.config)
     await service.require_run_thread(requested_thread_id(graph_input.config), identity)
     # Inline media the run would store gets the upload checks (signature, quota): a real 422.
     await service.check_inline_media(graph_input.messages, identity)
+    _perf_done("api_run_checks", _tp0)  # TEMP-PERF
 
     # Opt-in Idempotency-Key: a finished run's final state is replayed, a running one is 409.
     idem, replay = await _idempotency(request, identity, "stream")
@@ -259,7 +283,9 @@ async def stream_graph(
     try:
         # Same for a resume aimed at the wrong interrupt: a 409, as invoke answers it. The
         # state read here is the run's one read (kept on ``checks``).
+        _tp0 = _perf_now()  # TEMP-PERF
         await service.check_resume_target(graph_input, identity, checks)
+        _perf_done("api_check_resume", _tp0)  # TEMP-PERF
     except BaseException:
         guard.release()
         if idem:

@@ -417,7 +417,8 @@ ENVIRONMENT = "pytest"
 # --no-sources and fails if a git requirement reaches the metadata.
 # Before an API release that uses something only on core main, release core first and raise
 # the core floor in [project.dependencies] (and the dev group) to that version.
-10xgraph = { git = "https://github.com/10xGraph/10xGraph", branch = "main" }
+# Pinned to core main at f8f8d72 (merge of #390, fix/final-fixes).
+10xgraph = { git = "https://github.com/10xGraph/10xGraph", rev = "f8f8d72c25cf121eff3b7b5c20c64770e287cc80" }
 
 [tool.uv]
 # Core main still pins injectq<0.7; 0.7.0 fixes the optional-default bug (cleanup-review
@@ -448,6 +449,11 @@ dev = [
     "textxtract[pdf,docx,html,xml,md]>=0.2.0",
     # The ag-ui extra, so the AG-UI router tests run in CI instead of failing.
     "ag-ui-protocol>=1.0,<2",
+    # The otel extra, so the observability and tracing tests run in CI instead of skipping.
+    "opentelemetry-api>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
+    "opentelemetry-instrumentation-fastapi>=0.40b0",
+    "opentelemetry-exporter-otlp>=1.20.0",
     # The production worker class (uvicorn_worker.py) and its shutdown tests import these;
     # same ranges the generated Dockerfile installs.
     "gunicorn>=23,<27",
