@@ -33,7 +33,13 @@ def _schedule_key(task: ScheduledTask) -> tuple[Any, ...]:
 def _ready_or_skip(self: SchedulerLoop, task: ScheduledTask, now: datetime) -> bool:
     """TASKIQ_UPSTREAM.md "Scheduler": the loop catches only ``ValueError`` from pycron, so
     one bad schedule (``*/0``, a huge interval) raised out of ``SchedulerLoop.run`` and stopped
-    the scheduler for everyone. Log the schedule once and skip it; keep running."""
+    the scheduler for everyone. Log the schedule once and skip it; keep running. Also nothing is
+    due while the scheduler is a standby (``LeasedScheduler.leader`` is False): the loop would
+    mark the run as sent while ``on_ready`` drops it."""
+    if getattr(self.scheduler, "leader", True) is False:
+        # A standby sends nothing, so it must not use up the run: the loop would count it as
+        # sent and an ``every`` schedule would first run one interval after the lease is taken.
+        return False
     broken: set[tuple[Any, ...]] = self.__dict__.setdefault("_broken_schedules", set())
     key = _schedule_key(task)
     if key in broken:

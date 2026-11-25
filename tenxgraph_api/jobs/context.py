@@ -21,7 +21,9 @@ __all__ = ["TaskCancelled", "TaskContext", "cancel"]
 
 
 class TaskCancelled(Exception):  # - public name from the plan
-    """The task was cancelled before it started (the caller sees it as the error result)."""
+    """Raise it to end a task as cancelled with an error result. The worker raises it for a task
+    cancelled before it started. A task that sees ``ctx.cancelled()`` may also just return: it
+    still ends as ``cancelled``, with what it returned as its result."""
 
 
 class TaskContext:

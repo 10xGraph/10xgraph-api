@@ -134,6 +134,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A task that sees `ctx.cancelled()` and returns normally now ends as `cancelled` (its returned value stays its result), instead of `success`. A task that finishes before any cancel stays `success`; raising `TaskCancelled` still gives `cancelled`.
+- A scheduler waiting as a standby (another scheduler holds the lease) no longer uses up the `every` runs it cannot send: the first run comes one interval after start, or at once when the lease is taken after that. Before, a restart that met the old lease dropped the first run and the next one came a full interval later (about 40 s for `every: 20`).
 - One bad schedule no longer stops the scheduler for every user: a schedule the scheduler cannot check is logged once with its id and skipped (local patch of TaskIQ 0.13.0's scheduler loop, see `jobs/_taskiq_patches.py`).
 - PATCH of a one-time schedule shortly before its old time no longer deletes the new schedule, and a schedule changed or cancelled since the scheduler's last refresh is not sent from its old copy (`jobs/schedule_source.py`).
 - PATCH and cancel of one schedule run one at a time (409 while the other runs), so a cancel racing a PATCH no longer leaves a schedule running with no record.

@@ -416,3 +416,20 @@ def test_sent_one_time_schedule_reads_sent_and_cannot_be_patched(monkeypatch):
 
 def test_scheduler_module_builds_leased_scheduler():
     assert isinstance(scheduler_module.scheduler, LeasedScheduler)
+
+
+# S4b: a standby must not use up an ``every`` run
+
+
+@pytest.mark.asyncio
+async def test_standby_does_not_mark_an_interval_run_as_sent():
+    scheduler = LeasedScheduler(InMemoryBroker(), [_ListSource([])], None)
+    loop = SchedulerLoop(scheduler)
+    task = _task("every", interval=20)
+    now = datetime.now(UTC)
+    scheduler.lease_until = 0.0  # standby
+    assert loop._is_schedule_ready_to_send(task, now) is False
+    assert "every" not in loop.interval_tasks_last_run
+    scheduler.lease_until = float("inf")  # lease taken: due at once
+    assert loop._is_schedule_ready_to_send(task, now) is True
+    assert loop.interval_tasks_last_run["every"] == now

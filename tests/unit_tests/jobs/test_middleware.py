@@ -380,3 +380,48 @@ async def test_monitoring_never_raises_when_metrics_fail(monitored, monkeypatch)
     monkeypatch.setattr("tenxgraph.utils.metrics.counter", broken)
     monkeypatch.setattr("tenxgraph.utils.metrics.timer", broken)
     assert (await (await kiq_with_id(sync_job, 4)).wait_result(timeout=5)).return_value == 4
+
+
+# D-23: a task that returns after seeing ``ctx.cancelled()`` ends as cancelled
+
+
+async def test_return_after_cancel_flag_ends_cancelled_and_keeps_result(env):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    @env.broker.task
+    async def polite(ctx: Annotated[TaskContext, TaskiqDepends()]) -> dict:
+        started.set()
+        await release.wait()
+        return {"cancelled": await ctx.cancelled()}
+
+    @env.broker.task
+    async def quick() -> int:
+        return 7
+
+    env.wrap()
+    handle = await kiq_with_id(polite)
+    await started.wait()
+    await cancel(handle.task_id, env.broker)
+    assert (await state.read_status(env.store, handle.task_id)).status == "running"
+    release.set()
+    result = await handle.wait_result(timeout=5)
+    assert not result.is_err
+    assert result.return_value == {"cancelled": True}
+    assert (await state.read_status(env.store, handle.task_id)).status == "cancelled"
+
+    # A task that finishes before any cancel stays success, even if cancelled afterwards.
+    done = await kiq_with_id(quick)
+    assert (await done.wait_result(timeout=5)).return_value == 7
+    assert (await state.read_status(env.store, done.task_id)).status == "success"
+
+
+async def test_raising_task_cancelled_still_ends_cancelled(env):
+    @env.broker.task
+    async def raiser() -> None:
+        raise TaskCancelled("stopped")
+
+    env.wrap()
+    handle = await kiq_with_id(raiser)
+    assert isinstance((await handle.wait_result(timeout=5)).error, TaskCancelled)
+    assert (await state.read_status(env.store, handle.task_id)).status == "cancelled"

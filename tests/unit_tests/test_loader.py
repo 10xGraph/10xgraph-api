@@ -483,6 +483,44 @@ def test_web_concurrency_above_one_warns_even_in_development(monkeypatch, caplog
     assert "The cache store is in-memory" in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("setting", "cp_prefix", "warns"),
+    [
+        ("", "", False),  # no REDIS_KEY_PREFIX: nothing to compare
+        ("prod", "prod:", False),
+        ("prod", "prod", False),
+        ("prod", "", True),
+        ("prod", "other:", True),
+    ],
+)
+def test_redis_key_prefix_warning(monkeypatch, caplog, setting, cp_prefix, warns):
+    import logging
+    from types import SimpleNamespace
+
+    from tenxgraph_api.src.app import loader
+    from tenxgraph_api.src.app.core.config import settings as settings_module
+
+    monkeypatch.setattr(
+        settings_module, "get_settings", lambda: MagicMock(REDIS_KEY_PREFIX=setting)
+    )
+    with caplog.at_level(logging.WARNING):
+        loader.warn_redis_key_prefix(SimpleNamespace(redis_key_prefix=cp_prefix))
+    assert ("redis_key_prefix='prod:'" in caplog.text) is warns
+
+
+def test_redis_key_prefix_warning_skips_checkpointers_without_the_option(monkeypatch, caplog):
+    import logging
+
+    from tenxgraph_api.src.app import loader
+    from tenxgraph_api.src.app.core.config import settings as settings_module
+
+    monkeypatch.setattr(settings_module, "get_settings", lambda: MagicMock(REDIS_KEY_PREFIX="prod"))
+    with caplog.at_level(logging.WARNING):
+        loader.warn_redis_key_prefix(InMemoryCheckpointer())
+        loader.warn_redis_key_prefix(None)
+    assert not caplog.records
+
+
 class TestCustomAuthPathForms:
     """``auth.path`` resolves like the other module:attr keys (project folder on sys.path)."""
 

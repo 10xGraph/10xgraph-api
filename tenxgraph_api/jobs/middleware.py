@@ -155,12 +155,26 @@ class TaskMiddleware(TaskiqMiddleware):
             return  # the next attempt writes ``running``; a ``queued`` here could come after it
         if isinstance(result.error, NoResultError):
             # TaskIQ saves no result and calls no ``post_save``: the task raised it itself.
-            await self._write_status(message, "success")
+            await self._write_final(message, "success")
 
     async def post_save(self, message: TaskiqMessage, result: TaskiqResult[Any]) -> None:
         """The final status, written once the result is saved: ``success`` never comes before
         a result that could not be stored (see ``jobs.result_backend``)."""
-        await self._write_status(message, _final_status(result))
+        await self._write_final(message, _final_status(result))
+
+    async def _write_final(self, message: TaskiqMessage, status: state.Status) -> None:
+        """Write the final status. A task that returns normally after its cancel flag was set
+        (it saw ``ctx.cancelled()`` and stopped) ends as ``cancelled``, keeping its result."""
+        if status == "success":
+            try:
+                store = state.cache_store_for(self.broker)
+                if store is not None and await state.is_cancel_flag_set(store, message.task_id):
+                    status = "cancelled"
+            except Exception:
+                logger.exception(
+                    "Task %s (%s): cancel flag not read", message.task_name, message.task_id
+                )
+        await self._write_status(message, status)
 
     async def _write_status(self, message: TaskiqMessage, status: state.Status) -> None:
         try:

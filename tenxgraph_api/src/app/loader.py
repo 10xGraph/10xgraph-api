@@ -437,6 +437,29 @@ def warn_per_process_state(container: InjectQ) -> None:
         )
 
 
+def warn_redis_key_prefix(checkpointer: object | None) -> None:
+    """Warn when ``REDIS_KEY_PREFIX`` is set but the checkpointer's Redis keys do not carry it.
+
+    The API puts ``REDIS_KEY_PREFIX`` plus ``:`` in front of its own keys; the developer builds
+    the checkpointer, so its ``redis_key_prefix`` is checked, not set. Only checkpointers
+    with that option (``PgCheckpointer``) are checked.
+    """
+    from tenxgraph_api.src.app.core.config.settings import get_settings
+
+    prefix = get_settings().REDIS_KEY_PREFIX
+    current = getattr(checkpointer, "redis_key_prefix", None)
+    if not prefix or not isinstance(current, str) or current.rstrip(":") == prefix:
+        return
+    logger.warning(
+        "REDIS_KEY_PREFIX is %r but the checkpointer's redis_key_prefix is %r, so its Redis keys "
+        "(state cache, stop requests, active runs) are not separated from other deployments on "
+        "the same Redis. Pass PgCheckpointer(..., redis_key_prefix=%r).",
+        prefix,
+        current,
+        f"{prefix}:",
+    )
+
+
 def check_store_tenant_columns(
     graph: CompiledGraph,
     store: BaseStore | None,
@@ -553,6 +576,7 @@ async def attach_all_modules(
 
     _enable_token_revocation(container, config, bool(auth_config))
     warn_per_process_state(container)
+    warn_redis_key_prefix(graph._checkpointer)
 
     # --- Media service wiring ---
     from tenxgraph_api.src.app.core.config.media_settings import (
