@@ -9,7 +9,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tenxgraph_api.src.app.core.config import tracing_backends as tb
+
+pytest.importorskip("opentelemetry.sdk")
+
+from tenxgraph_api.src.app.core.config import tracing_backends as tb  # noqa: E402
 
 
 MOD = "tenxgraph_api.src.app.core.config.tracing_backends"

@@ -449,6 +449,11 @@ dev = [
     "textxtract[pdf,docx,html,xml,md]>=0.2.0",
     # The ag-ui extra, so the AG-UI router tests run in CI instead of failing.
     "ag-ui-protocol>=1.0,<2",
+    # The otel extra, so the observability and tracing tests run in CI instead of skipping.
+    "opentelemetry-api>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
+    "opentelemetry-instrumentation-fastapi>=0.40b0",
+    "opentelemetry-exporter-otlp>=1.20.0",
     # The production worker class (uvicorn_worker.py) and its shutdown tests import these;
     # same ranges the generated Dockerfile installs.
     "gunicorn>=23,<27",

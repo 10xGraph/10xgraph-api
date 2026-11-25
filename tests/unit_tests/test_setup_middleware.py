@@ -615,6 +615,7 @@ def test_setup_observability_binds_for_phoenix_only():
 )
 def test_setup_observability_publisher_writes_enabled_backend_keys(cfg, backends):
     """The bound publisher is real and its spans carry the keys of the enabled backends only."""
+    pytest.importorskip("opentelemetry.sdk")
     from tenxgraph.runtime.publisher.events import ContentType, Event, EventModel, EventType
 
     from tenxgraph_api.src.app.core.config.setup_middleware import _setup_observability

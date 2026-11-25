@@ -6,7 +6,12 @@ import sys
 import types
 from types import SimpleNamespace
 
-from tenxgraph_api.src.app.core.config import observability
+import pytest
+
+
+pytest.importorskip("opentelemetry.sdk")
+
+from tenxgraph_api.src.app.core.config import observability  # noqa: E402
 
 
 class _Result(enum.Enum):
