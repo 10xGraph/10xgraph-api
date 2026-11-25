@@ -14,6 +14,7 @@ from tenxgraph_api.cli.core.output import OutputFormatter
 from tenxgraph_api.cli.templates.defaults import (
     GRACEFUL_TIMEOUT_SECONDS,
     SHUTDOWN_KILL_MARGIN_SECONDS,
+    WORKER_SHUTDOWN_TIMEOUT_SECONDS,
     generate_docker_compose_content,
     generate_k8s_manifest_content,
 )
@@ -77,7 +78,10 @@ def test_compose_with_worker_and_scheduler(tmp_path, monkeypatch):
     api, worker, scheduler = services.values()
     for key in ("build", "env_file", "environment", "read_only", "tmpfs", "cap_drop", "restart"):
         assert worker[key] == api[key] == scheduler[key]
-    assert worker["stop_grace_period"] == api["stop_grace_period"]
+    assert scheduler["stop_grace_period"] == api["stop_grace_period"]
+    # Both TaskIQ waits, then a real margin before SIGKILL.
+    worker_waits = GRACEFUL_TIMEOUT_SECONDS + WORKER_SHUTDOWN_TIMEOUT_SECONDS
+    assert worker["stop_grace_period"] == f"{worker_waits + SHUTDOWN_KILL_MARGIN_SECONDS}s"
     assert "ports" not in worker
     assert "volumes" not in worker
     assert worker["healthcheck"] == {"disable": True}
@@ -96,7 +100,13 @@ def test_compose_with_worker_and_scheduler(tmp_path, monkeypatch):
         "scheduler",
         "tenxgraph_api.jobs.scheduler:scheduler",
     ]
-    assert scheduler["command"][-2:] == ["--update-interval", "10"]
+    assert scheduler["command"][-5:] == [
+        "--skip-first-run",
+        "--send-timeout",
+        "30",
+        "--update-interval",
+        "10",
+    ]
     assert "exactly one scheduler" in (tmp_path / "docker-compose.yml").read_text()
 
 
@@ -132,7 +142,11 @@ def test_k8s_with_worker_and_scheduler(tmp_path, monkeypatch):
     assert worker["metadata"]["name"] == "10xgraph-api-worker"
     assert scheduler["metadata"]["name"] == "10xgraph-api-scheduler"
     api_pod = api["spec"]["template"]["spec"]
-    for dep, recreate in ((worker, False), (scheduler, True)):
+    worker_grace = (
+        GRACEFUL_TIMEOUT_SECONDS + WORKER_SHUTDOWN_TIMEOUT_SECONDS + SHUTDOWN_KILL_MARGIN_SECONDS
+    )
+    scheduler_grace = GRACEFUL_TIMEOUT_SECONDS + SHUTDOWN_KILL_MARGIN_SECONDS
+    for dep, recreate, grace in ((worker, False, worker_grace), (scheduler, True, scheduler_grace)):
         pod = dep["spec"]["template"]["spec"]
         container = pod["containers"][0]
         assert dep["spec"]["replicas"] == 1
@@ -145,9 +159,7 @@ def test_k8s_with_worker_and_scheduler(tmp_path, monkeypatch):
         assert "ports" not in container
         assert "readinessProbe" not in container
         assert "lifecycle" not in container
-        assert pod["terminationGracePeriodSeconds"] == (
-            GRACEFUL_TIMEOUT_SECONDS + SHUTDOWN_KILL_MARGIN_SECONDS
-        )
+        assert pod["terminationGracePeriodSeconds"] == grace
     assert worker["spec"]["template"]["spec"]["containers"][0]["command"][0] == "taskiq"
 
 

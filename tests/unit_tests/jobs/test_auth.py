@@ -106,7 +106,7 @@ class Jobs:
         return resp.json()["data"]["task_id"]
 
     def schedule(self, user: str = "u1@a/member") -> str:
-        body = {"args": [1, 2], "schedule": {"every": 3}}
+        body = {"args": [1, 2], "schedule": {"every": 30}}
         resp = self.call("POST", f"/v1/tasks/{ADD}", user, json=body)
         return resp.json()["data"]["schedule_id"]
 
@@ -168,9 +168,9 @@ def test_reach_all_reads_and_cancels_any_tenant(jobs):
 @pytest.mark.parametrize("user", ["boss@a/org_admin", "root@z/root"])
 def test_patch_schedule_stays_own(jobs, user):
     schedule_id = jobs.schedule()
-    change = {"schedule": {"every": 9}}
+    change = {"schedule": {"every": 90}}
     assert jobs.call("PATCH", f"/v1/tasks/{schedule_id}", user, json=change).status_code == 404
-    assert jobs.env.source.schedules[schedule_id].interval == 3
+    assert jobs.env.source.schedules[schedule_id].interval == 30
     resp = jobs.call("PATCH", f"/v1/tasks/{schedule_id}", "u1@a/member", json=change)
     assert resp.status_code == 200
 

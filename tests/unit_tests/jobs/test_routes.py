@@ -69,6 +69,9 @@ class FakeSource(ScheduleSource):
     async def delete_schedule(self, schedule_id: str) -> None:
         self.schedules.pop(schedule_id, None)
 
+    async def stored(self, schedule_id: str) -> ScheduledTask | None:
+        return self.schedules.get(schedule_id)
+
 
 class Env:
     def __init__(
@@ -177,10 +180,10 @@ def test_same_user_id_in_another_tenant_gets_404(monkeypatch):
     assert env.call("GET", f"/v1/tasks/{task_id}", user="u1@b").status_code == 404
     assert env.call("POST", f"/v1/tasks/{task_id}/cancel", user="u1@b").status_code == 404
 
-    body = {"args": [1, 2], "schedule": {"every": 3}}
+    body = {"args": [1, 2], "schedule": {"every": 30}}
     resp = env.call("POST", f"/v1/tasks/{ADD}", user="u1@a", json=body)
     schedule_id = resp.json()["data"]["schedule_id"]
-    change = {"schedule": {"every": 5}}
+    change = {"schedule": {"every": 50}}
     assert env.call("GET", f"/v1/tasks/{schedule_id}", user="u1@b").status_code == 404
     assert (
         env.call("PATCH", f"/v1/tasks/{schedule_id}", user="u1@b", json=change).status_code == 404
@@ -205,19 +208,19 @@ def test_cancel_a_queued_task(env, monkeypatch):
 
 
 def test_schedule_create_read_patch_cancel(env):
-    body = {"args": [1, 2], "schedule": {"every": 3}}
+    body = {"args": [1, 2], "schedule": {"every": 30}}
     resp = env.call("POST", f"/v1/tasks/{ADD}", json=body)
     assert resp.status_code == 202
     schedule_id = resp.json()["data"]["schedule_id"]
     added = env.source.schedules[schedule_id]
-    assert added.interval == 3
+    assert added.interval == 30
     assert added.args == [1, 2]
     label = json.loads(added.labels[state.CONFIG_LABEL])
     assert label["user_id"] == "u1"
     assert label["user"]["user_id"] == "u1"
 
     data = env.call("GET", f"/v1/tasks/{schedule_id}").json()["data"]
-    assert data["schedule"]["every"] == 3
+    assert data["schedule"]["every"] == 30
     assert data["task_name"] == ADD
     assert "config" not in data
 
@@ -241,13 +244,13 @@ def test_schedule_at_a_time(env):
 
 
 def test_other_user_gets_404_on_schedule(env):
-    body = {"args": [1, 2], "schedule": {"every": 3}}
+    body = {"args": [1, 2], "schedule": {"every": 30}}
     schedule_id = env.call("POST", f"/v1/tasks/{ADD}", json=body).json()["data"]["schedule_id"]
-    patch = {"schedule": {"every": 5}}
+    patch = {"schedule": {"every": 50}}
     assert env.call("GET", f"/v1/tasks/{schedule_id}", user="u2").status_code == 404
     assert env.call("PATCH", f"/v1/tasks/{schedule_id}", user="u2", json=patch).status_code == 404
     assert env.call("POST", f"/v1/tasks/{schedule_id}/cancel", user="u2").status_code == 404
-    assert env.source.schedules[schedule_id].interval == 3
+    assert env.source.schedules[schedule_id].interval == 30
 
 
 @pytest.mark.parametrize(
@@ -262,7 +265,7 @@ def test_bad_schedule_is_422(env, schedule):
 
 def test_schedule_without_redis_source_is_501(env, monkeypatch):
     monkeypatch.setattr(routes, "schedule_source", None)
-    body = {"args": [1, 2], "schedule": {"every": 3}}
+    body = {"args": [1, 2], "schedule": {"every": 30}}
     resp = env.call("POST", f"/v1/tasks/{ADD}", json=body)
     assert resp.status_code == 501
     assert "Scheduling needs Redis" in resp.json()["error"]["message"]

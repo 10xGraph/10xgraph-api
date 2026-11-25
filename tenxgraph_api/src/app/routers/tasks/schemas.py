@@ -3,36 +3,61 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
+from tenxgraph_api.jobs.schedule_rules import check_cron, check_every
 from tenxgraph_api.src.app.core.validation.request_config import ClientInputError
 
 
 class Schedule(BaseModel):
-    """Exactly one of ``cron`` (cron expression), ``at`` (ISO time, once) or ``every``
-    (seconds)."""
+    """Exactly one of ``cron`` (cron expression, UTC), ``at`` (ISO time, once; a time without
+    an offset is UTC, any offset is converted to UTC) or ``every`` (seconds)."""
 
     model_config = ConfigDict(extra="forbid")
 
     cron: str | None = None
     at: datetime | None = None
-    every: int | None = Field(default=None, gt=0)
+    every: int | None = None
 
     @field_validator("cron")
     @classmethod
-    def _check_cron(cls, value: str | None) -> str | None:
+    def _check_cron(cls, value: str | None, info: ValidationInfo) -> str | None:
+        # Stored records are read back as written, so one saved before the strict check can
+        # still be read, changed and cancelled.
+        if value is None or (info.context or {}).get("stored"):
+            return value
+        try:
+            return check_cron(value)
+        except ValueError as exc:
+            raise ClientInputError(f"schedule.{exc}") from None
+
+    @field_validator("every")
+    @classmethod
+    def _check_every(cls, value: int | None, info: ValidationInfo) -> int | None:
+        if value is None or (info.context or {}).get("stored"):
+            return value
+        try:
+            check_every(value)
+        except ValueError as exc:
+            raise ClientInputError(f"schedule.{exc}") from None
+        return value
+
+    @field_validator("at")
+    @classmethod
+    def _utc(cls, value: datetime | None) -> datetime | None:
         if value is None:
             return value
-        import pycron  # what TaskIQ's scheduler matches cron with
-
-        try:
-            pycron.is_now(value)
-        except Exception:
-            raise ClientInputError("schedule.cron is not a valid cron expression") from None
-        return value
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
     @model_validator(mode="after")
     def _exactly_one(self) -> Schedule:
@@ -74,4 +99,5 @@ class ScheduleRecord(BaseModel):
     args: list[Any]
     kwargs: dict[str, Any]
     config: dict[str, Any]  # the creator's run config; never returned
+    slot_id: str | None = None  # this schedule's slot in the owner's schedule cap
     created_at: float = Field(default_factory=time.time)

@@ -160,16 +160,34 @@ async def test_shutdown_cancels_renewal(redis, queue, make_broker):
     await gen_b.aclose()
 
 
-async def test_closing_listen_mid_batch_releases_unyielded(redis, queue, make_broker):
+async def test_reads_one_message_per_request(redis, queue, make_broker):
     worker = make_broker("a")
     await worker.startup()
     for i in range(3):
         await kick(worker, f"m{i}".encode())
     gen = worker.listen()
     first = await asyncio.wait_for(anext(gen), 5)
-    assert len(worker._held) == 3  # whole batch held while waiting for a slot
-
-    await gen.aclose()
-    assert len(worker._held) == 1  # only the one handed to the worker
+    assert len(worker._held) == 1  # the other two stay in the queue for other workers
+    assert await pending_count(redis, queue) == 1
     await first.ack()
     assert worker._held == set()
+    await gen.aclose()
+
+
+async def test_release_makes_message_claimable_at_once(redis, queue, make_broker):
+    worker_a, worker_b = make_broker("a"), make_broker("b")
+    await worker_a.startup()
+    await worker_b.startup()
+    await kick(worker_a, b"dropped")
+    gen_a = worker_a.listen()
+    message = await asyncio.wait_for(anext(gen_a), 5)
+
+    await message.release()  # the callback ended without an ack
+
+    gen_b = worker_b.listen()
+    claimed = await asyncio.wait_for(anext(gen_b), 0.9)  # before idle_timeout (1 s)
+    assert claimed.data == b"dropped"
+    assert claimed.deliveries == 2  # the release kept the count, the claim added one
+    await claimed.ack()
+    await gen_a.aclose()
+    await gen_b.aclose()

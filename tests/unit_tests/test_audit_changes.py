@@ -177,10 +177,10 @@ def test_task_changes(sink, monkeypatch):
     run = env.call("POST", f"/v1/tasks/{ADD}", user="alice", json={"args": [1, 2]})
     task_id = run.json()["data"]["task_id"]
     sched = env.call(
-        "POST", f"/v1/tasks/{ADD}", user="alice", json={"args": [1, 2], "schedule": {"every": 3}}
+        "POST", f"/v1/tasks/{ADD}", user="alice", json={"args": [1, 2], "schedule": {"every": 30}}
     )
     schedule_id = sched.json()["data"]["schedule_id"]
-    env.call("PATCH", f"/v1/tasks/{schedule_id}", user="alice", json={"schedule": {"every": 5}})
+    env.call("PATCH", f"/v1/tasks/{schedule_id}", user="alice", json={"schedule": {"every": 50}})
     env.call("POST", f"/v1/tasks/{schedule_id}/cancel", user="alice")
     assert _seen(sink) == [
         ("tasks:trigger", f"task/{task_id}"),
@@ -201,7 +201,7 @@ def test_task_failures_emit_nothing(sink, monkeypatch):
     assert env.call("POST", "/v1/tasks/missing/cancel", user="alice").status_code == 404
     assert (
         env.call(
-            "PATCH", "/v1/tasks/missing", user="alice", json={"schedule": {"every": 5}}
+            "PATCH", "/v1/tasks/missing", user="alice", json={"schedule": {"every": 50}}
         ).status_code
         == 404
     )

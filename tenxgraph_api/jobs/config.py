@@ -178,13 +178,32 @@ def build_result_backend(cfg: WorkerConfig) -> Any | None:
     return RedisAsyncResultBackend(_results_url(cfg), **options)
 
 
+# Seconds a schedule-source or scheduler-lease Redis call may take, so a stalled Redis fails
+# PATCH, cancel and the scheduler's refresh instead of hanging them.
+SCHEDULE_REDIS_TIMEOUT = 5
+
+
+def schedule_redis_url(cfg: WorkerConfig) -> str | None:
+    """The Redis URL for dynamic schedules and the scheduler lease; None without a Redis
+    result backend."""
+    return _results_url(cfg) if _redis_results(cfg) else None
+
+
 def build_schedule_source(cfg: WorkerConfig) -> Any | None:
     """The Redis schedule source (JSON, not the default pickle) for dynamic schedules, on the
     result backend's Redis; None without a Redis result backend."""
-    if not _redis_results(cfg):
+    url = schedule_redis_url(cfg)
+    if url is None:
         return None
     _require("taskiq_redis")
     from taskiq.serializers import JSONSerializer
-    from taskiq_redis import ListRedisScheduleSource
 
-    return ListRedisScheduleSource(_results_url(cfg), serializer=JSONSerializer())
+    from tenxgraph_api.jobs.schedule_source import CheckedScheduleSource
+
+    return CheckedScheduleSource(
+        url,
+        serializer=JSONSerializer(),
+        timeout=SCHEDULE_REDIS_TIMEOUT,  # waiting for a pool connection
+        socket_timeout=SCHEDULE_REDIS_TIMEOUT,
+        socket_connect_timeout=SCHEDULE_REDIS_TIMEOUT,
+    )

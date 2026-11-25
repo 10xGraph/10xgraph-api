@@ -19,6 +19,11 @@ from tenxgraph_api.jobs.config import split_tasks
 
 MIN_FLAG_LEN = 3  # "--" plus at least one letter
 PROCESS_POOL_FLAGS = ("--use-process-pool", "--max-process-pool-processes")
+SCHEDULER_DEFAULTS: tuple[tuple[str, str | None], ...] = (
+    ("--update-interval", "10"),
+    ("--skip-first-run", None),
+    ("--send-timeout", "30"),
+)
 
 
 def _is_flag(arg: str, flag: str) -> bool:
@@ -40,6 +45,9 @@ class _TaskiqCommand(BaseCommand):
 
     def default_extra(self, extra: list[str]) -> list[str]:
         return extra
+
+    def check_worker(self, worker: Any) -> None:
+        """Refuse a ``worker`` config this command cannot run."""
 
     def build_argv(self, tasks: list[str], extra: list[str]) -> list[str]:
         """``<target>`` + module names + one ``--tasks-pattern`` per glob + the passed args."""
@@ -71,6 +79,7 @@ class _TaskiqCommand(BaseCommand):
                     '"worker": {"broker": {"type": "redis_stream"}, "tasks": ["myapp.tasks"]}.',
                     config_path=str(path),
                 )
+            self.check_worker(worker)
             os.environ["GRAPH_PATH"] = str(path)
             if str(project) not in sys.path[:1]:
                 sys.path.insert(0, str(project))
@@ -94,6 +103,23 @@ class WorkerCommand(_TaskiqCommand):
                     field=arg,
                 )
 
+    def default_extra(self, extra: list[str]) -> list[str]:
+        """The build image's shutdown waits unless given: wait up to 600 s for running tasks
+        after SIGTERM, then 60 s for the broker shutdown (graph close, telemetry flush)."""
+        from tenxgraph_api.cli.templates.defaults import (
+            GRACEFUL_TIMEOUT_SECONDS,
+            WORKER_SHUTDOWN_TIMEOUT_SECONDS,
+        )
+
+        extra = list(extra)
+        for flag, value in (
+            ("--wait-tasks-timeout", GRACEFUL_TIMEOUT_SECONDS),
+            ("--shutdown-timeout", WORKER_SHUTDOWN_TIMEOUT_SECONDS),
+        ):
+            if not any(_is_flag(arg, flag) for arg in extra):
+                extra += [flag, str(value)]
+        return extra
+
     def run_taskiq(self, argv: list[str]) -> int | None:
         from taskiq.cli.worker.cmd import WorkerCMD
 
@@ -105,10 +131,22 @@ class SchedulerCommand(_TaskiqCommand):
 
     target = "tenxgraph_api.jobs.scheduler:scheduler"
 
+    def check_worker(self, worker: Any) -> None:
+        if worker.broker.type == "memory":
+            raise ConfigurationError(
+                'The scheduler needs a real broker: the "memory" broker runs tasks inside the '
+                "API, so a separate scheduler process cannot send them. Set "
+                'worker.broker.type to "redis_stream", "rabbitmq" or "kafka".'
+            )
+
     def default_extra(self, extra: list[str]) -> list[str]:
-        if any(_is_flag(arg, "--update-interval") for arg in extra):
-            return extra
-        return [*extra, "--update-interval", "10"]
+        """TaskIQ defaults we change unless given: re-read sources every 10 s, do not run
+        schedules at start (no rerun on each restart), and give up a send after 30 s."""
+        extra = list(extra)
+        for flag, value in SCHEDULER_DEFAULTS:
+            if not any(_is_flag(arg, flag) for arg in extra):
+                extra += [flag] if value is None else [flag, value]
+        return extra
 
     def run_taskiq(self, argv: list[str]) -> int | None:
         from taskiq.cli.scheduler.cmd import SchedulerCMD

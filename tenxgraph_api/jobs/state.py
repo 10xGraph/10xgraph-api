@@ -31,6 +31,9 @@ logger = logging.getLogger("tenxgraph_api.jobs")
 RESULT_TTL: int = 86400
 # Message label that carries the run config as a JSON string (labels keep only scalars).
 CONFIG_LABEL = "tenxgraph_config"
+# Set by the Redis stream broker on a message delivered more than ``max_deliveries`` times
+# (the reason text): ``TaskMiddleware`` fails the task with it instead of running it.
+DELIVERY_LIMIT_LABEL = "tenxgraph_delivery_limit"
 
 Status = Literal["queued", "running", "success", "failure", "cancelled"]
 

@@ -10,6 +10,10 @@ import pytest
 from tenxgraph_api.cli.commands import worker as cmd
 
 
+# Same waits as the build image (`taskiq worker` in the Dockerfile, compose and k8s).
+WORKER_DEFAULTS = ["--wait-tasks-timeout", "600", "--shutdown-timeout", "60"]
+
+
 @pytest.fixture
 def project(tmp_path, monkeypatch):
     """A project dir with a worker config; restores cwd, sys.path and GRAPH_PATH afterwards."""
@@ -19,6 +23,13 @@ def project(tmp_path, monkeypatch):
     data = {"agent": "a:b", "worker": {"broker": {"type": "memory"}, "tasks": ["app.tasks"]}}
     (tmp_path / "10xgraph.json").write_text(json.dumps(data))
     return tmp_path
+
+
+@pytest.fixture
+def redis_project(project):
+    data = {"agent": "a:b", "worker": {"broker": {"type": "redis_stream"}, "tasks": ["app.tasks"]}}
+    (project / "10xgraph.json").write_text(json.dumps(data))
+    return project
 
 
 def run(command, monkeypatch, **kwargs):
@@ -32,27 +43,51 @@ def run(command, monkeypatch, **kwargs):
 def test_worker_argv_and_environment(project, monkeypatch):
     status, argv = run(cmd.WorkerCommand(), monkeypatch, extra=["--workers", "4"])
     assert status == 0
-    assert argv == ["tenxgraph_api.jobs.worker:broker", "app.tasks", "--workers", "4"]
+    assert argv == [
+        "tenxgraph_api.jobs.worker:broker",
+        "app.tasks",
+        "--workers",
+        "4",
+        *WORKER_DEFAULTS,
+    ]
     assert os.environ["GRAPH_PATH"] == str(project / "10xgraph.json")
     assert sys.path[0] == str(project)
     assert os.getcwd() == str(project)
 
 
-def test_scheduler_adds_update_interval(project, monkeypatch):
+def test_scheduler_adds_defaults(redis_project, monkeypatch):
     _, argv = run(cmd.SchedulerCommand(), monkeypatch)
     assert argv == [
         "tenxgraph_api.jobs.scheduler:scheduler",
         "app.tasks",
         "--update-interval",
         "10",
+        "--skip-first-run",
+        "--send-timeout",
+        "30",
     ]
 
 
-@pytest.mark.parametrize("given", [["--update-interval", "3"], ["--update-interval=3"]])
-def test_scheduler_keeps_user_update_interval(project, monkeypatch, given):
+@pytest.mark.parametrize(
+    "given",
+    [
+        ["--update-interval", "3"],
+        ["--update-interval=3"],
+        ["--send-timeout", "5"],
+        ["--skip-first-run"],
+    ],
+)
+def test_scheduler_keeps_user_flags(redis_project, monkeypatch, given):
     _, argv = run(cmd.SchedulerCommand(), monkeypatch, extra=given)
-    assert argv[-len(given) :] == given
-    assert "10" not in argv
+    assert argv[2 : 2 + len(given)] == given
+    flag = given[0].split("=")[0]
+    assert sum(arg.startswith(flag) for arg in argv) == 1
+
+
+def test_scheduler_refuses_memory_broker(project, monkeypatch):
+    status, argv = run(cmd.SchedulerCommand(), monkeypatch)
+    assert status != 0
+    assert argv is None
 
 
 def test_globs_become_fs_discover_patterns(project, monkeypatch):
@@ -67,7 +102,19 @@ def test_globs_become_fs_discover_patterns(project, monkeypatch):
         "jobs/*.py",
         "--tasks-pattern",
         "tasks.py",
+        *WORKER_DEFAULTS,
     ]
+
+
+@pytest.mark.parametrize(
+    "given",
+    [["--wait-tasks-timeout", "30"], ["--wait-tasks-timeout=30"], ["--shutdown-timeout", "5"]],
+)
+def test_worker_keeps_user_shutdown_flags(project, monkeypatch, given):
+    _, argv = run(cmd.WorkerCommand(), monkeypatch, extra=given)
+    assert argv[2 : 2 + len(given)] == given
+    flag = given[0].split("=")[0]
+    assert sum(arg.startswith(flag) for arg in argv) == 1
 
 
 @pytest.mark.parametrize(
@@ -82,7 +129,7 @@ def test_worker_refuses_process_pool(project, monkeypatch, flag):
 def test_worker_allows_similar_flags(project, monkeypatch):
     status, argv = run(cmd.WorkerCommand(), monkeypatch, extra=["--max-threadpool-threads", "2"])
     assert status == 0
-    assert argv[-2:] == ["--max-threadpool-threads", "2"]
+    assert argv[2:4] == ["--max-threadpool-threads", "2"]
 
 
 def test_missing_config_refused(tmp_path, monkeypatch):

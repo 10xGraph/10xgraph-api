@@ -53,6 +53,11 @@ _REFUSED = "This run's identity may not run this task"
 _warned_auth_off: set[str] = set()
 
 
+class DeliveryLimitError(RuntimeError):
+    """The message was delivered more than ``max_deliveries`` times (a task that keeps killing
+    its worker): the run fails without executing."""
+
+
 def _guard(func: Callable[..., Any]) -> Callable[..., Any]:
     if inspect.iscoroutinefunction(func):
 
@@ -115,6 +120,8 @@ class TaskMiddleware(TaskiqMiddleware):
             for name in injected_names(task.original_func) & set(message.kwargs):
                 message.kwargs.pop(name)
             _ABORT.set(error)
+        if (limit := message.labels.pop(state.DELIVERY_LIMIT_LABEL, None)) is not None:
+            _ABORT.set(_ABORT.get() or DeliveryLimitError(limit))
         try:
             if await _run_identity(state.container_for(self.broker), task, config):
                 # TaskContext reads the label: give it the rebuilt identity too.

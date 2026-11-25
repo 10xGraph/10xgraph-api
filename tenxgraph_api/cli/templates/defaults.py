@@ -262,9 +262,17 @@ TASKIQ_SCHEDULER_TARGET: Final[str] = "tenxgraph_api.jobs.scheduler:scheduler"
 # broker (worker_shutdown: closes the graph and flushes telemetry) within the second timeout.
 WORKER_SHUTDOWN_TIMEOUT_SECONDS: Final[int] = 60
 
+# The worker's kill timer (compose stop_grace_period, k8s terminationGracePeriodSeconds): both
+# TaskIQ waits plus a margin, so SIGKILL never lands while the worker is still shutting down.
+WORKER_KILL_GRACE_SECONDS: Final[int] = (
+    GRACEFUL_TIMEOUT_SECONDS + WORKER_SHUTDOWN_TIMEOUT_SECONDS + SHUTDOWN_KILL_MARGIN_SECONDS
+)
+
 # TaskIQ's scheduler re-reads its schedule sources this often (the same default as
 # `10xgraph scheduler`).
 SCHEDULER_UPDATE_INTERVAL_SECONDS: Final[int] = 10
+# A send to the broker that takes longer is given up (logged); the next tick retries.
+SCHEDULER_SEND_TIMEOUT_SECONDS: Final[int] = 30
 
 SCHEDULER_COMMENT: Final[tuple[str, str]] = (
     "Run exactly one scheduler: two send every scheduled task twice.",
@@ -287,12 +295,16 @@ def worker_command(tasks: list[str] | tuple[str, ...] = ()) -> list[str]:
 
 
 def scheduler_command(tasks: list[str] | tuple[str, ...] = ()) -> list[str]:
-    """The ``taskiq scheduler`` argv: the project's scheduler and ``worker.tasks``."""
+    """The ``taskiq scheduler`` argv: the project's scheduler, ``worker.tasks`` and the same
+    defaults as ``10xgraph scheduler`` (no run at start, so a restart does not rerun schedules)."""
     return [
         "taskiq",
         "scheduler",
         TASKIQ_SCHEDULER_TARGET,
         *_task_args(tasks),
+        "--skip-first-run",
+        "--send-timeout",
+        str(SCHEDULER_SEND_TIMEOUT_SECONDS),
         "--update-interval",
         str(SCHEDULER_UPDATE_INTERVAL_SECONDS),
     ]
@@ -372,6 +384,7 @@ def _k8s_background_deployment(
     comments: list[str],
     *,
     recreate: bool = False,
+    grace_seconds: int = GRACEFUL_TIMEOUT_SECONDS + SHUTDOWN_KILL_MARGIN_SECONDS,
 ) -> list[str]:
     """A one-replica Deployment for the worker or the scheduler: no port, Service or probes."""
     return [
@@ -393,7 +406,7 @@ def _k8s_background_deployment(
         f"        app: {name}",
         "    spec:",
         # No load balancer, so no preStop sleep.
-        *_k8s_pod_lines(GRACEFUL_TIMEOUT_SECONDS + SHUTDOWN_KILL_MARGIN_SECONDS),
+        *_k8s_pod_lines(grace_seconds),
         "      containers:",
         f"        - name: {name}",
         # Same image as the API; only the command differs.
@@ -549,6 +562,7 @@ def generate_k8s_manifest_content(
                 "# Needs the same Secret as the API, plus the broker URL if it is not in",
                 "# 10xgraph.json.",
             ],
+            grace_seconds=WORKER_KILL_GRACE_SECONDS,
         )
     if scheduler:
         lines += _k8s_background_deployment(
@@ -581,12 +595,12 @@ def _compose_env_lines() -> list[str]:
     ]
 
 
-def _compose_runtime_lines() -> list[str]:
+def _compose_runtime_lines(stop_grace: int = COMPOSE_STOP_GRACE_SECONDS) -> list[str]:
     return [
         # Give in-flight agent runs time to drain on `docker compose down`
         # instead of being killed after the default 10s.
         # Longer than gunicorn's --graceful-timeout, or SIGKILL lands mid-drain.
-        f"    stop_grace_period: {COMPOSE_STOP_GRACE_SECONDS}s",
+        f"    stop_grace_period: {stop_grace}s",
         "    restart: unless-stopped",
         "    # Locked down: read-only filesystem, no Linux capabilities, no setuid",
         "    # escalation. Only /tmp and the uploads folder are writable.",
@@ -600,7 +614,12 @@ def _compose_runtime_lines() -> list[str]:
     ]
 
 
-def _compose_background_service(name: str, comments: list[str], command: list[str]) -> list[str]:
+def _compose_background_service(
+    name: str,
+    comments: list[str],
+    command: list[str],
+    stop_grace: int = COMPOSE_STOP_GRACE_SECONDS,
+) -> list[str]:
     """The worker or scheduler service: the API's image and settings, no port, no uploads."""
     return [
         f"  {name}:",
@@ -610,7 +629,7 @@ def _compose_background_service(name: str, comments: list[str], command: list[st
         # The image's HEALTHCHECK calls the API's /ping, and there is no HTTP server here.
         "    healthcheck:",
         "      disable: true",
-        *_compose_runtime_lines(),
+        *_compose_runtime_lines(stop_grace),
     ]
 
 
@@ -668,6 +687,7 @@ def generate_docker_compose_content(
                 "    # scale with `docker compose up --scale worker=N`.",
             ],
             worker_command(tasks),
+            stop_grace=WORKER_KILL_GRACE_SECONDS,
         )
     if scheduler:
         lines += _compose_background_service(

@@ -8,16 +8,19 @@ stay ``own`` (A13). Anything else answers 404, the same as an unknown id.
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from taskiq import AsyncTaskiqDecoratedTask, ScheduleSource
+from taskiq import AsyncTaskiqDecoratedTask
 from tenxgraph.core.authz import Identity, Reach, can_reach
 
 from tenxgraph_api.jobs import state
-from tenxgraph_api.jobs.arguments import ReservedArgumentError, check_arguments
+from tenxgraph_api.jobs.arguments import TaskArgumentError, check_arguments
 from tenxgraph_api.jobs.context import cancel
+from tenxgraph_api.jobs.schedule_rules import HTTP_SCHEDULE_LABEL
 from tenxgraph_api.jobs.scheduler import sources
 from tenxgraph_api.jobs.worker import broker
 from tenxgraph_api.src.app.core.audit import audit_event
@@ -31,12 +34,20 @@ from tenxgraph_api.src.app.utils.response_helper import success_response
 from .schemas import Schedule, ScheduleChange, ScheduleRecord, TaskCall
 
 
+if TYPE_CHECKING:
+    from tenxgraph_api.jobs.schedule_source import CheckedScheduleSource
+
+
 router = APIRouter(tags=["Tasks"])
 
 # The Redis source for dynamic schedules (with a Redis result backend); None: no scheduling.
-schedule_source: ScheduleSource | None = sources[1] if len(sources) > 1 else None
+schedule_source: CheckedScheduleSource | None = sources[1] if len(sources) > 1 else None  # type: ignore[assignment]
 
 NOT_FOUND = "Task not found"
+# Live schedules one owner may have; a fired one-time schedule counts until its record expires.
+MAX_SCHEDULES_PER_OWNER = 100
+RECURRING_SLOT_TTL = 10 * 365 * 86400  # a recurring schedule's slot lives until it is cancelled
+LOCK_TTL = 30  # seconds; PATCH and cancel of one schedule run one at a time
 
 
 def _store() -> BaseCacheStore:
@@ -71,21 +82,69 @@ def _schedule_key(schedule_id: str) -> str:
 
 async def _read_schedule(store: BaseCacheStore, schedule_id: str) -> ScheduleRecord | None:
     raw = await store.get(_schedule_key(schedule_id))
-    return ScheduleRecord.model_validate_json(raw) if raw else None
+    if not raw:
+        return None
+    return ScheduleRecord.model_validate_json(raw, context={"stored": True})
+
+
+def _record_ttl(schedule: Schedule) -> float | None:
+    """Recurring schedules live until cancelled: no TTL. A one-time one is kept until its
+    run's result expires."""
+    if schedule.at is None:
+        return None
+    at = schedule.at if schedule.at.tzinfo else schedule.at.replace(tzinfo=UTC)
+    return max(at.timestamp() - datetime.now(UTC).timestamp(), 0) + state.RESULT_TTL
 
 
 async def _save_schedule(store: BaseCacheStore, record: ScheduleRecord) -> None:
-    # Recurring schedules live until cancelled: no TTL. A one-time one is kept until its
-    # run's result expires.
-    ttl = None
-    if record.schedule.at is not None:
-        at = record.schedule.at
-        at = at if at.tzinfo else at.replace(tzinfo=UTC)  # the Redis source reads naive as UTC
-        ttl = max(at.timestamp() - datetime.now(UTC).timestamp(), 0) + state.RESULT_TTL
+    ttl = _record_ttl(record.schedule)
     await store.set(_schedule_key(record.schedule_id), record.model_dump_json().encode(), ttl)
 
 
-def _source() -> ScheduleSource:
+def _slots_key(owner: str) -> str:
+    return f"jobs:schedules:{owner}"
+
+
+async def _take_slot(store: BaseCacheStore, record: ScheduleRecord) -> None:
+    """Hold one of the owner's ``MAX_SCHEDULES_PER_OWNER`` slots for as long as the record
+    lives; 429 when the owner has that many."""
+    key, ttl = _slots_key(record.owner), _record_ttl(record.schedule) or RECURRING_SLOT_TTL
+    if record.slot_id is not None and await store.renew(key, record.slot_id, ttl):
+        return
+    slot = await store.acquire(key, MAX_SCHEDULES_PER_OWNER, ttl)
+    if not slot.granted:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"At most {MAX_SCHEDULES_PER_OWNER} schedules per user: cancel one first",
+        )
+    record.slot_id = slot.slot_id
+
+
+async def _release_slot(store: BaseCacheStore, record: ScheduleRecord) -> None:
+    if record.slot_id is not None:
+        await store.release(_slots_key(record.owner), record.slot_id)
+
+
+@asynccontextmanager
+async def _schedule_lock(store: BaseCacheStore, schedule_id: str) -> AsyncIterator[None]:
+    """PATCH and cancel of one schedule one at a time, so a cancel racing a PATCH cannot
+    leave a schedule in Redis without its record; 409 while another holds it."""
+    key = f"jobs:schedule-lock:{schedule_id}"
+    slot = await store.acquire(key, 1, LOCK_TTL)
+    if not slot.granted or slot.slot_id is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "The schedule is being changed: try again")
+    try:
+        yield
+    finally:
+        await store.release(key, slot.slot_id)
+
+
+async def _sent(record: ScheduleRecord) -> bool:
+    """A one-time schedule the scheduler has sent: no longer in the Redis source."""
+    return record.schedule.at is not None and await _source().stored(record.schedule_id) is None
+
+
+def _source() -> CheckedScheduleSource:
     if schedule_source is None:
         raise HTTPException(
             status.HTTP_501_NOT_IMPLEMENTED,
@@ -98,7 +157,12 @@ async def _add_schedule(task: AsyncTaskiqDecoratedTask[Any, Any], record: Schedu
     kicker = (
         task.kicker()
         .with_schedule_id(record.schedule_id)
-        .with_labels(**{state.CONFIG_LABEL: json.dumps(record.config, default=str)})
+        .with_labels(
+            **{
+                state.CONFIG_LABEL: json.dumps(record.config, default=str),
+                HTTP_SCHEDULE_LABEL: "1",
+            }
+        )
     )
     when: Schedule = record.schedule
     args, kwargs = record.args, record.kwargs
@@ -132,7 +196,7 @@ async def start_task(
     task = _http_task(name)
     try:
         check_arguments(task, body.args, body.kwargs)
-    except ReservedArgumentError as exc:
+    except TaskArgumentError as exc:
         raise ClientInputError(str(exc)) from None
     store = _store()
     config: dict[str, Any] = {"user_id": identity.user_id if identity is not None else "anonymous"}
@@ -152,11 +216,13 @@ async def start_task(
             kwargs=body.kwargs,
             config=config,
         )
+        await _take_slot(store, record)
         await _save_schedule(store, record)
         try:
             await _add_schedule(task, record)
         except Exception:
             await store.delete(_schedule_key(record.schedule_id))
+            await _release_slot(store, record)
             raise
         await audit_event(
             "change",
@@ -203,7 +269,9 @@ async def get_task(
     store = _store()
     schedule = await _read_schedule(store, task_id)
     if schedule is not None and _visible(schedule, identity, widen=True):
-        return success_response(schedule.model_dump(mode="json", exclude={"config"}), request)
+        shown = schedule.model_dump(mode="json", exclude={"config", "slot_id"})
+        shown["status"] = "sent" if await _sent(schedule) else "scheduled"
+        return success_response(shown, request)
     record = await state.read_status(store, task_id)
     if schedule is not None or record is None or not _visible(record, identity, widen=True):
         raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
@@ -229,19 +297,21 @@ async def change_schedule(
     identity: Identity | None = Depends(RequirePermission("tasks", "trigger")),
 ):
     """Delete and add again with the same id, arguments and run config (TaskIQ has no
-    update)."""
+    update). A one-time schedule already sent is 409."""
     store = _store()
-    record = await _read_schedule(store, schedule_id)
-    if record is None or not _visible(record, identity, widen=False):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
-    task = broker.find_task(record.task_name)
-    if task is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
     source = _source()
-    await source.delete_schedule(schedule_id)
-    record.schedule = body.schedule
-    await _save_schedule(store, record)
-    await _add_schedule(task, record)
+    async with _schedule_lock(store, schedule_id):
+        record = await _read_schedule(store, schedule_id)
+        if record is None or not _visible(record, identity, widen=False):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
+        task = _http_task(record.task_name)
+        if await _sent(record):
+            raise HTTPException(status.HTTP_409_CONFLICT, "This one-time schedule already ran")
+        record.schedule = body.schedule
+        await _take_slot(store, record)
+        await source.delete_schedule(schedule_id)
+        await _add_schedule(task, record)
+        await _save_schedule(store, record)
     await audit_event(
         "change",
         "success",
@@ -249,7 +319,7 @@ async def change_schedule(
         resource=f"schedule/{schedule_id}",
         identity=identity,
     )
-    return success_response(record.model_dump(mode="json", exclude={"config"}), request)
+    return success_response(record.model_dump(mode="json", exclude={"config", "slot_id"}), request)
 
 
 @router.post("/v1/tasks/{task_id}/cancel", summary="Cancel a task or delete a schedule")
@@ -263,8 +333,13 @@ async def cancel_task(
     store = _store()
     schedule = await _read_schedule(store, task_id)
     if schedule is not None and _visible(schedule, identity, widen=True):
-        await _source().delete_schedule(task_id)
-        await store.delete(_schedule_key(task_id))
+        async with _schedule_lock(store, task_id):
+            schedule = await _read_schedule(store, task_id)
+            if schedule is None:  # cancelled while this call waited for the lock
+                raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
+            await _source().delete_schedule(task_id)
+            await store.delete(_schedule_key(task_id))
+            await _release_slot(store, schedule)
         await audit_event(
             "change",
             "success",

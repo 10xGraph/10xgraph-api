@@ -22,9 +22,12 @@ RESERVED_NAMES = frozenset({"config", "user", "user_id"})
 _POSITIONAL = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
 
 
-class ReservedArgumentError(ValueError):
-    """A caller tried to set an injected or reserved argument (Python rejects unknown or
-    repeated ones at call time)."""
+class TaskArgumentError(ValueError):
+    """The arguments do not fit the task's signature (unknown, missing or repeated)."""
+
+
+class ReservedArgumentError(TaskArgumentError):
+    """A caller tried to set an injected or reserved argument."""
 
 
 def injected_names(func: Callable[..., Any]) -> set[str]:
@@ -62,7 +65,9 @@ def _max_positional(params: list[inspect.Parameter], blocked: set[str]) -> int |
 def check_arguments(
     task: AsyncTaskiqDecoratedTask[Any, Any], args: tuple[Any, ...] | list[Any], kwargs: dict
 ) -> None:
-    """Raise ``ReservedArgumentError`` unless ``args`` / ``kwargs`` set only plain arguments."""
+    """Raise ``ReservedArgumentError`` unless ``args`` / ``kwargs`` set only plain arguments,
+    and ``TaskArgumentError`` unless they bind to the task's signature (injected and reserved
+    parameters left out), so an unknown or missing argument fails at trigger time."""
     func = task.original_func
     params = list(inspect.signature(func).parameters.values())
     blocked = injected_names(func) | RESERVED_NAMES
@@ -77,3 +82,9 @@ def check_arguments(
         raise ReservedArgumentError(
             f"Task {name!r} takes at most {limit} positional arguments, got {len(args)}"
         )
+
+    plain = inspect.Signature([param for param in params if param.name not in blocked])
+    try:
+        plain.bind(*args, **kwargs)
+    except TypeError as exc:
+        raise TaskArgumentError(f"Task {name!r}: {exc}") from None
