@@ -14,7 +14,7 @@ overrides = [{ name = "injectq", specifier = ">=0.7.0,<0.8" }]
 [[package]]
 name = "10xgraph"
 version = "1.0.0"
-source = { git = "https://github.com/10xGraph/10xGraph?branch=main#6b9948568889e59cc2ac8664133fbae231a7a085" }
+source = { git = "https://github.com/10xGraph/10xGraph?branch=main#b33eff1c8198169def1fc428cdd0e0e0706b171a" }
 dependencies = [
     { name = "injectq" },
     { name = "pydantic" },
