@@ -575,16 +575,16 @@ def test_use_metrics_endpoint_without_otlp_metrics_warns_and_disables(metrics):
     assert OBS["otlp"]["enabled"] is True
 
 
-def test_setup_observability_hands_resolved_otlp_to_core():
+def test_setup_observability_hands_resolved_otlp_to_backends():
     container = MagicMock()
     container.try_get.return_value = None
     graph_config = _graph_config(_cfg(), observability={"level": "standard", **OBS})
     with (
-        patch("tenxgraph.runtime.publisher.exporters.setup_observability") as core_setup,
+        patch("tenxgraph_api.src.app.core.config.observability.configure_tracing_backends") as core_setup,
     ):
         sm._setup_observability(container, graph_config)
     core_setup.assert_called_once()
-    assert core_setup.call_args.args[1]["otlp"]["endpoint"] == "http://c:4318"
+    assert core_setup.call_args.args[0]["otlp"]["endpoint"] == "http://c:4318"
 
 
 def test_setup_observability_runs_for_otlp_alone():
@@ -592,7 +592,7 @@ def test_setup_observability_runs_for_otlp_alone():
     container.try_get.return_value = None
     obs = {"otlp": {"enabled": True, "endpoint": "http://t:4318"}}
     with (
-        patch("tenxgraph.runtime.publisher.exporters.setup_observability") as core_setup,
+        patch("tenxgraph_api.src.app.core.config.observability.configure_tracing_backends") as core_setup,
     ):
         sm._setup_observability(container, _graph_config(MetricsConfig(), observability=obs))
     core_setup.assert_called_once()

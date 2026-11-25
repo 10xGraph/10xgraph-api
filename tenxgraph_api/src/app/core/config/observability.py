@@ -6,9 +6,11 @@ from fastapi import FastAPI
 from injectq import InjectQ
 from tenxgraph.runtime.publisher.identity import UserIdMode
 
+from .backends_publisher import BackendsPublisher, enabled_backends
 from .graph_config import GraphConfig
 from .metrics import resolve_use_metrics_endpoint
 from .settings import logger
+from .tracing_backends import configure_tracing_backends
 
 
 def _user_id_mode(graph_config: GraphConfig | None) -> UserIdMode:
@@ -100,21 +102,13 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
         return
     obs_cfg = resolve_use_metrics_endpoint(obs_cfg, graph_config.metrics)
 
-    logfire_on = bool((obs_cfg.get("logfire") or {}).get("enabled", False))
-    langsmith_on = bool((obs_cfg.get("langsmith") or {}).get("enabled", False))
-    phoenix_on = bool((obs_cfg.get("phoenix") or {}).get("enabled", False))
-    otlp_on = bool((obs_cfg.get("otlp") or {}).get("enabled", False))
-    if not (logfire_on or langsmith_on or phoenix_on or otlp_on):
+    backends = enabled_backends(obs_cfg)
+    if not backends:
         return
 
     try:
-        from tenxgraph.runtime.publisher.backends_publisher import (
-            BackendsPublisher,
-            enabled_backends,
-        )
         from tenxgraph.runtime.publisher.base_publisher import BasePublisher
         from tenxgraph.runtime.publisher.composite_publisher import CompositePublisher
-        from tenxgraph.runtime.publisher.exporters import setup_observability
         from tenxgraph.runtime.publisher.otel_publisher import ObservabilityLevel
     except ImportError:
         logger.warning(
@@ -136,11 +130,10 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
         )
         return
 
-    # Configure the provider(s)/exporter(s) only. graph=None means no publisher
-    # is attached here; we bind it into the container ourselves below so it is
-    # in place before the graph compiles.
+    # Configure the provider(s)/exporter(s) only; the publisher is bound into the
+    # container below so it is in place before the graph compiles.
     try:
-        setup_observability(None, obs_cfg)
+        configure_tracing_backends(obs_cfg)
     except (ImportError, ValueError) as exc:
         logger.warning("Observability setup skipped: %s", exc)
         return
@@ -157,7 +150,7 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
     # One span goes to every enabled exporter, so it carries the keys of each backend
     # (OpenInference for phoenix, langsmith.* for langsmith, logfire.msg for logfire).
     otel_publisher = BackendsPublisher(
-        enabled_backends(obs_cfg), level=level, user_id_mode=_user_id_mode(graph_config)
+        backends, level=level, user_id_mode=_user_id_mode(graph_config)
     )
     existing = container.try_get(BasePublisher)
 
@@ -170,10 +163,10 @@ def _setup_observability(container: InjectQ | None, graph_config: GraphConfig | 
 
     logger.info(
         "Observability enabled (logfire=%s, langsmith=%s, phoenix=%s, otlp=%s, level=%s)",
-        logfire_on,
-        langsmith_on,
-        phoenix_on,
-        otlp_on,
+        "logfire" in backends,
+        "langsmith" in backends,
+        "phoenix" in backends,
+        "otlp" in backends,
         level,
     )
 

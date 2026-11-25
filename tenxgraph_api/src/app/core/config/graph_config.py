@@ -188,7 +188,7 @@ class GraphConfig:
     def observability(self) -> dict | None:
         """The declarative ``observability`` block (Logfire / LangSmith / Phoenix).
 
-        Shape mirrors ``tenxgraph.runtime.publisher.setup_observability``::
+        Shape mirrors ``tracing_backends.configure_tracing_backends``::
 
             {
               "level": "full",
