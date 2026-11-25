@@ -99,3 +99,8 @@ async def worker_shutdown(state: TaskiqState) -> None:
 if worker_config is not None:
     broker.add_event_handler(TaskiqEvents.WORKER_STARTUP, worker_startup)
     broker.add_event_handler(TaskiqEvents.WORKER_SHUTDOWN, worker_shutdown)
+
+# The built-in cleanup task: registered only when 10xgraph.json turns it on, so the worker and
+# `10xgraph scheduler` (both import this module) see it, and nothing is scheduled otherwise.
+if worker_config is not None and graph_config is not None and graph_config.memory_cleanup.enabled:
+    from tenxgraph_api.jobs import memory_cleanup  # noqa: F401

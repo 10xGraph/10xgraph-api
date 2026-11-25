@@ -7,6 +7,7 @@ from injectq import inject, singleton
 from tenxgraph.core.authz import Identity
 from tenxgraph.core.state import Message
 from tenxgraph.storage.store import BaseStore
+from tenxgraph.storage.store.store_schema import MemoryOrigin
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.threads import set_user
@@ -38,9 +39,20 @@ class StoreUnavailableError(HTTPException, ValueError):
 
 
 # Memory fields the store owns. Client metadata is kept, but these keys are dropped from it:
-# user_id and thread_id decide who sees a memory, and memory_id is the memory's own id.
+# user_id and thread_id decide who sees a memory, memory_id is the memory's own id, and origin
+# and expires_at are real fields (origin is set by the server, expires_at by its own field).
 SYSTEM_METADATA_KEYS = frozenset(
-    {"content", "user_id", "thread_id", "memory_type", "category", "timestamp", "memory_id"}
+    {
+        "content",
+        "user_id",
+        "thread_id",
+        "memory_type",
+        "category",
+        "timestamp",
+        "memory_id",
+        "origin",
+        "expires_at",
+    }
 )
 
 # Store keyword options a client may set (``replace_metadata`` is read by QdrantStore.aupdate).
@@ -77,6 +89,14 @@ def _client_filters(filters: Any) -> Any:
             continue
         clean[key] = value
     return clean
+
+
+def _expiry(expires_at: Any) -> dict[str, Any]:
+    return {} if expires_at is None else {"expires_at": expires_at}
+
+
+def _origins(origins: Any) -> dict[str, Any]:
+    return {} if origins is None else {"origins": origins}
 
 
 def _client_options(options: dict[str, Any] | None) -> dict[str, Any]:
@@ -144,6 +164,8 @@ class StoreService:
             memory_type=payload.memory_type,
             category=payload.category,
             metadata=_client_metadata(payload.metadata),
+            origin=MemoryOrigin.USER,
+            **_expiry(payload.expires_at),
             **options,
         )
         logger.debug("Stored memory with id %s", memory_id)
@@ -172,6 +194,7 @@ class StoreService:
                 retrieval_strategy=payload.retrieval_strategy,
                 distance_metric=payload.distance_metric,
                 max_tokens=payload.max_tokens,
+                **_origins(payload.origins),
                 **options,
             )
         return MemorySearchResponseSchema(results=results)
@@ -198,6 +221,7 @@ class StoreService:
         options: dict[str, Any] | None = None,
         offset: int = 0,
         filters: dict[str, Any] | None = None,
+        origins: list[MemoryOrigin | None] | None = None,
     ) -> MemoryListResponseSchema:
         """One page of memories. The store has no offset, so it is asked for ``offset + limit
         + 1`` rows and the page is cut from those; the extra row only tells ``has_more``."""
@@ -208,6 +232,7 @@ class StoreService:
         client_filters = _client_filters(filters)
         if client_filters:
             list_kwargs["filters"] = client_filters
+        list_kwargs.update(_origins(origins))
         with filter_errors_as_client_errors():
             rows = await store.aget_all(
                 cfg, limit=offset + limit + 1, **list_kwargs, **_client_options(options)
@@ -236,6 +261,8 @@ class StoreService:
                 memory_id,
                 payload.content,
                 metadata=_client_metadata(payload.metadata),
+                origin=MemoryOrigin.USER,
+                **_expiry(payload.expires_at),
                 **options,
             )
         except (ValueError, PermissionError) as exc:

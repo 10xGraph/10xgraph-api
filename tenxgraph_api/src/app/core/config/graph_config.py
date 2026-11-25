@@ -24,6 +24,7 @@ from tenxgraph_api.src.app.core.config.sections.common import (
     _expand_env,
     _parse_bool,
 )
+from tenxgraph_api.src.app.core.config.sections.memory_cleanup import MemoryCleanupConfig
 from tenxgraph_api.src.app.core.config.sections.misc import (
     _REMOTE_TOOLS_ADAPTER,
     ID_GENERATOR_NAMES,
@@ -272,6 +273,11 @@ class GraphConfig:
         return AuditConfig.model_validate(self.data.get("audit") or {})
 
     @property
+    def memory_cleanup(self) -> MemoryCleanupConfig:
+        """The ``memory_cleanup`` block (scheduled delete of expired memories); off when absent."""
+        return MemoryCleanupConfig.model_validate(self.data.get("memory_cleanup") or {})
+
+    @property
     def media(self) -> MediaConfig:
         """Uploaded-file lifecycle settings (``media`` key); defaults when absent."""
         data = self.data.get("media", None)
@@ -299,6 +305,7 @@ __all__ = [
     "CacheStoreConfig",
     "GraphConfig",
     "MediaConfig",
+    "MemoryCleanupConfig",
     "RateLimitConfig",
     "RunsConfig",
     "TokenRevocationConfig",

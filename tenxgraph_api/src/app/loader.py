@@ -284,6 +284,23 @@ def load_and_bind_auth(container: InjectQ, auth_config: AuthConfig | None) -> No
     container.bind_instance(BaseAuth, auth, allow_none=True)
 
 
+def check_memory_cleanup(config: GraphConfig, store: object | None) -> None:
+    """Refuse to boot when ``memory_cleanup`` is on but nothing could run it."""
+    if config.memory_cleanup.enabled is not True:
+        return
+    if "worker" not in config.data:
+        raise ValueError(
+            'memory_cleanup is enabled but 10xgraph.json has no "worker" key: the cleanup is a '
+            "scheduled task, so add a worker (and run `10xgraph worker` and `10xgraph scheduler`)."
+        )
+    if store is None or not getattr(store, "supports_provenance", False):
+        name = "no store" if store is None else type(store).__name__
+        raise ValueError(
+            f"memory_cleanup is enabled but the configured store ({name}) cannot delete expired "
+            "memories. Use PgVectorStore, QdrantStore or InMemoryStore, or turn memory_cleanup off."
+        )
+
+
 def check_auth_at_boot(
     config: GraphConfig, checkpointer: object | None, store: object | None
 ) -> None:
@@ -492,6 +509,8 @@ async def attach_all_modules(
         store,
         allow_mismatch=getattr(config, "store_allow_tenant_mismatch", False) is True,
     )
+
+    check_memory_cleanup(config, store)
 
     # Bind the in-memory telemetry store so the graph service can record run
     # events and the /v1/observability endpoints can reconstruct traces.

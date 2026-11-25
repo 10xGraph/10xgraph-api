@@ -113,6 +113,7 @@ async def list_memories(
         options=opts,
         offset=payload.offset,
         filters=payload.filters,
+        origins=payload.origins,
     )
     return success_response(result, request)
 

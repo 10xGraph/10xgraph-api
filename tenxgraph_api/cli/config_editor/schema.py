@@ -83,6 +83,7 @@ KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
         "observability",
         "metrics",
         "audit",
+        "memory_cleanup",
         "injectq",
         "store",
         "store_allow_tenant_mismatch",
@@ -969,6 +970,44 @@ _SECTIONS: list[dict[str, Any]] = [
             {
                 "name": "LOG_FORMAT",
                 "purpose": ("json writes every log line as one JSON object; use in production."),
+            },
+        ],
+    },
+    {
+        "id": "memory_cleanup",
+        "title": "Memory cleanup",
+        "description": (
+            "Expired memories are hidden from every read; this deletes them for good. It runs "
+            "as a scheduled task, so it needs a worker, a scheduler and a store that supports "
+            "expiry."
+        ),
+        "key": "memory_cleanup",
+        "optional": True,
+        "off_summary": "Expired memories stay in the store; nothing is deleted.",
+        "default": {"enabled": True, "interval_seconds": 3600, "batch_size": 1000},
+        "fields": [
+            {
+                "path": ["memory_cleanup", "enabled"],
+                "label": "Delete expired memories",
+                "type": "bool",
+                "default": True,
+            },
+            {
+                "path": ["memory_cleanup", "interval_seconds"],
+                "label": "Run every (seconds)",
+                "type": "number",
+                "min": 1,
+                "step": 1,
+                "default": 3600,
+            },
+            {
+                "path": ["memory_cleanup", "batch_size"],
+                "label": "Rows per batch",
+                "type": "number",
+                "min": 1,
+                "step": 1,
+                "default": 1000,
+                "help": "Rows deleted per statement; the store repeats until none are left.",
             },
         ],
     },

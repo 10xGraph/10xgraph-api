@@ -32,6 +32,7 @@ from tenxgraph_api.src.app.core.config.graph_config import (
     CHECKPOINTER_KEY_REMOVED,
     _expand_env,
 )
+from tenxgraph_api.src.app.core.config.sections.memory_cleanup import MemoryCleanupConfig
 
 
 Issue = dict[str, str]
@@ -89,6 +90,7 @@ def validate_config(config: Any, base_dir: Path | None = None) -> list[Issue]:
     _check_observability(config, out)
     _check_metrics(config, out)
     _check_audit(config, out)
+    _check_memory_cleanup(config, out)
     _check_wiring(config, out, base_dir)
     _check_remote_tools(config, out)
     _check_section(config, "test", TestConfig, out)
@@ -419,6 +421,18 @@ def _check_audit(config: dict, out: _Collector) -> None:
     except ValidationError as exc:
         for err in exc.errors():
             field = ".".join(["audit", *(str(part) for part in err["loc"][:1])])  # not sinks.1
+            out.error(field, err["msg"].removeprefix("Value error, "))
+
+
+def _check_memory_cleanup(config: dict, out: _Collector) -> None:
+    data = config.get("memory_cleanup")
+    if data is None:
+        return
+    try:
+        MemoryCleanupConfig.model_validate(data)
+    except ValidationError as exc:
+        for err in exc.errors():
+            field = ".".join(["memory_cleanup", *(str(part) for part in err["loc"][:1])])
             out.error(field, err["msg"].removeprefix("Value error, "))
 
 
