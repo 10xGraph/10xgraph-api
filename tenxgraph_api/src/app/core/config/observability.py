@@ -248,10 +248,12 @@ def _setup_otel_metrics(resource, endpoint: str | None) -> None:
         from opentelemetry.sdk.metrics import MeterProvider
         from opentelemetry.sdk.metrics.export import (
             ConsoleMetricExporter,
+            MetricExporter,
             PeriodicExportingMetricReader,
         )
         from tenxgraph.utils.metrics import setup_otel_metrics
 
+        exporter: MetricExporter
         if endpoint:
             from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 

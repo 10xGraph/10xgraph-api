@@ -417,7 +417,8 @@ ENVIRONMENT = "pytest"
 # --no-sources and fails if a git requirement reaches the metadata.
 # Before an API release that uses something only on core main, release core first and raise
 # the core floor in [project.dependencies] (and the dev group) to that version.
-10xgraph = { git = "https://github.com/10xGraph/10xGraph", branch = "main" }
+# Pinned to core main at f8f8d72 (merge of #390, fix/final-fixes).
+10xgraph = { git = "https://github.com/10xGraph/10xGraph", rev = "f8f8d72c25cf121eff3b7b5c20c64770e287cc80" }
 
 [tool.uv]
 # Core main still pins injectq<0.7; 0.7.0 fixes the optional-default bug (cleanup-review
