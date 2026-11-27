@@ -30,6 +30,7 @@ from tenxgraph_api.src.app.core.validation.request_config import (
     client_error_detail,
 )
 
+from .resources_exceptions import MessageAlreadyProcessedError
 from .resources_exceptions import ResourceNotFoundError as APIResourceNotFoundError
 from .user_exception import UserAccountError, UserPermissionError
 
@@ -139,6 +140,7 @@ HANDLED_TYPES: tuple[type[Exception], ...] = (
     UserAccountError,
     UserPermissionError,
     APIResourceNotFoundError,
+    MessageAlreadyProcessedError,
     core_errors.ThreadNotFoundError,
     core_errors.GraphClosedError,
     *(entry[0] for entry in _TYPED_ERRORS),
@@ -187,7 +189,13 @@ def _handled_error(exc: Exception) -> Classified:  # noqa: PLR0911
     if isinstance(exc, InputValidationError):
         message = _sanitize_error_message(str(exc), "VALIDATION_ERROR", production)
         return Classified(422, "VALIDATION_ERROR", message)
-    if isinstance(exc, UserAccountError | UserPermissionError | APIResourceNotFoundError):
+    if isinstance(
+        exc,
+        UserAccountError
+        | UserPermissionError
+        | APIResourceNotFoundError
+        | MessageAlreadyProcessedError,
+    ):
         return Classified(exc.status_code, exc.error_code, exc.message)
     if isinstance(exc, core_errors.ThreadNotFoundError):
         return Classified(404, THREAD_NOT_FOUND_CODE, THREAD_NOT_FOUND_MESSAGE)

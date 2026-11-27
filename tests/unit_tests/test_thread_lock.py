@@ -56,6 +56,7 @@ def _service(invoke):
     service.runs_policy.return_value = RunsConfig()
     service.invoke_graph = invoke
     service.check_resume_target = AsyncMock()
+    service.check_repeated_messages = AsyncMock()
     service.stop_graph = AsyncMock(return_value={"ok": True})
     return service
 

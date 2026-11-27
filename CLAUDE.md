@@ -194,9 +194,15 @@ valid ones (`RATE_LIMIT_KEYS`).
   (`client_message_error`: no `assistant`/`system`; a `tool` message only as tool results, which
   must answer a pending remote call, `GraphService._check_tool_results`, also for PUT state
   `context`); the server replaces client `message_id`s (`with_fresh_message_ids`, in the schema
-  validators, AG-UI included: its converter keeps the client id in `metadata["client_message_id"]`,
-  and `select_new_messages` skips a client message whose id matches a stored message id or
-  `client_message_id`);
+  validators, AG-UI included) and keeps the client's id in `metadata["client_message_id"]` (a
+  client-written value is dropped; `""`/`"0"` record none). Retry dedup (1.1): REST/WS
+  `run_models.unseen_messages` drops a user message whose client id matches a stored
+  `client_message_id`. All dropped: the repeat must be the latest user message (else 409
+  `MESSAGE_ALREADY_PROCESSED`), then `execution_meta.status` decides: `completed` is 409
+  `MESSAGE_ALREADY_PROCESSED`; paused (`interrupted_*` with a reason outside core
+  `ABORTED_RUN_REASONS`) is 409 asking for a resume; `running`/`error` or cut off
+  (cancelled/shutdown/crashed/stop_requested) runs on stored state with no new messages, so core
+  continues at `current_node`; no `execution_meta` falls back to "repeat is the last message". AG-UI `select_new_messages` also matches stored server ids;
   `current_node` must be a real node and state values must match the state model's types (422).
   Every external media URL in client input (`media.kind="url"`, not `graph://media/` or
   `data:`; `gs://` included) is run through the graph's `media_policy.check_url` before the run

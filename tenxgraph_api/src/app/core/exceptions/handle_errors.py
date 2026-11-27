@@ -43,6 +43,7 @@ from tenxgraph_api.src.app.core.validation.request_config import (
 from tenxgraph_api.src.app.utils import error_response
 from tenxgraph_api.src.app.utils.schemas import ErrorSchemas
 
+from .resources_exceptions import MessageAlreadyProcessedError
 from .resources_exceptions import ResourceNotFoundError as APIResourceNotFoundError
 from .user_exception import (
     UserAccountError,
@@ -222,6 +223,18 @@ def init_errors_handler(app: FastAPI):  # noqa: PLR0915
     @app.exception_handler(APIResourceNotFoundError)
     async def resource_not_found_exception_handler(request: Request, exc: APIResourceNotFoundError):
         _log_handled(request, exc, exc.status_code, exc.error_code, "ResourceNotFoundError")
+        return error_response(
+            request,
+            error_code=exc.error_code,
+            message=exc.message,
+            status_code=exc.status_code,
+        )
+
+    @app.exception_handler(MessageAlreadyProcessedError)
+    async def message_already_processed_handler(
+        request: Request, exc: MessageAlreadyProcessedError
+    ):
+        _log_handled(request, exc, exc.status_code, exc.error_code, "MessageAlreadyProcessed")
         return error_response(
             request,
             error_code=exc.error_code,

@@ -42,8 +42,21 @@ Client messages are user messages. :func:`client_message_error` refuses the ``as
 lets a ``tool`` message through only when it carries nothing but tool results. The built-in state
 fields ``context_summary`` and ``execution_meta`` are never client-writable
 (:func:`reject_builtin_state_keys`). The server also generates every message id itself
-(:func:`with_fresh_message_ids`), AG-UI included; the AG-UI converter keeps the client's id in
-``metadata["client_message_id"]`` to skip messages the thread already stores.
+(:func:`with_fresh_message_ids`), AG-UI included: a client id never becomes the stored id, so a
+client cannot overwrite a stored message by reusing its id. The id the client sent is kept in
+``metadata["client_message_id"]`` (set only from the client's ``message_id``; a
+``client_message_id`` the client wrote into ``metadata`` itself is dropped; a missing, blank or
+``"0"`` id records none). Before a run on an existing thread, a user message whose client id matches
+a ``client_message_id`` the thread already stores is a retry and is dropped
+(``run_models.unseen_messages``; server message ids never match). AG-UI instead also matches
+stored server ids (:func:`known_message_ids`), because its history can carry them after a reload.
+When that leaves nothing, the retried message must be the thread's latest user message and the
+stored run status decides: a turn that did not finish (still ``running`` after a crash, ``error``,
+or cut off by cancel, shutdown, crash recovery or stop) continues on the stored state with no new
+messages; a ``completed`` turn, or a retry of an older message, is refused with 409
+``MESSAGE_ALREADY_PROCESSED``; a thread paused at an interrupt or a client-side tool is a 409
+that asks for a resume. A state without ``execution_meta`` falls back to "the retried message is
+the thread's last message". Resumes and tool results are never dropped.
 
 A request is also bounded in size before anything heavy runs (:func:`request_size_error`): the
 body cap lets a few MB of messages or content blocks through, and core then copies and serialises
@@ -376,11 +389,44 @@ def client_message_error(messages: Any, *, user_only: bool = True) -> str | None
     return None
 
 
+CLIENT_MESSAGE_ID = "client_message_id"
+# Ids that mean "no id": the TypeScript client sends "0" for a message without one.
+_PLACEHOLDER_IDS = frozenset({"", "0"})
+MAX_CLIENT_MESSAGE_ID_CHARS = 256
+
+
+def _client_message_id(message: Any) -> str | None:
+    """The ``message_id`` the client sent, or ``None`` for none or a placeholder."""
+    if isinstance(message, dict):
+        value = message.get("message_id")
+    elif "message_id" in (getattr(message, "model_fields_set", None) or ()):
+        value = message.message_id
+    else:
+        return None  # the default factory made it, the client sent none
+    if value is None or isinstance(value, bool) or not isinstance(value, str | int):
+        return None
+    text = str(value).strip()
+    if text in _PLACEHOLDER_IDS or len(text) > MAX_CLIENT_MESSAGE_ID_CHARS:
+        return None
+    return text
+
+
+def _with_client_id(metadata: Any, client_id: str | None) -> Any:
+    """``metadata`` with ``client_message_id`` set by the server, never taken from the client."""
+    if not isinstance(metadata, dict):
+        return metadata
+    kept = {k: v for k, v in metadata.items() if k != CLIENT_MESSAGE_ID}
+    if client_id is not None:
+        kept[CLIENT_MESSAGE_ID] = client_id
+    return kept
+
+
 def with_fresh_message_ids(messages: Any) -> Any:
     """Copy ``messages`` (``Message`` objects or dicts) with a newly generated ``message_id``.
 
     Ids are predictable and some checkpointers key messages on the id, so a client must not
-    choose them. The id comes from ``Message``'s own default factory.
+    choose them. The id comes from ``Message``'s own default factory. The id the client sent
+    goes to ``metadata["client_message_id"]``, so a retry of the same message can be recognised.
     """
     if not isinstance(messages, list | tuple):
         return messages
@@ -389,13 +435,25 @@ def with_fresh_message_ids(messages: Any) -> Any:
     make_id: Any = Message.model_fields["message_id"].default_factory
     fresh: list[Any] = []
     for message in messages:
+        client_id = _client_message_id(message)
         if isinstance(message, dict):
-            fresh.append({**message, "message_id": make_id()})
+            metadata = _with_client_id(message.get("metadata") or {}, client_id)
+            fresh.append({**message, "message_id": make_id(), "metadata": metadata})
         elif hasattr(message, "model_copy"):
-            fresh.append(message.model_copy(update={"message_id": make_id()}))
+            metadata = _with_client_id(getattr(message, "metadata", None) or {}, client_id)
+            fresh.append(message.model_copy(update={"message_id": make_id(), "metadata": metadata}))
         else:
             fresh.append(message)
     return fresh
+
+
+def known_message_ids(stored: list[Any]) -> set[str]:
+    """Message ids and client message ids of the messages already in the checkpoint."""
+    ids = {str(m.message_id) for m in stored}
+    ids.update(
+        str(m.metadata[CLIENT_MESSAGE_ID]) for m in stored if CLIENT_MESSAGE_ID in m.metadata
+    )
+    return ids
 
 
 def tool_result_ids(messages: Any) -> list[str]:

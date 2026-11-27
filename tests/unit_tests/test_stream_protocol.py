@@ -81,6 +81,7 @@ async def test_router_labels_the_stream_ndjson():
         ),
     ):
         service.check_resume_target = MagicMock(side_effect=lambda *a, **k: _done(None))
+        service.check_repeated_messages = MagicMock(side_effect=lambda *a, **k: _done(None))
         response = await stream_graph(graph_input=graph_input, service=service, identity=None)
     assert response.media_type == "application/x-ndjson"
 

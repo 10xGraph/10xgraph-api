@@ -47,6 +47,8 @@ from tenxgraph_api.src.app.routers.graph.services.run_models import (
     RunChecks,
     _resume_http_error,
     _run_tool_names,
+    has_client_ids,
+    unseen_messages,
 )
 
 
@@ -324,6 +326,39 @@ class RunChecksMixin:
         except _resume_error_types() as exc:
             raise _resume_http_error(exc) from exc
 
+    async def _new_messages(
+        self, graph_input: GraphInputSchema, config: dict[str, Any], checks: RunChecks
+    ) -> list[Any]:
+        """The request's messages without user messages the thread already stores (a retry).
+
+        Read under the thread lock, from the run's one state read (``checks.state``). Resumes
+        are left alone, and nothing is read when no user message carries a client id.
+
+        Raises:
+            MessageAlreadyProcessedError: The retried message's turn already finished (409).
+            HTTPException: 409, the thread is paused and must be resumed instead.
+        """
+        messages = graph_input.messages
+        if graph_input.is_resume or not has_client_ids(messages):
+            return messages
+        return unseen_messages(messages, await self._run_state(config, checks))
+
+    async def check_repeated_messages(
+        self, graph_input: GraphInputSchema, user: Identity | None, checks: RunChecks
+    ) -> None:
+        """409 for a retry of a finished turn (or on a paused thread), before a stream starts.
+
+        The stream router asks this under the thread lock, as it does ``check_resume_target``;
+        invoke and WebSocket runs get the same check in ``_prepare_input``. The state read is
+        kept on ``checks``, so the run reads it no second time.
+        """
+        thread_id = normalize_thread_id((graph_input.config or {}).get("thread_id"))
+        if thread_id is None:  # a new thread stores nothing yet
+            return
+        config: dict[str, Any] = {"thread_id": to_core_id(thread_id)}
+        set_user(config, user)
+        await self._new_messages(graph_input, config, checks)
+
     async def _is_static_pause(self, config: dict[str, Any], checks: RunChecks) -> bool:
         """Whether the thread is paused by ``interrupt_before`` / ``interrupt_after``.
 
@@ -391,10 +426,16 @@ class RunChecksMixin:
         if runs.max_parallel_tool_calls is not None:
             config["max_parallel_tool_calls"] = runs.max_parallel_tool_calls
 
+        # A client retrying a failed run resends a message the thread already stores: drop it
+        # (an empty list runs the graph on the stored state). The router holds the lock.
+        messages = graph_input.messages
+        if not is_new_thread:
+            messages = await self._new_messages(graph_input, config, checks)
+
         # Preprocess multimodal messages (resolve file_id → cached text, etc.)
         # ``user`` (the authenticated identity) carries the tenant values files are scoped by.
         preprocessed = await preprocess_multimodal_messages(
-            graph_input.messages,
+            messages,
             self.media_service,
             user.user_id if user else None,
             user=user,

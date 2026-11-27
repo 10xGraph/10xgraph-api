@@ -70,3 +70,30 @@ class InvalidOperationError(GeneralException):
             status_code=self.status_code,
             error_code=self.error_code,
         )
+
+
+class MessageAlreadyProcessedError(GeneralException):
+    """A retried message whose turn the thread already finished (HTTP 409).
+
+    The thread stores a user message with the same client ``message_id``, and either its run
+    completed or a later user message followed it, so the run would only repeat it. A client
+    that wants the finished run's result again sends the same ``Idempotency-Key`` header
+    instead.
+    """
+
+    def __init__(
+        self,
+        message=(
+            "This message was already processed: the thread already has it and its turn is over. "
+            "Send a new message with a new message_id, or retry with the same "
+            "Idempotency-Key header to get the finished run's result."
+        ),
+    ):
+        self.message = message
+        self.status_code = 409
+        self.error_code = "MESSAGE_ALREADY_PROCESSED"
+        super().__init__(
+            message=self.message,
+            status_code=self.status_code,
+            error_code=self.error_code,
+        )

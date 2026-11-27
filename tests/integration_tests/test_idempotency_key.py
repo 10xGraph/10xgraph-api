@@ -61,6 +61,7 @@ def _client():
     service = MagicMock(spec=GraphService)
     service.check_media_urls = MagicMock()
     service.check_resume_target = AsyncMock()
+    service.check_repeated_messages = AsyncMock()
     service.runs_policy = MagicMock(return_value=RunsConfig())
     service.invoke_graph = AsyncMock(side_effect=_invoke)
     service.stream_graph = MagicMock(side_effect=_stream)

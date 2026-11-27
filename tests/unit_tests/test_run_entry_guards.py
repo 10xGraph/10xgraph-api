@@ -71,6 +71,7 @@ def _service(runs=None):
     service.stop_graph = AsyncMock(return_value={"ok": True})
     service.check_media_urls = MagicMock()
     service.check_resume_target = AsyncMock()
+    service.check_repeated_messages = AsyncMock()
     return service
 
 

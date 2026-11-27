@@ -286,6 +286,8 @@ async def stream_graph(
         _tp0 = _perf_now()  # TEMP-PERF
         await service.check_resume_target(graph_input, identity, checks)
         _perf_done("api_check_resume", _tp0)  # TEMP-PERF
+        # And a retry of a message whose turn was answered: a real 409, from the same read.
+        await service.check_repeated_messages(graph_input, identity, checks)
     except BaseException:
         guard.release()
         if idem:

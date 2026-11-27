@@ -15,12 +15,16 @@ from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.exceptions.client_errors import client_error
 from tenxgraph_api.src.app.core.threads import set_user
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
-from tenxgraph_api.src.app.core.validation.request_config import ClientInputError, tool_result_ids
+from tenxgraph_api.src.app.core.validation.request_config import (
+    ClientInputError,
+    known_message_ids,
+    tool_result_ids,
+)
 from tenxgraph_api.src.app.core.validation.resource_ids import to_core_id
 from tenxgraph_api.src.app.routers.graph.schemas.graph_schemas import GraphInputSchema
 from tenxgraph_api.src.app.routers.graph.services.graph_service import GraphService, RunChecks
 
-from .converter import known_message_ids, select_new_messages, to_tenxgraph_messages
+from .converter import select_new_messages, to_tenxgraph_messages
 from .event_mapper import AgUiEventMapper
 
 

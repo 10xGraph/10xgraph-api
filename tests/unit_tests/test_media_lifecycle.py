@@ -124,6 +124,7 @@ def _graph_service(policy: Any = None, media: Any = None) -> GraphService:
     srv.checkpointer = MagicMock()
     srv.checkpointer.aget_thread_owner = AsyncMock(return_value=None)
     srv.checkpointer.aget_thread = AsyncMock(return_value=object())  # the caller's thread
+    srv.checkpointer.aget_state = AsyncMock(return_value=None)  # an empty thread
     srv.config = MagicMock()
     srv.thread_name_generator = None
     srv._media_service = media

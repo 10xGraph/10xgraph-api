@@ -193,10 +193,8 @@ def test_ag_ui_uses_server_message_ids(monkeypatch, id_type, factory, expected):
 def test_ag_ui_retry_with_the_same_client_id_is_not_stored_twice():
     from ag_ui.core import RunAgentInput
 
-    from tenxgraph_api.src.app.routers.ag_ui.converter import (
-        known_message_ids,
-        select_new_messages,
-    )
+    from tenxgraph_api.src.app.core.validation.request_config import known_message_ids
+    from tenxgraph_api.src.app.routers.ag_ui.converter import select_new_messages
 
     stored = Message(
         message_id=42,

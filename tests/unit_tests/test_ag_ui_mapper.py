@@ -336,8 +336,9 @@ class TestConverter:
     def test_user_text_keeps_the_client_id_in_metadata(self):
         run_input = _input([{"id": "u1", "role": "user", "content": "hi"}])
         [message] = to_tenxgraph_messages(run_input.messages)
-        assert message.message_id != "u1"
-        assert message.metadata == {"client_message_id": "u1"}
+        # The AG-UI id is the placeholder id; the graph schema moves it to metadata.
+        assert message.message_id == "u1"
+        assert message.metadata == {}
         assert message.role == "user"
         assert message.text() == "hi"
 

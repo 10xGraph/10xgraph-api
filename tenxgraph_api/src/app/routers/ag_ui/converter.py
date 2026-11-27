@@ -160,18 +160,6 @@ def _upgrade_part(part: Any) -> Any:
     return {"type": part_type, "source": source}
 
 
-CLIENT_MESSAGE_ID = "client_message_id"
-
-
-def known_message_ids(stored: list[Any]) -> set[str]:
-    """Message ids and client message ids of the messages already in the checkpoint."""
-    ids = {str(m.message_id) for m in stored}
-    ids.update(
-        str(m.metadata[CLIENT_MESSAGE_ID]) for m in stored if CLIENT_MESSAGE_ID in m.metadata
-    )
-    return ids
-
-
 def select_new_messages(
     messages: list[Any],
     known_ids: set[str] | frozenset[str] = frozenset(),
@@ -204,21 +192,15 @@ def select_new_messages(
 def to_tenxgraph_messages(messages: list[Any]) -> list[Message]:
     """Convert AG-UI user and tool messages to 10xGraph messages.
 
-    The message id is a placeholder: the graph schema replaces it with a server id, like REST.
-    The client's id is kept in ``metadata["client_message_id"]``.
+    The message id is the AG-UI id: the graph schema replaces it with a server id, like REST,
+    and keeps the AG-UI id in ``metadata["client_message_id"]``.
     """
     converted: list[Message] = []
     for message in messages:
         if message.role == "user":
             blocks = _content_blocks(message.content)
             if blocks:
-                converted.append(
-                    Message(
-                        role="user",
-                        content=blocks,
-                        metadata={CLIENT_MESSAGE_ID: str(message.id)},
-                    )
-                )
+                converted.append(Message(message_id=str(message.id), role="user", content=blocks))
         elif message.role == "tool":
             error = getattr(message, "error", None)
             output = error or _text(message.content)
@@ -228,13 +210,7 @@ def to_tenxgraph_messages(messages: list[Any]) -> list[Message]:
                 is_error=bool(error),
                 status="failed" if error else "completed",
             )
-            converted.append(
-                Message(
-                    role="tool",
-                    content=[result],
-                    metadata={CLIENT_MESSAGE_ID: str(message.id)},
-                )
-            )
+            converted.append(Message(message_id=str(message.id), role="tool", content=[result]))
     return converted
 
 
