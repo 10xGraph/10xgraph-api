@@ -33,7 +33,7 @@ def silent_output():
     return SilentOutput()
 
 
-def test_api_command_minimal_success(monkeypatch, tmp_path, silent_output):
+def _patch_api_command(monkeypatch, tmp_path, fake_run):
     monkeypatch.setenv("GRAPH_PATH", "")
 
     def fake_validate(host, port, config):
@@ -54,10 +54,16 @@ def test_api_command_minimal_success(monkeypatch, tmp_path, silent_output):
     monkeypatch.setitem(os.environ, "PYTHONDONTWRITEBYTECODE", "1")
     monkeypatch.setattr("tenxgraph_api.cli.commands.api.validate_cli_options", fake_validate)
     monkeypatch.setattr("tenxgraph_api.cli.commands.api.ConfigManager", lambda: FakeConfigManager())
+    monkeypatch.setattr("tenxgraph_api.cli.commands.api.uvicorn.run", fake_run)
+    monkeypatch.delenv("MAX_REQUEST_SIZE", raising=False)
+    monkeypatch.delenv("TENXGRAPH_LOOP", raising=False)
+    monkeypatch.delenv("TENXGRAPH_HTTP", raising=False)
 
+
+def test_api_command_minimal_success(monkeypatch, tmp_path, silent_output):
     called = {}
 
-    def fake_run(app_path, host, port, reload, workers, ws_max_size=None):
+    def fake_run(app_path, host, port, reload, workers, ws_max_size=None, loop=None, http=None):
         called.update(
             {
                 "app_path": app_path,
@@ -66,11 +72,12 @@ def test_api_command_minimal_success(monkeypatch, tmp_path, silent_output):
                 "reload": reload,
                 "workers": workers,
                 "ws_max_size": ws_max_size,
+                "loop": loop,
+                "http": http,
             }
         )
 
-    monkeypatch.setattr("tenxgraph_api.cli.commands.api.uvicorn.run", fake_run)
-    monkeypatch.delenv("MAX_REQUEST_SIZE", raising=False)
+    _patch_api_command(monkeypatch, tmp_path, fake_run)
 
     cmd = APICommand(output=silent_output)
     code = cmd.execute(config="test_config.json", host="127.0.0.1", port=TEST_PORT, reload=False)
@@ -78,8 +85,30 @@ def test_api_command_minimal_success(monkeypatch, tmp_path, silent_output):
     assert called["app_path"].endswith(":app")
     # WebSocket frames are capped like HTTP bodies.
     assert called["ws_max_size"] == 10 * 1024 * 1024
-    assert called["port"] == TEST_PORT
-    assert os.environ.get("GRAPH_PATH", "").endswith("test_config.json")
+    assert (called["loop"], called["http"]) == ("auto", "auto")
+
+
+def test_api_command_passes_loop_and_http_from_env(monkeypatch, tmp_path, silent_output):
+    called = {}
+    _patch_api_command(monkeypatch, tmp_path, lambda *a, **k: called.update(k))
+    monkeypatch.setenv("TENXGRAPH_LOOP", " AsyncIO ")
+    monkeypatch.setenv("TENXGRAPH_HTTP", "h11")
+
+    cmd = APICommand(output=silent_output)
+    code = cmd.execute(config="test_config.json", host="127.0.0.1", port=TEST_PORT, reload=False)
+    assert code == 0
+    assert (called["loop"], called["http"]) == ("asyncio", "h11")
+
+
+def test_api_command_refuses_invalid_loop(monkeypatch, tmp_path, silent_output):
+    called = []
+    _patch_api_command(monkeypatch, tmp_path, lambda *a, **k: called.append(k))
+    monkeypatch.setenv("TENXGRAPH_LOOP", "trio")
+
+    cmd = APICommand(output=silent_output)
+    code = cmd.execute(config="test_config.json", host="127.0.0.1", port=TEST_PORT, reload=False)
+    assert code != 0
+    assert called == []
 
 
 def test_api_command_error_path(monkeypatch, silent_output):
@@ -90,8 +119,6 @@ def test_api_command_error_path(monkeypatch, silent_output):
     cmd = APICommand(output=silent_output)
     code = cmd.execute(config="missing.json")
     assert code == 1
-
-
 
 
 def test_api_command_schedules_playground_launch(monkeypatch, tmp_path, silent_output):
@@ -316,13 +343,13 @@ def test_build_command_compose_force_overwrite(tmp_path, monkeypatch, silent_out
     [(None, 10 * 1024 * 1024), ("2048", 2048), ("junk", 10 * 1024 * 1024), ("0", 10 * 1024 * 1024)],
 )
 def test_ws_max_size_follows_max_request_size(monkeypatch, raw, expected):
-    from tenxgraph_api.cli.commands.api import _max_request_size
+    from tenxgraph_api.src.app.core.config.server_options import max_request_size
 
     if raw is None:
         monkeypatch.delenv("MAX_REQUEST_SIZE", raising=False)
     else:
         monkeypatch.setenv("MAX_REQUEST_SIZE", raw)
-    assert _max_request_size() == expected
+    assert max_request_size() == expected
 
 
 def test_build_command_refuses_compose_together_with_k8s(tmp_path, monkeypatch, silent_output):

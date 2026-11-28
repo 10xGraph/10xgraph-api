@@ -241,6 +241,7 @@ class BuildCommand(BaseCommand):
                         has_requirements=bool(requirements_files),
                         omit_cmd=target == "compose",
                         has_pyproject=has_pyproject,
+                        k8s=target == "k8s",
                     )
                     self._write(output_path, dockerfile_content)
                     step.detail(str(output_path))

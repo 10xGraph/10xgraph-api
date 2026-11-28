@@ -69,6 +69,11 @@ dependencies = [
     "pydantic>=2.13,<3",
     "pydantic-settings>=2.3,<3",
     "uvicorn>=0.36,<1.0",
+    # uvicorn's "auto" loop and http settings pick these up when installed (faster event loop
+    # and HTTP parser). Same markers as uvicorn[standard]; 0.22 and 0.7 are the first with
+    # Python 3.14 wheels.
+    "uvloop>=0.22,<1.0; sys_platform != 'win32' and sys_platform != 'cygwin' and platform_python_implementation != 'PyPy'",
+    "httptools>=0.7,<1.0",
     "typer>=0.17,<1.0",
     "python-dotenv>=1.0,<2",
     "questionary>=2.0,<3",

@@ -25,20 +25,12 @@ from tenxgraph_api.cli.constants import (
 from tenxgraph_api.cli.core.config import ConfigManager
 from tenxgraph_api.cli.core.validation import validate_cli_options
 from tenxgraph_api.cli.exceptions import ConfigurationError, ServerError
+from tenxgraph_api.src.app.core.config.server_options import (
+    event_loop_choice,
+    http_parser_choice,
+    max_request_size,
+)
 from tenxgraph_api.src.app.core.config.settings import normalize_mode_value
-
-
-# Mirrors Settings.MAX_REQUEST_SIZE; read from the environment the command just loaded.
-DEFAULT_MAX_REQUEST_SIZE = 10 * 1024 * 1024
-
-
-def _max_request_size() -> int:
-    raw = os.environ.get("MAX_REQUEST_SIZE")
-    try:
-        value = int(raw) if raw else DEFAULT_MAX_REQUEST_SIZE
-    except ValueError:
-        return DEFAULT_MAX_REQUEST_SIZE
-    return value if value > 0 else DEFAULT_MAX_REQUEST_SIZE
 
 
 class APICommand(BaseCommand):
@@ -113,6 +105,7 @@ class APICommand(BaseCommand):
                     # Fail early with a clear message instead of a settings traceback.
                     try:
                         normalize_mode_value(os.environ.get("MODE"))
+                        loop, http = event_loop_choice(), http_parser_choice()
                     except ValueError as e:
                         raise ConfigurationError(str(e)) from e
 
@@ -182,7 +175,9 @@ class APICommand(BaseCommand):
                 workers=1,
                 # Refuse WebSocket frames over the HTTP body cap before buffering them
                 # (uvicorn's own default is 16 MiB).
-                ws_max_size=_max_request_size(),
+                ws_max_size=max_request_size(),
+                loop=loop,
+                http=http,
             )
 
             return 0

@@ -117,3 +117,33 @@ def test_production_env_sets_json_logs_in_every_target() -> None:
     deployment, _ = yaml.safe_load_all(generate_k8s_manifest_content("svc", 8000))
     env = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
     assert {"name": "LOG_FORMAT", "value": "json"} in env
+
+
+def test_k8s_dockerfile_runs_one_uvicorn_process_without_gunicorn() -> None:
+    from tenxgraph_api.cli.templates.defaults import generate_dockerfile_content
+
+    content = generate_dockerfile_content("3.12", 8123, "requirements.txt", True, k8s=True)
+    assert (
+        'CMD ["python", "-m", "tenxgraph_api.src.app.serve", "--host", "0.0.0.0", '
+        '"--port", "8123"]'
+    ) in content
+    assert 'pip install "gunicorn' not in content
+    assert "uvicorn-worker" not in content
+    assert 'CMD ["gunicorn"' not in content
+    assert "WEB_CONCURRENCY" not in content
+    assert "HEALTHCHECK" in content
+
+
+def test_default_and_compose_dockerfiles_keep_gunicorn() -> None:
+    from tenxgraph_api.cli.templates.defaults import generate_dockerfile_content
+
+    default = generate_dockerfile_content("3.12", 8000, "requirements.txt", True)
+    assert 'RUN pip install "gunicorn' in default
+    assert "ENV WEB_CONCURRENCY=2" in default
+    assert 'CMD ["gunicorn"' in default
+    assert "tenxgraph_api.src.app.serve" not in default
+
+    compose = generate_dockerfile_content("3.12", 8000, "requirements.txt", True, omit_cmd=True)
+    assert 'RUN pip install "gunicorn' in compose
+    assert "ENV WEB_CONCURRENCY=2" in compose
+    assert "\nCMD [" not in compose

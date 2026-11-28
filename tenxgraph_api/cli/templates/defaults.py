@@ -44,6 +44,9 @@ K8S_TERMINATION_GRACE_SECONDS: Final[int] = (
 # /health/ready and a final chunk for open streams.
 GUNICORN_WORKER_CLASS: Final[str] = "tenxgraph_api.src.app.uvicorn_worker.TenxGraphUvicornWorker"
 
+# One Uvicorn process with the same SIGTERM drain, run by the Kubernetes image (no Gunicorn).
+SERVE_MODULE: Final[str] = "tenxgraph_api.src.app.serve"
+
 # Fixed, numeric uid/gid for the image user. Kubernetes can only verify
 # ``runAsNonRoot`` against a numeric USER, and a fixed id keeps volume ownership
 # (``fsGroup``, named volumes) stable across rebuilds.
@@ -87,8 +90,12 @@ def generate_dockerfile_content(
     has_requirements: bool,
     omit_cmd: bool = False,
     has_pyproject: bool = False,
+    k8s: bool = False,
 ) -> str:
     """Generate the content for the Dockerfile.
+
+    With ``k8s`` the image runs one Uvicorn process per pod (``serve.py``, Kubernetes scales
+    with replicas) and installs no Gunicorn; otherwise it runs Gunicorn.
 
     Dependencies come from ``requirements_file`` when there is one, otherwise from the
     ``[project].dependencies`` of ``pyproject.toml`` (what ``10xgraph init`` scaffolds), and
@@ -157,12 +164,26 @@ def generate_dockerfile_content(
             ]
         )
 
+    if k8s:
+        dockerfile_lines.extend(
+            [
+                "# One Uvicorn process per pod: Kubernetes scales with replicas, so there is no",
+                "# Gunicorn here. uvicorn, uvloop and httptools come with 10xgraph-api.",
+                "",
+            ]
+        )
+    else:
+        dockerfile_lines.extend(
+            [
+                "# Production process manager: gunicorn supervising uvicorn workers. These are",
+                "# not dependencies of 10xgraph-api, so the image installs them here.",
+                'RUN pip install "gunicorn>=25.1,<27" "uvicorn-worker>=0.4,<1"',
+                "",
+            ]
+        )
+
     dockerfile_lines.extend(
         [
-            "# Production process manager: gunicorn supervising uvicorn workers. These are",
-            "# not dependencies of 10xgraph-api, so the image installs them here.",
-            'RUN pip install "gunicorn>=25.1,<27" "uvicorn-worker>=0.4,<1"',
-            "",
             "# Strip CLI-only assets the server never loads: project scaffolds, the bundled",
             "# agent skill, and the local config editor (HTML/JS). Only the server code and",
             "# its dependencies stay in the image.",
@@ -190,10 +211,16 @@ def generate_dockerfile_content(
             "ENV MODE=production",
             "# One JSON object per log line, for the log pipeline (includes the audit log).",
             "ENV LOG_FORMAT=json",
-            "# Gunicorn worker count. Gunicorn reads WEB_CONCURRENCY natively; a sane default",
-            "# here beats gunicorn's built-in default of 1 worker. Tune to your CPU/memory",
-            "# at deploy time, e.g. `docker run -e WEB_CONCURRENCY=8 ...`.",
-            "ENV WEB_CONCURRENCY=2",
+            *(
+                ["# One process per pod: scale with replicas, not workers."]
+                if k8s
+                else [
+                    "# Gunicorn worker count. Gunicorn reads WEB_CONCURRENCY natively; a sane default",
+                    "# here beats gunicorn's built-in default of 1 worker. Tune to your CPU/memory",
+                    "# at deploy time, e.g. `docker run -e WEB_CONCURRENCY=8 ...`.",
+                    "ENV WEB_CONCURRENCY=2",
+                ]
+            ),
             "",
             "# Create a non-root user with a fixed uid that owns the work directory.",
             "# uploads/ exists up front so a volume mounted there inherits that owner.",
@@ -222,7 +249,22 @@ def generate_dockerfile_content(
         ]
     )
 
-    if not omit_cmd:
+    if k8s:
+        dockerfile_lines.extend(
+            [
+                "# Run the application (production), one Uvicorn process.",
+                "# Same drain as the Gunicorn image: /health/ready answers 503 on SIGTERM and",
+                "# open streams get a final interrupted chunk. Uvicorn waits",
+                "# TENXGRAPH_GRACEFUL_SHUTDOWN_SECONDS (540) for open responses, which stays",
+                "# inside the manifest's terminationGracePeriodSeconds.",
+                (
+                    f'CMD ["python", "-m", "{SERVE_MODULE}", '
+                    f'"--host", "0.0.0.0", "--port", "{port}"]'
+                ),
+                "",
+            ]
+        )
+    elif not omit_cmd:
         dockerfile_lines.extend(
             [
                 "# Run the application (production)",
@@ -484,7 +526,7 @@ def generate_k8s_manifest_content(
         f"            - containerPort: {port}",
         *_K8S_CONTAINER_SECURITY,
         "          volumeMounts:",
-        "            # Gunicorn worker heartbeats and Python temp files",
+        "            # Python temp files",
         "            - name: tmp",
         "              mountPath: /tmp",
         "            # Local media uploads (MEDIA_STORAGE_TYPE=local, the default)",

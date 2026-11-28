@@ -15,7 +15,7 @@ from injectq.integrations.fastapi import setup_fastapi
 from tenxgraph.storage.checkpointer import BaseCheckpointer, InMemoryCheckpointer
 
 from tenxgraph_api.cli.templates import defaults
-from tenxgraph_api.src.app import uvicorn_worker
+from tenxgraph_api.src.app import serve, uvicorn_worker
 from tenxgraph_api.src.app.core import shutdown
 from tenxgraph_api.src.app.core.cache_store import BaseCacheStore, InMemoryCacheStore
 from tenxgraph_api.src.app.routers.ping import readiness
@@ -188,7 +188,7 @@ async def test_worker_server_flags_draining_and_interrupts_streams_before_deadli
     from uvicorn.config import Config
     from uvicorn.server import Server
 
-    monkeypatch.setattr(uvicorn_worker, "STREAM_INTERRUPT_MARGIN_SECONDS", 0.0)
+    monkeypatch.setattr(serve, "STREAM_INTERRUPT_MARGIN_SECONDS", 0.0)
     seen = {}
 
     async def fake_shutdown(self, sockets=None):

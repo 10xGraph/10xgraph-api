@@ -35,6 +35,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`uvloop` and `httptools` are now dependencies** (`uvloop>=0.22` except on Windows, Cygwin and PyPy; `httptools>=0.7`). uvicorn's default `auto` settings pick them up, so `10xgraph dev` and the gunicorn worker run on the uvloop event loop and the httptools HTTP parser instead of asyncio and h11. No config change is needed.
 - **The legacy `OTEL_ENABLED` gRPC trace exporter reports a down collector once.** One WARNING from the `tenxgraph.trace_export` logger when exports start failing, one INFO when they recover, instead of a line per batch. Needs core 1.1.
 - **The `observability` block writes only the trace keys of the enabled backends.** The bound publisher is a core `BackendsPublisher`: `phoenix` adds the OpenInference keys, `langsmith` the `langsmith.*` keys, `logfire` `logfire.msg`, and several enabled backends add each set on the same span; `otlp` alone and the legacy `OTEL_ENABLED` path write only `gen_ai.*` and `tenxgraph.*`, so Phoenix users must enable the `phoenix` block (or use core `PhoenixPublisher`). Needs core 1.1.
 - **`POST /v1/graph/invoke` returns `thread_id` and `run_id` at the top level of `data`**, the same names stream events use. `meta.thread_id` and `meta.is_new_thread` are unchanged.
