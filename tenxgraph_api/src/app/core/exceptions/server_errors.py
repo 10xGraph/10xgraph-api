@@ -20,7 +20,6 @@ from typing import Any
 
 from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
-from tenxgraph.utils.temp_perf import done as _perf_done  # TEMP-PERF
 
 from tenxgraph_api.src.app.core.config.settings import is_production
 from tenxgraph_api.src.app.core.utils.log_sanitizer import log_safe
@@ -160,9 +159,6 @@ class UnhandledErrorMiddleware:
             return
 
         started = False
-        _tp0 = scope.get("state", {}).get("_perf_t0")  # TEMP-PERF
-        if isinstance(_tp0, float):  # TEMP-PERF
-            _perf_done("api_middleware_stack", _tp0)  # TEMP-PERF
 
         async def tracked_send(message: Message) -> None:
             nonlocal started

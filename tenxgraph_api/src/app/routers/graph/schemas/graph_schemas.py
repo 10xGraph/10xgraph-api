@@ -3,8 +3,6 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 from tenxgraph.core.state import Message
 from tenxgraph.utils import ResponseGranularity
-from tenxgraph.utils.temp_perf import done as _perf_done  # TEMP-PERF
-from tenxgraph.utils.temp_perf import now as _perf_now  # TEMP-PERF
 
 from tenxgraph_api.src.app.core.validation.request_config import (
     BoundedDict,
@@ -67,15 +65,6 @@ class GraphInputSchema(BaseModel):
             "same way and runs this request."
         ),
     )
-
-    @model_validator(mode="wrap")  # TEMP-PERF
-    @classmethod  # TEMP-PERF
-    def _perf_wrap(cls, data: Any, handler: Any) -> Any:  # TEMP-PERF
-        _tp0 = _perf_now()  # TEMP-PERF
-        try:  # TEMP-PERF
-            return handler(data)  # TEMP-PERF
-        finally:  # TEMP-PERF
-            _perf_done("api_input_validate", _tp0)  # TEMP-PERF
 
     @field_validator("messages", mode="before")
     @classmethod

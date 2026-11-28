@@ -13,7 +13,6 @@ from starlette.requests import HTTPConnection, Request
 from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from tenxgraph.core.exceptions import StaleStateError
-from tenxgraph.utils.temp_perf import now as _perf_now  # TEMP-PERF
 
 from tenxgraph_api.src.app.core.exceptions.server_errors import UnhandledErrorMiddleware
 from tenxgraph_api.src.app.core.middleware.rate_limit import RateLimitMiddleware
@@ -221,7 +220,6 @@ class RequestIDMiddleware:
         request_id = str(uuid.uuid4())
         timestamp = datetime.now().isoformat()
         state = scope.setdefault("state", {})
-        state["_perf_t0"] = _perf_now()  # TEMP-PERF
         state["request_id"] = request_id
         state["timestamp"] = timestamp
         logger.debug(f"Requesting: Request ID: {request_id}, Timestamp: {timestamp}")

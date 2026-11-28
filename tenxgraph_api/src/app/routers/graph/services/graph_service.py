@@ -49,8 +49,6 @@ from tenxgraph.utils import (  # noqa: F401
     ResponseGranularity,
 )
 from tenxgraph.utils.interrupt import pending_interrupt  # noqa: F401
-from tenxgraph.utils.temp_perf import done as _perf_done  # TEMP-PERF
-from tenxgraph.utils.temp_perf import now as _perf_now  # TEMP-PERF
 from tenxgraph.utils.validators import (  # noqa: F401
     ValidationError as InputValidationError,
 )
@@ -365,12 +363,9 @@ class GraphService(
             inv_thread_id, inv_run_id, inv_started = run.thread_id, run.run_id, run.started
 
             # Execute the graph
-            _tp0 = _perf_now()  # TEMP-PERF
             result = await self._ainvoke_bounded(
                 input_data, config, graph_input.response_granularity
             )
-            _perf_done("api_ainvoke_total", _tp0)  # TEMP-PERF
-            _tp_post = _perf_now()  # TEMP-PERF
 
             logger.info("Graph execution completed successfully")
 
@@ -415,9 +410,7 @@ class GraphService(
                     self.naming_texts(input_data["messages"], messages),
                 )
 
-            _perf_done("api_post_run", _tp_post)  # TEMP-PERF
-            _tp0 = _perf_now()  # TEMP-PERF
-            _out = GraphInvokeOutputSchema(  # TEMP-PERF (was: return GraphInvokeOutputSchema()
+            return GraphInvokeOutputSchema(
                 messages=[client_message(m) for m in messages],
                 state=parse_state_output(get_settings(), raw_state) if raw_state else None,
                 context=[client_message(m) for m in context] if context else context,
@@ -426,8 +419,6 @@ class GraphService(
                 run_id=inv_run_id,
                 meta=meta,
             )
-            _perf_done("api_output_build", _tp0)  # TEMP-PERF
-            return _out  # TEMP-PERF
 
         except Exception as e:
             # The same mapping as the stream's error chunk: typed and HTTP errors reach their
@@ -451,7 +442,6 @@ class GraphService(
         Fills ``run`` as it goes, so the caller's ``_end_run`` frees whatever was taken when
         a step fails. The thread's state is read at most once (``RunChecks.state``).
         """
-        _tp_sr = _perf_now()  # TEMP-PERF
         checks = checks or RunChecks()
         run.input_data, run.config, run.meta = await self._prepare_input(
             graph_input, user, server_config, credential, checks
@@ -462,10 +452,7 @@ class GraphService(
 
         # Saved for existing threads too: it refreshes the last-access time, and True means
         # the checkpointer created the thread just now.
-        _tp0 = _perf_now()  # TEMP-PERF
-        _saved = await self._save_thread(run.config, run.config["thread_id"])  # TEMP-PERF
-        _perf_done("api_save_thread", _tp0)  # TEMP-PERF
-        if _saved is True:  # TEMP-PERF (was: if await self._save_thread(...) is True:)
+        if await self._save_thread(run.config, run.config["thread_id"]) is True:
             run.meta["is_new_thread"] = True
 
         # A telemetry run, so the observability endpoint can rebuild the trace.
@@ -482,7 +469,6 @@ class GraphService(
             state = await self._run_state(run.config, checks)
             await run.tools.approval(state, run.input_data["resume"])
             await run.tools.before_resume(self.checkpointer, run.config, state)
-        _perf_done("api_start_run", _tp_sr)  # TEMP-PERF
 
     def _end_run(self, run: _Run) -> None:
         """Close the run's trace if nothing else did, then free the lock on a new thread."""

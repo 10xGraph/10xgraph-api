@@ -6,8 +6,6 @@ from fastapi.responses import JSONResponse
 from starlette.datastructures import MutableHeaders
 from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
-from tenxgraph.utils.temp_perf import done as _perf_done  # TEMP-PERF
-from tenxgraph.utils.temp_perf import now as _perf_now  # TEMP-PERF
 
 from tenxgraph_api.src.app.core import logger
 from tenxgraph_api.src.app.core.audit import audit_event
@@ -67,7 +65,6 @@ class RateLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        _tp0 = _perf_now()  # TEMP-PERF
         request = Request(scope)
         key = await self._client_key(request)
         cache = self.cache if self.cache is not None else self._bound_cache()
@@ -79,7 +76,6 @@ class RateLimitMiddleware:
             fail_open=self.config.fail_open,
         )
         reset_at_epoch = int(time.time()) + decision.reset_after
-        _perf_done("api_rate_limit", _tp0)  # TEMP-PERF
 
         if not decision.allowed and decision.unavailable:
             # The cache store failed and fail_open is off: an outage, not the client's fault.
